@@ -968,6 +968,8 @@ const confirmDeleteLocalStorage = async () => {
   if (!uid) return;
   try {
     await clearUserSnapshot(uid);
+    // Clear the httpOnly temp-user cookie via server so the welcome screen resets
+    await fetch('/api/auth/clear-temp-cookie', { method: 'POST', credentials: 'include' }).catch(() => {});
     void loadWelcomeStatus();
   } catch (e) {
     if (typeof console !== 'undefined' && console.warn) console.warn('[AUTH] Clear local snapshot failed:', e);

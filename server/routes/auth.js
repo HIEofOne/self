@@ -709,6 +709,12 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
     });
   });
 
+  // Clear the httpOnly temp-user cookie (used when deleting local storage)
+  app.post('/api/auth/clear-temp-cookie', (req, res) => {
+    res.clearCookie(TEMP_USER_COOKIE);
+    res.json({ success: true });
+  });
+
   // Check if an agent exists for a previous temporary userId
   app.get('/api/agent-exists', async (req, res) => {
     try {

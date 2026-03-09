@@ -43,7 +43,7 @@ import {
 dotenv.config();
 const storageConfig = normalizeStorageEnv();
 
-const SUPPRESSED_LOG_PATTERN = /\[(NEW FLOW 2|STARTUP|STORAGE|WELCOME|DESTROY|AGENT|WIZARD|LOCAL|KB UPDATE|KB AUTO|KB|WIZ)\]/i;
+const SUPPRESSED_LOG_PATTERN = /\[(NEW FLOW 2|STARTUP|STORAGE|WELCOME|DESTROY|WIZARD|LOCAL|KB UPDATE|KB AUTO|KB|WIZ)\]/i;
 const shouldSuppressLog = (args) =>
   Array.isArray(args) && args.some(arg => typeof arg === 'string' && SUPPRESSED_LOG_PATTERN.test(arg));
 const originalConsoleLog = console.log.bind(console);
