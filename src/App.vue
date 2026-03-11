@@ -136,6 +136,7 @@
             @rehydration-complete="handleRehydrationComplete"
             @rehydration-file-removed="handleRehydrationFileRemoved"
             @update:deep-link-info="handleDeepLinkInfoUpdate"
+            @local-folder-connected="handleLocalFolderConnected"
           />
         </div>
       </q-page>
@@ -549,6 +550,7 @@ import PrivacyDialog from './components/PrivacyDialog.vue';
 import AdminUsers from './components/AdminUsers.vue';
 import { useQuasar } from 'quasar';
 import { saveUserSnapshot, getLastSnapshotUserId, getUserSnapshot, clearLastSnapshotUserId, clearUserSnapshot, getPasskeyBackupPromptSkip, setPasskeyBackupPromptSkip, saveUserSnapshotEncrypted } from './utils/localDb';
+import { writeStateFile, type MaiaState } from './utils/localFolder';
 
 interface User {
   userId: string;
@@ -625,6 +627,9 @@ const showDevicePrivacyDialog = ref(false);
 const showSharedDeviceWarning = ref(false);
 const deviceChoiceResolved = ref(false);
 const sharedComputerMode = ref(false);
+// ── Local folder (File System Access API) state ───────────────
+const localFolderHandle = ref<FileSystemDirectoryHandle | null>(null);
+const localFolderName = ref<string | null>(null);
 const showOtherAccountOptionsDialog = ref(false);
 const pendingAccountAction = ref<'backup-and-delete' | 'delete-only' | 'confirm-delete-cloud' | null>(null);
 const showMoreChoicesConfirmDialog = ref(false);
@@ -1158,9 +1163,40 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
       fileStatusSummary,
       patientSummary: summary?.summary || null
     });
+
+    // Also save to local folder if connected
+    if (localFolderHandle.value && user.value?.userId) {
+      try {
+        const state: MaiaState = {
+          version: 1,
+          userId: user.value.userId,
+          displayName: user.value.displayName,
+          updatedAt: new Date().toISOString(),
+          files: filesList.map((f: any) => ({
+            fileName: f.fileName,
+            size: f.fileSize,
+            cloudStatus: indexedSet.has(f.bucketKey || '') ? 'indexed' as const : 'pending' as const,
+            bucketKey: f.bucketKey
+          })),
+          currentMedications: status?.currentMedications || null,
+          patientSummary: summary?.summary || null,
+          savedChats: savedChats || undefined,
+          currentChat: snapshot?.currentChat || undefined
+        };
+        await writeStateFile(localFolderHandle.value, state);
+      } catch (e) {
+        console.warn('[localFolder] Failed to save state to local folder:', e);
+      }
+    }
   } catch (error) {
     console.warn('Failed to save local snapshot:', error);
   }
+};
+
+/** Handle local-folder-connected event from ChatInterface. */
+const handleLocalFolderConnected = (payload: { handle: FileSystemDirectoryHandle; folderName: string }) => {
+  localFolderHandle.value = payload.handle;
+  localFolderName.value = payload.folderName;
 };
 
 const handlePrivateDevice = () => {

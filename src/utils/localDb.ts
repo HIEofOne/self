@@ -104,6 +104,13 @@ export const clearLastSnapshotUserId = () => {
 /** Remove local snapshot for a user (destroy IndexedDB, clear last-snapshot key if it was this user). */
 export const clearUserSnapshot = async (userId: string) => {
   if (!userId) return;
+  // Clear the File System Access API directory handle (if any)
+  try {
+    const { clearDirectoryHandle } = await import('./localFolder');
+    await clearDirectoryHandle(userId);
+  } catch {
+    // localFolder module may not be available
+  }
   const key = `maia-user-${userId}`;
   const db = dbCache.get(key);
   if (db) {
