@@ -43,7 +43,7 @@ import {
 dotenv.config();
 const storageConfig = normalizeStorageEnv();
 
-const SUPPRESSED_LOG_PATTERN = /\[(NEW FLOW 2|STARTUP|STORAGE|WELCOME|DESTROY|WIZARD|LOCAL|KB UPDATE|KB AUTO|KB|WIZ|CATCH-ALL)\]/i;
+const SUPPRESSED_LOG_PATTERN = /\[(NEW FLOW 2|STARTUP|STORAGE|WELCOME|WIZARD|LOCAL|KB UPDATE|KB AUTO|KB|WIZ|CATCH-ALL)\]/i;
 const shouldSuppressLog = (args) =>
   Array.isArray(args) && args.some(arg => typeof arg === 'string' && SUPPRESSED_LOG_PATTERN.test(arg));
 const originalConsoleLog = console.log.bind(console);
@@ -8000,18 +8000,30 @@ app.post('/api/self/delete', async (req, res) => {
 
     console.log(`[SELF-DELETE] Account deletion requested by ${sessionUserId}`);
     const deletionDetails = await deleteUserAndResources(sessionUserId);
+    console.log(`[SELF-DELETE] Deletion completed for ${sessionUserId}:`, JSON.stringify(deletionDetails.errors?.length ? { errors: deletionDetails.errors } : { ok: true }));
     await appendAdminUsageEntry(sessionUserId);
 
-    req.session.destroy(() => {
-      res.clearCookie('maia_temp_user');
-      res.json({
-        success: true,
-        message: 'User account deleted',
-        details: deletionDetails
-      });
+    // Destroy session — use a try/catch since session may already be invalid
+    try {
+      if (req.session) {
+        await new Promise((resolve) => {
+          req.session.destroy((err) => {
+            if (err) console.warn('[SELF-DELETE] Session destroy warning:', err.message);
+            resolve(undefined);
+          });
+        });
+      }
+    } catch (e) {
+      console.warn('[SELF-DELETE] Session cleanup error (non-fatal):', e.message);
+    }
+    res.clearCookie('maia_temp_user');
+    res.json({
+      success: true,
+      message: 'User account deleted',
+      details: deletionDetails
     });
   } catch (error) {
-    console.error('Error deleting user account:', error);
+    console.error('[SELF-DELETE] Error deleting user account:', error);
     const status = error.statusCode || 500;
     res.status(status).json({
       success: false,
