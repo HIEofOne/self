@@ -306,3 +306,21 @@ export async function writeStateFile(
   const json = JSON.stringify(state, null, 2);
   await writeFileToFolder(handle, STATE_FILE_NAME, json);
 }
+
+/**
+ * Write a maia.webloc file (macOS web shortcut) to the folder.
+ */
+export async function writeWeblocFile(
+  handle: FileSystemDirectoryHandle,
+  url: string
+): Promise<void> {
+  const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>URL</key>
+  <string>${url}</string>
+</dict>
+</plist>`;
+  await writeFileToFolder(handle, 'maia.webloc', plist);
+}

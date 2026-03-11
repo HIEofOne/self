@@ -53,9 +53,9 @@
                 </div>
 
                 <div v-if="!showAuth">
-                  <!-- Get Started: No Password (blue) and Passkey (green). No Password disabled when status is cloud (passkey user). -->
+                  <!-- Get Started: single button (Passkey & More Choices hidden for simplicity) -->
                   <q-btn
-                    label="GET STARTED with a No Password account"
+                    label="GET STARTED"
                     color="primary"
                     size="lg"
                     class="full-width q-mb-sm"
@@ -63,25 +63,8 @@
                     :disable="welcomeUserType === 'cloud'"
                     @click="handleGetStartedNoPassword"
                   />
-                  <q-btn
-                    label="GET STARTED with a Passkey account"
-                    color="green"
-                    size="lg"
-                    outline
-                    class="full-width q-mb-lg"
-                    @click="handleGetStartedPasskey"
-                  />
                   <div v-if="tempStartError" class="text-negative text-center q-mb-md">
                     {{ tempStartError }}
-                  </div>
-                  <div class="text-center q-mb-lg">
-                    <q-btn
-                      flat
-                      dense
-                      color="primary"
-                      label="More Choices"
-                      @click="showOtherAccountOptionsDialog = true"
-                    />
                   </div>
 
                   <!-- Caption (full width, two columns) -->
@@ -1233,9 +1216,11 @@ const handleGetStartedNoPassword = () => {
   startTemporarySession();
 };
 
+// Passkey flow — hidden in simplified welcome page, kept for future use
+/* eslint-disable @typescript-eslint/no-unused-vars */
+// @ts-expect-error Intentionally unused: Passkey button hidden in simplified welcome page
 const handleGetStartedPasskey = () => {
   showOtherAccountOptionsDialog.value = false;
-  // When status line shows a cloud user (passkey), bring that userId directly to WebAuthn
   if (welcomeUserType.value === 'cloud' && welcomeDisplayUserId.value) {
     passkeyPrefillUserId.value = welcomeDisplayUserId.value;
     passkeyPrefillAction.value = 'signin';
@@ -1245,6 +1230,7 @@ const handleGetStartedPasskey = () => {
   }
   showAuth.value = true;
 };
+/* eslint-enable @typescript-eslint/no-unused-vars */
 
 const performSignOut = async () => {
   const response = await fetch('/api/sign-out', {
@@ -1977,7 +1963,12 @@ onMounted(async () => {
   }
 
   if (!share) {
-    void loadWelcomeStatus();
+    await loadWelcomeStatus();
+    // Auto-launch for returning cookie users — skip welcome page
+    if (welcomeStatus.value.tempCookieUserId) {
+      startTemporarySession();
+      return;
+    }
   }
 
   if (share) {
