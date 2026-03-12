@@ -822,6 +822,32 @@
         </q-card-actions>
       </q-card>
     </q-dialog>
+
+    <!-- Post-Indexing: Offer to update Patient Summary -->
+    <q-dialog v-model="showPostIndexingSummaryPrompt" persistent>
+      <q-card style="min-width: 420px; max-width: 540px">
+        <q-card-section>
+          <div class="text-h6">Knowledge Base Updated</div>
+        </q-card-section>
+        <q-card-section class="q-pt-none text-body2">
+          You have changed the files in your knowledge base. Would you like to update the Patient Summary?
+        </q-card-section>
+        <q-card-actions align="right" class="q-gutter-sm">
+          <q-btn
+            flat
+            label="Not yet"
+            color="grey-8"
+            @click="showPostIndexingSummaryPrompt = false"
+          />
+          <q-btn
+            unelevated
+            label="Update the Patient Summary"
+            color="primary"
+            @click="handlePostIndexingUpdateSummary"
+          />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
   </div>
 </template>
 
@@ -957,6 +983,7 @@ const availableUserFiles = ref<Array<{ fileName: string; bucketKey: string; file
 const loadingUserFiles = ref(false);
 const showAgentSetupDialog = ref(false);
 const showNeedsIndexingPrompt = ref(false);
+const showPostIndexingSummaryPrompt = ref(false);
 /** Once the user dismisses "Index your records" with NOT YET, do not show it again this session. */
 const needsIndexingPromptDismissedThisSession = ref(false);
 const agentSetupStatus = ref('');
@@ -1392,14 +1419,18 @@ const handleRehydrationComplete = async (payload: { hasInitialFile: boolean }) =
   emit('rehydration-complete', payload);
   let shouldAutoProcess = !!payload?.hasInitialFile;
   let hasCurrentMedications = false;
-  if (!shouldAutoProcess && props.user?.userId) {
+  // Always check user-status so we can suppress auto-open when medications are already saved,
+  // regardless of whether the rehydration payload already indicated an initial file.
+  if (props.user?.userId) {
     try {
       const statusResponse = await fetch(`/api/user-status?userId=${encodeURIComponent(props.user.userId)}`, {
         credentials: 'include'
       });
       if (statusResponse.ok) {
         const statusResult = await statusResponse.json();
-        shouldAutoProcess = !!statusResult?.initialFile;
+        if (!shouldAutoProcess) {
+          shouldAutoProcess = !!statusResult?.initialFile;
+        }
         hasCurrentMedications = !!statusResult?.currentMedications;
       }
     } catch (error) {
@@ -5317,6 +5348,21 @@ const handleIndexingFinished = (_data: { jobId: string; phase: string; error?: s
   // Update status tip to show normal status
   updateContextualTip();
   refreshWizardState();
+  // Prompt to update Patient Summary, but not during wizard-controlled guided flow
+  if (wizardFlowPhase.value !== 'medications' && wizardFlowPhase.value !== 'summary') {
+    showPostIndexingSummaryPrompt.value = true;
+  }
+};
+
+const handlePostIndexingUpdateSummary = () => {
+  showPostIndexingSummaryPrompt.value = false;
+  // Close and reopen MyStuff on summary tab so requestSummaryOnOpen triggers generation
+  showMyStuffDialog.value = false;
+  void nextTick(() => {
+    myStuffInitialTab.value = 'summary';
+    wizardRequestSummaryOnOpen.value = true;
+    showMyStuffDialog.value = true;
+  });
 };
 
 const handleFilesArchived = (archivedBucketKeys: string[]) => {
