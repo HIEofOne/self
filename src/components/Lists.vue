@@ -2400,7 +2400,9 @@ watch(markdownContent, (newMarkdown) => {
 // Expose method to reload categories (can be called from parent)
 // Must be after reloadCategories is defined
 defineExpose({
-  reloadCategories
+  reloadCategories,
+  loadWizardAutoFlow,
+  attemptAutoProcessInitialFile
 });
 </script>
 

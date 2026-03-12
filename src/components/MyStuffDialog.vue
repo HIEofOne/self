@@ -5249,8 +5249,19 @@ watch(() => props.modelValue, async (newValue) => {
       loadDiary();
     } else if (currentTab.value === 'references') {
       loadReferences();
+    } else if (currentTab.value === 'lists') {
+      // Wizard may have set sessionStorage flags after Lists component was already mounted;
+      // re-trigger wizard auto-flow detection so it picks up the new flags.
+      nextTick(() => {
+        if (listsComponentRef.value) {
+          listsComponentRef.value.loadWizardAutoFlow();
+          listsComponentRef.value.attemptAutoProcessInitialFile();
+        }
+      });
     } else if (currentTab.value === 'summary' && props.requestSummaryOnOpen) {
       // Wizard asked for one summary generation on open (avoids duplicate API call)
+      // Set loadingSummary immediately to prevent flash of empty state
+      loadingSummary.value = true;
       nextTick(() => {
         setTimeout(() => {
           requestNewSummary();
@@ -5318,9 +5329,10 @@ watch(currentTab, async (newTab) => {
     } else if (newTab === 'summary') {
       loadPatientSummary();
     } else if (newTab === 'lists') {
-      // Reload categories when Lists tab is opened
-      if (listsComponentRef.value && typeof listsComponentRef.value.reloadCategories === 'function') {
+      if (listsComponentRef.value) {
         listsComponentRef.value.reloadCategories();
+        listsComponentRef.value.loadWizardAutoFlow();
+        listsComponentRef.value.attemptAutoProcessInitialFile();
       }
     } else if (newTab === 'diary') {
       loadDiary();

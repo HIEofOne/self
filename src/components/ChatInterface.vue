@@ -452,8 +452,8 @@
               </div>
             </div>
 
-            <!-- Non-local-folder fallback: original file list, checkboxes, buttons -->
-            <template v-else>
+            <!-- Non-local-folder fallback: original file list, checkboxes, buttons (only when local folder API not supported) -->
+            <template v-else-if="!localFolderSupported">
             <div class="q-mt-lg">
             <div class="wizard-slide-box">
               <div class="text-subtitle1 text-weight-bold q-mb-sm">Files to be indexed</div>

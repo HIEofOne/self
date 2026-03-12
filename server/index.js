@@ -7788,9 +7788,7 @@ async function deleteUserAndResources(userId, options = {}) {
     console.log(`[DESTROY] Deleting knowledge base for ${userId}`);
     const kbId = userDoc.kbId;
     if (kbId) {
-      // Check if KB exists before trying to delete
       try {
-        await doClient.kb.get(kbId);
         await doClient.kb.delete(kbId);
         deletionDetails.kbDeleted = true;
       } catch (error) {
@@ -7813,9 +7811,7 @@ async function deleteUserAndResources(userId, options = {}) {
       console.log(`[DESTROY] Deleting agent for ${userId}`);
       const agentId = userDoc.assignedAgentId;
       if (agentId) {
-        // Check if agent exists before trying to delete
         try {
-          await doClient.agent.get(agentId);
           await doClient.agent.delete(agentId);
           deletionDetails.agentDeleted = true;
           console.log(`[DESTROY] Agent deleted for ${userId} (${agentId})`);
