@@ -53,9 +53,9 @@
                 </div>
 
                 <div v-if="!showAuth">
-                  <!-- Get Started: No Password (blue) and Passkey (green). No Password disabled when status is cloud (passkey user). -->
+                  <!-- Get Started: single button (Passkey & More Choices hidden for simplicity) -->
                   <q-btn
-                    label="GET STARTED with a No Password account"
+                    label="GET STARTED"
                     color="primary"
                     size="lg"
                     class="full-width q-mb-sm"
@@ -63,25 +63,8 @@
                     :disable="welcomeUserType === 'cloud'"
                     @click="handleGetStartedNoPassword"
                   />
-                  <q-btn
-                    label="GET STARTED with a Passkey account"
-                    color="green"
-                    size="lg"
-                    outline
-                    class="full-width q-mb-lg"
-                    @click="handleGetStartedPasskey"
-                  />
                   <div v-if="tempStartError" class="text-negative text-center q-mb-md">
                     {{ tempStartError }}
-                  </div>
-                  <div class="text-center q-mb-lg">
-                    <q-btn
-                      flat
-                      dense
-                      color="primary"
-                      label="More Choices"
-                      @click="showOtherAccountOptionsDialog = true"
-                    />
                   </div>
 
                   <!-- Caption (full width, two columns) -->
@@ -136,6 +119,7 @@
             @rehydration-complete="handleRehydrationComplete"
             @rehydration-file-removed="handleRehydrationFileRemoved"
             @update:deep-link-info="handleDeepLinkInfoUpdate"
+            @local-folder-connected="handleLocalFolderConnected"
           />
         </div>
       </q-page>
@@ -549,6 +533,7 @@ import PrivacyDialog from './components/PrivacyDialog.vue';
 import AdminUsers from './components/AdminUsers.vue';
 import { useQuasar } from 'quasar';
 import { saveUserSnapshot, getLastSnapshotUserId, getUserSnapshot, clearLastSnapshotUserId, clearUserSnapshot, getPasskeyBackupPromptSkip, setPasskeyBackupPromptSkip, saveUserSnapshotEncrypted } from './utils/localDb';
+import { writeStateFile, type MaiaState } from './utils/localFolder';
 
 interface User {
   userId: string;
@@ -625,6 +610,9 @@ const showDevicePrivacyDialog = ref(false);
 const showSharedDeviceWarning = ref(false);
 const deviceChoiceResolved = ref(false);
 const sharedComputerMode = ref(false);
+// ── Local folder (File System Access API) state ───────────────
+const localFolderHandle = ref<FileSystemDirectoryHandle | null>(null);
+const localFolderName = ref<string | null>(null);
 const showOtherAccountOptionsDialog = ref(false);
 const pendingAccountAction = ref<'backup-and-delete' | 'delete-only' | 'confirm-delete-cloud' | null>(null);
 const showMoreChoicesConfirmDialog = ref(false);
@@ -968,6 +956,8 @@ const confirmDeleteLocalStorage = async () => {
   if (!uid) return;
   try {
     await clearUserSnapshot(uid);
+    // Clear the httpOnly temp-user cookie via server so the welcome screen resets
+    await fetch('/api/auth/clear-temp-cookie', { method: 'POST', credentials: 'include' }).catch(() => {});
     void loadWelcomeStatus();
   } catch (e) {
     if (typeof console !== 'undefined' && console.warn) console.warn('[AUTH] Clear local snapshot failed:', e);
@@ -1156,9 +1146,40 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
       fileStatusSummary,
       patientSummary: summary?.summary || null
     });
+
+    // Also save to local folder if connected
+    if (localFolderHandle.value && user.value?.userId) {
+      try {
+        const state: MaiaState = {
+          version: 1,
+          userId: user.value.userId,
+          displayName: user.value.displayName,
+          updatedAt: new Date().toISOString(),
+          files: filesList.map((f: any) => ({
+            fileName: f.fileName,
+            size: f.fileSize,
+            cloudStatus: indexedSet.has(f.bucketKey || '') ? 'indexed' as const : 'pending' as const,
+            bucketKey: f.bucketKey
+          })),
+          currentMedications: status?.currentMedications || null,
+          patientSummary: summary?.summary || null,
+          savedChats: savedChats || undefined,
+          currentChat: snapshot?.currentChat || undefined
+        };
+        await writeStateFile(localFolderHandle.value, state);
+      } catch (e) {
+        console.warn('[localFolder] Failed to save state to local folder:', e);
+      }
+    }
   } catch (error) {
     console.warn('Failed to save local snapshot:', error);
   }
+};
+
+/** Handle local-folder-connected event from ChatInterface. */
+const handleLocalFolderConnected = (payload: { handle: FileSystemDirectoryHandle; folderName: string }) => {
+  localFolderHandle.value = payload.handle;
+  localFolderName.value = payload.folderName;
 };
 
 const handlePrivateDevice = () => {
@@ -1195,9 +1216,11 @@ const handleGetStartedNoPassword = () => {
   startTemporarySession();
 };
 
+// Passkey flow — hidden in simplified welcome page, kept for future use
+/* eslint-disable @typescript-eslint/no-unused-vars */
+// @ts-expect-error Intentionally unused: Passkey button hidden in simplified welcome page
 const handleGetStartedPasskey = () => {
   showOtherAccountOptionsDialog.value = false;
-  // When status line shows a cloud user (passkey), bring that userId directly to WebAuthn
   if (welcomeUserType.value === 'cloud' && welcomeDisplayUserId.value) {
     passkeyPrefillUserId.value = welcomeDisplayUserId.value;
     passkeyPrefillAction.value = 'signin';
@@ -1207,6 +1230,7 @@ const handleGetStartedPasskey = () => {
   }
   showAuth.value = true;
 };
+/* eslint-enable @typescript-eslint/no-unused-vars */
 
 const performSignOut = async () => {
   const response = await fetch('/api/sign-out', {
@@ -1939,7 +1963,12 @@ onMounted(async () => {
   }
 
   if (!share) {
-    void loadWelcomeStatus();
+    await loadWelcomeStatus();
+    // Auto-launch for returning cookie users — skip welcome page
+    if (welcomeStatus.value.tempCookieUserId) {
+      startTemporarySession();
+      return;
+    }
   }
 
   if (share) {

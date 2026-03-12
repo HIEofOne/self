@@ -984,6 +984,7 @@ const clearWizardAutoFlow = () => {
 
 const attemptAutoProcessInitialFile = async () => {
   if (isProcessing.value) return;
+  if (hasSavedResults.value) return; // Already processed — don't redo
   const autoProcess = sessionStorage.getItem('autoProcessInitialFile');
   const shouldAutoProcess = autoProcess === 'true' || wizardAutoFlow.value;
   if (!shouldAutoProcess) return;
@@ -1855,6 +1856,11 @@ const countObservationsByPageRange = (markedMarkdown: string): void => {
       cat.name.toLowerCase().includes('medication')
     );
     if (medicationCategory && medicationCategory.observations && medicationCategory.observations.length > 0) {
+      // Cancel any premature edit mode from before categories were ready
+      if (isEditingCurrentMedications.value && !editingCurrentMedications.value) {
+        isEditingCurrentMedications.value = false;
+        currentMedicationsBlockTitle.value = 'Current Medications';
+      }
       loadCurrentMedications();
     } else {
       isLoadingCurrentMedications.value = false;
@@ -2071,8 +2077,15 @@ onMounted(async () => {
   // Load initial file info first (needed for PDF viewing)
   await checkInitialFile();
   await loadSavedResults(); // Check for saved results first
-  // Load current medications from user document
-  loadCurrentMedications();
+  // Load current medications from user document — but skip when wizard auto
+  // flow is active and categories haven't been built yet.  processInitialFile()
+  // will populate categories and then countObservationsByPageRange() will
+  // trigger loadCurrentMedications() at the right time.
+  if (wizardAutoFlow.value && !hasSavedResults.value) {
+    // Wizard mode, first run — defer to processInitialFile flow
+  } else {
+    loadCurrentMedications();
+  }
 
   if (!hasSavedResults.value) {
     await nextTick();
@@ -2214,6 +2227,9 @@ const loadCurrentMedications = async (forceRefresh = false) => {
       const cleaned = removeHeadingsFromResponse(result.currentMedications);
       currentMedications.value = cleaned;
       isCurrentMedicationsEdited.value = false; // Reset edited flag when loading from AI
+      // Exit edit mode so the display view shows the AI-generated medications
+      isEditingCurrentMedications.value = false;
+      currentMedicationsBlockTitle.value = 'Current Medications';
       logWizardEvent('current_meds_generated', { length: cleaned.length });
     } else {
       currentMedications.value = null;
@@ -2400,7 +2416,9 @@ watch(markdownContent, (newMarkdown) => {
 // Expose method to reload categories (can be called from parent)
 // Must be after reloadCategories is defined
 defineExpose({
-  reloadCategories
+  reloadCategories,
+  loadWizardAutoFlow,
+  attemptAutoProcessInitialFile
 });
 </script>
 

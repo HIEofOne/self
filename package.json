@@ -12,7 +12,10 @@
     "preview": "vite preview",
     "start": "node server/index.js",
     "dev:server": "nodemon server/index.js",
-    "dev:all": "concurrently -n v,s -c blue,green \"vite\" \"node server/index.js\""
+    "dev:all": "concurrently -n v,s -c blue,green \"vite\" \"node server/index.js\"",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:backend": "vitest run tests/backend"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.68.0",
@@ -48,16 +51,18 @@
     "vue-router": "^4.5.0"
   },
   "devDependencies": {
-    "concurrently": "^9.1.0",
     "@quasar/vite-plugin": "^1.8.0",
     "@types/markdown-it": "^14.1.2",
     "@types/pouchdb-adapter-idb": "^6.1.7",
     "@types/pouchdb-core": "^7.0.15",
     "@types/pouchdb-find": "^7.3.3",
     "@vitejs/plugin-vue": "^5.2.1",
+    "concurrently": "^9.1.0",
     "nodemon": "^3.1.9",
     "sass": "^1.83.0",
+    "supertest": "^7.2.2",
     "vite": "^6.0.7",
+    "vitest": "^4.0.18",
     "vue-tsc": "^2.1.42"
   }
 }

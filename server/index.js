@@ -43,7 +43,7 @@ import {
 dotenv.config();
 const storageConfig = normalizeStorageEnv();
 
-const SUPPRESSED_LOG_PATTERN = /\[(NEW FLOW 2|STARTUP|STORAGE|WELCOME|DESTROY|AGENT|WIZARD|LOCAL|KB UPDATE|KB AUTO|KB|WIZ)\]/i;
+const SUPPRESSED_LOG_PATTERN = /\[(NEW FLOW 2|STARTUP|STORAGE|WELCOME|WIZARD|LOCAL|KB UPDATE|KB AUTO|KB|WIZ|CATCH-ALL)\]/i;
 const shouldSuppressLog = (args) =>
   Array.isArray(args) && args.some(arg => typeof arg === 'string' && SUPPRESSED_LOG_PATTERN.test(arg));
 const originalConsoleLog = console.log.bind(console);
@@ -7788,9 +7788,7 @@ async function deleteUserAndResources(userId, options = {}) {
     console.log(`[DESTROY] Deleting knowledge base for ${userId}`);
     const kbId = userDoc.kbId;
     if (kbId) {
-      // Check if KB exists before trying to delete
       try {
-        await doClient.kb.get(kbId);
         await doClient.kb.delete(kbId);
         deletionDetails.kbDeleted = true;
       } catch (error) {
@@ -7813,9 +7811,7 @@ async function deleteUserAndResources(userId, options = {}) {
       console.log(`[DESTROY] Deleting agent for ${userId}`);
       const agentId = userDoc.assignedAgentId;
       if (agentId) {
-        // Check if agent exists before trying to delete
         try {
-          await doClient.agent.get(agentId);
           await doClient.agent.delete(agentId);
           deletionDetails.agentDeleted = true;
           console.log(`[DESTROY] Agent deleted for ${userId} (${agentId})`);
@@ -8000,18 +7996,30 @@ app.post('/api/self/delete', async (req, res) => {
 
     console.log(`[SELF-DELETE] Account deletion requested by ${sessionUserId}`);
     const deletionDetails = await deleteUserAndResources(sessionUserId);
+    console.log(`[SELF-DELETE] Deletion completed for ${sessionUserId}:`, JSON.stringify(deletionDetails.errors?.length ? { errors: deletionDetails.errors } : { ok: true }));
     await appendAdminUsageEntry(sessionUserId);
 
-    req.session.destroy(() => {
-      res.clearCookie('maia_temp_user');
-      res.json({
-        success: true,
-        message: 'User account deleted',
-        details: deletionDetails
-      });
+    // Destroy session — use a try/catch since session may already be invalid
+    try {
+      if (req.session) {
+        await new Promise((resolve) => {
+          req.session.destroy((err) => {
+            if (err) console.warn('[SELF-DELETE] Session destroy warning:', err.message);
+            resolve(undefined);
+          });
+        });
+      }
+    } catch (e) {
+      console.warn('[SELF-DELETE] Session cleanup error (non-fatal):', e.message);
+    }
+    res.clearCookie('maia_temp_user');
+    res.json({
+      success: true,
+      message: 'User account deleted',
+      details: deletionDetails
     });
   } catch (error) {
-    console.error('Error deleting user account:', error);
+    console.error('[SELF-DELETE] Error deleting user account:', error);
     const status = error.statusCode || 500;
     res.status(status).json({
       success: false,

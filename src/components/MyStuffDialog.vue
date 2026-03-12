@@ -4972,6 +4972,39 @@ const cancelSummaryEdit = () => {
   summaryEditText.value = '';
 };
 
+/**
+ * Extract the "Current Medications" section from a Patient Summary text.
+ * Looks for headings like "Current Medications", "## Current Medications", "**Current Medications**".
+ * Returns the text from that heading to the next heading, or null if not found.
+ */
+const extractMedicationsFromSummary = (summaryText: string): string | null => {
+  const lines = summaryText.split('\n');
+  let startIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim().toLowerCase();
+    if (
+      line.match(/^#{1,3}\s*current\s+medications/) ||
+      line.match(/^\*{1,2}current\s+medications\*{1,2}/) ||
+      line === 'current medications' ||
+      line === 'current medications:'
+    ) {
+      startIdx = i + 1;
+      break;
+    }
+  }
+  if (startIdx < 0) return null;
+  let endIdx = lines.length;
+  for (let i = startIdx; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (line.match(/^#{1,3}\s+/) || (line.match(/^\*{2}.+\*{2}$/) && !line.toLowerCase().includes('medication'))) {
+      endIdx = i;
+      break;
+    }
+  }
+  const medsText = lines.slice(startIdx, endIdx).join('\n').trim();
+  return medsText.length > 0 ? medsText : null;
+};
+
 const saveSummaryFromTab = async () => {
   if (!props.userId) {
     if ($q && typeof $q.notify === 'function') {
@@ -5020,6 +5053,25 @@ const saveSummaryFromTab = async () => {
     summaryEditText.value = summaryToSave;
     isEditingSummaryTab.value = false;
     emit('patient-summary-saved', { userId: props.userId });
+
+    // Extract Current Medications from Patient Summary and save automatically
+    try {
+      const medsText = extractMedicationsFromSummary(summaryToSave);
+      if (medsText) {
+        await fetch('/api/user-current-medications', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({
+            userId: props.userId,
+            currentMedications: medsText
+          })
+        });
+        emit('current-medications-saved', { value: medsText, edited: false });
+      }
+    } catch (medsError) {
+      console.warn('Failed to auto-save medications from summary:', medsError);
+    }
 
     if ($q && typeof $q.notify === 'function') {
       $q.notify({
@@ -5197,8 +5249,19 @@ watch(() => props.modelValue, async (newValue) => {
       loadDiary();
     } else if (currentTab.value === 'references') {
       loadReferences();
+    } else if (currentTab.value === 'lists') {
+      // Wizard may have set sessionStorage flags after Lists component was already mounted;
+      // re-trigger wizard auto-flow detection so it picks up the new flags.
+      nextTick(() => {
+        if (listsComponentRef.value) {
+          listsComponentRef.value.loadWizardAutoFlow();
+          listsComponentRef.value.attemptAutoProcessInitialFile();
+        }
+      });
     } else if (currentTab.value === 'summary' && props.requestSummaryOnOpen) {
       // Wizard asked for one summary generation on open (avoids duplicate API call)
+      // Set loadingSummary immediately to prevent flash of empty state
+      loadingSummary.value = true;
       nextTick(() => {
         setTimeout(() => {
           requestNewSummary();
@@ -5266,9 +5329,10 @@ watch(currentTab, async (newTab) => {
     } else if (newTab === 'summary') {
       loadPatientSummary();
     } else if (newTab === 'lists') {
-      // Reload categories when Lists tab is opened
-      if (listsComponentRef.value && typeof listsComponentRef.value.reloadCategories === 'function') {
+      if (listsComponentRef.value) {
         listsComponentRef.value.reloadCategories();
+        listsComponentRef.value.loadWizardAutoFlow();
+        listsComponentRef.value.attemptAutoProcessInitialFile();
       }
     } else if (newTab === 'diary') {
       loadDiary();

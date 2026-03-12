@@ -376,6 +376,84 @@
           </q-dialog>
 
 
+            <!-- Local Folder: "Select your MAIA folder" button (Chrome 122+) -->
+            <div v-if="localFolderSupported" class="q-mt-md q-mb-sm">
+              <div v-if="!localFolderHandle" class="wizard-slide-box q-pa-md">
+                <div class="text-subtitle2 text-weight-bold q-mb-xs">Local Folder</div>
+                <div class="text-caption text-grey-7 q-mb-sm">
+                  Select a folder on your computer. MAIA will import PDFs, save state, and write a setup log there.
+                </div>
+                <q-btn
+                  unelevated
+                  color="primary"
+                  label="Select your MAIA folder"
+                  icon="folder_open"
+                  :disable="localFolderAutoRunActive"
+                  @click="handlePickLocalFolder"
+                />
+              </div>
+              <div v-else class="wizard-slide-box q-pa-md">
+                <div class="text-subtitle2 text-weight-bold q-mb-xs">
+                  <q-icon name="folder" color="primary" class="q-mr-xs" />
+                  {{ localFolderName }}
+                </div>
+                <div v-if="localFolderAutoRunActive" class="text-caption text-primary q-mt-xs">
+                  <q-spinner size="14px" class="q-mr-xs" />
+                  {{ localFolderAutoRunPhase }}
+                </div>
+                <div v-else-if="localFolderFiles.length > 0" class="text-caption text-grey-7 q-mt-xs">
+                  {{ localFolderFiles.length }} PDF file(s) found
+                </div>
+                <div v-if="setupLogLines.length > 0 && !localFolderAutoRunActive" class="text-caption text-green-7 q-mt-xs">
+                  ✓ Setup complete — maia-setup-log.pdf written to folder
+                </div>
+              </div>
+            </div>
+
+            <!-- Local Folder mode: scrolling activity log (replaces file list/checkboxes) -->
+            <div v-if="localFolderHandle" class="q-mt-md">
+              <div class="wizard-slide-box q-pa-sm" style="max-height: 260px; overflow-y: auto; font-family: monospace; font-size: 12px; background: #f5f5f5; border-radius: 6px;">
+                <div v-if="setupLogLines.length === 0" class="text-grey-6 text-center q-pa-md">
+                  Waiting for setup to begin...
+                </div>
+                <div v-for="(line, idx) in setupLogLines" :key="idx" class="q-mb-xs" style="line-height: 1.4;">
+                  <span :style="{ color: line.ok ? '#2e7d32' : '#c62828' }">{{ line.ok ? '✓' : '✗' }}</span>
+                  <span class="text-grey-7">[{{ new Date(line.time).toLocaleTimeString() }}]</span>
+                  <span class="text-weight-medium">{{ line.step }}:</span>
+                  <span>{{ line.detail }}</span>
+                </div>
+              </div>
+
+              <!-- Status summary lines (agent, indexing, meds, summary) -->
+              <div class="text-caption q-mt-md" :class="wizardStage1Complete ? 'text-green-7' : (wizardStage1TimerActive ? 'text-green-7' : 'text-grey-7')">
+                Private AI agent deployment status: {{ wizardStage1StatusLine }}
+              </div>
+              <div
+                v-if="stage2StatusDisplay.show"
+                class="text-caption q-mt-sm"
+                :class="stage2StatusDisplay.active ? 'text-green-7' : 'text-grey-7'"
+              >
+                <span>{{ stage2StatusDisplay.text }}</span>
+                <span class="q-ml-xs">Files: {{ stage2StatusDisplay.files }} &bull; Tokens: {{ stage2StatusDisplay.tokens }}</span>
+              </div>
+              <div
+                v-if="stage2StatusDisplay.show"
+                class="text-caption q-mt-xs"
+                :class="wizardCurrentMedications ? 'text-green-7' : 'text-orange-8'"
+              >
+                Current Medications: {{ wizardCurrentMedications ? '✓ Verified' : 'Pending' }}
+              </div>
+              <div
+                v-if="stage2StatusDisplay.show"
+                class="text-caption q-mt-xs"
+                :class="wizardPatientSummary ? 'text-green-7' : 'text-orange-8'"
+              >
+                Patient Summary: {{ wizardPatientSummary ? '✓ Verified' : 'Pending' }}
+              </div>
+            </div>
+
+            <!-- Non-local-folder fallback: original file list, checkboxes, buttons (only when local folder API not supported) -->
+            <template v-else-if="!localFolderSupported">
             <div class="q-mt-lg">
             <div class="wizard-slide-box">
               <div class="text-subtitle1 text-weight-bold q-mb-sm">Files to be indexed</div>
@@ -471,7 +549,7 @@
           >
             <span>{{ stage2StatusDisplay.text }}</span>
             <span class="q-ml-xs">
-              Files: {{ stage2StatusDisplay.files }} • Tokens: {{ stage2StatusDisplay.tokens }}
+              Files: {{ stage2StatusDisplay.files }} &bull; Tokens: {{ stage2StatusDisplay.tokens }}
             </span>
           </div>
             <div
@@ -509,6 +587,7 @@
               class="q-ml-xs wizard-verify-btn"
             />
             </div>
+            </template>
           </div>
           <div v-else class="wizard-slide-text">
             <img
@@ -537,6 +616,22 @@
               @click="wizardSlideIndex = idx"
             />
           </div>
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
+    <!-- Wizard 60-minute timeout modal -->
+    <q-dialog v-model="wizardTimeoutModalVisible" persistent>
+      <q-card style="min-width: 480px; max-width: 600px">
+        <q-card-section>
+          <div class="text-h6">Setup Taking Longer Than Expected</div>
+        </q-card-section>
+        <q-card-section class="text-body2">
+          <p>Your MAIA setup has been running for over 60 minutes. This may indicate an issue that needs attention.</p>
+          <p>A detailed setup log (<strong>maia-setup-log.pdf</strong>) has been saved to your MAIA folder. Please email it to <a href="mailto:info@trustee.ai">info@trustee.ai</a> for tech support.</p>
+        </q-card-section>
+        <q-card-actions align="right">
+          <q-btn flat label="OK" color="primary" @click="wizardTimeoutModalVisible = false" />
         </q-card-actions>
       </q-card>
     </q-dialog>
@@ -738,6 +833,18 @@ import SavedChatsModal from './SavedChatsModal.vue';
 import MyStuffDialog from './MyStuffDialog.vue';
 import { jsPDF } from 'jspdf';
 import MarkdownIt from 'markdown-it';
+import {
+  isFileSystemAccessSupported,
+  pickLocalFolder,
+  reconnectLocalFolder,
+  listFolderFiles,
+  readFileFromFolder,
+  writeFileToFolder,
+  writeStateFile,
+  writeWeblocFile,
+  type MaiaFileEntry,
+  type MaiaState
+} from '../utils/localFolder';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -815,6 +922,7 @@ const emit = defineEmits<{
   'rehydration-complete': [payload: { hasInitialFile: boolean }];
   'rehydration-file-removed': [payload: { bucketKey?: string; fileName?: string }];
   'update:deepLinkInfo': [DeepLinkInfo | null];
+  'local-folder-connected': [payload: { handle: FileSystemDirectoryHandle; folderName: string }];
 }>();
 
 const providers = ref<string[]>([]);
@@ -941,6 +1049,21 @@ const restoreIndexingActive = ref(false);
 const restoreIndexingQueued = ref(false);
 const wizardRestoreTargetName = ref<string | null>(null);
 const wizardStage2NoDevice = ref(false);
+
+// ── Local Folder state (File System Access API) ─────────────────
+const localFolderSupported = ref(false);
+const localFolderHandle = ref<FileSystemDirectoryHandle | null>(null);
+const localFolderName = ref<string | null>(null);
+const localFolderFiles = ref<MaiaFileEntry[]>([]);
+const localFolderAutoRunActive = ref(false);
+const localFolderAutoRunPhase = ref<string>('');
+/** Setup log lines accumulated during the auto-run wizard. */
+const setupLogLines = ref<Array<{ time: string; step: string; detail: string; ok: boolean }>>([]);
+/** 60-minute timeout — show failure modal asking user to email setup log to tech support. */
+const wizardTimeoutModalVisible = ref(false);
+let wizardTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
+const wizardFlowPhase = ref<'running' | 'medications' | 'summary' | 'done'>('running');
+
 const wizardStage1StatusLine = computed(() => {
   if (wizardStage1Complete.value) return 'Ready to chat';
   const statusSuffix = agentSetupStatus.value ? ` • ${agentSetupStatus.value}` : '';
@@ -1180,6 +1303,9 @@ watch(
     void positionWizardInlineDots();
   }
 );
+
+// Deferred-indexing watcher removed — indexing now starts immediately in runAutoWizard.
+// wizardPatientSummary auto-dismiss watcher removed — guided flow handles this via wizardFlowPhase.
 
 const startRestoreIndexing = async () => {
   if (!props.user?.userId) {
@@ -2372,6 +2498,332 @@ const dismissWizard = () => {
     showPrivateUnavailableDialog.value = true;
     selectFirstNonPrivateProvider();
   }
+};
+
+// ── Local Folder: pick, auto-run, PDF log ────────────────────────
+
+const SETUP_LOG_JSON = 'maia-setup-log.json';
+
+const addSetupLogLine = (step: string, detail: string, ok: boolean) => {
+  setupLogLines.value.push({
+    time: new Date().toISOString(),
+    step,
+    detail,
+    ok
+  });
+};
+
+const persistSetupLogJson = async () => {
+  if (!localFolderHandle.value) return;
+  try {
+    await writeFileToFolder(localFolderHandle.value, SETUP_LOG_JSON, JSON.stringify(setupLogLines.value, null, 2));
+  } catch { /* ignore */ }
+};
+
+const restoreSetupLogFromJson = async () => {
+  if (!localFolderHandle.value) return;
+  try {
+    const file = await readFileFromFolder(localFolderHandle.value, SETUP_LOG_JSON);
+    if (!file) return;
+    const parsed = JSON.parse(await file.text());
+    if (Array.isArray(parsed)) setupLogLines.value = parsed;
+  } catch { /* ignore */ }
+};
+
+/** User clicks "Select your MAIA folder" — opens directory picker, scans files, starts auto-run. */
+const handlePickLocalFolder = async () => {
+  if (!props.user?.userId) return;
+  const result = await pickLocalFolder(props.user.userId);
+  if (!result) return; // user cancelled
+  localFolderHandle.value = result.handle;
+  localFolderName.value = result.folderName;
+  emit('local-folder-connected', { handle: result.handle, folderName: result.folderName });
+  // Restore previous session history before adding new entries
+  await restoreSetupLogFromJson();
+  addSetupLogLine('Session Info', `User: ${props.user.userId}`, true);
+  addSetupLogLine('Session Info', `Browser: ${navigator.userAgent}`, true);
+  addSetupLogLine('Session Info', `App URL: ${window.location.origin}`, true);
+  addSetupLogLine('Folder Selected', `Folder: ${result.folderName}`, true);
+
+  // Write maia.webloc shortcut immediately
+  try {
+    await writeWeblocFile(result.handle, window.location.origin);
+    addSetupLogLine('Shortcut Created', 'maia.webloc written to folder', true);
+  } catch (e) {
+    addSetupLogLine('Shortcut Error', `Failed to write maia.webloc: ${e instanceof Error ? e.message : 'Unknown'}`, false);
+  }
+
+  // Scan folder for PDF files
+  try {
+    const files = await listFolderFiles(result.handle, { extensions: ['pdf'] });
+    localFolderFiles.value = files;
+    addSetupLogLine('Folder Scanned', `Found ${files.length} PDF file(s): ${files.map(f => f.name).join(', ') || '(none)'}`, true);
+  } catch (e) {
+    localFolderFiles.value = [];
+    addSetupLogLine('Folder Scan', `Error scanning folder: ${e instanceof Error ? e.message : 'Unknown'}`, false);
+  }
+
+  // Start 60-minute timeout
+  wizardTimeoutTimer = setTimeout(async () => {
+    if (showAgentSetupDialog.value && localFolderHandle.value) {
+      addSetupLogLine('Timeout', 'Wizard timed out after 60 minutes', false);
+      await generateSetupLogPdf();
+      wizardTimeoutModalVisible.value = true;
+    }
+  }, 60 * 60 * 1000);
+
+  // Start auto-run wizard
+  await runAutoWizard();
+};
+
+/** Try to silently reconnect to a previously chosen local folder. */
+const tryReconnectLocalFolder = async () => {
+  if (!props.user?.userId || !isFileSystemAccessSupported()) return;
+  const result = await reconnectLocalFolder(props.user.userId);
+  if (!result) return;
+  localFolderHandle.value = result.handle;
+  localFolderName.value = result.folderName;
+  emit('local-folder-connected', { handle: result.handle, folderName: result.folderName });
+  // Scan folder for new files silently
+  try {
+    const files = await listFolderFiles(result.handle, { extensions: ['pdf'] });
+    localFolderFiles.value = files;
+  } catch {
+    // ignore — folder may be unavailable
+  }
+  // Restore previous session history
+  await restoreSetupLogFromJson();
+};
+
+/** Auto-run wizard: upload folder files → deploy agent → index KB → detect Apple Health → generate summary. */
+const runAutoWizard = async () => {
+  if (!props.user?.userId || !localFolderHandle.value) return;
+  localFolderAutoRunActive.value = true;
+  // Add session separator (preserves full history from previous sessions)
+  addSetupLogLine('Session Start', '--- New Session ---', true);
+
+  try {
+    // Phase 1: Upload PDFs from folder to Spaces
+    localFolderAutoRunPhase.value = 'Uploading files...';
+    const MAIA_GENERATED_FILES = ['maia-setup-log.pdf', 'maia-setup-log.json'];
+    const filesToUpload = localFolderFiles.value.filter(f => {
+      const name = f.name.toLowerCase();
+      return name.endsWith('.pdf') && !MAIA_GENERATED_FILES.includes(name);
+    });
+    addSetupLogLine('Upload Phase', `Starting upload of ${filesToUpload.length} PDF file(s)`, true);
+    let uploadedCount = 0;
+    let appleHealthCount = 0;
+    for (const fileEntry of filesToUpload) {
+      try {
+        const file = await fileEntry.fileHandle.getFile();
+        // Check size
+        const maxSize = 50 * 1024 * 1024;
+        if (file.size > maxSize) {
+          addSetupLogLine('Upload Skip', `${file.name}: too large (${(file.size / 1024 / 1024).toFixed(1)}MB)`, false);
+          continue;
+        }
+        localFolderAutoRunPhase.value = `Uploading ${file.name}...`;
+        // Upload to bucket
+        const uploadFormData = new FormData();
+        uploadFormData.append('file', file);
+        const uploadResponse = await fetch('/api/files/upload', {
+          method: 'POST',
+          credentials: 'include',
+          body: uploadFormData
+        });
+        if (!uploadResponse.ok) {
+          const errorData = await uploadResponse.json().catch(() => ({}));
+          addSetupLogLine('Upload Failed', `${file.name}: ${errorData.message || errorData.error || 'Upload error'}`, false);
+          continue;
+        }
+        const uploadResult = await uploadResponse.json();
+
+        // Detect Apple Health
+        let isAppleHealth = false;
+        try {
+          isAppleHealth = await detectAppleHealthFromBucket(uploadResult.fileInfo.bucketKey);
+          if (isAppleHealth) appleHealthCount++;
+        } catch { /* ignore detection errors */ }
+
+        // Save file metadata
+        await fetch('/api/user-file-metadata', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({
+            userId: props.user!.userId,
+            fileMetadata: {
+              fileName: uploadResult.fileInfo.fileName,
+              bucketKey: uploadResult.fileInfo.bucketKey,
+              bucketPath: uploadResult.fileInfo.userFolder,
+              fileSize: uploadResult.fileInfo.size,
+              fileType: 'pdf',
+              uploadedAt: uploadResult.fileInfo.uploadedAt,
+              isAppleHealth
+            },
+            updateInitialFile: false
+          })
+        });
+
+        uploadedCount++;
+        addSetupLogLine('File Uploaded', `${file.name} (${(file.size / 1024).toFixed(0)} KB)${isAppleHealth ? ' [Apple Health]' : ''}`, true);
+      } catch (e) {
+        addSetupLogLine('Upload Error', `${fileEntry.name}: ${e instanceof Error ? e.message : 'Unknown'}`, false);
+      }
+    }
+    addSetupLogLine('Upload Complete', `${uploadedCount} of ${filesToUpload.length} file(s) uploaded${appleHealthCount > 0 ? `, ${appleHealthCount} Apple Health` : ''}`, uploadedCount > 0);
+
+    // Refresh wizard state to pick up new files
+    await refreshWizardState();
+    addSetupLogLine('State Refreshed', `Server knows about ${wizardStage3Files.value.length} file(s)`, true);
+
+    // Phase 2: Check agent deployment status
+    localFolderAutoRunPhase.value = 'Checking agent deployment...';
+    if (!wizardStage1Complete.value) {
+      addSetupLogLine('Agent Status', 'Agent deployment in progress', true);
+    } else {
+      addSetupLogLine('Agent Status', 'Agent ready', true);
+    }
+
+    // Phase 3: Move files to KB and trigger indexing immediately (KB creation is independent of agent)
+    if (uploadedCount > 0) {
+      localFolderAutoRunPhase.value = 'Starting knowledge base indexing...';
+      try {
+        const fileNames = wizardStage3Files.value.map(f => f.name);
+        if (fileNames.length > 0) {
+          addSetupLogLine('Indexing Start', `Sending ${fileNames.length} file(s) for indexing: ${fileNames.join(', ')}`, true);
+          await handleStage3Index(fileNames, false);
+          addSetupLogLine('Indexing Started', `KB indexing kicked off for ${fileNames.length} file(s)`, true);
+          localFolderAutoRunPhase.value = 'Knowledge base indexing in progress...';
+        }
+      } catch (e) {
+        addSetupLogLine('Indexing Error', `${e instanceof Error ? e.message : 'Unknown'}`, false);
+      }
+    }
+
+    // Phase 4: Generate setup log PDF
+    await generateSetupLogPdf();
+
+    // Phase 5: Write initial maia-state.json
+    await saveStateToLocalFolder();
+
+    if (uploadedCount > 0) {
+      localFolderAutoRunPhase.value = 'Knowledge base indexing in progress...';
+    } else {
+      localFolderAutoRunPhase.value = 'Setup complete';
+    }
+  } catch (e) {
+    addSetupLogLine('Auto-Run Error', `${e instanceof Error ? e.message : 'Unknown error'}`, false);
+    localFolderAutoRunPhase.value = 'Setup completed with errors';
+  } finally {
+    localFolderAutoRunActive.value = false;
+  }
+};
+
+/** Generate maia-setup-log.pdf from setupLogLines and write to local folder. */
+const generateSetupLogPdf = async () => {
+  if (!localFolderHandle.value) return;
+  const doc = new jsPDF();
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const margin = 14;
+  const maxWidth = pageWidth - margin * 2;
+  let y = 20;
+
+  // Header
+  doc.setFontSize(18);
+  doc.text('MAIA Setup Log', margin, y);
+  y += 10;
+  doc.setFontSize(10);
+  doc.text(`Generated: ${new Date().toLocaleString()}`, margin, y);
+  y += 6;
+  doc.text(`User: ${props.user?.userId || 'unknown'}`, margin, y);
+  y += 6;
+  doc.text(`App URL: ${window.location.origin}`, margin, y);
+  y += 6;
+  doc.text(`Folder: ${localFolderName.value || 'unknown'}`, margin, y);
+  y += 6;
+  const ua = typeof navigator !== 'undefined' ? navigator.userAgent : 'unknown';
+  const uaLines = doc.splitTextToSize(`Browser: ${ua}`, maxWidth);
+  for (const ul of uaLines) {
+    doc.text(ul, margin, y);
+    y += 5;
+  }
+  y += 4;
+
+  // Summary section
+  doc.setFontSize(11);
+  doc.text('Summary', margin, y);
+  y += 6;
+  doc.setFontSize(9);
+  const totalFiles = setupLogLines.value.filter(l => l.step === 'File Uploaded').length;
+  const failedUploads = setupLogLines.value.filter(l => l.step === 'Upload Failed' || l.step === 'Upload Error').length;
+  const hasIndexing = setupLogLines.value.some(l => l.step === 'Indexing Complete');
+  const indexTokens = indexingStatus.value?.tokens || '0';
+  const hasMeds = wizardCurrentMedications.value;
+  const hasSummary = wizardPatientSummary.value;
+  const summaryItems = [
+    `Files uploaded: ${totalFiles}${failedUploads > 0 ? ` (${failedUploads} failed)` : ''}`,
+    `Agent ready: ${wizardStage1Complete.value ? 'Yes' : 'No'}`,
+    `KB indexed: ${hasIndexing ? 'Yes' : 'Pending'} (${indexTokens} tokens)`,
+    `Current Medications: ${hasMeds ? 'Yes' : 'No'}`,
+    `Patient Summary: ${hasSummary ? 'Yes' : 'No'}`
+  ];
+  for (const item of summaryItems) {
+    doc.text(`  ${item}`, margin, y);
+    y += 5;
+  }
+  y += 6;
+
+  // Detailed log
+  doc.setFontSize(11);
+  doc.text('Detailed Log', margin, y);
+  y += 6;
+  doc.setFontSize(9);
+  for (const line of setupLogLines.value) {
+    if (y > 270) {
+      doc.addPage();
+      y = 20;
+    }
+    const statusIcon = line.ok ? '[OK]' : '[FAIL]';
+    const timestamp = new Date(line.time).toLocaleTimeString();
+    const text = `${statusIcon} [${timestamp}] ${line.step}: ${line.detail}`;
+    const splitLines = doc.splitTextToSize(text, maxWidth);
+    for (const sl of splitLines) {
+      if (y > 270) {
+        doc.addPage();
+        y = 20;
+      }
+      doc.text(sl, margin, y);
+      y += 5;
+    }
+    y += 2;
+  }
+
+  const pdfBlob = doc.output('blob');
+  await writeFileToFolder(localFolderHandle.value, 'maia-setup-log.pdf', pdfBlob);
+  // Also persist JSON for history restoration across sessions
+  await persistSetupLogJson();
+};
+
+/** Save current app state to maia-state.json in the local folder. */
+const saveStateToLocalFolder = async () => {
+  if (!localFolderHandle.value || !props.user?.userId) return;
+  const state: MaiaState = {
+    version: 1,
+    userId: props.user.userId,
+    displayName: props.user.displayName,
+    updatedAt: new Date().toISOString(),
+    files: wizardStage3Files.value.map(f => ({
+      fileName: f.name,
+      cloudStatus: f.inKnowledgeBase ? 'indexed' as const : 'pending' as const,
+      bucketKey: f.bucketKey
+    })),
+    currentMedications: wizardCurrentMedications.value ? 'verified' : null,
+    patientSummary: wizardPatientSummary.value ? 'verified' : null,
+    savedChats: undefined,
+    currentChat: undefined
+  };
+  await writeStateFile(localFolderHandle.value, state);
 };
 
 const stage3IndexingPoll = ref<ReturnType<typeof setInterval> | null>(null);
@@ -4768,6 +5220,64 @@ const stage3IndexingActive = computed(() =>
   !!stage3IndexingPoll.value
 );
 
+// Log when indexing completes (watch indexingStatus phase transition to 'complete')
+// Placed here because indexingStatus must be declared before the watcher.
+watch(
+  () => indexingStatus.value?.phase,
+  (phase, oldPhase) => {
+    if (phase === 'complete' && oldPhase !== 'complete' && localFolderHandle.value) {
+      const tokens = indexingStatus.value?.tokens || '0';
+      const filesIndexed = indexingStatus.value?.filesIndexed || 0;
+      const elapsed = stage3IndexingStartedAt.value
+        ? Math.round((Date.now() - stage3IndexingStartedAt.value) / 1000)
+        : 0;
+      addSetupLogLine('Indexing Complete', `${filesIndexed} file(s) indexed, ${tokens} tokens, ${elapsed}s elapsed`, true);
+      void generateSetupLogPdf();
+    }
+  }
+);
+
+// Log when Current Medications becomes verified
+watch(
+  () => wizardCurrentMedications.value,
+  (verified, was) => {
+    if (verified && !was && localFolderHandle.value) {
+      addSetupLogLine('Current Medications', 'Current Medications verified', true);
+      void generateSetupLogPdf();
+    }
+  }
+);
+
+// Guided flow: when indexing completes AND agent is ready, close wizard and start medications flow
+watch(
+  [() => indexingStatus.value?.phase, () => wizardStage1Complete.value],
+  ([phase, agentReady]) => {
+    if (
+      phase === 'complete' &&
+      agentReady &&
+      localFolderHandle.value &&
+      wizardFlowPhase.value === 'running'
+    ) {
+      // Both indexing and agent are done — transition to medications phase
+      addSetupLogLine('Wizard Flow', 'Indexing and agent both complete — starting guided review', true);
+      void generateSetupLogPdf();
+      showAgentSetupDialog.value = false;
+      if (wizardTimeoutTimer) {
+        clearTimeout(wizardTimeoutTimer);
+        wizardTimeoutTimer = null;
+      }
+      wizardFlowPhase.value = 'medications';
+      // Open MyStuff on lists tab (same as handleWizardMedsAction)
+      try {
+        sessionStorage.setItem('autoProcessInitialFile', 'true');
+        sessionStorage.setItem('wizardMyListsAuto', 'true');
+      } catch { /* ignore */ }
+      myStuffInitialTab.value = 'lists';
+      showMyStuffDialog.value = true;
+    }
+  }
+);
+
 const handleIndexingStarted = (data: { jobId: string; phase: string }) => {
   stage3IndexingStartedAt.value = Date.now();
   stage3IndexingCompletedAt.value = null;
@@ -4943,6 +5453,18 @@ const handleCurrentMedicationsSaved = async () => {
   wizardStage2Pending.value = false;
   wizardStage2NoDevice.value = false;
   await refreshWizardState();
+  // Guided flow: advance from medications → summary
+  if (wizardFlowPhase.value === 'medications') {
+    wizardFlowPhase.value = 'summary';
+    addSetupLogLine('Wizard Flow', 'Current Medications saved — opening Patient Summary', true);
+    void generateSetupLogPdf();
+    // Close and reopen MyStuff on summary tab (reopen triggers requestSummaryOnOpen)
+    showMyStuffDialog.value = false;
+    await nextTick();
+    myStuffInitialTab.value = 'summary';
+    wizardRequestSummaryOnOpen.value = true;
+    showMyStuffDialog.value = true;
+  }
 };
 
 const handlePatientSummarySaved = async () => {
@@ -4951,6 +5473,14 @@ const handlePatientSummarySaved = async () => {
   showAgentSetupDialog.value = false;
   wizardDismissed.value = true;
   await refreshWizardState();
+  // Guided flow: saving summary also completes the flow
+  if (wizardFlowPhase.value === 'summary') {
+    wizardFlowPhase.value = 'done';
+    addSetupLogLine('Wizard Flow', 'Patient Summary saved — wizard complete', true);
+    persistWizardCompletion();
+    void generateSetupLogPdf();
+    // Leave MyStuff open — user can close when ready
+  }
 };
 
 const handlePatientSummaryVerified = async () => {
@@ -4959,6 +5489,13 @@ const handlePatientSummaryVerified = async () => {
   showAgentSetupDialog.value = false;
   wizardDismissed.value = true;
   await refreshWizardState();
+  // Guided flow: verifying summary completes the flow
+  if (wizardFlowPhase.value === 'summary') {
+    wizardFlowPhase.value = 'done';
+    addSetupLogLine('Wizard Flow', 'Patient Summary verified — wizard complete', true);
+    void generateSetupLogPdf();
+    // Leave MyStuff open — user can close when ready
+  }
 };
 
 const handleRehydrationFileRemoved = (payload: { bucketKey?: string; fileName?: string }) => {
@@ -5077,12 +5614,20 @@ onMounted(async () => {
   // no-op
   void loadWizardMessages();
 
+  // Detect File System Access API support
+  localFolderSupported.value = isFileSystemAccessSupported();
+
   // Load owner's deep link setting first, then providers
   await loadOwnerDeepLinkSetting();
   await loadProviders();
   loadSavedChatCount();
-  
+
   if (!isDeepLink.value) {
+    // Try to reconnect to a previously chosen local folder (silent on Chrome 122+)
+    if (localFolderSupported.value) {
+      void tryReconnectLocalFolder();
+    }
+
     startSetupWizardPolling();
     updateContextualTip();
     setTimeout(() => void checkAndShowNeedsIndexingPrompt(), 800);
@@ -5102,6 +5647,22 @@ onMounted(async () => {
 
     watch(() => showMyStuffDialog.value, (isOpen, wasOpen) => {
       if (wasOpen && !isOpen) {
+        // During guided flow, prevent closing — reopen on the appropriate tab
+        if (wizardFlowPhase.value === 'medications') {
+          void nextTick(() => {
+            myStuffInitialTab.value = 'lists';
+            showMyStuffDialog.value = true;
+          });
+          return;
+        }
+        if (wizardFlowPhase.value === 'summary') {
+          void nextTick(() => {
+            myStuffInitialTab.value = 'summary';
+            wizardRequestSummaryOnOpen.value = true;
+            showMyStuffDialog.value = true;
+          });
+          return;
+        }
         if (wizardStage2Pending.value) {
           wizardStage2Pending.value = false;
           refreshWizardState();
