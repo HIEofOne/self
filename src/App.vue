@@ -46,9 +46,17 @@
                 <div class="text-center q-mb-md">
                   <p
                     class="q-ma-none text-body2"
-                    :style="welcomeUserType === 'new' ? { color: '#1a1a1a' } : (welcomeUserType === 'local' && welcomeCloudValid === true) ? { color: '#2e7d32' } : welcomeUserType === 'local' ? { color: '#e65100' } : welcomeUserType === 'cloud' ? { color: '#2e7d32' } : {}"
+                    :style="welcomeUserType === 'new' ? { color: '#1a1a1a' } : (welcomeUserType === 'local' && welcomeCloudValid === true) ? { color: '#2e7d32' } : (welcomeUserType === 'local' && welcomeCloudValid === null) ? { color: '#757575' } : welcomeUserType === 'local' ? { color: '#e65100' } : welcomeUserType === 'cloud' ? { color: '#2e7d32' } : {}"
                   >
-                    {{ welcomeUserStatusLine }}
+                    <template v-if="welcomeUserStatusLine === '__passkey_link__'">
+                      Get started with a new account or
+                      <a
+                        href="#"
+                        style="color: #1976d2; text-decoration: underline; cursor: pointer"
+                        @click.prevent="handlePasskeySignInLink"
+                      >sign-in with a passkey</a>.
+                    </template>
+                    <template v-else>{{ welcomeUserStatusLine }}</template>
                   </p>
                   <!-- Cloud-invalid local user: inline restore/delete options on the status line -->
                   <div v-if="welcomeUserType === 'local' && welcomeCloudValid === false" class="q-mt-sm">
@@ -135,6 +143,7 @@
             :rehydration-files="rehydrationFiles"
             :rehydration-active="rehydrationActive"
             :suppress-wizard="suppressWizard"
+            :folder-access-tier="folderAccessTier"
             @sign-out="handleSignOut"
             @restore-applied="restoredChatState = null"
             @rehydration-complete="handleRehydrationComplete"
@@ -289,23 +298,102 @@
       </q-card>
     </q-dialog>
 
-    <!-- Passkey sign-out: offer local backup (encrypted with PIN) -->
-    <q-dialog v-model="showPasskeyBackupPromptModal" persistent>
-      <q-card style="min-width: 420px; max-width: 520px">
+    <!-- Non-Chrome browser warning -->
+    <q-dialog v-model="showNotChromeDialog" persistent>
+      <q-card style="min-width: 460px; max-width: 640px">
         <q-card-section>
-          <div class="text-h6">Local backup</div>
-          <p class="text-body2 q-mt-sm q-mb-md">
-            Would you like to keep a local backup on this computer and browser?
-          </p>
-          <q-toggle
-            v-model="passkeyBackupDoNotAskAgain"
-            label="Do not ask again"
-            color="primary"
-          />
+          <div class="text-h6">Chrome Recommended</div>
+        </q-card-section>
+        <q-card-section class="text-body2">
+          MAIA works best in Chrome because it can access an entire local folder
+          for your health records, rather than requiring you to select individual
+          files one at a time. Other browsers have limited support for folder-level
+          access.
         </q-card-section>
         <q-card-actions align="right">
-          <q-btn flat label="NO" color="primary" @click="onPasskeyBackupNo" />
-          <q-btn unelevated label="YES" color="primary" @click="onPasskeyBackupYes" />
+          <q-btn
+            flat
+            label="CONTINUE IN THIS BROWSER"
+            color="primary"
+            @click="handleContinueNonChrome"
+          />
+          <q-btn
+            unelevated
+            label="LET ME START OVER IN CHROME"
+            color="primary"
+            @click="showNotChromeDialog = false"
+          />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
+    <!-- Non-Chrome: create a MAIA folder first -->
+    <q-dialog v-model="showCreateFolderDialog" persistent>
+      <q-card style="min-width: 460px; max-width: 640px">
+        <q-card-section>
+          <div class="text-h6">Create Your MAIA Folder</div>
+        </q-card-section>
+        <q-card-section class="text-body2">
+          <p>
+            Before continuing, please pause here and go create a folder on this
+            computer — for example <strong>AG MAIA files</strong> — and put whatever
+            health record files you want indexed into that folder. Use a name that
+            identifies the patient so you don't accidentally mix records.
+          </p>
+          <p class="text-negative text-weight-medium q-mb-none">
+            Important: Be sure not to mix records from different patients into the
+            same folder.
+          </p>
+        </q-card-section>
+        <q-card-actions align="right">
+          <q-btn
+            unelevated
+            label="I HAVE MY HEALTH RECORDS FOLDER"
+            color="primary"
+            @click="handleFolderReady"
+          />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
+    <!-- Passkey sign-out: cross-device info -->
+    <q-dialog v-model="showPasskeyBackupPromptModal" persistent>
+      <q-card style="min-width: 420px; max-width: 560px">
+        <q-card-section>
+          <div class="text-h6">Passkey Created</div>
+          <p class="text-body2 q-mt-sm q-mb-none">
+            Passkeys allow you to access your MAIA on other devices or browsers.
+            The MAIA folder you created this account from may not be available or
+            would be a privacy risk on these other devices. Although your cloud
+            MAIA account will be updated, your local MAIA folder will not be
+            updated until the next time you access MAIA from the same original device.
+          </p>
+        </q-card-section>
+        <q-card-actions align="right">
+          <q-btn unelevated label="OK" color="primary" @click="onPasskeyBackupNo" />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
+    <!-- Sign-out: prompt to choose folder for saving updated files -->
+    <q-dialog v-model="showSignOutFolderPrompt" persistent>
+      <q-card style="min-width: 420px; max-width: 560px">
+        <q-card-section>
+          <div class="text-h6">Save Updated Files</div>
+          <p class="text-body2 q-mt-sm q-mb-none">
+            Download your updated log and database backup to keep your local
+            MAIA folder in sync with your cloud account.
+          </p>
+        </q-card-section>
+        <q-card-actions align="right">
+          <q-btn flat label="SKIP" color="grey" @click="signOutFolderSkip" />
+          <q-btn
+            unelevated
+            label="DOWNLOAD BACKUP"
+            color="primary"
+            :loading="signOutFolderSaving"
+            @click="signOutFolderPick"
+          />
         </q-card-actions>
       </q-card>
     </q-dialog>
@@ -698,6 +786,8 @@ const showDormantDialog = ref(false);
 const dormantDeepLinkCount = ref(0);
 const dormantLoading = ref(false);
 const signOutSnapshot = ref<SignOutSnapshot | null>(null);
+const showSignOutFolderPrompt = ref(false);
+const signOutFolderSaving = ref(false);
 const showRestoreDialog = ref(false);
 const restoreLoading = ref(false);
 const restoreSnapshot = ref<any | null>(null);
@@ -715,6 +805,27 @@ const showDevicePrivacyDialog = ref(false);
 const showSharedDeviceWarning = ref(false);
 const deviceChoiceResolved = ref(false);
 const sharedComputerMode = ref(false);
+const showNotChromeDialog = ref(false);
+const showCreateFolderDialog = ref(false);
+
+/** Browser folder-access capability tier:
+ *  'chrome'  – Full File System Access API (persistent read/write)
+ *  'safari'  – webkitdirectory one-time folder read; sync on sign-out only
+ *  'basic'   – No folder access; single-file-at-a-time fallback */
+type FolderTier = 'chrome' | 'safari' | 'basic';
+const folderAccessTier = ref<FolderTier>('basic');
+
+const detectFolderAccessTier = (): FolderTier => {
+  if (typeof window !== 'undefined' && typeof window.showDirectoryPicker === 'function') return 'chrome';
+  // Safari and Firefox support <input webkitdirectory> for one-time folder reads
+  if (typeof document !== 'undefined') {
+    const input = document.createElement('input');
+    if ('webkitdirectory' in input) return 'safari';
+  }
+  return 'basic';
+};
+folderAccessTier.value = detectFolderAccessTier();
+
 // ── Local folder (File System Access API) state ───────────────
 const localFolderHandle = ref<FileSystemDirectoryHandle | null>(null);
 const localFolderName = ref<string | null>(null);
@@ -793,12 +904,16 @@ const welcomeUserStatusLine = computed(() => {
   const localId = welcomeLocalUserId.value;
   const snap = welcomeLocalSnapshot.value;
   const ws = welcomeStatus.value;
-  if (type === 'new') return 'Sign in with your passkey or create a new account';
+  if (type === 'new') return '__passkey_link__'; // handled in template
   if (type === 'local') {
     const userId = ws.tempCookieUserId || localId || '';
     const savedCount = welcomeSavedFileCount.value ?? snap?.fileCount ?? 0;
     if (welcomeCloudValid.value === true) {
       return `${userId} is ready to continue with ${savedCount} saved file${savedCount === 1 ? '' : 's'}.`;
+    }
+    // Still loading cloud validity — show neutral message to avoid red flash
+    if (welcomeCloudValid.value === null && welcomeKbExists.value === null) {
+      return `Checking ${userId} account status…`;
     }
     // Show what's missing
     const parts: string[] = [];
@@ -1372,11 +1487,37 @@ const handleLocalFolderConnected = (payload: { handle: FileSystemDirectoryHandle
   localFolderName.value = payload.folderName;
 };
 
+/** Detect whether the browser is Chrome (not Edge, not Opera). */
+const isChromeBrowser = (): boolean => {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent;
+  return /Chrome\/\d+/.test(ua) && !/Edg\//.test(ua) && !/OPR\//.test(ua);
+};
+
+/** After device-privacy choice, check Chrome before proceeding. */
+const proceedAfterDeviceChoice = () => {
+  if (!isChromeBrowser()) {
+    showNotChromeDialog.value = true;
+    return;
+  }
+  startTemporarySession();
+};
+
+const handleContinueNonChrome = () => {
+  showNotChromeDialog.value = false;
+  showCreateFolderDialog.value = true;
+};
+
+const handleFolderReady = () => {
+  showCreateFolderDialog.value = false;
+  startTemporarySession();
+};
+
 const handlePrivateDevice = () => {
   sharedComputerMode.value = false;
   deviceChoiceResolved.value = true;
   showDevicePrivacyDialog.value = false;
-  startTemporarySession();
+  proceedAfterDeviceChoice();
 };
 
 const handleSharedDevice = () => {
@@ -1388,7 +1529,7 @@ const handleSharedDevice = () => {
 
 const handleSharedWarningOk = () => {
   showSharedDeviceWarning.value = false;
-  deviceChoiceResolved.value = false;
+  proceedAfterDeviceChoice();
 };
 
 const handleGetStartedNoPassword = () => {
@@ -1412,6 +1553,13 @@ const handleGetStartedNoPassword = () => {
     return;
   }
   startTemporarySession();
+};
+
+/** "sign-in with a passkey" link on Welcome page for new users */
+const handlePasskeySignInLink = () => {
+  passkeyPrefillUserId.value = null;
+  passkeyPrefillAction.value = 'signin';
+  showAuth.value = true;
 };
 
 // Passkey flow — hidden in simplified welcome page, kept for future use
@@ -1446,6 +1594,19 @@ const performSignOut = async () => {
 
 const handleDormantSignOut = async () => {
   if (!user.value?.userId) return;
+
+  // If no persistent folder handle, prompt user to choose a folder for saving updated files
+  if (!localFolderHandle.value && !sharedComputerMode.value) {
+    showSignOutFolderPrompt.value = true;
+    return;
+  }
+
+  await completeDormantSignOut();
+};
+
+/** Finish the dormant sign-out after optional folder save. */
+const completeDormantSignOut = async () => {
+  if (!user.value?.userId) return;
   dormantLoading.value = true;
   try {
     await saveLocalSnapshot(signOutSnapshot.value);
@@ -1460,6 +1621,66 @@ const handleDormantSignOut = async () => {
     dormantLoading.value = false;
     showDormantDialog.value = false;
     signOutSnapshot.value = null;
+  }
+};
+
+/** User chose to skip folder save on sign-out. */
+const signOutFolderSkip = () => {
+  showSignOutFolderPrompt.value = false;
+  void completeDormantSignOut();
+};
+
+/** User chose to download updated state on sign-out (non-Chrome browsers only). */
+const signOutFolderPick = async () => {
+  signOutFolderSaving.value = true;
+  try {
+    await downloadStateAsFile();
+  } catch (e) {
+    console.warn('[sign-out] State download failed:', e);
+  } finally {
+    signOutFolderSaving.value = false;
+    showSignOutFolderPrompt.value = false;
+    void completeDormantSignOut();
+  }
+};
+
+/** Download state JSON as a file (fallback for browsers without folder write). */
+const downloadStateAsFile = async () => {
+  if (!user.value?.userId) return;
+  try {
+    const [filesResponse, statusResponse, summaryResponse] = await Promise.all([
+      fetch(`/api/user-files?userId=${encodeURIComponent(user.value.userId)}`, { credentials: 'include' }),
+      fetch(`/api/user-status?userId=${encodeURIComponent(user.value.userId)}`, { credentials: 'include' }),
+      fetch(`/api/patient-summary?userId=${encodeURIComponent(user.value.userId)}`, { credentials: 'include' })
+    ]);
+    const files = filesResponse.ok ? await filesResponse.json() : null;
+    const status = statusResponse.ok ? await statusResponse.json() : null;
+    const summary = summaryResponse.ok ? await summaryResponse.json() : null;
+    const filesList = Array.isArray(files?.files) ? files.files : [];
+    const indexedSet = new Set(Array.isArray(files?.indexedFiles) ? files.indexedFiles : []);
+    const state = {
+      version: 1,
+      userId: user.value.userId,
+      displayName: user.value.displayName,
+      updatedAt: new Date().toISOString(),
+      files: filesList.map((f: any) => ({
+        fileName: f.fileName,
+        size: f.fileSize,
+        cloudStatus: indexedSet.has(f.bucketKey || '') ? 'indexed' : 'pending',
+        bucketKey: f.bucketKey
+      })),
+      currentMedications: status?.currentMedications || null,
+      patientSummary: summary?.summary || null
+    };
+    const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'maia-state.json';
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    console.warn('[sign-out] Failed to download state:', e);
   }
 };
 
@@ -1930,12 +2151,7 @@ const onPasskeyBackupNo = () => {
   void handleDormantSignOut();
 };
 
-const onPasskeyBackupYes = () => {
-  showPasskeyBackupPromptModal.value = false;
-  passkeyBackupPin.value = '';
-  passkeyBackupPinError.value = '';
-  showPasskeyBackupPinDialog.value = true;
-};
+// onPasskeyBackupYes removed — backup prompt replaced with info-only modal
 
 const closePasskeyBackupPinDialog = () => {
   showPasskeyBackupPinDialog.value = false;

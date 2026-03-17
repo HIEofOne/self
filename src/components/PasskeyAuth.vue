@@ -313,6 +313,10 @@ const handleRegistration = async () => {
     const options = await optionsResponse.json();
 
     // Step 2: Create passkey
+    // Hint: prefer OS keychain (iCloud Keychain / Windows Hello) over browser password manager
+    if (options && typeof options === 'object') {
+      options.hints = ['client-device'];
+    }
     const credential = await startRegistration({ optionsJSON: options });
 
     // Step 3: Verify registration
