@@ -7364,11 +7364,12 @@ app.get('/api/admin/users', async (req, res) => {
     const userStats = await Promise.all(users.map(async (userDoc) => {
       const userId = userDoc.userId;
       
-      // Get last activity from sessions
+      // Get last activity from sessions, falling back to userDoc.lastActivity (stamped on sign-out)
       const session = sessionsByUserId.get(userId);
       let lastActivity = null;
-      if (session?.lastActivity) {
-        const lastActivityDate = new Date(session.lastActivity);
+      const lastActivityRaw = session?.lastActivity || userDoc.lastActivity;
+      if (lastActivityRaw) {
+        const lastActivityDate = new Date(lastActivityRaw);
         const now = new Date();
         const diffMs = now - lastActivityDate;
         const diffMins = Math.floor(diffMs / 60000);
@@ -7412,8 +7413,15 @@ app.get('/api/admin/users', async (req, res) => {
         // Errors are already logged by getUserBucketSize if needed
       }
       
+      // Saved files count: exclude References folder (same logic as Saved Files tab)
+      const allFiles = Array.isArray(userDoc.files) ? userDoc.files : [];
+      const referencesPath = `${userId}/References/`;
+      const savedFilesCount = allFiles.filter(f => {
+        const bk = f.bucketKey || '';
+        return !bk.startsWith(referencesPath) && f.isReference !== true;
+      }).length;
       // KB indexing status is DO-only; keep admin count minimal
-      const filesIndexed = 0;
+      const filesIndexed = savedFilesCount;
       
       // Get saved chats count
       const savedChatsCount = chatsByUserId.get(userId) || 0;
@@ -8029,6 +8037,36 @@ app.post('/api/self/delete', async (req, res) => {
   }
 });
 
+// Unauthenticated delete for local (temporary, non-admin) users from the welcome page
+app.post('/api/local/delete', async (req, res) => {
+  try {
+    const { userId } = req.body || {};
+    if (!userId || typeof userId !== 'string') {
+      return res.status(400).json({ success: false, error: 'userId required' });
+    }
+    // Only allow UUID-format userIds (temporary users)
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(userId.trim())) {
+      return res.status(400).json({ success: false, error: 'Invalid userId format' });
+    }
+    // Never allow deleting the admin user
+    const adminUsername = process.env.ADMIN_USERNAME?.trim();
+    if (adminUsername && userId.trim().toLowerCase() === adminUsername.toLowerCase()) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+    console.log(`[LOCAL-DELETE] Unauthenticated deletion requested for ${userId}`);
+    const deletionDetails = await deleteUserAndResources(userId);
+    console.log(`[LOCAL-DELETE] Deletion completed for ${userId}`);
+    res.json({ success: true, details: deletionDetails });
+  } catch (error) {
+    if (error?.statusCode === 404) {
+      return res.json({ success: true, message: 'User not found (may already be deleted)' });
+    }
+    console.error('[LOCAL-DELETE] Error:', error);
+    res.status(500).json({ success: false, error: error.message || 'Failed to delete user' });
+  }
+});
+
 // Store Apple Health export availability (wizard stage 3)
 app.post('/api/user-apple-file-status', async (req, res) => {
   try {
@@ -8060,6 +8098,108 @@ app.post('/api/user-apple-file-status', async (req, res) => {
     res.status(500).json({
       success: false,
       error: error.message || 'Failed to update Apple Health export status'
+    });
+  }
+});
+
+// Cloud health check — verify all four cloud resources are accessible
+app.get('/api/cloud-health', async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) {
+      return res.status(400).json({ healthy: false, error: 'userId required' });
+    }
+
+    const details = {
+      database: { ok: false },
+      agent: { ok: false },
+      knowledgeBase: { ok: false },
+      spacesFiles: { ok: false, fileCount: 0 }
+    };
+
+    // 1. Check database
+    let userDoc;
+    try {
+      userDoc = await cloudant.getDocument('maia_users', userId);
+      details.database.ok = !!userDoc;
+      if (!userDoc) details.database.error = 'User document not found';
+    } catch (e) {
+      details.database.error = e.message || 'Database check failed';
+    }
+
+    // 2. Check agent
+    const agentId = userDoc?.assignedAgentId;
+    if (agentId) {
+      try {
+        const agent = await getCachedAgent(agentId);
+        details.agent.ok = !!agent;
+        details.agent.agentId = agentId;
+        if (!agent) details.agent.error = 'Agent not found';
+      } catch (e) {
+        details.agent.error = e.message || 'Agent check failed';
+        details.agent.agentId = agentId;
+      }
+    } else {
+      // No agent configured — only an issue if user previously had one
+      details.agent.ok = !userDoc?.agentId; // ok if never had an agent
+      if (!details.agent.ok) details.agent.error = 'Agent ID missing from user record';
+    }
+
+    // 3. Check KB
+    const kbId = userDoc?.kbId;
+    if (kbId) {
+      try {
+        const kb = await getCachedKB(kbId);
+        details.knowledgeBase.ok = !!kb;
+        details.knowledgeBase.kbId = kbId;
+        if (!kb) details.knowledgeBase.error = 'Knowledge base not found';
+      } catch (e) {
+        details.knowledgeBase.error = e.message || 'KB check failed';
+        details.knowledgeBase.kbId = kbId;
+      }
+    } else {
+      // No KB configured — ok if user never had files indexed
+      details.knowledgeBase.ok = true;
+    }
+
+    // 4. Check Spaces files
+    try {
+      const bucketUrl = getSpacesBucketName();
+      if (bucketUrl) {
+        const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+        const s3 = new S3Client({
+          endpoint: getSpacesEndpoint(),
+          region: 'us-east-1',
+          forcePathStyle: process.env.S3_FORCE_PATH_STYLE === 'true',
+          credentials: {
+            accessKeyId: process.env.DIGITALOCEAN_AWS_ACCESS_KEY_ID || '',
+            secretAccessKey: process.env.DIGITALOCEAN_AWS_SECRET_ACCESS_KEY || ''
+          }
+        });
+        const listResp = await s3.send(new ListObjectsV2Command({
+          Bucket: bucketName,
+          Prefix: `${userId}/`,
+          MaxKeys: 10
+        }));
+        const count = listResp.KeyCount || 0;
+        details.spacesFiles.ok = true; // Spaces accessible even if no files yet
+        details.spacesFiles.fileCount = count;
+      } else {
+        details.spacesFiles.ok = true; // No Spaces configured — not an error
+      }
+    } catch (e) {
+      details.spacesFiles.error = e.message || 'Spaces check failed';
+    }
+
+    const healthy = details.database.ok && details.agent.ok &&
+                    details.knowledgeBase.ok && details.spacesFiles.ok;
+
+    res.json({ healthy, details });
+  } catch (error) {
+    console.error('Cloud health check error:', error);
+    res.status(500).json({
+      healthy: false,
+      error: error.message || 'Health check failed'
     });
   }
 });

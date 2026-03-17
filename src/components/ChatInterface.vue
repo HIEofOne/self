@@ -709,6 +709,7 @@
       @request-summary-done="wizardRequestSummaryOnOpen = false"
       @rehydration-file-removed="handleRehydrationFileRemoved"
       @rehydration-complete="handleRehydrationComplete"
+      @file-added-to-kb="handleFileAddedToKb"
       v-if="canAccessMyStuff"
     />
 
@@ -837,7 +838,7 @@
             flat
             label="Not yet"
             color="grey-8"
-            @click="showPostIndexingSummaryPrompt = false"
+            @click="showPostIndexingSummaryPrompt = false; postIndexingSummaryDismissedThisSession = true"
           />
           <q-btn
             unelevated
@@ -853,6 +854,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue';
+import { useQuasar } from 'quasar';
 import PdfViewerModal from './PdfViewerModal.vue';
 import TextViewerModal from './TextViewerModal.vue';
 import SavedChatsModal from './SavedChatsModal.vue';
@@ -863,9 +865,11 @@ import {
   isFileSystemAccessSupported,
   pickLocalFolder,
   reconnectLocalFolder,
+  reconnectLocalFolderWithGesture,
   listFolderFiles,
   readFileFromFolder,
   writeFileToFolder,
+  readStateFile,
   writeStateFile,
   writeWeblocFile,
   type MaiaFileEntry,
@@ -951,6 +955,8 @@ const emit = defineEmits<{
   'local-folder-connected': [payload: { handle: FileSystemDirectoryHandle; folderName: string }];
 }>();
 
+const $q = useQuasar();
+
 const providers = ref<string[]>([]);
 const selectedProvider = ref<string>('Private AI');
 const messages = ref<Message[]>([]);
@@ -984,6 +990,8 @@ const loadingUserFiles = ref(false);
 const showAgentSetupDialog = ref(false);
 const showNeedsIndexingPrompt = ref(false);
 const showPostIndexingSummaryPrompt = ref(false);
+/** Once the user dismisses the post-indexing "Update Patient Summary?" prompt, do not show again this session. */
+const postIndexingSummaryDismissedThisSession = ref(false);
 /** Once the user dismisses "Index your records" with NOT YET, do not show it again this session. */
 const needsIndexingPromptDismissedThisSession = ref(false);
 const agentSetupStatus = ref('');
@@ -1089,7 +1097,9 @@ const setupLogLines = ref<Array<{ time: string; step: string; detail: string; ok
 /** 60-minute timeout — show failure modal asking user to email setup log to tech support. */
 const wizardTimeoutModalVisible = ref(false);
 let wizardTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
-const wizardFlowPhase = ref<'running' | 'medications' | 'summary' | 'done'>('running');
+/** Guided wizard flow phase. Starts 'done' to avoid re-entering guided flow on reload;
+ *  set to 'running' only when the wizard is actively running for the first time. */
+const wizardFlowPhase = ref<'running' | 'medications' | 'summary' | 'done'>('done');
 
 const wizardStage1StatusLine = computed(() => {
   if (wizardStage1Complete.value) return 'Ready to chat';
@@ -2535,6 +2545,30 @@ const dismissWizard = () => {
 
 const SETUP_LOG_JSON = 'maia-setup-log.json';
 
+/** Parse navigator.userAgent into a human-readable string, e.g. "Chrome 145 on macOS". */
+const parseUserAgent = (): string => {
+  if (typeof navigator === 'undefined') return 'unknown';
+  const ua = navigator.userAgent;
+  // Detect browser
+  let browser = 'Unknown browser';
+  const chromeMatch = ua.match(/Chrome\/(\d+)/);
+  const firefoxMatch = ua.match(/Firefox\/(\d+)/);
+  const safariMatch = ua.match(/Version\/(\d+).*Safari/);
+  const edgeMatch = ua.match(/Edg\/(\d+)/);
+  if (edgeMatch) browser = `Edge ${edgeMatch[1]}`;
+  else if (chromeMatch) browser = `Chrome ${chromeMatch[1]}`;
+  else if (firefoxMatch) browser = `Firefox ${firefoxMatch[1]}`;
+  else if (safariMatch) browser = `Safari ${safariMatch[1]}`;
+  // Detect OS
+  let os = 'Unknown OS';
+  if (ua.includes('Mac OS X') || ua.includes('Macintosh')) os = 'macOS';
+  else if (ua.includes('Windows')) os = 'Windows';
+  else if (ua.includes('Linux')) os = 'Linux';
+  else if (ua.includes('Android')) os = 'Android';
+  else if (ua.includes('iPhone') || ua.includes('iPad')) os = 'iOS';
+  return `${browser} on ${os}`;
+};
+
 const addSetupLogLine = (step: string, detail: string, ok: boolean) => {
   setupLogLines.value.push({
     time: new Date().toISOString(),
@@ -2571,8 +2605,16 @@ const handlePickLocalFolder = async () => {
   emit('local-folder-connected', { handle: result.handle, folderName: result.folderName });
   // Restore previous session history before adding new entries
   await restoreSetupLogFromJson();
+
+  // Detect user change — if the log has entries from a different user, insert a divider
+  const prevUserEntry = [...setupLogLines.value].reverse().find(l => l.step === 'Session Info' && l.detail?.startsWith('User: '));
+  const prevUserId = prevUserEntry ? prevUserEntry.detail.replace('User: ', '') : null;
+  if (prevUserId && prevUserId !== props.user.userId) {
+    addSetupLogLine('Session Change', `--- Account changed from ${prevUserId} to ${props.user.userId} ---`, true);
+  }
+
   addSetupLogLine('Session Info', `User: ${props.user.userId}`, true);
-  addSetupLogLine('Session Info', `Browser: ${navigator.userAgent}`, true);
+  addSetupLogLine('Session Info', `Browser: ${parseUserAgent()}`, true);
   addSetupLogLine('Session Info', `App URL: ${window.location.origin}`, true);
   addSetupLogLine('Folder Selected', `Folder: ${result.folderName}`, true);
 
@@ -2603,7 +2645,8 @@ const handlePickLocalFolder = async () => {
     }
   }, 60 * 60 * 1000);
 
-  // Start auto-run wizard
+  // Start auto-run wizard — set guided flow phase to 'running'
+  wizardFlowPhase.value = 'running';
   await runAutoWizard();
 };
 
@@ -2773,13 +2816,9 @@ const generateSetupLogPdf = async () => {
   y += 6;
   doc.text(`Folder: ${localFolderName.value || 'unknown'}`, margin, y);
   y += 6;
-  const ua = typeof navigator !== 'undefined' ? navigator.userAgent : 'unknown';
-  const uaLines = doc.splitTextToSize(`Browser: ${ua}`, maxWidth);
-  for (const ul of uaLines) {
-    doc.text(ul, margin, y);
-    y += 5;
-  }
-  y += 4;
+  const ua = parseUserAgent();
+  doc.text(`Browser: ${ua}`, margin, y);
+  y += 8;
 
   // Summary section
   doc.setFontSize(11);
@@ -2814,6 +2853,19 @@ const generateSetupLogPdf = async () => {
     if (y > 270) {
       doc.addPage();
       y = 20;
+    }
+    // Session Change divider — draw a horizontal rule and bold heading
+    if (line.step === 'Session Change') {
+      y += 3;
+      doc.setDrawColor(100);
+      doc.line(margin, y, pageWidth - margin, y);
+      y += 6;
+      doc.setFontSize(10);
+      const timestamp = new Date(line.time).toLocaleTimeString();
+      doc.text(`[${timestamp}] ${line.detail}`, margin, y);
+      y += 8;
+      doc.setFontSize(9);
+      continue;
     }
     const statusIcon = line.ok ? '[OK]' : '[FAIL]';
     const timestamp = new Date(line.time).toLocaleTimeString();
@@ -3107,8 +3159,23 @@ const handleStage3Action = () => {
 const handleFileSelect = async (event: Event) => {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
-  
+
   if (!file) return;
+
+  // Reconnect local folder NOW while we still have user-gesture context
+  // (requestPermission requires an active gesture; it'll be lost after the first await)
+  if (!localFolderHandle.value && props.user?.userId) {
+    try {
+      const result = await reconnectLocalFolderWithGesture(props.user.userId);
+      if (result) {
+        localFolderHandle.value = result.handle;
+        localFolderName.value = result.folderName;
+        console.log(`[localFolder] Reconnected to "${result.folderName}" during file select gesture`);
+      }
+    } catch (e) {
+      // Not critical — file will still upload to cloud
+    }
+  }
 
   if (wizardUploadIntent.value === 'restore') {
     isUploadingFile.value = true;
@@ -3332,6 +3399,35 @@ const uploadPDFFile = async (file: File) => {
         })
       });
       await refreshWizardState();
+
+      // Copy file to local MAIA folder so it's available for offline restore
+      // (localFolderHandle was reconnected at file-select time while gesture was active)
+      if (localFolderHandle.value) {
+        try {
+          await writeFileToFolder(localFolderHandle.value, file.name, file);
+          // Update maia-state.json to include the new file
+          const state = await readStateFile(localFolderHandle.value);
+          if (state) {
+            const stateFiles = state.files || [];
+            const existing = stateFiles.find((f: any) => f.fileName === file.name);
+            if (!existing) {
+              stateFiles.push({
+                fileName: file.name,
+                size: file.size,
+                cloudStatus: 'uploaded' as const,
+                bucketKey: uploadResult.fileInfo.bucketKey
+              });
+              state.files = stateFiles;
+              await writeStateFile(localFolderHandle.value, state);
+            }
+          }
+          console.log(`[localFolder] Paperclip file "${file.name}" copied to local folder`);
+        } catch (folderErr) {
+          console.warn('[localFolder] Failed to copy paperclip file to local folder:', folderErr);
+        }
+      } else {
+        console.log('[localFolder] No local folder connected — skipping local copy of paperclip file');
+      }
     } catch (error) {
       console.warn('Failed to save file metadata to user document:', error);
     }
@@ -5348,8 +5444,8 @@ const handleIndexingFinished = (_data: { jobId: string; phase: string; error?: s
   // Update status tip to show normal status
   updateContextualTip();
   refreshWizardState();
-  // Prompt to update Patient Summary, but not during wizard-controlled guided flow
-  if (wizardFlowPhase.value !== 'medications' && wizardFlowPhase.value !== 'summary') {
+  // Prompt to update Patient Summary, but not during wizard-controlled guided flow or if already dismissed this session
+  if (wizardFlowPhase.value !== 'medications' && wizardFlowPhase.value !== 'summary' && !postIndexingSummaryDismissedThisSession.value) {
     showPostIndexingSummaryPrompt.value = true;
   }
 };
@@ -5390,6 +5486,68 @@ const handleFilesArchived = (archivedBucketKeys: string[]) => {
   
   // Update status tip immediately after files are archived
   updateContextualTip();
+};
+
+const handleFileAddedToKb = async (data: { fileName: string; bucketKey: string }) => {
+  // Copy the file to the local MAIA folder so it's available for offline restore
+  // Try to reconnect if handle is missing (may work if user gesture chain is still active)
+  if (!localFolderHandle.value && props.user?.userId) {
+    try {
+      const result = await reconnectLocalFolderWithGesture(props.user.userId);
+      if (result) {
+        localFolderHandle.value = result.handle;
+        localFolderName.value = result.folderName;
+        console.log(`[localFolder] Reconnected to "${result.folderName}" during KB file add`);
+      }
+    } catch { /* ignore */ }
+  }
+  if (!localFolderHandle.value) {
+    console.log('[localFolder] No local folder connected — skipping local copy of KB file');
+    return;
+  }
+  try {
+    // Fetch file content via the proxy endpoint
+    const resp = await fetch(`/api/files/proxy-pdf/${encodeURIComponent(data.bucketKey)}`, {
+      credentials: 'include'
+    });
+    if (!resp.ok) {
+      console.warn(`[localFolder] Failed to fetch file for local copy: ${resp.status}`);
+      return;
+    }
+    const blob = await resp.blob();
+    await writeFileToFolder(localFolderHandle.value, data.fileName, blob);
+
+    // Update maia-state.json to reflect the new file
+    try {
+      const state = await readStateFile(localFolderHandle.value);
+      if (state) {
+        const files = state.files || [];
+        const existing = files.find(f => f.fileName === data.fileName);
+        if (!existing) {
+          files.push({
+            fileName: data.fileName,
+            size: blob.size,
+            cloudStatus: 'indexed' as const,
+            bucketKey: data.bucketKey
+          });
+          state.files = files;
+          await writeStateFile(localFolderHandle.value, state);
+        }
+      }
+    } catch (stateErr) {
+      console.warn('[localFolder] Failed to update maia-state.json:', stateErr);
+    }
+
+    if ($q && typeof $q.notify === 'function') {
+      $q.notify({
+        type: 'positive',
+        message: `"${data.fileName}" copied to local MAIA folder`,
+        timeout: 3000
+      });
+    }
+  } catch (err) {
+    console.warn('[localFolder] Failed to copy file to local folder:', err);
+  }
 };
 
 const handleMessagesFiltered = async (filteredMessages: Message[]) => {

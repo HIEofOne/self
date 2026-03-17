@@ -122,20 +122,6 @@ async function getStoredHandle(
 // ── Handle lifecycle ───────────────────────────────────────────────
 
 /**
- * Verify read or readwrite permission on a handle.
- * On Chrome 122+ with persistent permissions, this succeeds silently.
- */
-async function verifyPermission(
-  handle: FileSystemDirectoryHandle,
-  mode: FileSystemPermissionMode = 'readwrite'
-): Promise<boolean> {
-  const opts = { mode };
-  if ((await handle.queryPermission(opts)) === 'granted') return true;
-  if ((await handle.requestPermission(opts)) === 'granted') return true;
-  return false;
-}
-
-/**
  * Open a directory picker and store the handle. Must be called from a user gesture.
  */
 export async function pickLocalFolder(
@@ -174,6 +160,28 @@ export async function reconnectLocalFolder(
     return { handle, folderName: handle.name };
   } catch (e) {
     console.warn('[localFolder] reconnectLocalFolder failed:', e);
+    return null;
+  }
+}
+
+/**
+ * Reconnect using requestPermission (requires active user gesture).
+ * Use this when a user action (e.g. clicking paperclip) provides the gesture context
+ * that queryPermission-only reconnect can't use.
+ */
+export async function reconnectLocalFolderWithGesture(
+  userId: string
+): Promise<{ handle: FileSystemDirectoryHandle; folderName: string } | null> {
+  if (!isFileSystemAccessSupported()) return null;
+  try {
+    const handle = await getStoredHandle(userId);
+    if (!handle) return null;
+    // requestPermission works here because we're in a user gesture context
+    const perm = await handle.requestPermission({ mode: 'readwrite' });
+    if (perm !== 'granted') return null;
+    return { handle, folderName: handle.name };
+  } catch (e) {
+    console.warn('[localFolder] reconnectLocalFolderWithGesture failed:', e);
     return null;
   }
 }

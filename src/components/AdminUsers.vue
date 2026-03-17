@@ -250,7 +250,7 @@ const columns = [
   },
   {
     name: 'filesIndexed',
-    label: 'Files Indexed',
+    label: 'Saved Files',
     align: 'center' as const,
     field: 'filesIndexed',
     sortable: true

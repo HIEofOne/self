@@ -683,7 +683,20 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
   app.post('/api/sign-out', async (req, res) => {
     const userId = req.session?.userId;
     const clientInfo = getClientInfo(req);
-    
+
+    // Stamp lastActivity on user doc before destroying session (so admin can show it)
+    if (userId) {
+      try {
+        const userDoc = await cloudant.getDocument('maia_users', userId);
+        if (userDoc) {
+          userDoc.lastActivity = new Date().toISOString();
+          await cloudant.saveDocument('maia_users', userDoc);
+        }
+      } catch (e) {
+        console.warn(`[SIGN-OUT] Failed to stamp lastActivity on ${userId}:`, e.message);
+      }
+    }
+
     req.session.destroy(async (err) => {
       if (err) {
         return res.status(500).json({ error: 'Failed to sign out' });
@@ -726,19 +739,44 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
         });
       }
 
-      const agent = await findUserAgent(doClient, userId);
-      const exists = !!agent;
-      if (exists) {
-        console.log(`[LOCAL] Agent lookup for ${userId}: found ${agent.name || agent.id || agent.uuid}`);
-      } else {
-        console.log(`[LOCAL] Agent lookup for ${userId}: missing`);
-      }
+      const [agent, userDoc] = await Promise.all([
+        findUserAgent(doClient, userId).catch(() => null),
+        cloudant.getDocument('maia_users', userId).catch(() => null)
+      ]);
+      const agentExists = !!agent;
+
+      // Saved files count: exclude References folder (matches Saved Files tab logic)
+      const allFiles = Array.isArray(userDoc?.files) ? userDoc.files : [];
+      const referencesPath = `${userId}/References/`;
+      const savedFiles = allFiles.filter(f => {
+        const bk = f.bucketKey || '';
+        return !bk.startsWith(referencesPath) && f.isReference !== true;
+      });
+      const savedFileCount = savedFiles.length;
+
+      // KB exists: userDoc has a kbId or connectedKBs
+      const kbExists = !!(userDoc?.kbId || (Array.isArray(userDoc?.connectedKBs) && userDoc.connectedKBs.length > 0));
+
+      // Agent linked to KB: agent exists AND kbId is set AND agent has an endpoint
+      const agentLinkedToKb = agentExists && kbExists && !!userDoc?.agentEndpoint;
+
+      // Wizard complete: workflowStage reached patient_summary AND patientSummary text exists
+      const wizardComplete = userDoc?.workflowStage === 'patient_summary'
+        && !!(userDoc?.patientSummary && String(userDoc.patientSummary).trim());
+
+      console.log(`[WELCOME] agent-exists for ${userId}: agent=${agentExists}, savedFiles=${savedFileCount}/${allFiles.length}, kb=${kbExists}, linked=${agentLinkedToKb}, wizardDone=${wizardComplete}, stage=${userDoc?.workflowStage || 'none'}`);
 
       res.json({
         success: true,
-        exists,
+        exists: agentExists,
         agentName: agent?.name || null,
-        agentId: agent?.uuid || agent?.id || null
+        agentId: agent?.uuid || agent?.id || null,
+        savedFileCount,
+        cloudFileCount: allFiles.length,
+        kbExists,
+        agentLinkedToKb,
+        wizardComplete,
+        workflowStage: userDoc?.workflowStage || null
       });
     } catch (error) {
       console.error('Agent lookup failed:', error);
@@ -806,40 +844,17 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
         });
       }
 
-      let kbDeleted = false;
-      if (userDoc.kbId) {
-        try {
-          await doClient.kb.get(userDoc.kbId);
-          await doClient.kb.delete(userDoc.kbId);
-          kbDeleted = true;
-        } catch (kbError) {
-          if (kbError.statusCode === 404 || kbError.message?.includes('not found')) {
-            kbDeleted = true;
-          } else {
-            throw kbError;
-          }
-        }
-      } else {
-        kbDeleted = true;
-      }
-
+      // Preserve KB and all cloud resources — don't delete anything.
+      // The user may return and resume with the same KB, agent, and files.
       userDoc.dormantAccount = true;
       userDoc.dormantAt = new Date().toISOString();
-      userDoc.kbId = null;
-      userDoc.kbIndexedFiles = [];
-      userDoc.kbPendingFiles = undefined;
-      userDoc.kbIndexingNeeded = false;
-      userDoc.kbLastIndexingJobId = null;
-      userDoc.kbLastIndexedAt = null;
-      userDoc.kbLastIndexingTokens = null;
-      userDoc.kbIndexingStartedAt = null;
       userDoc.updatedAt = new Date().toISOString();
 
       await cloudant.saveDocument('maia_users', userDoc);
 
       res.json({
         success: true,
-        kbDeleted
+        kbPreserved: !!userDoc.kbId
       });
     } catch (error) {
       console.error('Dormant account error:', error);
@@ -1067,6 +1082,11 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       console.error('[AUTH] welcome-status error:', error?.message || error);
       res.status(500).json({});
     }
+  });
+
+  // Return configured admin username (for admin passkey pre-fill on /admin page)
+  app.get('/api/admin-username', (req, res) => {
+    res.json({ adminUsername: process.env.ADMIN_USERNAME || null });
   });
 
   // Current user

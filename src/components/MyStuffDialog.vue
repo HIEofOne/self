@@ -922,9 +922,27 @@
                   />
                 </template>
                 <q-space />
-                <q-btn 
-                  label="Request New Summary" 
-                  color="primary" 
+                <q-btn
+                  v-if="showSummaryAttention && !isEditingSummaryTab"
+                  outline
+                  label="Verify"
+                  color="primary"
+                  icon="verified"
+                  :class="{ 'verify-highlight': showSummaryAttention }"
+                  @click="handleVerifySummaryTab"
+                />
+                <q-btn
+                  v-if="!isEditingSummaryTab"
+                  outline
+                  label="Edit"
+                  color="primary"
+                  icon="edit"
+                  :class="{ 'verify-highlight': showSummaryAttention }"
+                  @click="startSummaryEdit"
+                />
+                <q-btn
+                  label="Request New Summary"
+                  color="primary"
                   @click="requestNewSummary"
                   icon="refresh"
                   :disable="isEditingSummaryTab || isSavingSummary"
@@ -949,7 +967,64 @@
         </q-tab-panels>
       </q-card-section>
     </q-card>
-    
+
+    <!-- Local Folder Delete Reminder -->
+    <q-dialog v-model="showLocalFolderDeleteReminder" persistent>
+      <q-card style="min-width: 400px; max-width: 520px">
+        <q-card-section>
+          <div class="text-h6">
+            <q-icon name="info" color="primary" class="q-mr-sm" />
+            Local Folder
+          </div>
+        </q-card-section>
+        <q-card-section class="q-pt-none text-body2">
+          <b>{{ deletedFileName }}</b> has been deleted from MAIA but may still
+          exist in your local MAIA folder. If you don't also delete it from
+          the local folder, it could be restored the next time you run the
+          setup wizard.
+        </q-card-section>
+        <q-card-actions align="right">
+          <q-btn
+            flat
+            label="I UNDERSTAND"
+            color="primary"
+            @click="showLocalFolderDeleteReminder = false"
+          />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
+    <!-- Current Medications Mismatch Warning -->
+    <q-dialog v-model="showMedsMismatchDialog" persistent>
+      <q-card style="min-width: 420px; max-width: 560px">
+        <q-card-section>
+          <div class="text-h6 text-negative">
+            <q-icon name="warning" class="q-mr-sm" />
+            Medications Mismatch
+          </div>
+        </q-card-section>
+        <q-card-section class="q-pt-none text-body2">
+          The Current Medications section in the Patient Summary does not match
+          your verified Current Medications list. An inconsistent Patient Summary
+          could lead to incorrect medical information being shared.
+        </q-card-section>
+        <q-card-actions align="right" class="q-gutter-sm">
+          <q-btn
+            flat
+            label="I UNDERSTAND"
+            color="grey-8"
+            @click="handleMedsMismatchAcknowledge"
+          />
+          <q-btn
+            unelevated
+            label="UPDATE"
+            color="primary"
+            @click="handleMedsMismatchUpdate"
+          />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
     <!-- PDF Viewer Modal -->
     <PdfViewerModal
       v-model="showPdfViewer"
@@ -1174,6 +1249,7 @@ const emit = defineEmits<{
   'rehydration-complete': [payload: { hasInitialFile: boolean }];
   'rehydration-file-removed': [payload: { bucketKey?: string; fileName?: string }];
   'request-summary-done': [];
+  'file-added-to-kb': [data: { fileName: string; bucketKey: string }];
 }>();
 
 // Handle show patient summary from Lists component
@@ -1237,6 +1313,15 @@ const loadingRandomNames = ref(false);
 const patientSummary = ref('');
 const patientSummaries = ref<Array<{ text: string; createdAt: string; updatedAt: string; isCurrent: boolean }>>([]);
 
+// Current Medications ↔ Patient Summary consistency check
+const verifiedCurrentMedications = ref<string | null>(null);
+const showMedsMismatchDialog = ref(false);
+const medsMismatchAcknowledged = ref(false);
+
+// Local folder reminder after file deletion
+const showLocalFolderDeleteReminder = ref(false);
+const deletedFileName = ref('');;
+
 // Patient Diary
 const loadingDiary = ref(false);
 const diaryError = ref('');
@@ -1269,6 +1354,8 @@ const kbSummaryTokens = ref<string | number | null>(null);
 const kbSummaryFiles = ref<number | null>(null);
 const showWizardSummaryActions = computed(() => !!props.wizardActive && currentTab.value === 'summary');
 const summaryNeedsVerify = ref(false);
+/** Once the user dismisses the summary tab without verifying this session, don't auto-reopen. */
+const summaryDismissedThisSession = ref(false);
 const showSummaryAttention = computed(() => showWizardSummaryActions.value || summaryNeedsVerify.value);
 const kbDataSourceCount = ref<number | null>(null);
 const kbIndexedDataSourceCount = ref<number | null>(null);
@@ -2062,6 +2149,11 @@ const onCheckboxChange = async (file: UserFile, options: { silent?: boolean; ret
     if (newStatus) {
       const keysToClear = [oldBucketKey, result.newBucketKey].filter(Boolean);
       emit('files-archived', keysToClear);
+      // Notify parent to copy file to local MAIA folder
+      emit('file-added-to-kb', {
+        fileName: file.fileName,
+        bucketKey: result.newBucketKey || oldBucketKey
+      });
     }
     
     // Mark KB as dirty since a file was moved in/out of KB
@@ -2182,6 +2274,10 @@ const deleteFile = async (file: UserFile) => {
         timeout: 3000
       });
     }
+
+    // Remind user to also delete from local folder
+    deletedFileName.value = file.fileName || file.bucketKey?.split('/').pop() || 'the file';
+    showLocalFolderDeleteReminder.value = true;
 
     if (props.rehydrationActive) {
       const removedName = normalizeRehydrationName(file);
@@ -4900,6 +4996,11 @@ const loadPatientSummary = async () => {
     if (!loadedSummary) {
       isEditingSummaryTab.value = false;
     }
+
+    // Check medications consistency after loading summary
+    if (loadedSummary && !medsMismatchAcknowledged.value) {
+      await checkMedicationsConsistency();
+    }
   } catch (err) {
     summaryError.value = err instanceof Error ? err.message : 'Failed to load patient summary';
   } finally {
@@ -5003,6 +5104,156 @@ const extractMedicationsFromSummary = (summaryText: string): string | null => {
   }
   const medsText = lines.slice(startIdx, endIdx).join('\n').trim();
   return medsText.length > 0 ? medsText : null;
+};
+
+/**
+ * Normalize medication text for comparison: lowercase, collapse whitespace, strip markdown bullets/formatting.
+ */
+const normalizeMedsText = (text: string): string => {
+  return text
+    .toLowerCase()
+    .replace(/\*{1,2}/g, '')          // strip bold/italic markers
+    .replace(/^[-*•]\s*/gm, '')       // strip bullet prefixes
+    .replace(/\s+/g, ' ')             // collapse whitespace
+    .trim();
+};
+
+/**
+ * Fetch the verified Current Medications and compare with what's in the Patient Summary.
+ * If they differ, show a warning dialog.
+ */
+const checkMedicationsConsistency = async () => {
+  if (!patientSummary.value || !props.userId) return;
+
+  try {
+    const res = await fetch(`/api/user-status?userId=${encodeURIComponent(props.userId)}`, {
+      credentials: 'include'
+    });
+    if (!res.ok) return;
+    const status = await res.json();
+    const medsFromList = status.currentMedications;
+    if (!medsFromList || !String(medsFromList).trim()) return;
+
+    verifiedCurrentMedications.value = medsFromList;
+
+    const medsFromSummary = extractMedicationsFromSummary(patientSummary.value);
+    if (!medsFromSummary) return; // summary doesn't have a Current Medications section — nothing to compare
+
+    const normalizedList = normalizeMedsText(medsFromList);
+    const normalizedSummary = normalizeMedsText(medsFromSummary);
+
+    if (normalizedList !== normalizedSummary) {
+      console.log('[MyStuff] Current Medications mismatch detected between list and Patient Summary');
+      showMedsMismatchDialog.value = true;
+    }
+  } catch (err) {
+    console.warn('[MyStuff] Failed to check medications consistency:', err);
+  }
+};
+
+/**
+ * Replace the Current Medications section in a summary with the verified list text.
+ * Preserves the heading and everything before/after the section.
+ */
+const replaceMedicationsInSummary = (summaryText: string, newMedsText: string): string | null => {
+  const lines = summaryText.split('\n');
+  let headingIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim().toLowerCase();
+    if (
+      line.match(/^#{1,3}\s*current\s+medications/) ||
+      line.match(/^\*{1,2}current\s+medications\*{1,2}/) ||
+      line === 'current medications' ||
+      line === 'current medications:'
+    ) {
+      headingIdx = i;
+      break;
+    }
+  }
+  if (headingIdx < 0) return null;
+
+  const startIdx = headingIdx + 1;
+  let endIdx = lines.length;
+  for (let i = startIdx; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (line.match(/^#{1,3}\s+/) || (line.match(/^\*{2}.+\*{2}$/) && !line.toLowerCase().includes('medication'))) {
+      endIdx = i;
+      break;
+    }
+  }
+
+  // Keep the heading as-is (the AI may already include "(patient-confirmed)")
+  const heading = lines[headingIdx];
+
+  const before = lines.slice(0, headingIdx);
+  const after = lines.slice(endIdx);
+  return [...before, heading, '', newMedsText, '', ...after].join('\n').trim();
+};
+
+/**
+ * Handle UPDATE from the mismatch dialog: splice the verified Current Medications
+ * into the existing Patient Summary (no full regeneration).
+ */
+const handleMedsMismatchUpdate = async () => {
+  showMedsMismatchDialog.value = false;
+  medsMismatchAcknowledged.value = true;
+
+  const meds = verifiedCurrentMedications.value;
+  if (!meds || !patientSummary.value) return;
+
+  const updated = replaceMedicationsInSummary(patientSummary.value, meds);
+  if (!updated) {
+    // Couldn't find the section — fall back to full regeneration
+    await requestNewSummary();
+    return;
+  }
+
+  // Save the patched summary in place (replaces the current slot)
+  loadingSummary.value = true;
+  try {
+    const response = await fetch('/api/patient-summary', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        userId: props.userId,
+        summary: updated,
+        replaceStrategy: 'newest'
+      })
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.message || 'Failed to save updated summary');
+    }
+    await loadPatientSummary();
+    emit('patient-summary-saved', { userId: props.userId });
+    if ($q && typeof $q.notify === 'function') {
+      $q.notify({
+        type: 'positive',
+        message: 'Patient Summary updated with verified Current Medications.',
+        timeout: 3000
+      });
+    }
+  } catch (error) {
+    console.error('Error patching summary medications:', error);
+    if ($q && typeof $q.notify === 'function') {
+      $q.notify({
+        type: 'negative',
+        message: error instanceof Error ? error.message : 'Failed to update summary',
+        timeout: 5000
+      });
+    }
+  } finally {
+    loadingSummary.value = false;
+  }
+};
+
+/**
+ * Handle I UNDERSTAND from the mismatch dialog: user accepts the difference.
+ */
+const handleMedsMismatchAcknowledge = () => {
+  showMedsMismatchDialog.value = false;
+  medsMismatchAcknowledged.value = true;
 };
 
 const saveSummaryFromTab = async () => {
@@ -5114,6 +5365,10 @@ const sortedSharedChats = computed(() => {
 });
 
 const closeDialog = async (): Promise<boolean> => {
+  // Track if user dismissed the summary tab without verifying
+  if (currentTab.value === 'summary' && summaryNeedsVerify.value) {
+    summaryDismissedThisSession.value = true;
+  }
   // Check if indexing is in progress
   if (indexingKB.value && currentIndexingJobId.value) {
     const result = await new Promise<'ok' | 'cancel' | 'dismiss'>((resolve) => {
@@ -5192,6 +5447,9 @@ const closeDialog = async (): Promise<boolean> => {
 watch(() => props.modelValue, async (newValue) => {
   isOpen.value = newValue;
   if (newValue) {
+    // Reset per-open state
+    medsMismatchAcknowledged.value = false;
+
     // Set initial tab if provided
     if (props.initialTab) {
       currentTab.value = props.initialTab;
@@ -5260,14 +5518,20 @@ watch(() => props.modelValue, async (newValue) => {
       });
     } else if (currentTab.value === 'summary' && props.requestSummaryOnOpen) {
       // Wizard asked for one summary generation on open (avoids duplicate API call)
-      // Set loadingSummary immediately to prevent flash of empty state
-      loadingSummary.value = true;
-      nextTick(() => {
-        setTimeout(() => {
-          requestNewSummary();
-          emit('request-summary-done');
-        }, 300);
-      });
+      if (summaryDismissedThisSession.value && !props.wizardActive) {
+        // User already dismissed summary this session — skip auto-generation (not during wizard)
+        emit('request-summary-done');
+        loadPatientSummary();
+      } else {
+        // Set loadingSummary immediately to prevent flash of empty state
+        loadingSummary.value = true;
+        nextTick(() => {
+          setTimeout(() => {
+            requestNewSummary();
+            emit('request-summary-done');
+          }, 300);
+        });
+      }
     }
 
   }
