@@ -440,7 +440,24 @@
                   <q-icon name="folder" color="primary" class="q-mr-xs" />
                   {{ safariFolderName }}
                 </div>
-                <div v-if="localFolderAutoRunActive" class="text-caption text-primary q-mt-xs">
+                <!-- Recovered session: folder name from localStorage but no live files -->
+                <div v-if="safariNeedsReselect && !wizardStage3Complete && !stage3IndexingActive" class="q-mt-sm">
+                  <div class="text-caption text-orange-8 q-mb-sm">
+                    Page was reloaded. Please re-select your folder to continue uploading files.
+                  </div>
+                  <q-btn
+                    dense unelevated
+                    color="primary"
+                    label="Re-select folder"
+                    icon="folder_open"
+                    size="sm"
+                    @click="handlePickSafariFolder"
+                  />
+                </div>
+                <div v-else-if="safariNeedsReselect" class="text-caption text-green-7 q-mt-xs">
+                  Session recovered — files already uploaded
+                </div>
+                <div v-else-if="localFolderAutoRunActive" class="text-caption text-primary q-mt-xs">
                   <q-spinner size="14px" class="q-mr-xs" />
                   {{ localFolderAutoRunPhase }}
                 </div>
@@ -1151,6 +1168,9 @@ const safariFolderFiles = ref<File[]>([]);
 const safariFolderInputRef = ref<HTMLInputElement | null>(null);
 /** Name of the folder selected via webkitdirectory (extracted from webkitRelativePath). */
 const safariFolderName = ref<string | null>(null);
+/** True when we recovered safariFolderName from localStorage but have no live folder handle/files.
+ *  Shows a prompt asking the user to re-select the folder to continue. */
+const safariNeedsReselect = ref(false);
 
 const wizardStage1StatusLine = computed(() => {
   if (wizardStage1Complete.value) return 'Ready to chat';
@@ -2725,7 +2745,14 @@ const handleSafariFolderSelected = async (event: Event) => {
   const firstPath = allFiles[0]?.webkitRelativePath || '';
   const folderName = firstPath.split('/')[0] || 'Selected Folder';
   safariFolderName.value = folderName;
+  safariNeedsReselect.value = false;
   safariFolderFiles.value = pdfs;
+
+  // Persist safari folder name so we can recover wizard state on reload
+  try {
+    const sfKey = `safariFolderName-${props.user.userId}`;
+    localStorage.setItem(sfKey, folderName);
+  } catch { /* ignore */ }
 
   // Populate localFolderFiles with compatible entries (no fileHandle — Safari doesn't provide one)
   localFolderFiles.value = pdfs.map(f => ({
@@ -5468,6 +5495,34 @@ const startSetupWizardPolling = () => {
 
   refreshWizardState()
     .then(() => {
+      // ── Safari/basic reload recovery: resume guided flow if indexing already done ──
+      // On reload wizardFlowPhase resets to 'done'. If the server shows indexing
+      // complete + agent ready but medications or summary are still pending, the
+      // user was mid-guided-flow. Resume it so the wizard doesn't get stuck.
+      if (
+        wizardFlowPhase.value === 'done' &&
+        (safariFolderName.value || localFolderHandle.value) &&
+        indexingStatus.value?.phase === 'complete' &&
+        wizardStage1Complete.value
+      ) {
+        if (!wizardPatientSummary.value && wizardCurrentMedications.value) {
+          // Meds done, summary pending → resume at summary phase
+          wizardFlowPhase.value = 'summary';
+          myStuffInitialTab.value = 'summary';
+          wizardRequestSummaryOnOpen.value = true;
+          showMyStuffDialog.value = true;
+        } else if (!wizardCurrentMedications.value) {
+          // Meds still pending → resume at medications phase
+          wizardFlowPhase.value = 'medications';
+          try {
+            sessionStorage.setItem('autoProcessInitialFile', 'true');
+            sessionStorage.setItem('wizardMyListsAuto', 'true');
+          } catch { /* ignore */ }
+          myStuffInitialTab.value = 'lists';
+          showMyStuffDialog.value = true;
+        }
+      }
+
       if (!shouldHideSetupWizard.value && !showAgentSetupDialog.value && !wizardDismissed.value) {
         showAgentSetupDialog.value = true;
         stopAgentSetupTimer();
@@ -6042,6 +6097,24 @@ onMounted(async () => {
     // Try to reconnect to a previously chosen local folder (silent on Chrome 122+)
     if (localFolderSupported.value) {
       void tryReconnectLocalFolder();
+    }
+
+    // Recover Safari folder session from localStorage on reload.
+    // If we had a safariFolderName but lost the live File objects (reload),
+    // we can still let the wizard show server-sourced progress. If files
+    // are already indexed, the watchers won't need the folder handle at all.
+    if (props.folderAccessTier === 'safari' || props.folderAccessTier === 'basic') {
+      try {
+        const sfKey = `safariFolderName-${props.user?.userId}`;
+        const stored = sfKey ? localStorage.getItem(sfKey) : null;
+        if (stored && !safariFolderName.value) {
+          safariFolderName.value = stored;
+          localFolderName.value = stored;
+          // We have the name but no live File objects — mark that a re-select
+          // may be needed if the wizard still requires file uploads.
+          safariNeedsReselect.value = true;
+        }
+      } catch { /* ignore */ }
     }
 
     startSetupWizardPolling();
