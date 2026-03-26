@@ -1727,6 +1727,7 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
 
     // Also save to local folder if connected (v2 state file)
     console.log(`[localFolder] signOut save: folderHandle=${!!localFolderHandle.value}, folderName=${localFolderName.value || 'none'}, userId=${user.value?.userId}`);
+    console.log(`[localFolder] signOut: cloud summary="${(summary?.summary || '').substring(0, 100)}", summaryResponse.ok=${summaryResponse.ok}`);
     if (localFolderHandle.value && user.value?.userId) {
       try {
         const now = new Date().toISOString();
@@ -1737,6 +1738,7 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
           const { readStateFile } = await import('./utils/localFolder');
           existingState = await readStateFile(localFolderHandle.value);
         } catch { /* first time, no existing state */ }
+        console.log(`[localFolder] existingState: patientSummary="${(existingState?.patientSummary || '').substring(0, 100)}", files=${existingState?.files?.length || 0}, wizardComplete=${existingState?.wizardComplete}`);
         const state: MaiaState = {
           version: 2,
           userId: user.value.userId,
@@ -1749,11 +1751,11 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
             cloudStatus: indexedSet.has(f.bucketKey || '') ? 'indexed' as const : 'pending' as const,
             bucketKey: f.bucketKey
           })) : existingState?.files || [],
-          currentMedications: status?.currentMedications || existingState?.currentMedications || null,
-          patientSummary: summary?.summary || existingState?.patientSummary || null,
-          savedChats: savedChats || existingState?.savedChats || undefined,
+          currentMedications: (status?.currentMedications && status.currentMedications.trim()) ? status.currentMedications : (existingState?.currentMedications || null),
+          patientSummary: (summary?.summary && summary.summary.trim()) ? summary.summary : (existingState?.patientSummary || null),
+          savedChats: (savedChats?.chats?.length || savedChats?.length) ? savedChats : (existingState?.savedChats || undefined),
           currentChat: snapshot?.currentChat || existingState?.currentChat || undefined,
-          agentInstructions: instrData?.instructions || existingState?.agentInstructions || null,
+          agentInstructions: (instrData?.instructions && instrData.instructions.trim()) ? instrData.instructions : (existingState?.agentInstructions || null),
           kbStats: indexedCount > 0
             ? { fileCount: indexedCount, tokenCount: files?.tokenCount || 0 }
             : existingState?.kbStats || { fileCount: 0, tokenCount: 0 },
