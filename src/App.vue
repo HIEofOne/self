@@ -171,6 +171,7 @@
             @update:deep-link-info="handleDeepLinkInfoUpdate"
             @local-folder-connected="handleLocalFolderConnected"
             @session-dirty="sessionDirty = true"
+            @wizard-complete="handleWizardComplete"
           />
         </div>
       </q-page>
@@ -817,6 +818,7 @@ import {
   writeStateFile, clearDirectoryHandle, readIdentityFile, writeIdentityFile,
   addOrUpdateKnownUser, removeKnownUser, migrateToKnownUsers,
   getKnownUsers, getActiveUserId, setActiveUserId,
+  readStateFileByUserId,
   type MaiaState, type MaiaIdentity, type KnownUser
 } from './utils/localFolder';
 
@@ -1157,10 +1159,24 @@ const loadWelcomeStatus = async () => {
       let localSummaryVerified = false;
       let localWizardComplete = false;
       let foundLocalState = false;
-      if (localFolderHandle.value) {
+      // Try active folder handle first, then try reconnecting stored handle (queryPermission only, no gesture)
+      let folderHandle = localFolderHandle.value;
+      if (!folderHandle && localId) {
+        try {
+          const result = await readStateFileByUserId(localId);
+          if (result) {
+            folderHandle = result.handle;
+            // Also populate localFolderHandle so subsequent operations can use it
+            localFolderHandle.value = result.handle;
+          }
+        } catch {
+          // Not available without gesture, will fall back to IndexedDB
+        }
+      }
+      if (folderHandle) {
         try {
           const { readStateFile } = await import('./utils/localFolder');
-          const folderState = await readStateFile(localFolderHandle.value);
+          const folderState = await readStateFile(folderHandle);
           if (folderState) {
             foundLocalState = true;
             localFileCount = Array.isArray(folderState.files) ? folderState.files.length : 0;
@@ -1762,6 +1778,17 @@ const handleLocalFolderConnected = async (payload: { handle: FileSystemDirectory
   }
 };
 
+/** [WIZARD] Save state to local folder when wizard completes (so maia-state.json is current). */
+const handleWizardComplete = async () => {
+  console.log('[WIZARD-COMPLETE] Wizard finished, saving local state snapshot...');
+  try {
+    await saveLocalSnapshot(null);
+    console.log('[WIZARD-COMPLETE] Local state saved successfully');
+  } catch (e) {
+    console.warn('[WIZARD-COMPLETE] Failed to save local state:', e);
+  }
+};
+
 /** Detect whether the browser is Chrome (not Edge, not Opera). */
 const isChromeBrowser = (): boolean => {
   if (typeof navigator === 'undefined') return false;
@@ -1993,12 +2020,23 @@ const handleRestoreFromLocalFolder = async () => {
     if (!newUser) return;
     // Try to read local state from folder first (has accurate file list + wizard status)
     let localState: MaiaState | null = null;
+    // 1. Try active folder handle
     if (localFolderHandle.value) {
       const { readStateFile } = await import('./utils/localFolder');
       localState = await readStateFile(localFolderHandle.value);
     }
+    // 2. Try stored handle from IndexedDB (queryPermission only)
+    if (!localState && localId) {
+      try {
+        const result = await readStateFileByUserId(localId);
+        if (result) {
+          localState = result.state;
+          localFolderHandle.value = result.handle;
+        }
+      } catch { /* not available */ }
+    }
+    // 3. Fall back to IndexedDB snapshot, convert to MaiaState shape
     if (!localState) {
-      // Fall back to IndexedDB snapshot, convert to MaiaState shape
       const snapshot = await getUserSnapshot(localId);
       if (snapshot) {
         localState = {
@@ -2023,7 +2061,7 @@ const handleRestoreFromLocalFolder = async () => {
       showRestoreWizard.value = true;
     } else {
       if ($q && typeof $q.notify === 'function') {
-        $q.notify({ type: 'info', message: 'No local backup found. Use the wizard to set up your account.', timeout: 4000 });
+        $q.notify({ type: 'warning', message: 'No local backup found. Please re-select your MAIA folder or use GET STARTED to create a new account.', timeout: 6000 });
       }
     }
   } catch (error) {
@@ -2058,14 +2096,27 @@ const confirmDeleteLocalUser = async () => {
     await clearUserSnapshot(localId);
     clearLastSnapshotUserId();
     clearWizardPendingKey(localId);
+    // Remove from known users registry and clear stored folder handle
+    removeKnownUser(localId);
+    try {
+      await clearDirectoryHandle(localId);
+    } catch { /* non-fatal */ }
+    refreshKnownUsers();
+    selectedWelcomeUserId.value = knownUsers.value[0]?.userId || null;
     // Reset welcome state so GET STARTED creates a new userId
     welcomeLocalUserId.value = null;
     welcomeLocalSnapshot.value = null;
     welcomeLocalHasPasskey.value = null;
     welcomeAgentExists.value = null;
     welcomeCloudFileCount.value = null;
+    welcomeKbExists.value = null;
+    welcomeAgentLinkedToKb.value = null;
+    welcomeWizardComplete.value = null;
+    welcomeSavedFileCount.value = null;
     welcomeStatus.value = {};
     showDeleteLocalUserDialog.value = false;
+    // Reload welcome status to reflect the deletion
+    void loadWelcomeStatus();
     if ($q && typeof $q.notify === 'function') {
       $q.notify({ type: 'positive', message: `${localId} deleted. Click GET STARTED to create a new account.`, timeout: 5000 });
     }

@@ -1023,6 +1023,7 @@ const emit = defineEmits<{
   'update:deepLinkInfo': [DeepLinkInfo | null];
   'local-folder-connected': [payload: { handle: FileSystemDirectoryHandle; folderName: string }];
   'session-dirty': [];
+  'wizard-complete': [];
 }>();
 
 const $q = useQuasar();
@@ -5960,6 +5961,7 @@ const handlePatientSummarySaved = async () => {
     addSetupLogLine('Wizard Flow', 'Patient Summary saved — wizard complete', true);
     persistWizardCompletion();
     void generateSetupLogPdf();
+    emit('wizard-complete');
     // Leave MyStuff open — user can close when ready
   }
 };
@@ -5975,6 +5977,7 @@ const handlePatientSummaryVerified = async () => {
     wizardFlowPhase.value = 'done';
     addSetupLogLine('Wizard Flow', 'Patient Summary verified — wizard complete', true);
     void generateSetupLogPdf();
+    emit('wizard-complete');
     // Leave MyStuff open — user can close when ready
   }
 };
