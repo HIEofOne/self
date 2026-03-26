@@ -613,8 +613,15 @@ ensureBucketExists();
   const intervalMs = useDroplet ? 30000 : 0;
   let connected = false;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    connected = await cloudant.testConnection();
-    if (connected) break;
+    const result = await cloudant.testConnection();
+    if (result === true) { connected = true; break; }
+    if (result === 'auth_error') {
+      console.error(`❌ CouchDB authentication failed — stopping retries to avoid brute-force lockout.`);
+      console.error('   Check CLOUDANT_USERNAME and CLOUDANT_PASSWORD. If using CouchDB droplet:');
+      console.error('   SSH into droplet and run: docker inspect couchdb | grep COUCHDB_PASSWORD');
+      console.error('   Then set the correct CLOUDANT_PASSWORD in App Platform environment variables.');
+      return;
+    }
     if (attempt < maxAttempts) {
       console.warn(`[Cloudant] Connection attempt ${attempt}/${maxAttempts} failed, retrying in ${intervalMs / 1000}s...`);
       await new Promise(r => setTimeout(r, intervalMs));

@@ -197,20 +197,15 @@ export async function ensureCouchDBDroplet() {
         );
         return;
       }
-      // Try to derive URL from droplet IP even without stored credentials
+      // Without a password, don't even attempt connection — repeated bad-auth
+      // attempts trigger CouchDB's brute-force lockout (HTTP 403).
       const ip = getDropletIp(droplet);
-      if (ip) {
-        console.warn(
-          `[CouchDB Droplet] Droplet "${DROPLET_NAME}" exists at ${ip} but credentials not found. ` +
-          'Set CLOUDANT_PASSWORD manually. Attempting connection with droplet IP and default username.'
-        );
-        process.env.CLOUDANT_URL = `http://${ip}:${COUCHDB_PORT}`;
-        process.env.CLOUDANT_USERNAME = process.env.CLOUDANT_USERNAME || 'admin';
-        return;
-      }
       throw new Error(
-        `CouchDB droplet "${DROPLET_NAME}" exists but credentials not found in Spaces (${SPACES_CREDENTIALS_KEY}) or local file. ` +
-        'Set CLOUDANT_URL, CLOUDANT_USERNAME, CLOUDANT_PASSWORD manually or delete the droplet and restart.'
+        `CouchDB droplet "${DROPLET_NAME}" exists${ip ? ` at ${ip}` : ''} but credentials not found in Spaces (${SPACES_CREDENTIALS_KEY}) or local file, ` +
+        'and CLOUDANT_PASSWORD is not set in the environment. ' +
+        'To recover: SSH into the droplet and run `docker inspect couchdb | grep COUCHDB_PASSWORD` to retrieve the password, ' +
+        'then set CLOUDANT_PASSWORD in the App Platform environment variables. ' +
+        'Do NOT restart the app without the password — repeated auth failures will lock the CouchDB account.'
       );
     }
     const ip = getDropletIp(droplet) || creds.url?.match(/\/\/([^:/]+)/)?.[1];
