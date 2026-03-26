@@ -1912,6 +1912,37 @@ const handleWizardComplete = async () => {
   try {
     await saveLocalSnapshot(null);
     console.log('[WIZARD-COMPLETE] Local state saved successfully');
+    // Also update the webloc NOW (don't wait for sign-out) since the patient summary is fresh
+    if (localFolderHandle.value && user.value?.userId) {
+      try {
+        const { readStateFile, writeWeblocFile } = await import('./utils/localFolder');
+        const currentState = await readStateFile(localFolderHandle.value);
+        const summaryText = currentState?.patientSummary;
+        if (summaryText) {
+          const lines = summaryText.split('\n').map((l: string) => l.trim()).filter(Boolean);
+          let patientName: string | null = null;
+          for (const line of lines.slice(0, 5)) {
+            const m = line.match(/(?:Patient Summary for|Summary for|Name:\s*)\s*(.+)/i);
+            if (m?.[1]?.trim()) { patientName = m[1].trim(); break; }
+          }
+          if (!patientName) {
+            for (const line of lines.slice(0, 10)) {
+              const m = line.match(/\*?\*?Name\*?\*?:\s*\*?\*?\s*(.+)/i);
+              if (m?.[1]?.trim()) { patientName = m[1].trim().replace(/\*+/g, ''); break; }
+            }
+          }
+          if (patientName) {
+            await writeWeblocFile(localFolderHandle.value, window.location.origin, {
+              patientName,
+              userId: user.value.userId
+            });
+            console.log(`[WIZARD-COMPLETE] Webloc renamed: maia-for-${patientName}-as-${user.value.userId}.webloc`);
+          }
+        }
+      } catch (e) {
+        console.warn('[WIZARD-COMPLETE] Webloc update failed:', e);
+      }
+    }
   } catch (e) {
     console.warn('[WIZARD-COMPLETE] Failed to save local state:', e);
   }
