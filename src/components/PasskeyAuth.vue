@@ -481,6 +481,13 @@ const handleSignIn = async () => {
 
     if (!optionsResponse.ok) {
       const errorData = await optionsResponse.json();
+      // If user not found (e.g., CouchDB wiped), switch to registration mode
+      if (optionsResponse.status === 404) {
+        action.value = 'register';
+        currentStep.value = 'userId';
+        error.value = 'No passkey found for this user. Please register a new passkey.';
+        return;
+      }
       throw new Error(errorData.error || 'Failed to start authentication');
     }
 

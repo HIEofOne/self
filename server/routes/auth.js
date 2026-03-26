@@ -511,7 +511,7 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
 
       // Return success with flag indicating file import dialog should be shown
       // The frontend will handle showing the dialog and uploading files
-      const isAdminUser = agentReadyUser.userId === process.env.ADMIN_USERNAME;
+      const isAdminUser = agentReadyUser.userId?.toLowerCase() === process.env.ADMIN_USERNAME?.trim()?.toLowerCase();
       res.json({ 
         success: true, 
         user: {
@@ -551,7 +551,7 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       await cloudant.saveDocument('maia_users', userDoc);
       console.log(`[NEW FLOW 2] User document updated - no admin provisioning`);
 
-      const isAdminUser = userDoc.userId === process.env.ADMIN_USERNAME;
+      const isAdminUser = userDoc.userId?.toLowerCase() === process.env.ADMIN_USERNAME?.trim()?.toLowerCase();
       res.json({ 
         success: true, 
         user: {
@@ -663,8 +663,8 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
         userAgent: clientInfo.userAgent
       });
 
-      const isAdminUser = agentReadyUser.userId === process.env.ADMIN_USERNAME;
-      res.json({ 
+      const isAdminUser = agentReadyUser.userId?.toLowerCase() === process.env.ADMIN_USERNAME?.trim()?.toLowerCase();
+      res.json({
         success: true, 
         user: {
           userId: agentReadyUser.userId,
@@ -1190,7 +1190,7 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       return res.json({ authenticated: false });
     }
 
-    const isAdminUser = req.session.userId === process.env.ADMIN_USERNAME;
+    const isAdminUser = req.session.userId?.toLowerCase() === process.env.ADMIN_USERNAME?.trim()?.toLowerCase();
     res.json({
       authenticated: true,
       user: {

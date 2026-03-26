@@ -333,10 +333,14 @@ export async function writeStateFile(
 
 /**
  * Write a maia.webloc file (macOS web shortcut) to the folder.
+ * If patientName and userId are provided, the filename is:
+ *   maia-for-<patient name>-as-<userId>.webloc
+ * Otherwise falls back to maia.webloc.
  */
 export async function writeWeblocFile(
   handle: FileSystemDirectoryHandle,
-  url: string
+  url: string,
+  opts?: { patientName?: string; userId?: string }
 ): Promise<void> {
   const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -346,7 +350,22 @@ export async function writeWeblocFile(
   <string>${url}</string>
 </dict>
 </plist>`;
-  await writeFileToFolder(handle, 'maia.webloc', plist);
+  // Build filename: maia-for-<patient>-as-<userId>.webloc or maia.webloc
+  let filename = 'maia.webloc';
+  if (opts?.patientName && opts?.userId) {
+    // Sanitize patient name for filesystem: remove special chars, collapse spaces
+    const safeName = opts.patientName.replace(/[^a-zA-Z0-9 _-]/g, '').trim().replace(/\s+/g, '-');
+    if (safeName) {
+      filename = `maia-for-${safeName}-as-${opts.userId}.webloc`;
+    }
+  }
+  // Remove old maia.webloc if we're using a personalized name (avoid duplicates)
+  if (filename !== 'maia.webloc') {
+    try {
+      await handle.removeEntry('maia.webloc');
+    } catch { /* doesn't exist, fine */ }
+  }
+  await writeFileToFolder(handle, filename, plist);
 }
 
 // ── Identity file (maia-identity.json) ────────────────────────────

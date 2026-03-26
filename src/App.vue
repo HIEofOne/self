@@ -1021,12 +1021,17 @@ const welcomeUserStatusLine = computed(() => {
     if (welcomeCloudValid.value === null && welcomeKbExists.value === null) {
       return `Checking ${userId} account status…`;
     }
-    // Show what's missing
+    // Show what's missing in cloud — but use local backup info when available
+    const localFiles = snap?.fileCount ?? 0;
+    const localComplete = snap && snap.medicationsVerified && snap.summaryVerified;
+    if (localFiles > 0 && localComplete) {
+      // Local backup is healthy — cloud just needs restoring
+      return `${userId} has a local backup with ${localFiles} file${localFiles === 1 ? '' : 's'} ready to restore.`;
+    }
     const parts: string[] = [];
     if (!welcomeKbExists.value) parts.push('no knowledge base');
     if (!welcomeAgentLinkedToKb.value) parts.push('agent not linked');
-    if (!welcomeWizardComplete.value) parts.push('wizard incomplete');
-    const localFiles = snap?.fileCount ?? 0;
+    if (!welcomeWizardComplete.value && !localComplete) parts.push('wizard incomplete');
     const reason = parts.length > 0 ? ` (${parts.join(', ')})` : '';
     return `${userId} has a local backup with ${localFiles} file${localFiles === 1 ? '' : 's'}${reason}.`;
   }
@@ -1145,19 +1150,52 @@ const loadWelcomeStatus = async () => {
         console.warn(`[WELCOME] agent-exists call failed: ${agentRes.status}`);
         welcomeAgentExists.value = false;
       }
-      if (snapshot) {
+      // Prefer local folder maia-state.json (most accurate after sign-out), fall back to IndexedDB
+      let localFileCount = 0;
+      let localIndexedCount = 0;
+      let localMedsVerified = false;
+      let localSummaryVerified = false;
+      let localWizardComplete = false;
+      let foundLocalState = false;
+      if (localFolderHandle.value) {
+        try {
+          const { readStateFile } = await import('./utils/localFolder');
+          const folderState = await readStateFile(localFolderHandle.value);
+          if (folderState) {
+            foundLocalState = true;
+            localFileCount = Array.isArray(folderState.files) ? folderState.files.length : 0;
+            localIndexedCount = Array.isArray(folderState.files) ? folderState.files.filter(f => f.cloudStatus === 'indexed').length : 0;
+            localMedsVerified = !!(folderState.currentMedications != null && String(folderState.currentMedications).trim() !== '');
+            localSummaryVerified = !!(folderState.patientSummary != null && String(folderState.patientSummary).trim() !== '');
+            localWizardComplete = !!folderState.wizardComplete;
+            console.log(`[WELCOME] local folder state for ${localId}: files=${localFileCount}, indexed=${localIndexedCount}, medsVerified=${localMedsVerified}, summaryVerified=${localSummaryVerified}, wizardComplete=${localWizardComplete}`);
+          }
+        } catch (e) {
+          console.warn('[WELCOME] Failed to read local folder state:', e);
+        }
+      }
+      if (!foundLocalState && snapshot) {
         const fileStatusSummary = snapshot.fileStatusSummary || snapshot.files || [];
-        const fileCount = Array.isArray(fileStatusSummary) ? fileStatusSummary.length : 0;
-        const indexedCount = Array.isArray(snapshot.fileStatusSummary)
+        localFileCount = Array.isArray(fileStatusSummary) ? fileStatusSummary.length : 0;
+        localIndexedCount = Array.isArray(snapshot.fileStatusSummary)
           ? snapshot.fileStatusSummary.filter((f: any) => f?.chipStatus === 'indexed').length
           : 0;
+        localMedsVerified = !!(snapshot.currentMedications != null && String(snapshot.currentMedications).trim() !== '');
+        localSummaryVerified = !!(snapshot.patientSummary != null && String(snapshot.patientSummary).trim() !== '');
+        foundLocalState = true;
+        console.log(`[WELCOME] IndexedDB snapshot for ${localId}: files=${localFileCount}, indexed=${localIndexedCount}, medsVerified=${localMedsVerified}, summaryVerified=${localSummaryVerified}`);
+      }
+      if (foundLocalState) {
         welcomeLocalSnapshot.value = {
-          fileCount,
-          indexedCount,
-          medicationsVerified: !!(snapshot.currentMedications != null && String(snapshot.currentMedications).trim() !== ''),
-          summaryVerified: !!(snapshot.patientSummary != null && String(snapshot.patientSummary).trim() !== '')
+          fileCount: localFileCount,
+          indexedCount: localIndexedCount,
+          medicationsVerified: localMedsVerified,
+          summaryVerified: localSummaryVerified
         };
-        console.log(`[WELCOME] local snapshot for ${localId}: files=${fileCount}, indexed=${indexedCount}, medsVerified=${welcomeLocalSnapshot.value.medicationsVerified}, summaryVerified=${welcomeLocalSnapshot.value.summaryVerified}`);
+        // If cloud says wizard incomplete but local folder says it was complete, trust local
+        if (localWizardComplete && welcomeWizardComplete.value === false) {
+          welcomeWizardComplete.value = true;
+        }
       } else {
         console.log(`[WELCOME] no local snapshot for ${localId}`);
       }
@@ -1645,6 +1683,25 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
         } catch {
           // non-critical
         }
+
+        // Update webloc shortcut with patient name from summary
+        if (summary?.summary && user.value?.userId) {
+          try {
+            const { writeWeblocFile } = await import('./utils/localFolder');
+            // Extract patient name from first line of summary (typically "Patient Summary for <Name>")
+            const firstLine = summary.summary.split('\n')[0] || '';
+            const nameMatch = firstLine.match(/(?:Patient Summary for|Summary for|Name:\s*)\s*(.+)/i);
+            const patientName = nameMatch?.[1]?.trim();
+            if (patientName) {
+              await writeWeblocFile(localFolderHandle.value, window.location.origin, {
+                patientName,
+                userId: user.value.userId
+              });
+            }
+          } catch {
+            // non-critical
+          }
+        }
       } catch (e) {
         console.warn('[localFolder] Failed to save state to local folder:', e);
       }
@@ -1925,7 +1982,7 @@ const clearWizardPendingKey = (userId?: string | null) => {
   }
 };
 
-/** [AUTH] RESTORE FROM LOCAL FOLDER: create new temp session and run restore from IndexedDB snapshot. */
+/** [AUTH] RESTORE FROM LOCAL FOLDER: try local folder maia-state.json first, fall back to IndexedDB. */
 const handleRestoreFromLocalFolder = async () => {
   const localId = welcomeLocalUserId.value;
   if (!localId) return;
@@ -1934,12 +1991,36 @@ const handleRestoreFromLocalFolder = async () => {
   try {
     const newUser = await createTemporarySession();
     if (!newUser) return;
-    const snapshot = await getUserSnapshot(localId);
-    if (snapshot) {
-      restoreSnapshot.value = snapshot;
-      suppressWizard.value = false;
-      clearWizardPendingKey(localId);
-      await handleRestoreSnapshot();
+    // Try to read local state from folder first (has accurate file list + wizard status)
+    let localState: MaiaState | null = null;
+    if (localFolderHandle.value) {
+      const { readStateFile } = await import('./utils/localFolder');
+      localState = await readStateFile(localFolderHandle.value);
+    }
+    if (!localState) {
+      // Fall back to IndexedDB snapshot, convert to MaiaState shape
+      const snapshot = await getUserSnapshot(localId);
+      if (snapshot) {
+        localState = {
+          version: 1,
+          userId: localId,
+          displayName: snapshot.user?.displayName || localId,
+          updatedAt: snapshot.updatedAt || new Date().toISOString(),
+          files: Array.isArray(snapshot.fileStatusSummary) ? snapshot.fileStatusSummary.map((f: any) => ({
+            fileName: f.fileName,
+            bucketKey: f.bucketKey,
+            cloudStatus: f.chipStatus
+          })) : undefined,
+          currentMedications: snapshot.currentMedications || null,
+          patientSummary: snapshot.patientSummary || null,
+          savedChats: snapshot.savedChats || undefined,
+          currentChat: snapshot.currentChat || undefined
+        };
+      }
+    }
+    if (localState) {
+      restoreWizardLocalState.value = localState;
+      showRestoreWizard.value = true;
     } else {
       if ($q && typeof $q.notify === 'function') {
         $q.notify({ type: 'info', message: 'No local backup found. Use the wizard to set up your account.', timeout: 4000 });
