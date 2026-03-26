@@ -106,7 +106,7 @@ function openHandleDb(): Promise<IDBDatabase> {
   });
 }
 
-async function storeHandle(
+export async function storeDirectoryHandle(
   userId: string,
   handle: FileSystemDirectoryHandle
 ): Promise<void> {
@@ -142,7 +142,7 @@ export async function pickLocalFolder(
   if (!isFileSystemAccessSupported()) return null;
   try {
     const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
-    await storeHandle(userId, handle);
+    await storeDirectoryHandle(userId, handle);
     return { handle, folderName: handle.name };
   } catch (e: any) {
     // User cancelled the picker
@@ -331,8 +331,13 @@ export async function readStateFileByUserId(
   try {
     const handle = await getStoredHandle(userId);
     if (!handle) return null;
-    const perm = await handle.queryPermission({ mode: 'read' });
-    if (perm !== 'granted') return null;
+    // Try readwrite first so the returned handle can be used for writes (sign-out snapshot).
+    // Falls back to read-only if readwrite wasn't previously granted.
+    let perm = await handle.queryPermission({ mode: 'readwrite' });
+    if (perm !== 'granted') {
+      perm = await handle.queryPermission({ mode: 'read' });
+      if (perm !== 'granted') return null;
+    }
     const state = await readStateFile(handle);
     if (!state) return null;
     return { state, handle };
