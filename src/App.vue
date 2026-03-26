@@ -2101,6 +2101,8 @@ const confirmDeleteLocalUser = async () => {
     try {
       await clearDirectoryHandle(localId);
     } catch { /* non-fatal */ }
+    // Clear the httpOnly temp-user cookie so /api/welcome-status doesn't re-surface this user
+    await fetch('/api/auth/clear-temp-cookie', { method: 'POST', credentials: 'include' }).catch(() => {});
     refreshKnownUsers();
     selectedWelcomeUserId.value = knownUsers.value[0]?.userId || null;
     // Reset welcome state so GET STARTED creates a new userId
