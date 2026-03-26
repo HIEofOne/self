@@ -291,6 +291,10 @@ const executeRestore = async () => {
         }
       }
       updateItem('files', { status: 'done', progress: `${filesUploaded} uploaded` });
+    } else if (filesItem) {
+      // Files need restoring but no folder handle or Safari files available
+      updateItem('files', { status: 'error', errorMsg: 'No local folder connected. Files cannot be uploaded.' });
+      console.warn('[RestoreWizard] Files needed but no folder handle or Safari files available');
     }
 
     // 2. Create/index Knowledge Base

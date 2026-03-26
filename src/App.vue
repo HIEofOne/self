@@ -706,6 +706,39 @@
       </q-card>
     </q-dialog>
 
+    <!-- Connect local MAIA folder dialog (shown after passkey sign-in without folder) -->
+    <q-dialog v-model="showConnectFolderDialog">
+      <q-card style="min-width: 420px; max-width: 560px">
+        <q-card-section>
+          <div class="text-h6">Connect Your MAIA Folder</div>
+        </q-card-section>
+        <q-card-section class="text-body2">
+          <p>
+            You signed in with a passkey. To keep your local backup updated,
+            connect the MAIA folder on this computer.
+          </p>
+          <p class="text-caption text-grey-7 q-mt-sm">
+            Without a connected folder, changes made during this session
+            will only be saved in the cloud. Your local backup will not be updated.
+          </p>
+        </q-card-section>
+        <q-card-actions align="right" class="q-gutter-sm">
+          <q-btn
+            flat
+            label="Skip for now"
+            color="grey-8"
+            @click="showConnectFolderDialog = false"
+          />
+          <q-btn
+            unelevated
+            label="Connect folder"
+            color="primary"
+            @click="handleConnectFolderFromDialog"
+          />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
     <!-- Phase 7: Restore Wizard -->
     <RestoreWizard
       v-model="showRestoreWizard"
@@ -935,6 +968,7 @@ const localFolderHandle = ref<FileSystemDirectoryHandle | null>(null);
 const localFolderName = ref<string | null>(null);
 /** [Phase 5] True when user signed in via passkey but has no local folder on this device. */
 const passkeyWithoutFolder = ref(false);
+const showConnectFolderDialog = ref(false);
 /** [Phase 6] Dirty flag — true when session state changed since last save. */
 const sessionDirty = ref(false);
 const showOtherAccountOptionsDialog = ref(false);
@@ -1416,6 +1450,8 @@ const confirmDeleteCloudOnly = async () => {
       const data = await res.json();
       if (!res.ok || !data.authenticated || !data.user) throw new Error(data.error || 'Could not restore session');
       setAuthenticatedUser(data.user, null);
+      // Save local snapshot before deleting cloud resources
+      await saveLocalSnapshot(null);
       const response = await fetch('/api/self/delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1471,6 +1507,8 @@ const runPendingAccountClosure = async () => {
       await fetch('/api/account/dormant', { method: 'POST', credentials: 'include' });
       await performSignOut();
     } else if (action === 'delete-only') {
+      // Save local snapshot before destroying cloud resources
+      await saveLocalSnapshot(null);
       const userIdToDelete = user.value.userId;
       const response = await fetch('/api/self/delete', {
         method: 'POST',
@@ -1563,6 +1601,31 @@ const handleAuthenticated = async (userData: any) => {
   // Phase 5: Detect passkey-only session (no local folder on this device)
   if (userData?.hasPasskey || userData?.credentialID) {
     passkeyWithoutFolder.value = !localFolderHandle.value;
+    // Prompt to connect a local folder if one isn't already connected
+    // Check if this user has a known folder on this device (knownUsers registry)
+    if (!localFolderHandle.value && typeof window !== 'undefined') {
+      const known = getKnownUsers().find(u => u.userId === userData.userId);
+      if (known?.folderName) {
+        // User has used a folder on this device before — try silent reconnect
+        try {
+          const result = await readStateFileByUserId(userData.userId);
+          if (result) {
+            localFolderHandle.value = result.handle;
+            localFolderName.value = known.folderName;
+            passkeyWithoutFolder.value = false;
+            console.log(`[AUTH] Reconnected folder "${known.folderName}" for passkey user ${userData.userId}`);
+          } else {
+            // Handle exists in registry but can't reconnect — prompt user
+            showConnectFolderDialog.value = true;
+          }
+        } catch {
+          showConnectFolderDialog.value = true;
+        }
+      } else {
+        // No known folder — show connect prompt (user may have the folder on this computer)
+        showConnectFolderDialog.value = true;
+      }
+    }
   }
 };
 
@@ -1764,6 +1827,40 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
     });
   } catch (error) {
     console.warn('Failed to save local snapshot:', error);
+  }
+};
+
+/** Handle "Connect folder" button from the passkey-without-folder dialog. */
+const handleConnectFolderFromDialog = async () => {
+  showConnectFolderDialog.value = false;
+  if (typeof window !== 'undefined' && 'showDirectoryPicker' in window) {
+    try {
+      const handle = await (window as any).showDirectoryPicker({ mode: 'readwrite' });
+      const folderName = handle.name;
+      localFolderHandle.value = handle;
+      localFolderName.value = folderName;
+      passkeyWithoutFolder.value = false;
+      // Store the handle for future reconnection
+      const { storeDirectoryHandle } = await import('./utils/localFolder');
+      if (user.value?.userId) {
+        await storeDirectoryHandle(user.value.userId, handle);
+      }
+      // Read/create identity file
+      const existing = await readIdentityFile(handle);
+      if (!existing && user.value?.userId) {
+        await writeIdentityFile(handle, {
+          userId: user.value.userId,
+          displayName: user.value.displayName || user.value.userId,
+          createdAt: new Date().toISOString(),
+          lastSync: new Date().toISOString()
+        });
+      }
+      console.log(`[AUTH] Folder "${folderName}" connected after passkey sign-in`);
+    } catch (e: any) {
+      if (e?.name !== 'AbortError') {
+        console.warn('[AUTH] Folder picker failed:', e);
+      }
+    }
   }
 };
 
@@ -2049,6 +2146,27 @@ const handleRestoreFromLocalFolder = async () => {
   try {
     const newUser = await createTemporarySession();
     if (!newUser) return;
+    // Run cloud health check so RestoreWizard knows what infrastructure needs restoring
+    try {
+      const healthResp = await fetch(
+        `/api/cloud-health?userId=${encodeURIComponent(newUser.userId)}`,
+        { credentials: 'include' }
+      );
+      if (healthResp.ok) {
+        const health = await healthResp.json();
+        cloudHealthDetails.value = health.details || null;
+        console.log(`[RESTORE] Cloud health for ${newUser.userId}:`, JSON.stringify(health.details));
+      }
+    } catch (e) {
+      console.warn('[RESTORE] Cloud health check failed, assuming all resources missing:', e);
+      // Assume everything is missing so RestoreWizard will try to restore all
+      cloudHealthDetails.value = {
+        database: { ok: false, error: 'health check failed' },
+        spacesFiles: { ok: false, error: 'health check failed' },
+        knowledgeBase: { ok: false, error: 'health check failed' },
+        agent: { ok: false, error: 'health check failed' }
+      };
+    }
     // Try to read local state from folder first (has accurate file list + wizard status)
     let localState: MaiaState | null = null;
     // 1. Try active folder handle
@@ -2258,11 +2376,38 @@ const handleCloudStartFresh = async () => {
 };
 
 /** Phase 7: Restore Wizard completed — close dialog, clear health state, notify user. */
-const handleRestoreWizardComplete = () => {
+const handleRestoreWizardComplete = async () => {
   showRestoreWizard.value = false;
   restoreWizardLocalState.value = null;
   cloudHealthDetails.value = null;
   suppressWizard.value = true; // Don't re-enter the wizard flow
+  // Re-stamp maia-identity.json with the current userId (may differ from the original after restore)
+  if (localFolderHandle.value && user.value?.userId) {
+    try {
+      const existing = await readIdentityFile(localFolderHandle.value);
+      const identity: MaiaIdentity = {
+        userId: user.value.userId,
+        displayName: user.value.displayName || user.value.userId,
+        createdAt: existing?.createdAt || new Date().toISOString(),
+        lastSync: new Date().toISOString()
+      };
+      await writeIdentityFile(localFolderHandle.value, identity);
+      // Also store the handle under the new userId for future reconnection
+      const { storeDirectoryHandle } = await import('./utils/localFolder');
+      await storeDirectoryHandle(user.value.userId, localFolderHandle.value);
+      // Update known users registry
+      addOrUpdateKnownUser({
+        userId: user.value.userId,
+        displayName: user.value.displayName || user.value.userId,
+        folderName: localFolderName.value || localFolderHandle.value.name,
+        hasPasskey: !!user.value.hasPasskey,
+        lastActive: new Date().toISOString()
+      });
+      console.log(`[RESTORE] Re-stamped identity and handle for ${user.value.userId}`);
+    } catch (e) {
+      console.warn('[RESTORE] Failed to re-stamp identity:', e);
+    }
+  }
   if ($q && typeof $q.notify === 'function') {
     $q.notify({ type: 'positive', message: 'Account restored successfully!', timeout: 3000 });
   }
