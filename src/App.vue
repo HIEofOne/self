@@ -2080,6 +2080,7 @@ const handleDeleteLocalUser = () => {
 const confirmDeleteLocalUser = async () => {
   const localId = welcomeLocalUserId.value;
   if (!localId) return;
+  console.log(`[WELCOME] DELETE requested for ${localId}`);
   deleteLocalUserLoading.value = true;
   try {
     // Best-effort server-side delete (user may have no cloud account)
@@ -2096,8 +2097,12 @@ const confirmDeleteLocalUser = async () => {
     await clearUserSnapshot(localId);
     clearLastSnapshotUserId();
     clearWizardPendingKey(localId);
-    // Remove from known users registry and clear stored folder handle
+    // Remove from known users registry, clear active user, and clear stored folder handle
     removeKnownUser(localId);
+    // Clear active user if it matches the deleted user, so refreshKnownUsers won't resurrect it
+    if (getActiveUserId() === localId) {
+      setActiveUserId(null);
+    }
     try {
       await clearDirectoryHandle(localId);
     } catch { /* non-fatal */ }
@@ -2117,6 +2122,7 @@ const confirmDeleteLocalUser = async () => {
     welcomeSavedFileCount.value = null;
     welcomeStatus.value = {};
     showDeleteLocalUserDialog.value = false;
+    console.log(`[WELCOME] DELETE complete for ${localId}: knownUsers=${JSON.stringify(knownUsers.value.map(u => u.userId))}, activeUser=${getActiveUserId()}, lastSnapshot=${getLastSnapshotUserId()}`);
     // Reload welcome status to reflect the deletion
     void loadWelcomeStatus();
     if ($q && typeof $q.notify === 'function') {
