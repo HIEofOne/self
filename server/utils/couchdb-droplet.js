@@ -189,6 +189,25 @@ export async function ensureCouchDBDroplet() {
   if (droplet) {
     const creds = await loadCredentials();
     if (!creds) {
+      // If CLOUDANT_* env vars are already set, use them instead of crashing
+      if (process.env.CLOUDANT_URL && process.env.CLOUDANT_PASSWORD) {
+        console.warn(
+          `[CouchDB Droplet] Droplet "${DROPLET_NAME}" exists but credentials not found in Spaces or local file. ` +
+          'Using CLOUDANT_URL/CLOUDANT_USERNAME/CLOUDANT_PASSWORD from environment.'
+        );
+        return;
+      }
+      // Try to derive URL from droplet IP even without stored credentials
+      const ip = getDropletIp(droplet);
+      if (ip) {
+        console.warn(
+          `[CouchDB Droplet] Droplet "${DROPLET_NAME}" exists at ${ip} but credentials not found. ` +
+          'Set CLOUDANT_PASSWORD manually. Attempting connection with droplet IP and default username.'
+        );
+        process.env.CLOUDANT_URL = `http://${ip}:${COUCHDB_PORT}`;
+        process.env.CLOUDANT_USERNAME = process.env.CLOUDANT_USERNAME || 'admin';
+        return;
+      }
       throw new Error(
         `CouchDB droplet "${DROPLET_NAME}" exists but credentials not found in Spaces (${SPACES_CREDENTIALS_KEY}) or local file. ` +
         'Set CLOUDANT_URL, CLOUDANT_USERNAME, CLOUDANT_PASSWORD manually or delete the droplet and restart.'
@@ -203,6 +222,13 @@ export async function ensureCouchDBDroplet() {
     process.env.CLOUDANT_USERNAME = creds.username || 'admin';
     process.env.CLOUDANT_PASSWORD = creds.password;
     console.log(`[CouchDB Droplet] Found existing droplet "${DROPLET_NAME}" at ${url}`);
+    // Re-save to Spaces if loaded from local file only (ensures Spaces has a copy)
+    if (!await loadCredentialsFromSpaces()) {
+      console.log('[CouchDB Droplet] Saving credentials to Spaces for next deploy...');
+      await saveCredentialsToSpaces(creds).catch(e =>
+        console.warn('[CouchDB Droplet] Failed to save credentials to Spaces:', e.message)
+      );
+    }
     return;
   }
 
