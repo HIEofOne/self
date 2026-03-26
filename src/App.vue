@@ -1668,25 +1668,33 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
       try {
         const now = new Date().toISOString();
         const indexedCount = filesList.filter((f: any) => indexedSet.has(f.bucketKey || '')).length;
+        // Read existing local state so we don't overwrite good data with empty cloud responses
+        let existingState: MaiaState | null = null;
+        try {
+          const { readStateFile } = await import('./utils/localFolder');
+          existingState = await readStateFile(localFolderHandle.value);
+        } catch { /* first time, no existing state */ }
         const state: MaiaState = {
           version: 2,
           userId: user.value.userId,
           displayName: user.value.displayName,
           updatedAt: now,
           exportedAt: now,
-          files: filesList.map((f: any) => ({
+          files: filesList.length > 0 ? filesList.map((f: any) => ({
             fileName: f.fileName,
             size: f.fileSize,
             cloudStatus: indexedSet.has(f.bucketKey || '') ? 'indexed' as const : 'pending' as const,
             bucketKey: f.bucketKey
-          })),
-          currentMedications: status?.currentMedications || null,
-          patientSummary: summary?.summary || null,
-          savedChats: savedChats || undefined,
-          currentChat: snapshot?.currentChat || undefined,
-          agentInstructions: instrData?.instructions || null,
-          kbStats: { fileCount: indexedCount, tokenCount: files?.tokenCount || 0 },
-          wizardComplete: status?.workflowStage === 'patient_summary'
+          })) : existingState?.files || [],
+          currentMedications: status?.currentMedications || existingState?.currentMedications || null,
+          patientSummary: summary?.summary || existingState?.patientSummary || null,
+          savedChats: savedChats || existingState?.savedChats || undefined,
+          currentChat: snapshot?.currentChat || existingState?.currentChat || undefined,
+          agentInstructions: instrData?.instructions || existingState?.agentInstructions || null,
+          kbStats: indexedCount > 0
+            ? { fileCount: indexedCount, tokenCount: files?.tokenCount || 0 }
+            : existingState?.kbStats || { fileCount: 0, tokenCount: 0 },
+          wizardComplete: status?.workflowStage === 'patient_summary' || existingState?.wizardComplete || false
         };
         await writeStateFile(localFolderHandle.value, state);
 
@@ -1701,13 +1709,14 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
           // non-critical
         }
 
-        // Update webloc shortcut with patient name from summary
-        if (summary?.summary && user.value?.userId) {
+        // Update webloc shortcut with patient name from summary (use merged state which preserves local data)
+        const summaryText = state.patientSummary;
+        if (summaryText && user.value?.userId) {
           try {
             const { writeWeblocFile } = await import('./utils/localFolder');
             // Extract patient name: try "Patient Summary for X", "Summary for X", "Name: X",
             // or fall back to first line that looks like a name (capitalized words)
-            const lines = summary.summary.split('\n').map((l: string) => l.trim()).filter(Boolean);
+            const lines = summaryText.split('\n').map((l: string) => l.trim()).filter(Boolean);
             let patientName: string | null = null;
             for (const line of lines.slice(0, 5)) {
               const nameMatch = line.match(/(?:Patient Summary for|Summary for|Name:\s*)\s*(.+)/i);
@@ -1738,7 +1747,7 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
             console.warn('[localFolder] webloc write failed:', e);
           }
         } else {
-          console.log(`[localFolder] webloc skipped: summary=${!!summary?.summary}, userId=${user.value?.userId}`);
+          console.log(`[localFolder] webloc skipped: summaryText=${!!summaryText}, userId=${user.value?.userId}`);
         }
       } catch (e) {
         console.warn('[localFolder] Failed to save state to local folder:', e);
