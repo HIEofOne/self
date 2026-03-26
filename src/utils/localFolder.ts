@@ -320,6 +320,28 @@ export async function readStateFile(
 }
 
 /**
+ * Try to read maia-state.json from the stored folder handle for a userId.
+ * Uses queryPermission only (no user gesture needed).
+ * Returns { state, handle } if successful, or null if no handle / no permission / no file.
+ */
+export async function readStateFileByUserId(
+  userId: string
+): Promise<{ state: MaiaState; handle: FileSystemDirectoryHandle } | null> {
+  if (!isFileSystemAccessSupported()) return null;
+  try {
+    const handle = await getStoredHandle(userId);
+    if (!handle) return null;
+    const perm = await handle.queryPermission({ mode: 'read' });
+    if (perm !== 'granted') return null;
+    const state = await readStateFile(handle);
+    if (!state) return null;
+    return { state, handle };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Write maia-state.json to the folder (replaces PouchDB snapshot).
  */
 export async function writeStateFile(
