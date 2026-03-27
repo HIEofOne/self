@@ -2058,10 +2058,12 @@ const performSignOut = async () => {
 const handleDormantSignOut = async () => {
   if (!user.value?.userId) return;
 
-  // Try to reconnect the local folder handle if missing (e.g., after passkey sign-in)
+  // Try to reconnect the local folder handle if missing.
+  // Pass requestWrite:true — the Sign Out button click is a user gesture,
+  // so Chrome will show its "allow access" prompt if permission expired.
   if (!localFolderHandle.value && user.value.userId) {
     try {
-      const result = await readStateFileByUserId(user.value.userId);
+      const result = await readStateFileByUserId(user.value.userId, { requestWrite: true });
       if (result) {
         localFolderHandle.value = result.handle;
         console.log(`[SIGN-OUT] Reconnected folder handle for ${user.value.userId}`);
