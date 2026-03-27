@@ -392,7 +392,16 @@ export function extractPatientName(summaryText: string | null | undefined): stri
       return m[1].trim().replace(/\*+/g, '');
     }
   }
-  // Pattern 3: First line that looks like a person's name (2-4 capitalized words, no punctuation)
+  // Pattern 3: "**Name, Age Gender**" or "# Name, Age Gender" (common AI summary format)
+  for (const line of lines.slice(0, 3)) {
+    const cleaned = line.replace(/^#+\s*/, '').replace(/\*+/g, '').trim();
+    // Match "Adrian Gropper, 73 M" — extract just the name before comma/paren/age
+    const nameAge = cleaned.match(/^([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)+)\s*[,(]\s*\d/);
+    if (nameAge?.[1]) {
+      return nameAge[1].trim();
+    }
+  }
+  // Pattern 4: First line that looks like a person's name (2-4 capitalized words, no punctuation)
   for (const line of lines.slice(0, 5)) {
     const cleaned = line.replace(/^#+\s*/, '').replace(/\*+/g, '').trim();
     if (/^[A-Z][a-z]+(\s+[A-Z][a-z]+){0,3}$/.test(cleaned) && cleaned.length < 40) {
