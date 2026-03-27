@@ -325,18 +325,28 @@ export async function readStateFile(
  * Returns { state, handle } if successful, or null if no handle / no permission / no file.
  */
 export async function readStateFileByUserId(
-  userId: string
+  userId: string,
+  options?: { requestWrite?: boolean }
 ): Promise<{ state: MaiaState; handle: FileSystemDirectoryHandle } | null> {
   if (!isFileSystemAccessSupported()) return null;
   try {
     const handle = await getStoredHandle(userId);
     if (!handle) return null;
     // Try readwrite first so the returned handle can be used for writes (sign-out snapshot).
-    // Falls back to read-only if readwrite wasn't previously granted.
     let perm = await handle.queryPermission({ mode: 'readwrite' });
     if (perm !== 'granted') {
-      perm = await handle.queryPermission({ mode: 'read' });
-      if (perm !== 'granted') return null;
+      // If caller passed requestWrite (has a user gesture), prompt Chrome for permission
+      if (options?.requestWrite && perm === 'prompt') {
+        perm = await handle.requestPermission({ mode: 'readwrite' });
+      }
+      if (perm !== 'granted') {
+        // Fall back to read-only
+        perm = await handle.queryPermission({ mode: 'read' });
+        if (perm !== 'granted' && options?.requestWrite) {
+          perm = await handle.requestPermission({ mode: 'read' });
+        }
+        if (perm !== 'granted') return null;
+      }
     }
     const state = await readStateFile(handle);
     if (!state) return null;

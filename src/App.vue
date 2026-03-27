@@ -1727,6 +1727,7 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
 
     // Also save to local folder if connected (v2 state file)
     console.log(`[localFolder] signOut save: folderHandle=${!!localFolderHandle.value}, folderName=${localFolderName.value || 'none'}, userId=${user.value?.userId}`);
+    console.log(`[localFolder] signOut: cloud summary="${(summary?.summary || '').substring(0, 100)}", summaryResponse.ok=${summaryResponse.ok}`);
     if (localFolderHandle.value && user.value?.userId) {
       try {
         const now = new Date().toISOString();
@@ -1737,6 +1738,7 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
           const { readStateFile } = await import('./utils/localFolder');
           existingState = await readStateFile(localFolderHandle.value);
         } catch { /* first time, no existing state */ }
+        console.log(`[localFolder] existingState: patientSummary="${(existingState?.patientSummary || '').substring(0, 100)}", files=${existingState?.files?.length || 0}, wizardComplete=${existingState?.wizardComplete}`);
         const state: MaiaState = {
           version: 2,
           userId: user.value.userId,
@@ -1749,11 +1751,11 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
             cloudStatus: indexedSet.has(f.bucketKey || '') ? 'indexed' as const : 'pending' as const,
             bucketKey: f.bucketKey
           })) : existingState?.files || [],
-          currentMedications: status?.currentMedications || existingState?.currentMedications || null,
-          patientSummary: summary?.summary || existingState?.patientSummary || null,
-          savedChats: savedChats || existingState?.savedChats || undefined,
+          currentMedications: (status?.currentMedications && status.currentMedications.trim()) ? status.currentMedications : (existingState?.currentMedications || null),
+          patientSummary: (summary?.summary && summary.summary.trim()) ? summary.summary : (existingState?.patientSummary || null),
+          savedChats: (savedChats?.chats?.length || savedChats?.length) ? savedChats : (existingState?.savedChats || undefined),
           currentChat: snapshot?.currentChat || existingState?.currentChat || undefined,
-          agentInstructions: instrData?.instructions || existingState?.agentInstructions || null,
+          agentInstructions: (instrData?.instructions && instrData.instructions.trim()) ? instrData.instructions : (existingState?.agentInstructions || null),
           kbStats: indexedCount > 0
             ? { fileCount: indexedCount, tokenCount: files?.tokenCount || 0 }
             : existingState?.kbStats || { fileCount: 0, tokenCount: 0 },
@@ -1912,6 +1914,37 @@ const handleWizardComplete = async () => {
   try {
     await saveLocalSnapshot(null);
     console.log('[WIZARD-COMPLETE] Local state saved successfully');
+    // Also update the webloc NOW (don't wait for sign-out) since the patient summary is fresh
+    if (localFolderHandle.value && user.value?.userId) {
+      try {
+        const { readStateFile, writeWeblocFile } = await import('./utils/localFolder');
+        const currentState = await readStateFile(localFolderHandle.value);
+        const summaryText = currentState?.patientSummary;
+        if (summaryText) {
+          const lines = summaryText.split('\n').map((l: string) => l.trim()).filter(Boolean);
+          let patientName: string | null = null;
+          for (const line of lines.slice(0, 5)) {
+            const m = line.match(/(?:Patient Summary for|Summary for|Name:\s*)\s*(.+)/i);
+            if (m?.[1]?.trim()) { patientName = m[1].trim(); break; }
+          }
+          if (!patientName) {
+            for (const line of lines.slice(0, 10)) {
+              const m = line.match(/\*?\*?Name\*?\*?:\s*\*?\*?\s*(.+)/i);
+              if (m?.[1]?.trim()) { patientName = m[1].trim().replace(/\*+/g, ''); break; }
+            }
+          }
+          if (patientName) {
+            await writeWeblocFile(localFolderHandle.value, window.location.origin, {
+              patientName,
+              userId: user.value.userId
+            });
+            console.log(`[WIZARD-COMPLETE] Webloc renamed: maia-for-${patientName}-as-${user.value.userId}.webloc`);
+          }
+        }
+      } catch (e) {
+        console.warn('[WIZARD-COMPLETE] Webloc update failed:', e);
+      }
+    }
   } catch (e) {
     console.warn('[WIZARD-COMPLETE] Failed to save local state:', e);
   }
@@ -2025,7 +2058,20 @@ const performSignOut = async () => {
 const handleDormantSignOut = async () => {
   if (!user.value?.userId) return;
 
-  // If no persistent folder handle, prompt user to choose a folder for saving updated files
+  // Try to reconnect the local folder handle if missing.
+  // Pass requestWrite:true — the Sign Out button click is a user gesture,
+  // so Chrome will show its "allow access" prompt if permission expired.
+  if (!localFolderHandle.value && user.value.userId) {
+    try {
+      const result = await readStateFileByUserId(user.value.userId, { requestWrite: true });
+      if (result) {
+        localFolderHandle.value = result.handle;
+        console.log(`[SIGN-OUT] Reconnected folder handle for ${user.value.userId}`);
+      }
+    } catch { /* not available */ }
+  }
+
+  // If still no persistent folder handle, prompt user to choose a folder for saving updated files
   if (!localFolderHandle.value && !sharedComputerMode.value) {
     showSignOutFolderPrompt.value = true;
     return;
