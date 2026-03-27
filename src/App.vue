@@ -1726,8 +1726,9 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
     });
 
     // Also save to local folder if connected (v2 state file)
-    console.log(`[localFolder] signOut save: folderHandle=${!!localFolderHandle.value}, folderName=${localFolderName.value || 'none'}, userId=${user.value?.userId}`);
-    console.log(`[localFolder] signOut: cloud summary="${(summary?.summary || '').substring(0, 100)}", summaryResponse.ok=${summaryResponse.ok}`);
+    const clog = (msg: string) => { console.log(msg); fetch('/api/client-log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tag: 'SIGN-OUT', msg }) }).catch(() => {}); };
+    clog(`folderHandle=${!!localFolderHandle.value}, folderName=${localFolderName.value || 'none'}, userId=${user.value?.userId}`);
+    clog(`cloud summary="${(summary?.summary || '').substring(0, 100)}", summaryResponse.ok=${summaryResponse.ok}`);
     if (localFolderHandle.value && user.value?.userId) {
       try {
         const now = new Date().toISOString();
@@ -1738,7 +1739,7 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
           const { readStateFile } = await import('./utils/localFolder');
           existingState = await readStateFile(localFolderHandle.value);
         } catch { /* first time, no existing state */ }
-        console.log(`[localFolder] existingState: patientSummary="${(existingState?.patientSummary || '').substring(0, 100)}", files=${existingState?.files?.length || 0}, wizardComplete=${existingState?.wizardComplete}`);
+        clog(`existingState: summary="${(existingState?.patientSummary || '').substring(0, 100)}", files=${existingState?.files?.length || 0}, wizard=${existingState?.wizardComplete}`);
         const state: MaiaState = {
           version: 2,
           userId: user.value.userId,
@@ -1775,26 +1776,28 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
         }
 
         // Always update webloc shortcut at sign-out
+        clog(`stateFile written OK. Now writing webloc. userId=${user.value?.userId}`);
         if (user.value?.userId) {
-          console.log(`[localFolder] webloc: starting write for userId=${user.value.userId}, hasSummary=${!!state.patientSummary}`);
           try {
             const folderUtils = await import('./utils/localFolder');
             const patientName = typeof folderUtils.extractPatientName === 'function'
               ? folderUtils.extractPatientName(state.patientSummary)
               : null;
-            console.log(`[localFolder] webloc: patientName=${patientName || 'none'}`);
+            clog(`webloc: patientName=${patientName || 'none'}, calling writeWeblocFile`);
             await folderUtils.writeWeblocFile(localFolderHandle.value, window.location.origin, {
               patientName: patientName || undefined,
               userId: user.value.userId
             });
-            console.log(`[localFolder] webloc: write complete`);
-          } catch (e) {
-            console.warn('[localFolder] webloc write FAILED:', e);
+            clog(`webloc: WRITTEN SUCCESSFULLY`);
+          } catch (e: any) {
+            clog(`webloc: WRITE FAILED: ${e?.message || e}`);
           }
         }
-      } catch (e) {
-        console.warn('[localFolder] Failed to save state to local folder:', e);
+      } catch (e: any) {
+        clog(`OUTER CATCH: folder save failed: ${e?.message || e}`);
       }
+    } else {
+      clog(`SKIPPED folder save: folderHandle=${!!localFolderHandle.value}, userId=${user.value?.userId}`);
     }
 
     // Update known-user registry

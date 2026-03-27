@@ -582,6 +582,13 @@ function getAppUrlConfig() {
 }
 const appUrlConfig = getAppUrlConfig();
 
+// Client-side diagnostic logging endpoint (shows browser events in server terminal)
+app.post('/api/client-log', express.json(), (req, res) => {
+  const { tag, msg } = req.body || {};
+  console.log(`[CLIENT ${tag || '?'}] ${msg || ''}`);
+  res.json({ ok: true });
+});
+
 // Start listening immediately so readiness probes pass while CouchDB droplet setup runs
 app.get('/health', (req, res) => res.json({ status: 'ok', app: 'maia-cloud-user-app' }));
 app.listen(PORT, () => console.log(`User app server listening on port ${PORT} (startup in progress)`));
