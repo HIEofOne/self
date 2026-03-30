@@ -42,63 +42,76 @@
                 <div class="text-h6 text-center q-mb-sm">
                   Welcome to MAIA
                 </div>
-                <!-- Multi-user selector: show when more than one known family member -->
-                <div v-if="knownUsers.length > 1" class="text-center q-mb-sm">
-                  <q-btn-toggle
-                    v-model="selectedWelcomeUserId"
-                    toggle-color="primary"
-                    no-caps
-                    dense
-                    rounded
-                    :options="knownUsers.map(u => ({ label: u.displayName, value: u.userId }))"
-                    @update:model-value="onWelcomeUserSwitch"
-                  />
-                  <q-btn
-                    flat dense round icon="person_add" size="sm" color="grey-6"
-                    class="q-ml-xs"
-                    @click="handleAddFamilyMember"
+                <!-- Account status cards for known users -->
+                <div v-if="knownUsers.length > 0" class="q-mb-md">
+                  <div
+                    v-for="ku in knownUsers"
+                    :key="ku.userId"
+                    class="q-mb-xs q-pa-sm rounded-borders"
+                    :style="{
+                      border: '1px solid ' + (welcomeUserCloudStatus[ku.userId] === 'ready' ? '#c8e6c9' : welcomeUserCloudStatus[ku.userId] === 'loading' ? '#e0e0e0' : '#ffe0b2'),
+                      background: welcomeUserCloudStatus[ku.userId] === 'ready' ? '#f1f8e9' : welcomeUserCloudStatus[ku.userId] === 'loading' ? '#fafafa' : '#fff8e1'
+                    }"
                   >
-                    <q-tooltip>Add family member</q-tooltip>
-                  </q-btn>
-                </div>
-                <!-- User Status line (USER_AUTH.md §2): black / orange / green by type -->
-                <div class="text-center q-mb-md">
-                  <p
-                    class="q-ma-none text-body2"
-                    :style="welcomeUserType === 'new' ? { color: '#1a1a1a' } : (welcomeUserType === 'local' && welcomeCloudValid === true) ? { color: '#2e7d32' } : (welcomeUserType === 'local' && welcomeCloudValid === null) ? { color: '#757575' } : welcomeUserType === 'local' ? { color: '#e65100' } : welcomeUserType === 'cloud' ? { color: '#2e7d32' } : {}"
-                  >
-                    <template v-if="welcomeUserStatusLine === '__passkey_link__'">
-                      Get started with a new account or
-                      <a
-                        href="#"
-                        style="color: #1976d2; text-decoration: underline; cursor: pointer"
-                        @click.prevent="handlePasskeySignInLink"
-                      >sign-in with a passkey</a>.
-                    </template>
-                    <template v-else>{{ welcomeUserStatusLine }}</template>
-                  </p>
-                  <!-- Cloud-invalid local user: inline restore/delete options on the status line -->
-                  <div v-if="welcomeUserType === 'local' && welcomeCloudValid === false" class="q-mt-sm">
-                    <q-btn
-                      flat
-                      dense
-                      label="RESTORE FROM LOCAL FOLDER"
-                      color="negative"
-                      size="sm"
-                      :loading="tempStartLoading"
-                      @click="handleRestoreFromLocalFolder"
-                    />
-                    <span class="text-grey-6 q-mx-xs text-body2">or</span>
-                    <q-btn
-                      flat
-                      dense
-                      :label="`DELETE ${welcomeDisplayUserId}`"
-                      color="negative"
-                      size="sm"
-                      :loading="deleteLocalUserLoading"
-                      @click="handleDeleteLocalUser"
-                    />
+                    <div class="row items-center no-wrap">
+                      <q-icon
+                        :name="welcomeUserCloudStatus[ku.userId] === 'ready' ? 'check_circle' : welcomeUserCloudStatus[ku.userId] === 'loading' ? 'hourglass_empty' : 'warning'"
+                        :color="welcomeUserCloudStatus[ku.userId] === 'ready' ? 'green' : welcomeUserCloudStatus[ku.userId] === 'loading' ? 'grey' : 'orange'"
+                        size="sm"
+                        class="q-mr-sm"
+                      />
+                      <div class="col text-body2">
+                        <strong>{{ ku.displayName }}</strong>
+                        <span class="text-grey-7"> ({{ ku.userId }})</span>
+                        <span v-if="ku.folderName" class="text-grey-6"> &mdash; {{ ku.folderName }}</span>
+                        <div v-if="welcomeUserCloudStatus[ku.userId] === 'ready'" class="text-caption text-green-8">
+                          Cloud account ready{{ ku.hasPasskey ? ' (passkey)' : '' }}
+                        </div>
+                        <div v-else-if="welcomeUserCloudStatus[ku.userId] === 'loading'" class="text-caption text-grey-6">
+                          Checking account...
+                        </div>
+                        <div v-else class="text-caption text-orange-9">
+                          Cloud account needs restoring
+                        </div>
+                      </div>
+                      <div class="row no-wrap q-gutter-xs">
+                        <q-btn
+                          v-if="welcomeUserCloudStatus[ku.userId] === 'ready'"
+                          flat dense size="sm" color="primary"
+                          :label="ku.hasPasskey ? 'SIGN IN' : 'CONTINUE'"
+                          :loading="tempStartLoading && selectedWelcomeUserId === ku.userId"
+                          @click="handleUserCardContinue(ku)"
+                        />
+                        <q-btn
+                          v-else-if="welcomeUserCloudStatus[ku.userId] === 'restore'"
+                          flat dense size="sm" color="primary"
+                          label="RESTORE"
+                          :loading="tempStartLoading && selectedWelcomeUserId === ku.userId"
+                          @click="handleUserCardRestore(ku)"
+                        />
+                        <q-btn
+                          flat dense round size="xs" icon="close" color="grey-5"
+                          @click="handleDeleteLocalUser(ku.userId)"
+                        >
+                          <q-tooltip>Remove from this device</q-tooltip>
+                        </q-btn>
+                      </div>
+                    </div>
                   </div>
+                  <div class="text-center q-mt-xs">
+                    <q-btn flat dense size="sm" color="grey-6" icon="person_add" label="Add family member" @click="handleAddFamilyMember" />
+                  </div>
+                </div>
+                <!-- No known users: passkey link -->
+                <div v-else class="text-center q-mb-md">
+                  <p class="q-ma-none text-body2" style="color: #1a1a1a">
+                    Get started with a new account or
+                    <a
+                      href="#"
+                      style="color: #1976d2; text-decoration: underline; cursor: pointer"
+                      @click.prevent="handlePasskeySignInLink"
+                    >sign-in with a passkey</a>.
+                  </p>
                 </div>
 
                 <div v-if="!showAuth">
@@ -1040,43 +1053,137 @@ const welcomeCloudValid = computed(() => {
   return valid;
 });
 
-/** [AUTH] Single User Status line below "Welcome to MAIA" (USER_AUTH.md §2). */
-const welcomeUserStatusLine = computed(() => {
-  const type = welcomeUserType.value;
-  const localId = welcomeLocalUserId.value;
-  const snap = welcomeLocalSnapshot.value;
-  const ws = welcomeStatus.value;
-  if (type === 'new') return '__passkey_link__'; // handled in template
-  if (type === 'local') {
-    const userId = ws.tempCookieUserId || localId || '';
-    const savedCount = welcomeSavedFileCount.value ?? snap?.fileCount ?? 0;
-    if (welcomeCloudValid.value === true) {
-      return `${userId} is ready to continue with ${savedCount} saved file${savedCount === 1 ? '' : 's'}.`;
+/** Per-user cloud status for Welcome page cards: 'loading' | 'ready' | 'restore' */
+const welcomeUserCloudStatus = ref<Record<string, 'loading' | 'ready' | 'restore'>>({});
+
+/** Check cloud status for all known users (called from loadWelcomeStatus). */
+const checkAllUserCloudStatus = async () => {
+  const users = knownUsers.value;
+  if (users.length === 0) return;
+  // Set all to loading initially
+  const statusMap: Record<string, 'loading' | 'ready' | 'restore'> = {};
+  for (const u of users) statusMap[u.userId] = 'loading';
+  welcomeUserCloudStatus.value = { ...statusMap };
+  // Check each user in parallel
+  await Promise.all(users.map(async (u) => {
+    try {
+      const resp = await fetch(`/api/agent-exists?userId=${encodeURIComponent(u.userId)}`);
+      if (resp.ok) {
+        const data = await resp.json();
+        const kbOk = !!data.kbExists;
+        const linkedOk = !!data.agentLinkedToKb;
+        const wizardOk = !!data.wizardComplete;
+        statusMap[u.userId] = (kbOk && linkedOk && wizardOk) ? 'ready' : 'restore';
+      } else {
+        statusMap[u.userId] = 'restore';
+      }
+    } catch {
+      statusMap[u.userId] = 'restore';
     }
-    // Still loading cloud validity — show neutral message to avoid red flash
-    if (welcomeCloudValid.value === null && welcomeKbExists.value === null) {
-      return `Checking ${userId} account status…`;
-    }
-    // Show what's missing in cloud — but use local backup info when available
-    const localFiles = snap?.fileCount ?? 0;
-    const localComplete = snap && snap.medicationsVerified && snap.summaryVerified;
-    if (localFiles > 0 && localComplete) {
-      // Local backup is healthy — cloud just needs restoring
-      return `${userId} has a local backup with ${localFiles} file${localFiles === 1 ? '' : 's'} ready to restore.`;
-    }
-    const parts: string[] = [];
-    if (!welcomeKbExists.value) parts.push('no knowledge base');
-    if (!welcomeAgentLinkedToKb.value) parts.push('agent not linked');
-    if (!welcomeWizardComplete.value && !localComplete) parts.push('wizard incomplete');
-    const reason = parts.length > 0 ? ` (${parts.join(', ')})` : '';
-    return `${userId} has a local backup with ${localFiles} file${localFiles === 1 ? '' : 's'}${reason}.`;
+    welcomeUserCloudStatus.value = { ...statusMap };
+  }));
+};
+
+/** Handle CONTINUE/SIGN IN on a user card */
+const handleUserCardContinue = (ku: KnownUser) => {
+  selectedWelcomeUserId.value = ku.userId;
+  setActiveUserId(ku.userId);
+  welcomeLocalUserId.value = ku.userId;
+  if (ku.hasPasskey) {
+    passkeyPrefillUserId.value = ku.userId;
+    passkeyPrefillAction.value = 'signin';
+    showAuth.value = true;
+  } else {
+    startTemporarySession();
   }
-  const userId = ws.tempCookieUserId || localId || '';
-  const hasLocalBackup = !!welcomeLocalUserId.value;
-  return hasLocalBackup
-    ? `${userId} has a passkey and local backup available.`
-    : `${userId} has a passkey and no local backup available.`;
-});
+};
+
+/** Handle RESTORE on a user card — uses /api/account/recreate to preserve original userId */
+const handleUserCardRestore = async (ku: KnownUser) => {
+  selectedWelcomeUserId.value = ku.userId;
+  setActiveUserId(ku.userId);
+  welcomeLocalUserId.value = ku.userId;
+  tempStartLoading.value = true;
+  tempStartError.value = '';
+  try {
+    // Recreate the user doc with the ORIGINAL userId
+    const recreateResp = await fetch('/api/account/recreate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ userId: ku.userId, displayName: ku.displayName })
+    });
+    const recreateData = await recreateResp.json();
+    if (!recreateResp.ok || !recreateData.authenticated) {
+      throw new Error(recreateData.error || 'Failed to recreate account');
+    }
+    setAuthenticatedUser(recreateData.user, null);
+
+    // Read local state from folder
+    let localState: MaiaState | null = null;
+    if (localFolderHandle.value) {
+      const { readStateFile } = await import('./utils/localFolder');
+      localState = await readStateFile(localFolderHandle.value);
+    }
+    if (!localState && ku.userId) {
+      try {
+        const result = await readStateFileByUserId(ku.userId);
+        if (result) {
+          localState = result.state;
+          localFolderHandle.value = result.handle;
+        }
+      } catch { /* not available */ }
+    }
+    if (!localState) {
+      const snapshot = await getUserSnapshot(ku.userId);
+      if (snapshot) {
+        localState = {
+          version: 1,
+          userId: ku.userId,
+          displayName: ku.displayName,
+          updatedAt: snapshot.updatedAt || new Date().toISOString(),
+          files: Array.isArray(snapshot.fileStatusSummary) ? snapshot.fileStatusSummary.map((f: any) => ({
+            fileName: f.fileName, bucketKey: f.bucketKey, cloudStatus: f.chipStatus
+          })) : undefined,
+          currentMedications: snapshot.currentMedications || null,
+          patientSummary: snapshot.patientSummary || null,
+          savedChats: snapshot.savedChats || undefined,
+          currentChat: snapshot.currentChat || undefined
+        };
+      }
+    }
+
+    // Cloud health check
+    try {
+      const healthResp = await fetch(`/api/cloud-health?userId=${encodeURIComponent(ku.userId)}`, { credentials: 'include' });
+      if (healthResp.ok) {
+        const health = await healthResp.json();
+        cloudHealthDetails.value = health.details || null;
+      }
+    } catch {
+      cloudHealthDetails.value = {
+        database: { ok: true },
+        agent: { ok: false, error: 'Not deployed' },
+        knowledgeBase: { ok: false, error: 'Not created' },
+        spacesFiles: { ok: false, error: 'No files' }
+      };
+    }
+
+    // Launch RestoreWizard
+    if (localState) {
+      restoreWizardLocalState.value = localState;
+      showRestoreWizard.value = true;
+    } else {
+      if ($q && typeof $q.notify === 'function') {
+        $q.notify({ type: 'warning', message: 'No local backup found. Please use GET STARTED to set up your account.', timeout: 5000 });
+      }
+    }
+  } catch (error) {
+    tempStartError.value = error instanceof Error ? error.message : 'Restore failed';
+  } finally {
+    tempStartLoading.value = false;
+  }
+};
 
 /** [AUTH] New client = no local backup and no temp cookie. */
 const isNewClient = computed(() => !welcomeLocalUserId.value && !welcomeStatus.value.tempCookieUserId);
@@ -1096,13 +1203,6 @@ const refreshKnownUsers = () => {
 };
 
 /** When user switches in the multi-user toggle, reload welcome status for that user. */
-const onWelcomeUserSwitch = (userId: string) => {
-  setActiveUserId(userId);
-  // Override welcomeLocalUserId to the selected user so all status computeds update
-  welcomeLocalUserId.value = userId;
-  void loadWelcomeStatus();
-};
-
 /** Add family member: go through new-account flow */
 const handleAddFamilyMember = () => {
   // Clear any existing user context and start fresh
@@ -1150,6 +1250,8 @@ const moreChoicesConfirmUserId = ref<string | null>(null);
 /** [AUTH] Load welcome-status and localStorage for status line and branching. */
 const loadWelcomeStatus = async () => {
   refreshKnownUsers();
+  // Check cloud status for all known users (parallel, non-blocking)
+  void checkAllUserCloudStatus();
   // Use selected user from multi-user selector, fall back to old single-user key
   welcomeLocalUserId.value = selectedWelcomeUserId.value || getLastSnapshotUserId();
   welcomeLocalSnapshot.value = null;
@@ -2149,91 +2251,13 @@ const clearWizardPendingKey = (userId?: string | null) => {
   }
 };
 
-/** [AUTH] RESTORE FROM LOCAL FOLDER: try local folder maia-state.json first, fall back to IndexedDB. */
-const handleRestoreFromLocalFolder = async () => {
-  const localId = welcomeLocalUserId.value;
-  if (!localId) return;
-  tempStartLoading.value = true;
-  tempStartError.value = '';
-  try {
-    const newUser = await createTemporarySession();
-    if (!newUser) return;
-    // Run cloud health check so RestoreWizard knows what infrastructure needs restoring
-    try {
-      const healthResp = await fetch(
-        `/api/cloud-health?userId=${encodeURIComponent(newUser.userId)}`,
-        { credentials: 'include' }
-      );
-      if (healthResp.ok) {
-        const health = await healthResp.json();
-        cloudHealthDetails.value = health.details || null;
-        console.log(`[RESTORE] Cloud health for ${newUser.userId}:`, JSON.stringify(health.details));
-      }
-    } catch (e) {
-      console.warn('[RESTORE] Cloud health check failed, assuming all resources missing:', e);
-      // Assume everything is missing so RestoreWizard will try to restore all
-      cloudHealthDetails.value = {
-        database: { ok: false, error: 'health check failed' },
-        spacesFiles: { ok: false, error: 'health check failed' },
-        knowledgeBase: { ok: false, error: 'health check failed' },
-        agent: { ok: false, error: 'health check failed' }
-      };
-    }
-    // Try to read local state from folder first (has accurate file list + wizard status)
-    let localState: MaiaState | null = null;
-    // 1. Try active folder handle
-    if (localFolderHandle.value) {
-      const { readStateFile } = await import('./utils/localFolder');
-      localState = await readStateFile(localFolderHandle.value);
-    }
-    // 2. Try stored handle from IndexedDB (queryPermission only)
-    if (!localState && localId) {
-      try {
-        const result = await readStateFileByUserId(localId);
-        if (result) {
-          localState = result.state;
-          localFolderHandle.value = result.handle;
-        }
-      } catch { /* not available */ }
-    }
-    // 3. Fall back to IndexedDB snapshot, convert to MaiaState shape
-    if (!localState) {
-      const snapshot = await getUserSnapshot(localId);
-      if (snapshot) {
-        localState = {
-          version: 1,
-          userId: localId,
-          displayName: snapshot.user?.displayName || localId,
-          updatedAt: snapshot.updatedAt || new Date().toISOString(),
-          files: Array.isArray(snapshot.fileStatusSummary) ? snapshot.fileStatusSummary.map((f: any) => ({
-            fileName: f.fileName,
-            bucketKey: f.bucketKey,
-            cloudStatus: f.chipStatus
-          })) : undefined,
-          currentMedications: snapshot.currentMedications || null,
-          patientSummary: snapshot.patientSummary || null,
-          savedChats: snapshot.savedChats || undefined,
-          currentChat: snapshot.currentChat || undefined
-        };
-      }
-    }
-    if (localState) {
-      restoreWizardLocalState.value = localState;
-      showRestoreWizard.value = true;
-    } else {
-      if ($q && typeof $q.notify === 'function') {
-        $q.notify({ type: 'warning', message: 'No local backup found. Please re-select your MAIA folder or use GET STARTED to create a new account.', timeout: 6000 });
-      }
-    }
-  } catch (error) {
-    tempStartError.value = error instanceof Error ? error.message : 'Unable to start restore';
-  } finally {
-    tempStartLoading.value = false;
-  }
-};
-
 /** [AUTH] Open delete confirmation dialog for local userId from welcome page. */
-const handleDeleteLocalUser = () => {
+const handleDeleteLocalUser = (userIdOrEvent?: string | Event) => {
+  // Accept userId from card close button or use current welcomeLocalUserId
+  if (typeof userIdOrEvent === 'string') {
+    welcomeLocalUserId.value = userIdOrEvent;
+    selectedWelcomeUserId.value = userIdOrEvent;
+  }
   showDeleteLocalUserDialog.value = true;
 };
 
@@ -2393,6 +2417,17 @@ const handleRestoreWizardComplete = async () => {
   restoreWizardLocalState.value = null;
   cloudHealthDetails.value = null;
   suppressWizard.value = true; // Don't re-enter the wizard flow
+  // Mark wizard as complete on the server so it doesn't re-trigger
+  if (user.value?.userId) {
+    try {
+      await fetch('/api/user-status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ userId: user.value.userId, workflowStage: 'patient_summary' })
+      });
+    } catch { /* non-critical */ }
+  }
   // Re-stamp maia-identity.json with the current userId (may differ from the original after restore)
   if (localFolderHandle.value && user.value?.userId) {
     try {
