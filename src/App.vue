@@ -62,7 +62,7 @@
                       />
                       <div class="col text-body2">
                         <strong>{{ ku.displayName }}</strong>
-                        <span class="text-grey-7"> ({{ ku.userId }})</span>
+                        <span v-if="ku.displayName.toLowerCase() !== ku.userId.toLowerCase()" class="text-grey-7"> ({{ ku.userId }})</span>
                         <span v-if="ku.folderName" class="text-grey-6"> &mdash; {{ ku.folderName }}</span>
                         <div v-if="welcomeUserCloudStatus[ku.userId] === 'ready'" class="text-caption text-green-8">
                           Cloud account ready{{ ku.hasPasskey ? ' (passkey)' : '' }}
@@ -1795,17 +1795,23 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
           // non-critical
         }
 
+        // Extract patient name for webloc and known-user display
+        let extractedPatientName: string | null = null;
+        try {
+          const folderUtils = await import('./utils/localFolder');
+          extractedPatientName = typeof folderUtils.extractPatientName === 'function'
+            ? folderUtils.extractPatientName(state.patientSummary)
+            : null;
+        } catch { /* extraction not critical */ }
+
         // Always update webloc shortcut at sign-out
         clog(`stateFile written OK. Now writing webloc. userId=${user.value?.userId}`);
         if (user.value?.userId) {
           try {
             const folderUtils = await import('./utils/localFolder');
-            const patientName = typeof folderUtils.extractPatientName === 'function'
-              ? folderUtils.extractPatientName(state.patientSummary)
-              : null;
-            clog(`webloc: patientName=${patientName || 'none'}, calling writeWeblocFile`);
+            clog(`webloc: patientName=${extractedPatientName || 'none'}, calling writeWeblocFile`);
             await folderUtils.writeWeblocFile(localFolderHandle.value, window.location.origin, {
-              patientName: patientName || undefined,
+              patientName: extractedPatientName || undefined,
               userId: user.value.userId
             });
             clog(`webloc: WRITTEN SUCCESSFULLY`);
@@ -1813,6 +1819,15 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
             clog(`webloc: WRITE FAILED: ${e?.message || e}`);
           }
         }
+
+        // Update known-user registry with patient name if available
+        addOrUpdateKnownUser({
+          userId: user.value.userId,
+          displayName: extractedPatientName || user.value.displayName || user.value.userId,
+          folderName: localFolderName.value || localFolderHandle.value.name || null,
+          hasPasskey: !!user.value.hasPasskey,
+          lastActive: new Date().toISOString()
+        });
       } catch (e: any) {
         clog(`OUTER CATCH: folder save failed: ${e?.message || e}`);
       }
@@ -1820,14 +1835,16 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
       clog(`SKIPPED folder save: folderHandle=${!!localFolderHandle.value}, userId=${user.value?.userId}`);
     }
 
-    // Update known-user registry
-    addOrUpdateKnownUser({
-      userId: user.value.userId,
-      displayName: user.value.displayName || user.value.userId,
-      folderName: localFolderName.value || null,
-      hasPasskey: !!user.value.hasPasskey,
-      lastActive: new Date().toISOString()
-    });
+    // Update known-user registry (fallback when no folder handle)
+    if (!localFolderHandle.value) {
+      addOrUpdateKnownUser({
+        userId: user.value.userId,
+        displayName: user.value.displayName || user.value.userId,
+        folderName: null,
+        hasPasskey: !!user.value.hasPasskey,
+        lastActive: new Date().toISOString()
+      });
+    }
   } catch (error) {
     console.warn('Failed to save local snapshot:', error);
   }
