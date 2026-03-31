@@ -210,7 +210,7 @@ function getSetupWizardMessages() {
 
 const agentStatusCache = new Map();
 const TEMP_USER_COOKIE = 'maia_temp_user';
-const TEMP_USER_COOKIE_MAX_AGE = 1000 * 60 * 60 * 24 * 90;
+const TEMP_USER_COOKIE_MAX_AGE = 1000 * 60 * 60 * 24 * 7; // 7 days
 let cachedTempUserNames = null;
 let tempUserNamesLoadFailed = false;
 
@@ -509,11 +509,14 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       console.log(`[NEW FLOW 2] Passkey registration logged for ${updatedUser.userId}`);
       console.log(`[NEW FLOW 2] Ready to show app UI - no provisioning steps`);
 
+      // Clear temp cookie — passkey users no longer need it
+      res.clearCookie(TEMP_USER_COOKIE);
+
       // Return success with flag indicating file import dialog should be shown
       // The frontend will handle showing the dialog and uploading files
       const isAdminUser = agentReadyUser.userId?.toLowerCase() === process.env.ADMIN_USERNAME?.trim()?.toLowerCase();
-      res.json({ 
-        success: true, 
+      res.json({
+        success: true,
         user: {
           userId: agentReadyUser.userId,
           displayName: agentReadyUser.displayName,
@@ -663,9 +666,12 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
         userAgent: clientInfo.userAgent
       });
 
+      // Clear temp cookie — passkey users no longer need it
+      res.clearCookie(TEMP_USER_COOKIE);
+
       const isAdminUser = agentReadyUser.userId?.toLowerCase() === process.env.ADMIN_USERNAME?.trim()?.toLowerCase();
       res.json({
-        success: true, 
+        success: true,
         user: {
           userId: agentReadyUser.userId,
           displayName: agentReadyUser.displayName,

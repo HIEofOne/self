@@ -563,4 +563,88 @@ export function migrateToKnownUsers(): void {
     lastActive: new Date().toISOString()
   });
   setActiveUserId(oldUserId);
+  // Clean up the old key — knownUsers is now canonical
+  window.localStorage.removeItem('maia_last_snapshot_user');
+}
+
+/**
+ * Recover userIds from IndexedDB folder handles (survives localStorage clear).
+ * For each stored handle, tries queryPermission (no user gesture needed).
+ * If permission is granted, reads maia-identity.json to get userId/displayName.
+ * Returns recoverable users not already in knownUsers.
+ */
+export async function getAllStoredUserIds(): Promise<Array<{ userId: string; displayName: string; folderName: string }>> {
+  if (typeof window === 'undefined' || !window.indexedDB) return [];
+  const results: Array<{ userId: string; displayName: string; folderName: string }> = [];
+  try {
+    const db = await openHandleDb();
+    const tx = db.transaction(HANDLE_STORE_NAME, 'readonly');
+    const store = tx.objectStore(HANDLE_STORE_NAME);
+    // Get all keys (userIds) from the handle store
+    const allKeys: string[] = await new Promise((resolve, reject) => {
+      const req = store.getAllKeys();
+      req.onsuccess = () => resolve(req.result as string[]);
+      req.onerror = () => reject(req.error);
+    });
+    db.close();
+
+    for (const userId of allKeys) {
+      try {
+        const handle = await getStoredHandle(userId);
+        if (!handle) continue;
+        const perm = await handle.queryPermission({ mode: 'read' });
+        if (perm !== 'granted') continue;
+        // Try to read identity file
+        const identity = await readIdentityFile(handle);
+        results.push({
+          userId: identity?.userId || userId,
+          displayName: identity?.displayName || userId,
+          folderName: handle.name
+        });
+      } catch {
+        // Skip handles we can't access
+      }
+    }
+  } catch {
+    // IndexedDB not available
+  }
+  return results;
+}
+
+/**
+ * Reconcile knownUsers with all available sources:
+ * - Existing knownUsers (localStorage)
+ * - Folder handles in IndexedDB (survives localStorage clear)
+ * Call on app startup after migrateToKnownUsers().
+ */
+export async function reconcileKnownUsers(): Promise<void> {
+  const existing = getKnownUsers();
+  const existingIds = new Set(existing.map(u => u.userId));
+
+  // Recover from IndexedDB folder handles
+  const folderUsers = await getAllStoredUserIds();
+  for (const fu of folderUsers) {
+    if (!existingIds.has(fu.userId)) {
+      addOrUpdateKnownUser({
+        userId: fu.userId,
+        displayName: fu.displayName,
+        folderName: fu.folderName,
+        hasPasskey: false, // unknown — will be checked by checkAllUserCloudStatus
+        lastActive: new Date().toISOString()
+      });
+      existingIds.add(fu.userId);
+      console.log(`[reconcile] Recovered user "${fu.userId}" from local folder handle`);
+    } else {
+      // Update folderName if we didn't have it
+      const ku = existing.find(u => u.userId === fu.userId);
+      if (ku && !ku.folderName && fu.folderName) {
+        addOrUpdateKnownUser({ ...ku, folderName: fu.folderName });
+      }
+    }
+  }
+
+  // Ensure active user is set if we have known users
+  if (!getActiveUserId() && getKnownUsers().length > 0) {
+    setActiveUserId(getKnownUsers()[0].userId);
+  }
 }

@@ -391,25 +391,6 @@
       </q-card>
     </q-dialog>
 
-    <!-- Passkey sign-out: cross-device info -->
-    <q-dialog v-model="showPasskeyBackupPromptModal" persistent>
-      <q-card style="min-width: 420px; max-width: 560px">
-        <q-card-section>
-          <div class="text-h6">Passkey Created</div>
-          <p class="text-body2 q-mt-sm q-mb-none">
-            Passkeys allow you to access your MAIA on other devices or browsers.
-            The MAIA folder you created this account from may not be available or
-            would be a privacy risk on these other devices. Although your cloud
-            MAIA account will be updated, your local MAIA folder will not be
-            updated until the next time you access MAIA from the same original device.
-          </p>
-        </q-card-section>
-        <q-card-actions align="right">
-          <q-btn unelevated label="OK" color="primary" @click="onPasskeyBackupNo" />
-        </q-card-actions>
-      </q-card>
-    </q-dialog>
-
     <!-- Sign-out: prompt to choose folder for saving updated files -->
     <q-dialog v-model="showSignOutFolderPrompt" persistent>
       <q-card style="min-width: 420px; max-width: 560px">
@@ -433,35 +414,7 @@
       </q-card>
     </q-dialog>
 
-    <!-- Passkey backup: 4-digit PIN to encrypt -->
-    <q-dialog v-model="showPasskeyBackupPinDialog" persistent>
-      <q-card style="min-width: 360px; max-width: 440px">
-        <q-card-section>
-          <div class="text-h6">Encrypt local backup</div>
-          <p class="text-body2 q-mt-sm q-mb-md">
-            Enter a 4-digit PIN to encrypt your local backup. You will need this PIN to restore on this device.
-          </p>
-          <q-input
-            v-model="passkeyBackupPin"
-            type="password"
-            inputmode="numeric"
-            pattern="[0-9]*"
-            maxlength="4"
-            placeholder="4-digit PIN"
-            dense
-            outlined
-            :error="!!passkeyBackupPinError"
-            :error-message="passkeyBackupPinError"
-            autocomplete="off"
-            @keyup.enter="submitPasskeyBackupPin"
-          />
-        </q-card-section>
-        <q-card-actions align="right">
-          <q-btn flat label="CANCEL" color="primary" @click="closePasskeyBackupPinDialog" />
-          <q-btn unelevated label="SAVE" color="primary" :loading="passkeyBackupPinLoading" :disable="(passkeyBackupPin || '').length !== 4" @click="submitPasskeyBackupPin" />
-        </q-card-actions>
-      </q-card>
-    </q-dialog>
+
 
     <!-- Passkey dialog for authenticated users -->
     <q-dialog v-model="showPasskeyDialog" persistent>
@@ -619,36 +572,6 @@
       </q-card>
     </q-dialog>
 
-    <!-- Missing agent dialog (legacy — kept for temporary session flow) -->
-    <q-dialog v-model="showMissingAgentDialog" persistent>
-      <q-card style="min-width: 520px; max-width: 640px">
-        <q-card-section>
-          <div class="text-h6">Local Backup Found</div>
-        </q-card-section>
-        <q-card-section class="text-body2">
-          <p>
-            We found a local backup for <strong>{{ missingAgentUserId }}</strong>, but no matching agent is available.
-          </p>
-          <p class="q-mt-md">
-            Choose what to do with the local backup.
-          </p>
-        </q-card-section>
-        <q-card-actions align="right">
-          <q-btn
-            flat
-            label="CLEAR LOCAL STORAGE"
-            color="primary"
-            @click="handleClearLocalBackup"
-          />
-          <q-btn
-            flat
-            label="START THE WIZARD AGAIN"
-            color="negative"
-            @click="handleStartWizardAgain"
-          />
-        </q-card-actions>
-      </q-card>
-    </q-dialog>
 
     <!-- Phase 4: Confirm new account creation when known users exist -->
     <q-dialog v-model="showNewAccountConfirmDialog" persistent>
@@ -859,10 +782,10 @@ import DeepLinkAccess from './components/DeepLinkAccess.vue';
 import PrivacyDialog from './components/PrivacyDialog.vue';
 import AdminUsers from './components/AdminUsers.vue';
 import { useQuasar } from 'quasar';
-import { saveUserSnapshot, getLastSnapshotUserId, getUserSnapshot, clearLastSnapshotUserId, clearUserSnapshot, getPasskeyBackupPromptSkip, setPasskeyBackupPromptSkip, saveUserSnapshotEncrypted } from './utils/localDb';
+import { saveUserSnapshot, getUserSnapshot, clearUserSnapshot } from './utils/localDb';
 import {
   writeStateFile, clearDirectoryHandle, readIdentityFile, writeIdentityFile,
-  addOrUpdateKnownUser, removeKnownUser, migrateToKnownUsers,
+  addOrUpdateKnownUser, removeKnownUser, migrateToKnownUsers, reconcileKnownUsers,
   getKnownUsers, getActiveUserId, setActiveUserId,
   readStateFileByUserId,
   type MaiaState, type MaiaIdentity, type KnownUser
@@ -921,12 +844,6 @@ const passkeyPrefillAction = ref<'signin' | 'register' | null>(null);
 /** When set, we showed PasskeyAuth for a returning passkey user (from Get Started + local snapshot). */
 const welcomeBackPasskeyUserId = ref<string | null>(null);
 const showPasskeyDialog = ref(false);
-const showPasskeyBackupPromptModal = ref(false);
-const passkeyBackupDoNotAskAgain = ref(false);
-const showPasskeyBackupPinDialog = ref(false);
-const passkeyBackupPin = ref('');
-const passkeyBackupPinError = ref('');
-const passkeyBackupPinLoading = ref(false);
 const showDormantDialog = ref(false);
 const dormantDeepLinkCount = ref(0);
 const dormantLoading = ref(false);
@@ -940,15 +857,12 @@ const restoredChatState = ref<any | null>(null);
 const rehydrationFiles = ref<any[]>([]);
 const rehydrationActive = ref(false);
 const suppressWizard = ref(false);
-const showMissingAgentDialog = ref(false);
-const missingAgentUserId = ref<string | null>(null);
 const showCloudHealthDialog = ref(false);
 const cloudHealthDetails = ref<any>(null);
 const cloudHealthLoading = ref(false);
 /** [Phase 7] Restore Wizard state */
 const showRestoreWizard = ref(false);
 const restoreWizardLocalState = ref<MaiaState | null>(null);
-const pendingLocalUserId = ref<string | null>(null);
 const showDestroyedRestoreDialog = ref(false);
 const destroyedUserId = ref<string | null>(null);
 const showDevicePrivacyDialog = ref(false);
@@ -1252,8 +1166,8 @@ const loadWelcomeStatus = async () => {
   refreshKnownUsers();
   // Check cloud status for all known users (parallel, non-blocking)
   void checkAllUserCloudStatus();
-  // Use selected user from multi-user selector, fall back to old single-user key
-  welcomeLocalUserId.value = selectedWelcomeUserId.value || getLastSnapshotUserId();
+  // Use selected user from multi-user selector, fall back to active user in knownUsers
+  welcomeLocalUserId.value = selectedWelcomeUserId.value || getActiveUserId();
   welcomeLocalSnapshot.value = null;
   welcomeLocalHasPasskey.value = null;
   welcomeAgentExists.value = null;
@@ -1443,6 +1357,16 @@ const setAuthenticatedUser = (userData: any, deepLink: DeepLinkInfo | null = nul
       lastActive: new Date().toISOString()
     });
     setActiveUserId(normalizedUser.userId);
+
+    // Write identity file at account creation (Goal B) — fire-and-forget
+    if (localFolderHandle.value) {
+      writeIdentityFile(localFolderHandle.value, {
+        userId: normalizedUser.userId,
+        displayName: normalizedUser.displayName || normalizedUser.userId,
+        createdAt: new Date().toISOString(),
+        lastSync: new Date().toISOString()
+      }).catch((e) => console.warn('[AUTH] Identity file write failed:', e));
+    }
   }
 };
 
@@ -1754,12 +1678,6 @@ const resetAuthState = () => {
   welcomeBackPasskeyUserId.value = null;
   pendingAccountAction.value = null;
   showPasskeyDialog.value = false;
-  showPasskeyBackupPromptModal.value = false;
-  showPasskeyBackupPinDialog.value = false;
-  passkeyBackupPin.value = '';
-  passkeyBackupPinError.value = '';
-  passkeyBackupPinLoading.value = false;
-  passkeyBackupDoNotAskAgain.value = false;
   showDeepLinkAccess.value = !!deepLinkShareId.value;
   showMoreChoicesConfirmDialog.value = false;
   moreChoicesConfirmKind.value = null;
@@ -2280,7 +2198,6 @@ const confirmDeleteLocalUser = async () => {
     }
     // Clear all local data
     await clearUserSnapshot(localId);
-    clearLastSnapshotUserId();
     clearWizardPendingKey(localId);
     // Remove from known users registry, clear active user, and clear stored folder handle
     removeKnownUser(localId);
@@ -2307,7 +2224,7 @@ const confirmDeleteLocalUser = async () => {
     welcomeSavedFileCount.value = null;
     welcomeStatus.value = {};
     showDeleteLocalUserDialog.value = false;
-    console.log(`[WELCOME] DELETE complete for ${localId}: knownUsers=${JSON.stringify(knownUsers.value.map(u => u.userId))}, activeUser=${getActiveUserId()}, lastSnapshot=${getLastSnapshotUserId()}`);
+    console.log(`[WELCOME] DELETE complete for ${localId}: knownUsers=${JSON.stringify(knownUsers.value.map(u => u.userId))}, activeUser=${getActiveUserId()}`);
     // Reload welcome status to reflect the deletion
     void loadWelcomeStatus();
     if ($q && typeof $q.notify === 'function') {
@@ -2320,19 +2237,6 @@ const confirmDeleteLocalUser = async () => {
   }
 };
 
-const handleClearLocalBackup = () => {
-  clearLastSnapshotUserId();
-  pendingLocalUserId.value = null;
-  showMissingAgentDialog.value = false;
-  startTemporarySession();
-};
-
-const handleStartWizardAgain = () => {
-  clearLastSnapshotUserId();
-  pendingLocalUserId.value = null;
-  showMissingAgentDialog.value = false;
-  startTemporarySession();
-};
 
 const handleCloudRestore = async () => {
   if (!user.value?.userId) return;
@@ -2394,7 +2298,8 @@ const handleCloudStartFresh = async () => {
     const uid = user.value.userId;
     await clearUserSnapshot(uid);
     await clearDirectoryHandle(uid);
-    clearLastSnapshotUserId();
+    removeKnownUser(uid);
+    if (getActiveUserId() === uid) setActiveUserId(null);
     showCloudHealthDialog.value = false;
     cloudHealthDetails.value = null;
     if ($q && typeof $q.notify === 'function') {
@@ -2744,7 +2649,6 @@ const handleRestoreSnapshot = async () => {
         console.warn('Failed to restore patient summary:', summaryError);
       }
     }
-    clearLastSnapshotUserId();
     if ($q && typeof $q.notify === 'function') {
       $q.notify({
         type: 'positive',
@@ -2859,104 +2763,7 @@ const handleSignOut = async (snapshot?: SignOutSnapshot) => {
     console.warn('Unable to check deep links for sign-out:', error);
   }
 
-  const hasLocalBackup = getLastSnapshotUserId() === user.value?.userId;
-  if (!hasLocalBackup && !getPasskeyBackupPromptSkip()) {
-    passkeyBackupDoNotAskAgain.value = false;
-    showPasskeyBackupPromptModal.value = true;
-    return;
-  }
   await handleDormantSignOut();
-};
-
-const onPasskeyBackupNo = () => {
-  if (passkeyBackupDoNotAskAgain.value) {
-    setPasskeyBackupPromptSkip(true);
-  }
-  showPasskeyBackupPromptModal.value = false;
-  void handleDormantSignOut();
-};
-
-// onPasskeyBackupYes removed — backup prompt replaced with info-only modal
-
-const closePasskeyBackupPinDialog = () => {
-  showPasskeyBackupPinDialog.value = false;
-  passkeyBackupPin.value = '';
-  passkeyBackupPinError.value = '';
-  passkeyBackupPinLoading.value = false;
-  void handleDormantSignOut();
-};
-
-const buildSnapshotPayloadForUser = async (): Promise<{
-  user: { userId: string; displayName?: string; isTemporary?: boolean; isAdmin?: boolean };
-  files: any;
-  savedChats: any;
-  currentChat: any;
-  currentMedications: any;
-  initialFile: any;
-  fileStatusSummary: any[];
-  patientSummary: any;
-} | null> => {
-  if (!user.value?.userId) return null;
-  const [filesResponse, chatsResponse, statusResponse, summaryResponse] = await Promise.all([
-    fetch(`/api/user-files?userId=${encodeURIComponent(user.value.userId)}`, { credentials: 'include' }),
-    fetch(`/api/user-chats?userId=${encodeURIComponent(user.value.userId)}`, { credentials: 'include' }),
-    fetch(`/api/user-status?userId=${encodeURIComponent(user.value.userId)}`, { credentials: 'include' }),
-    fetch(`/api/patient-summary?userId=${encodeURIComponent(user.value.userId)}`, { credentials: 'include' })
-  ]);
-  const files = filesResponse.ok ? await filesResponse.json() : null;
-  const savedChats = chatsResponse.ok ? await chatsResponse.json() : null;
-  const status = statusResponse.ok ? await statusResponse.json() : null;
-  const summary = summaryResponse.ok ? await summaryResponse.json() : null;
-  const filesList = Array.isArray(files?.files) ? files.files : [];
-  const indexedSet = new Set(Array.isArray(files?.indexedFiles) ? files.indexedFiles : []);
-  const kbName = files?.kbName || null;
-  const fileStatusSummary = filesList.map((file: any) => {
-    const bucketKey = file.bucketKey || '';
-    const kbFolderPrefix = kbName ? `${user.value?.userId}/${kbName}/` : null;
-    const inKnowledgeBase = kbFolderPrefix ? (file.bucketKey || '').startsWith(kbFolderPrefix) : false;
-    let chipStatus: 'indexed' | 'pending' | 'not_in_kb' = 'not_in_kb';
-    if (inKnowledgeBase && indexedSet.has(bucketKey)) chipStatus = 'indexed';
-    else if (inKnowledgeBase && !indexedSet.has(bucketKey)) chipStatus = 'pending';
-    return { fileName: file.fileName, bucketKey, chipStatus };
-  });
-  return {
-    user: {
-      userId: user.value.userId,
-      displayName: user.value.displayName,
-      isTemporary: user.value.isTemporary,
-      isAdmin: user.value.isAdmin
-    },
-    files,
-    savedChats,
-    currentChat: signOutSnapshot.value?.currentChat || null,
-    currentMedications: status?.currentMedications || null,
-    initialFile: status?.initialFile || null,
-    fileStatusSummary,
-    patientSummary: summary?.summary || null
-  };
-};
-
-const submitPasskeyBackupPin = async () => {
-  const pin = (passkeyBackupPin.value || '').trim();
-  if (pin.length !== 4 || !/^\d{4}$/.test(pin)) {
-    passkeyBackupPinError.value = 'Enter a 4-digit PIN';
-    return;
-  }
-  passkeyBackupPinError.value = '';
-  passkeyBackupPinLoading.value = true;
-  try {
-    const payload = await buildSnapshotPayloadForUser();
-    if (!payload) throw new Error('Could not build backup');
-    await saveUserSnapshotEncrypted(payload, pin);
-    showPasskeyBackupPinDialog.value = false;
-    passkeyBackupPin.value = '';
-    passkeyBackupPinError.value = '';
-    passkeyBackupPinLoading.value = false;
-    await handleDormantSignOut();
-  } catch (e) {
-    passkeyBackupPinError.value = e instanceof Error ? e.message : 'Failed to save encrypted backup';
-    passkeyBackupPinLoading.value = false;
-  }
 };
 
 const handleTemporarySignOut = async () => {
@@ -2968,20 +2775,20 @@ const startTemporarySession = async () => {
   tempStartLoading.value = true;
   tempStartError.value = '';
   try {
-    // Use the selected user from multi-user selector, fall back to old key
-    const lastSnapshotUserId = selectedWelcomeUserId.value || getLastSnapshotUserId();
-    if (lastSnapshotUserId) {
+    // Use the selected user from multi-user selector, fall back to active user in knownUsers
+    const activeUserId = selectedWelcomeUserId.value || getActiveUserId();
+    if (activeUserId) {
       // If the stored user has a passkey, guide them to sign in instead of restoring as temporary
       try {
-        const checkResponse = await fetch(`/api/passkey/check-user?userId=${encodeURIComponent(lastSnapshotUserId)}`, {
+        const checkResponse = await fetch(`/api/passkey/check-user?userId=${encodeURIComponent(activeUserId)}`, {
           credentials: 'include'
         });
         if (checkResponse.ok) {
           const checkData = await checkResponse.json();
           if (checkData.exists && checkData.hasPasskey) {
-            passkeyPrefillUserId.value = lastSnapshotUserId;
+            passkeyPrefillUserId.value = activeUserId;
             passkeyPrefillAction.value = 'signin';
-            welcomeBackPasskeyUserId.value = lastSnapshotUserId;
+            welcomeBackPasskeyUserId.value = activeUserId;
             showAuth.value = true;
             return;
           }
@@ -2990,7 +2797,7 @@ const startTemporarySession = async () => {
         // If check fails, continue with restore flow
       }
 
-      const agentResponse = await fetch(`/api/agent-exists?userId=${encodeURIComponent(lastSnapshotUserId)}`);
+      const agentResponse = await fetch(`/api/agent-exists?userId=${encodeURIComponent(activeUserId)}`);
       const agentData = agentResponse.ok ? await agentResponse.json() : null;
       if (agentData && agentData.exists) {
         const restoreResponse = await fetch('/api/temporary/restore', {
@@ -2999,7 +2806,7 @@ const startTemporarySession = async () => {
             'Content-Type': 'application/json'
           },
           credentials: 'include',
-          body: JSON.stringify({ userId: lastSnapshotUserId })
+          body: JSON.stringify({ userId: activeUserId })
         });
         const restoreData = await restoreResponse.json();
         if (restoreResponse.ok && restoreData.authenticated && restoreData.user) {
@@ -3008,9 +2815,10 @@ const startTemporarySession = async () => {
           throw new Error(restoreData.error || 'Unable to restore temporary account');
         }
       } else if (agentResponse.ok) {
-        pendingLocalUserId.value = lastSnapshotUserId;
-        missingAgentUserId.value = lastSnapshotUserId;
-        showMissingAgentDialog.value = true;
+        // Agent missing — update cloud status to show RESTORE card on Welcome page
+        const statusMap = { ...welcomeUserCloudStatus.value };
+        statusMap[activeUserId] = 'restore';
+        welcomeUserCloudStatus.value = statusMap;
         tempStartLoading.value = false;
         return;
       }
@@ -3033,16 +2841,16 @@ const startTemporarySession = async () => {
     }
 
     const effectiveUserId = user.value?.userId;
-    if (lastSnapshotUserId && lastSnapshotUserId === effectiveUserId) {
+    if (activeUserId && activeUserId === effectiveUserId) {
       // Skip restore dialog if cloud is already valid (agent + spaces in sync)
       if (welcomeCloudValid.value !== true) {
         try {
-          const snapshot = await getUserSnapshot(lastSnapshotUserId);
+          const snapshot = await getUserSnapshot(activeUserId);
           if (snapshot) {
             restoreSnapshot.value = snapshot;
             showRestoreDialog.value = true;
             suppressWizard.value = true;
-            clearWizardPendingKey(lastSnapshotUserId);
+            clearWizardPendingKey(activeUserId);
             clearWizardPendingKey(effectiveUserId);
           }
         } catch (restoreError) {
@@ -3183,6 +2991,8 @@ const beforeUnloadHandler = (e: BeforeUnloadEvent) => {
 onMounted(async () => {
   // Migrate single-user localStorage to multi-user registry (one-time)
   migrateToKnownUsers();
+  // Reconcile: recover userIds from IndexedDB folder handles (survives localStorage clear)
+  await reconcileKnownUsers();
 
   // Phase 6: Register beforeunload listener
   window.addEventListener('beforeunload', beforeUnloadHandler);
@@ -3281,11 +3091,7 @@ onMounted(async () => {
 
   if (!share) {
     await loadWelcomeStatus();
-    // Auto-launch for returning cookie users — skip welcome page
-    if (welcomeStatus.value.tempCookieUserId) {
-      startTemporarySession();
-      return;
-    }
+    // Welcome page always shows — user clicks CONTINUE/SIGN IN on their card
   }
 
   if (share) {
