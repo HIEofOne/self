@@ -481,14 +481,26 @@ Please provide a list of all top-level markdown categories (### headings) and th
 
     console.log(`🤖 [PDF-MD] Calling Private AI to extract markdown categories for user ${userId}`);
 
-    // Call the agent
-    const response = await agentProvider.chat(
-      [{ role: 'user', content: prompt }],
-      { 
-        model: userDoc.agentModelName || 'openai-gpt-oss-120b',
-        stream: false
+    // Call the agent (with 401 retry — stale API key auto-heals)
+    const chatMessages = [{ role: 'user', content: prompt }];
+    const chatOptions = { model: userDoc.agentModelName || 'openai-gpt-oss-120b', stream: false };
+
+    let response;
+    try {
+      response = await agentProvider.chat(chatMessages, chatOptions);
+    } catch (firstError) {
+      const statusCode = firstError.status || firstError.statusCode || 0;
+      if (statusCode === 401 && userDoc.assignedAgentId) {
+        console.warn(`⚠️ [PDF-MD] 401 from agent for ${userId}, recreating API key...`);
+        const { recreateAgentApiKey } = await import('../utils/agent-helper.js');
+        const newApiKey = await recreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
+        console.log(`✅ [PDF-MD] Recreated API key for agent ${userDoc.assignedAgentId}`);
+        const retryProvider = new DigitalOceanProvider(newApiKey, { baseURL: userDoc.agentEndpoint });
+        response = await retryProvider.chat(chatMessages, chatOptions);
+      } else {
+        throw firstError;
       }
-    );
+    }
 
     const aiResponse = response.content || response.text || '';
     
@@ -2806,21 +2818,32 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       const prompt = `What are the current medications from this list?\n\n${medicationsText}\n\nPlease list only the medications that are currently active or being taken. Format your response as a clear, readable list.`;
 
 
-      // Call the agent
-      const response = await agentProvider.chat(
-        [{ role: 'user', content: prompt }],
-        { 
-          model: userDoc.agentModelName || 'openai-gpt-oss-120b',
-          stream: false
+      // Call the agent (with 401 retry — stale API key auto-heals)
+      const chatMessages = [{ role: 'user', content: prompt }];
+      const chatOptions = { model: userDoc.agentModelName || 'openai-gpt-oss-120b', stream: false };
+
+      let response;
+      try {
+        response = await agentProvider.chat(chatMessages, chatOptions);
+      } catch (firstError) {
+        const statusCode = firstError.status || firstError.statusCode || 0;
+        if (statusCode === 401 && userDoc.assignedAgentId) {
+          console.warn(`⚠️ [MEDS] 401 from agent for ${userId}, recreating API key...`);
+          const { recreateAgentApiKey } = await import('../utils/agent-helper.js');
+          const newApiKey = await recreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
+          console.log(`✅ [MEDS] Recreated API key for agent ${userDoc.assignedAgentId}`);
+          const retryProvider = new DigitalOceanProvider(newApiKey, { baseURL: userDoc.agentEndpoint });
+          response = await retryProvider.chat(chatMessages, chatOptions);
+        } else {
+          throw firstError;
         }
-      );
+      }
 
       const aiResponse = response.content || response.text || '';
-      
+
       if (!aiResponse || aiResponse.trim().length === 0) {
         return res.status(500).json({ error: 'Empty response from Private AI' });
       }
-
 
       res.json({
         success: true,

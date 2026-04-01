@@ -8722,18 +8722,29 @@ app.post('/api/generate-patient-summary', async (req, res) => {
     
     try {
       // chat() method signature: chat(messages, options, onUpdate)
-      // messages: array of message objects
-      // options: object with model, stream, etc.
-      const summaryResponse = await agentProvider.chat(
-        [{ role: 'user', content: summaryPrompt }], // messages array
-        { 
-          model: userDoc.agentModelName || 'openai-gpt-oss-120b',
-          stream: false
-        } // options object
-      );
+      const chatMessages = [{ role: 'user', content: summaryPrompt }];
+      const chatOptions = { model: userDoc.agentModelName || 'openai-gpt-oss-120b', stream: false };
+
+      let summaryResponse;
+      try {
+        summaryResponse = await agentProvider.chat(chatMessages, chatOptions);
+      } catch (firstError) {
+        const statusCode = firstError.status || firstError.statusCode || 0;
+        if (statusCode === 401 && userDoc.assignedAgentId) {
+          // Agent API key is stale — recreate and retry once
+          console.warn(`⚠️ [SUMMARY] 401 from agent for ${userId}, recreating API key...`);
+          const { recreateAgentApiKey } = await import('./utils/agent-helper.js');
+          const newApiKey = await recreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
+          console.log(`✅ [SUMMARY] Recreated API key for agent ${userDoc.assignedAgentId}`);
+          const retryProvider = new DigitalOceanProvider(newApiKey, { baseURL: userDoc.agentEndpoint });
+          summaryResponse = await retryProvider.chat(chatMessages, chatOptions);
+        } else {
+          throw firstError;
+        }
+      }
 
       const summary = summaryResponse.content || summaryResponse.text || '';
-      
+
       if (!summary || summary.trim().length === 0) {
         throw new Error('Empty summary received from agent');
       }
