@@ -8058,9 +8058,9 @@ app.post('/api/local/delete', async (req, res) => {
     if (!userId || typeof userId !== 'string') {
       return res.status(400).json({ success: false, error: 'userId required' });
     }
-    // Only allow UUID-format userIds (temporary users)
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    if (!uuidRegex.test(userId.trim())) {
+    // Basic sanitization: alphanumeric, hyphens, underscores, dots, @; max 128 chars
+    const safeIdRegex = /^[a-zA-Z0-9_@.\-]{1,128}$/;
+    if (!safeIdRegex.test(userId.trim())) {
       return res.status(400).json({ success: false, error: 'Invalid userId format' });
     }
     // Never allow deleting the admin user

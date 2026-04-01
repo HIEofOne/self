@@ -12,6 +12,26 @@
           <q-spinner size="2em" />
           <div class="q-mt-sm">Loading...</div>
         </div>
+        <!-- FAQ: accordion of questions -->
+        <div v-else-if="props.section === 'faq' && faqItems.length > 0" class="welcome-section-content">
+          <q-list>
+            <q-expansion-item
+              v-for="(item, idx) in faqItems"
+              :key="idx"
+              :label="item.question"
+              header-class="text-weight-medium text-body1"
+              expand-icon-class="text-grey-7"
+              class="faq-item"
+            >
+              <q-card>
+                <q-card-section class="text-body2 text-grey-8 q-pt-none">
+                  <vue-markdown :source="item.answer" />
+                </q-card-section>
+              </q-card>
+            </q-expansion-item>
+          </q-list>
+        </div>
+        <!-- Privacy / About: rendered markdown -->
         <div v-else-if="sectionContent" class="welcome-section-content">
           <vue-markdown :source="sectionContent" />
         </div>
@@ -47,7 +67,13 @@ const titles: Record<string, string> = {
 
 const title = computed(() => titles[props.section] || '');
 
+interface FaqItem {
+  question: string;
+  answer: string;
+}
+
 const sectionContent = ref<string>('');
+const faqItems = ref<FaqItem[]>([]);
 const loading = ref(false);
 
 let cachedMarkdown: string | null = null;
@@ -68,6 +94,42 @@ const extractSection = (markdown: string, sectionName: string): string => {
   return content.trim();
 };
 
+/** Parse FAQ markdown into question/answer pairs.
+ *  Expects top-level `* **Question?**` with nested `  * answer` lines. */
+const parseFaqItems = (markdown: string): FaqItem[] => {
+  const items: FaqItem[] = [];
+  const lines = markdown.split('\n');
+  let currentQuestion = '';
+  let answerLines: string[] = [];
+
+  const flush = () => {
+    if (currentQuestion) {
+      items.push({ question: currentQuestion, answer: answerLines.join('\n').trim() });
+    }
+    currentQuestion = '';
+    answerLines = [];
+  };
+
+  for (const line of lines) {
+    // Top-level list item with bold text = question
+    const qMatch = line.match(/^\*\s+\*\*(.+?)\*\*\s*$/);
+    if (qMatch) {
+      flush();
+      currentQuestion = qMatch[1];
+      continue;
+    }
+    // Nested list item or continuation = answer
+    if (currentQuestion && line.match(/^\s{2,}\*/)) {
+      // Convert nested `  * text` to markdown bullet
+      answerLines.push(line.replace(/^\s{2,}\*\s*/, '- '));
+    } else if (currentQuestion && line.trim() === '') {
+      answerLines.push('');
+    }
+  }
+  flush();
+  return items;
+};
+
 const loadSection = async () => {
   if (!props.modelValue) return;
 
@@ -78,10 +140,18 @@ const loadSection = async () => {
       if (!response.ok) throw new Error(`Failed to load: ${response.status}`);
       cachedMarkdown = await response.text();
     }
-    sectionContent.value = extractSection(cachedMarkdown, props.section);
+    const raw = extractSection(cachedMarkdown, props.section);
+    if (props.section === 'faq') {
+      faqItems.value = parseFaqItems(raw);
+      sectionContent.value = '';
+    } else {
+      faqItems.value = [];
+      sectionContent.value = raw;
+    }
   } catch (err) {
     console.error('Error loading welcome content:', err);
     sectionContent.value = 'Unable to load content.';
+    faqItems.value = [];
   } finally {
     loading.value = false;
   }
@@ -128,5 +198,13 @@ watch(() => props.modelValue, (newVal) => {
 
 .welcome-section-content :deep(li) {
   margin-bottom: 0.5rem;
+}
+
+.faq-item {
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.faq-item:last-child {
+  border-bottom: none;
 }
 </style>

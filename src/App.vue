@@ -1047,6 +1047,24 @@ const handleUserCardRestore = async (ku: KnownUser) => {
         }
       } catch { /* not available */ }
     }
+
+    // Validate folder identity matches the userId being restored
+    if (localState && localFolderHandle.value) {
+      try {
+        const folderIdentity = await readIdentityFile(localFolderHandle.value);
+        if (folderIdentity && folderIdentity.userId && folderIdentity.userId !== ku.userId) {
+          if ($q && typeof $q.notify === 'function') {
+            $q.notify({
+              type: 'warning',
+              message: `This folder belongs to ${folderIdentity.displayName || folderIdentity.userId}, not ${ku.userId}. Cannot restore from a mismatched folder.`,
+              timeout: 7000
+            });
+          }
+          localState = null;
+        }
+      } catch { /* identity file unreadable — proceed with caution */ }
+    }
+
     if (!localState) {
       const snapshot = await getUserSnapshot(ku.userId);
       if (snapshot) {
@@ -1864,8 +1882,23 @@ const handleConnectFolderFromDialog = async () => {
       if (user.value?.userId) {
         await storeDirectoryHandle(user.value.userId, handle);
       }
-      // Read/create identity file
+      // Read/create identity file — reject if folder belongs to a different known user
       const existing = await readIdentityFile(handle);
+      if (existing && existing.userId && user.value?.userId && existing.userId !== user.value.userId) {
+        const otherKnown = getKnownUsers().find(u => u.userId === existing.userId);
+        if (otherKnown) {
+          if ($q && typeof $q.notify === 'function') {
+            $q.notify({
+              type: 'warning',
+              message: `This folder belongs to ${existing.displayName || existing.userId}. Please choose a different folder.`,
+              timeout: 7000
+            });
+          }
+          localFolderHandle.value = null;
+          localFolderName.value = '';
+          return;
+        }
+      }
       if (!existing && user.value?.userId) {
         await writeIdentityFile(handle, {
           userId: user.value.userId,
@@ -1892,11 +1925,22 @@ const handleLocalFolderConnected = async (payload: { handle: FileSystemDirectory
   try {
     const existing = await readIdentityFile(payload.handle);
     if (existing) {
-      // Folder already belongs to a user
-      if (user.value?.userId && existing.userId !== user.value.userId) {
-        // Identity mismatch — this folder belongs to a different user.
-        // For now, log a warning; Phase 3 will add a conflict dialog.
-        console.warn(`[IDENTITY] Folder "${payload.folderName}" belongs to ${existing.userId}, but current user is ${user.value.userId}`);
+      // Folder already belongs to a user — reject if it's a different known user
+      if (user.value?.userId && existing.userId && existing.userId !== user.value.userId) {
+        const otherKnown = getKnownUsers().find(u => u.userId === existing.userId);
+        if (otherKnown) {
+          console.warn(`[IDENTITY] Folder "${payload.folderName}" belongs to ${existing.userId}, rejecting for ${user.value.userId}`);
+          if ($q && typeof $q.notify === 'function') {
+            $q.notify({
+              type: 'warning',
+              message: `This folder belongs to ${existing.displayName || existing.userId}. Please choose a different folder.`,
+              timeout: 7000
+            });
+          }
+          localFolderHandle.value = null;
+          localFolderName.value = '';
+          return;
+        }
       }
     } else if (user.value?.userId) {
       // New folder — stamp it with the current user's identity

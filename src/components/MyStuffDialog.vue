@@ -5546,6 +5546,19 @@ watch(() => props.initialTab, (newTab) => {
   }
 });
 
+// Allow summary generation while dialog stays open (avoids close/reopen flash).
+// Only fires when dialog was already open before the flag was set — reload recovery
+// and initial open are handled by the modelValue watcher instead.
+let dialogOpenedAt = 0;
+watch(() => props.modelValue, (v) => { if (v) dialogOpenedAt = Date.now(); });
+watch(() => props.requestSummaryOnOpen, (newVal) => {
+  if (newVal && isOpen.value && currentTab.value === 'summary' && (Date.now() - dialogOpenedAt) > 500) {
+    loadingSummary.value = true;
+    requestNewSummary();
+    emit('request-summary-done');
+  }
+});
+
 watch(isOpen, (newValue) => {
   emit('update:modelValue', newValue);
   if (!newValue) {

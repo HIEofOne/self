@@ -5730,13 +5730,12 @@ const handleIndexingFinished = (_data: { jobId: string; phase: string; error?: s
 
 const handlePostIndexingUpdateSummary = () => {
   showPostIndexingSummaryPrompt.value = false;
-  // Close and reopen MyStuff on summary tab so requestSummaryOnOpen triggers generation
-  showMyStuffDialog.value = false;
-  void nextTick(() => {
-    myStuffInitialTab.value = 'summary';
-    wizardRequestSummaryOnOpen.value = true;
+  myStuffInitialTab.value = 'summary';
+  wizardRequestSummaryOnOpen.value = true;
+  if (!showMyStuffDialog.value) {
     showMyStuffDialog.value = true;
-  });
+  }
+  // If dialog is already open, the requestSummaryOnOpen watcher handles the switch
 };
 
 const handleFilesArchived = (archivedBucketKeys: string[]) => {
@@ -5940,12 +5939,9 @@ const handleCurrentMedicationsSaved = async () => {
     wizardFlowPhase.value = 'summary';
     addSetupLogLine('Wizard Flow', 'Current Medications saved — opening Patient Summary', true);
     void generateSetupLogPdf();
-    // Close and reopen MyStuff on summary tab (reopen triggers requestSummaryOnOpen)
-    showMyStuffDialog.value = false;
-    await nextTick();
+    // Switch tab in-place (no close/reopen) — the requestSummaryOnOpen watcher triggers generation
     myStuffInitialTab.value = 'summary';
     wizardRequestSummaryOnOpen.value = true;
-    showMyStuffDialog.value = true;
   }
 };
 
