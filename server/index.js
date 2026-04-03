@@ -4401,9 +4401,10 @@ app.post('/api/save-group-chat', async (req, res) => {
     const result = await cloudant.saveDocument('maia_chats', groupChatDoc);
     
     // Set workflowStage to link_stored when chat is saved with shareId
+    // but don't downgrade from patient_summary (wizard already completed)
     try {
       const userDoc = await cloudant.getDocument('maia_users', effectiveUserId);
-      if (userDoc) {
+      if (userDoc && userDoc.workflowStage !== 'patient_summary') {
         userDoc.workflowStage = 'link_stored';
         await cloudant.saveDocument('maia_users', userDoc);
       }
@@ -4526,9 +4527,10 @@ app.put('/api/save-group-chat/:chatId', async (req, res) => {
     await cloudant.saveDocument('maia_chats', existingChat);
 
     // Keep workflowStage in sync when chats are updated
+    // but don't downgrade from patient_summary (wizard already completed)
     try {
       const userDoc = await cloudant.getDocument('maia_users', effectiveUserId);
-      if (userDoc) {
+      if (userDoc && userDoc.workflowStage !== 'patient_summary') {
         userDoc.workflowStage = 'link_stored';
         await cloudant.saveDocument('maia_users', userDoc);
       }
@@ -8435,7 +8437,7 @@ app.get('/api/user-status', async (req, res) => {
     // Convert kbStatus to hasKB for backward compatibility, but also return kbStatus
     const hasKB = kbStatus === 'attached' || kbStatus === 'not_attached';
 
-    const kbName = kbInfo?.name || null;
+    const kbName = kbInfo?.name || userDoc.kbName || null;
     let hasFilesInKB = false;
     if (kbInfo?.id && kbName) {
       try {
@@ -8641,6 +8643,20 @@ app.post('/api/restore', async (req, res) => {
       } catch (err) {
         results.errors.push(`Instructions: ${err.message}`);
       }
+    }
+
+    // 7. Mark wizard as complete so setup wizard doesn't re-appear after restore
+    try {
+      await saveUserDocWithRetry(cloudant, userId, (doc) => {
+        doc.workflowStage = 'patient_summary';
+        doc.wizardComplete = true;
+        doc.medsVerified = !!(currentMedications || doc.currentMedications);
+        doc.summaryVerified = !!(patientSummary || doc.patientSummary);
+        doc.restoredAt = new Date().toISOString();
+        doc.updatedAt = new Date().toISOString();
+      });
+    } catch (err) {
+      results.errors.push(`Wizard flags: ${err.message}`);
     }
 
     res.json({ success: true, results });

@@ -802,8 +802,8 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       // Agent linked to KB: agent exists AND kbId is set AND agent has an endpoint
       const agentLinkedToKb = agentExists && kbExists && !!userDoc?.agentEndpoint;
 
-      // Wizard complete: workflowStage reached patient_summary AND patientSummary text exists
-      const wizardComplete = userDoc?.workflowStage === 'patient_summary'
+      // Wizard complete: workflowStage reached patient_summary OR explicit wizardComplete flag, AND patientSummary text exists
+      const wizardComplete = (userDoc?.workflowStage === 'patient_summary' || userDoc?.wizardComplete === true)
         && !!(userDoc?.patientSummary && String(userDoc.patientSummary).trim());
 
       console.log(`[WELCOME] agent-exists for ${userId}: agent=${agentExists}, savedFiles=${savedFileCount}/${allFiles.length}, kb=${kbExists}, linked=${agentLinkedToKb}, wizardDone=${wizardComplete}, stage=${userDoc?.workflowStage || 'none'}`);
@@ -986,6 +986,7 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
         success: true,
         authenticated: true,
         recreated: true,
+        kbName,
         user: {
           userId,
           displayName: userDoc.displayName,
@@ -1152,21 +1153,11 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       }
 
       if (!userDoc) {
-        userDoc = {
-          _id: restoreUserId,
-          userId: restoreUserId,
-          displayName: restoreUserId,
-          email: null,
-          domain: passkeyService.rpID,
-          type: 'user',
-          workflowStage: 'active',
-          temporaryAccount: true,
-          assignedAgentId: agent ? (agent.uuid || agent.id || null) : null,
-          assignedAgentName: agent ? (agent.name || null) : null,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString()
-        };
-        await cloudant.saveDocument('maia_users', userDoc);
+        // User doc was destroyed — don't auto-create a bare doc here.
+        // Return 404 so the client triggers the full restore wizard which
+        // uses /api/account/recreate and restores local state (meds, summary, chats).
+        console.log('[SAVE-RESTORE] No user doc found (destroyed?) — returning 404 for restore wizard');
+        return res.status(404).json({ success: false, error: 'User not found — account may have been destroyed' });
       }
 
       req.session.userId = userDoc.userId;

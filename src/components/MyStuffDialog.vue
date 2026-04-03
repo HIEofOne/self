@@ -1253,9 +1253,12 @@ const emit = defineEmits<{
   'file-added-to-kb': [data: { fileName: string; bucketKey: string }];
 }>();
 
-// Handle show patient summary from Lists component — emit upward so the wizard controller decides
+// Handle show patient summary from Lists component — regenerate summary with updated medications
 const handleShowPatientSummary = () => {
-  currentTab.value = 'summary';
+  loadingSummary.value = true;          // show spinner immediately
+  currentTab.value = 'summary';         // switch tab (watcher will call loadPatientSummary, but we override below)
+  pendingSummaryRegeneration.value = true; // flag so the tab watcher skips its loadPatientSummary
+  requestNewSummary();                  // regenerate with latest medications
   emit('show-patient-summary');
 };
 
@@ -1312,6 +1315,7 @@ const patientSummaries = ref<Array<{ text: string; createdAt: string; updatedAt:
 const verifiedCurrentMedications = ref<string | null>(null);
 const showMedsMismatchDialog = ref(false);
 const medsMismatchAcknowledged = ref(false);
+const pendingSummaryRegeneration = ref(false);
 
 // Local folder reminder after file deletion
 const showLocalFolderDeleteReminder = ref(false);
@@ -5605,7 +5609,12 @@ watch(currentTab, async (newTab) => {
     } else if (newTab === 'chats') {
       loadSharedChats();
     } else if (newTab === 'summary') {
-      loadPatientSummary();
+      // Skip load if regeneration is already in progress (e.g. after meds edit)
+      if (pendingSummaryRegeneration.value) {
+        pendingSummaryRegeneration.value = false;
+      } else {
+        loadPatientSummary();
+      }
     } else if (newTab === 'lists') {
       if (listsComponentRef.value) {
         listsComponentRef.value.reloadCategories();

@@ -375,7 +375,13 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
         }
       }
       
-      res.status(statusCode).json({ 
+      // Guard: if we already started streaming, headers are sent — don't try to send again
+      if (res.headersSent) {
+        // Try to end the stream gracefully so the client knows something went wrong
+        try { res.end(); } catch (_) { /* already closed */ }
+        return;
+      }
+      res.status(statusCode).json({
         error: errorMessage,
         type: error.type,
         status: statusCode

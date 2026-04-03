@@ -841,11 +841,13 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         if (!Array.isArray(userDoc.files)) userDoc.files = [];
         // Don't duplicate
         if (!userDoc.files.some(f => f.bucketKey === bucketKey)) {
+          const isAppleHealth = /^apple/i.test(fileName) && /\.pdf$/i.test(fileName);
           userDoc.files.push({
             fileName,
             bucketKey,
             fileSize: fileSize || 0,
-            uploadedAt: new Date().toISOString()
+            uploadedAt: new Date().toISOString(),
+            ...(isAppleHealth ? { isAppleHealth: true } : {})
           });
           userDoc.updatedAt = new Date().toISOString();
         }

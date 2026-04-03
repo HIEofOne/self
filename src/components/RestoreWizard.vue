@@ -23,6 +23,7 @@
             <q-item-section>
               <q-item-label :class="{ 'text-grey-5': item.status === 'pending' }">
                 {{ item.label }}
+                <q-chip v-if="item.isAppleHealth" color="blue-6" text-color="white" size="sm" dense class="q-ml-xs">Apple Health</q-chip>
                 <span v-if="item.status === 'running' && item.progress" class="text-primary text-caption q-ml-sm">{{ item.progress }}</span>
                 <span v-if="item.status === 'done' && item.progress" class="text-green text-caption q-ml-sm">{{ item.progress }}</span>
               </q-item-label>
@@ -60,6 +61,7 @@ interface RestoreItem {
   status: 'pending' | 'running' | 'done' | 'error' | 'skipped';
   progress?: string;
   errorMsg?: string;
+  isAppleHealth?: boolean;
 }
 
 interface CloudHealth {
@@ -76,6 +78,7 @@ const props = defineProps<{
   localState: MaiaState | null;
   localFolderHandle: FileSystemDirectoryHandle | null;
   safariFolderFiles?: File[] | null;
+  kbName?: string | null;
 }>();
 
 defineEmits<{
@@ -94,8 +97,11 @@ const updateItem = (key: string, updates: Partial<RestoreItem>) => {
   }
 };
 
-/** Get the KB name for this user, creating one if needed */
+/** Get the KB name for this user — prefer the prop passed from recreate response */
 const resolveKbName = async (uid: string): Promise<string | null> => {
+  // 1. Use the kbName prop (set at user doc creation time, always correct)
+  if (props.kbName) return props.kbName;
+  // 2. Fall back to user-status (which now also falls back to userDoc.kbName)
   try {
     const resp = await fetch(`/api/user-status?userId=${encodeURIComponent(uid)}`, { credentials: 'include' });
     if (resp.ok) {
@@ -103,7 +109,8 @@ const resolveKbName = async (uid: string): Promise<string | null> => {
       if (data.kbName) return data.kbName;
     }
   } catch { /* fall through */ }
-  // Default KB name pattern
+  // 3. Last resort — should not happen if recreate worked correctly
+  console.warn(`[RestoreWizard] Could not resolve kbName for ${uid}, using fallback`);
   return `${uid}-kb`;
 };
 
@@ -114,28 +121,36 @@ const buildRestoreItems = () => {
 
   // Individual file lines
   for (const f of files) {
+    // Detect Apple Health files by filename pattern (same as used elsewhere in the app)
+    const isAppleHealth = /^apple/i.test(f.fileName) && /\.pdf$/i.test(f.fileName);
     items.push({
       key: `file:${f.fileName}`,
       label: f.fileName,
       needed: true,
-      status: 'pending'
+      status: 'pending',
+      isAppleHealth
     });
   }
 
-  // Agent deployment
-  items.push({ key: 'agent', label: 'Deploy AI Agent', needed: true, status: 'pending' });
-
-  // Knowledge Base indexing
+  // Knowledge Base indexing (starts as soon as files are in Spaces, does NOT need agent)
   if (files.length > 0) {
     items.push({ key: 'kb', label: 'Index Knowledge Base', needed: true, status: 'pending' });
   }
 
-  // Current Medications (from local state)
+  // Agent deployment (runs in parallel with KB indexing)
+  items.push({ key: 'agent', label: 'Deploy AI Agent', needed: true, status: 'pending' });
+
+  // Agent Instructions (needs agent deployed)
+  if (state?.agentInstructions) {
+    items.push({ key: 'instructions', label: 'Restore Agent Instructions', needed: true, status: 'pending' });
+  }
+
+  // Current Medications (from local backup)
   if (state?.currentMedications) {
     items.push({ key: 'medications', label: 'Restore Current Medications', needed: true, status: 'pending' });
   }
 
-  // Patient Summary (from local state)
+  // Patient Summary (from local backup)
   if (state?.patientSummary) {
     items.push({ key: 'summary', label: 'Restore Patient Summary', needed: true, status: 'pending' });
   }
@@ -144,11 +159,6 @@ const buildRestoreItems = () => {
   const chatCount = Array.isArray(state?.savedChats?.chats) ? state.savedChats.chats.length : 0;
   if (chatCount > 0) {
     items.push({ key: 'chats', label: `Restore ${chatCount} saved chat${chatCount === 1 ? '' : 's'}`, needed: true, status: 'pending' });
-  }
-
-  // Agent Instructions
-  if (state?.agentInstructions) {
-    items.push({ key: 'instructions', label: 'Restore Agent Instructions', needed: true, status: 'pending' });
   }
 
   restoreItems.value = items;
@@ -252,56 +262,18 @@ const executeRestore = async () => {
       }
     }
 
-    // 2. Deploy Agent (create if needed)
-    console.log(`[RestoreWizard] Step 2: Deploy agent for ${uid}`);
-    let agentDeployed = false;
-    updateItem('agent', { status: 'running' });
-    try {
-      const syncResp = await fetch('/api/sync-agent', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ userId: uid, create: true })
-      });
-      const syncData = await syncResp.json();
-      console.log(`[RestoreWizard] /api/sync-agent response: status=${syncResp.status}`, JSON.stringify(syncData));
-      if (!syncResp.ok) throw new Error(syncData.error || 'Agent deployment failed');
-      if (syncData.success || syncData.agentId) {
-        agentDeployed = true;
-        const agentId = syncData.agentId || syncData.agent?.id;
-        console.log(`[RestoreWizard] Agent created: agentId=${agentId}, created=${syncData.created}`);
-        // Poll for agent endpoint to become ready (deployment takes ~30-90s)
-        updateItem('agent', { progress: 'Deploying...' });
-        let endpointReady = !!syncData.agentEndpoint;
-        let pollAttempts = 0;
-        while (!endpointReady && pollAttempts < 40) {
-          await new Promise(r => setTimeout(r, 5000));
-          pollAttempts++;
-          try {
-            const statusResp = await fetch('/api/agent-setup-status', { credentials: 'include' });
-            if (statusResp.ok) {
-              const statusData = await statusResp.json();
-              if (statusData.endpointReady) {
-                endpointReady = true;
-              } else {
-                updateItem('agent', { progress: `Deploying... (${pollAttempts * 5}s)` });
-              }
-            }
-          } catch { /* continue polling */ }
-        }
-        updateItem('agent', { status: 'done', progress: endpointReady ? 'Deployed' : 'Deploying in background' });
-      } else {
-        throw new Error(syncData.error || 'Agent not available');
-      }
-    } catch (e: any) {
-      console.error(`[RestoreWizard] Agent deploy failed:`, e?.message);
-      updateItem('agent', { status: 'error', errorMsg: e?.message || 'Failed' });
-    }
+    // 2. Start KB indexing AND agent deployment IN PARALLEL
+    // KB indexing only needs files in Spaces — it does NOT need the agent.
+    // Agent deployment takes ~60-90s. KB creation + indexing is independent.
+    console.log(`[RestoreWizard] Step 2: Start KB indexing and agent deployment in parallel`);
 
-    // 3. Index Knowledge Base (files are already in KB folder)
-    console.log(`[RestoreWizard] Step 3: Index KB. filesUploaded=${filesUploaded}`);
+    // --- KB indexing promise (runs independently) ---
     const kbItem = restoreItems.value.find(i => i.key === 'kb' && i.needed);
-    if (kbItem && filesUploaded > 0) {
+    const kbPromise = (async () => {
+      if (!kbItem || filesUploaded === 0) {
+        if (kbItem) updateItem('kb', { status: 'error', errorMsg: 'No files uploaded' });
+        return;
+      }
       updateItem('kb', { status: 'running', progress: 'Creating...' });
       try {
         console.log(`[RestoreWizard] Calling /api/update-knowledge-base for ${uid}`);
@@ -317,28 +289,39 @@ const executeRestore = async () => {
           throw new Error(errData.message || `KB update failed: ${indexResp.status}`);
         }
         const indexData = await indexResp.json();
-        const jobId = indexData.jobId;
+        const kbId = indexData.kbId;
+        const jobId = indexData.jobId || kbId; // Prefer jobId for status polling
+        const filesCount = indexData.filesIndexed || indexData.filesCount || 0;
+        const tokens = indexData.totalTokens || indexData.tokenCount || 0;
 
-        if (jobId) {
+        if (kbId) {
           updateItem('kb', { progress: 'Indexing...' });
           let done = false;
           let attempts = 0;
           while (!done && attempts < 120) {
             await new Promise(r => setTimeout(r, 3000));
             try {
-              const statusResp = await fetch(`/api/kb-indexing-status/${jobId}`, { credentials: 'include' });
+              const statusResp = await fetch(`/api/kb-indexing-status/${jobId}?userId=${encodeURIComponent(uid)}`, { credentials: 'include' });
               if (statusResp.ok) {
                 const statusData = await statusResp.json();
-                if (statusData.status === 'completed' || statusData.completed) {
+                if (statusData.completed || statusData.backendCompleted) {
                   done = true;
-                  const tokens = statusData.tokenCount || statusData.total_tokens || 0;
-                  updateItem('kb', { status: 'done', progress: tokens ? `${tokens.toLocaleString()} tokens indexed` : 'Indexed' });
-                } else if (statusData.status === 'failed') {
+                  const t = statusData.tokens || statusData.tokenCount || statusData.total_tokens || tokens || 0;
+                  const f = statusData.filesIndexed || filesCount || 0;
+                  const parts = [];
+                  if (f) parts.push(`${f} file${f === 1 ? '' : 's'}`);
+                  if (t) parts.push(`${Number(t).toLocaleString()} tokens`);
+                  updateItem('kb', { status: 'done', progress: parts.join(', ') || 'Indexed' });
+                } else if (statusData.status === 'INDEX_JOB_STATUS_FAILED') {
                   throw new Error(statusData.error || 'Indexing failed');
                 } else {
-                  const tokens = statusData.tokenCount || statusData.total_tokens || 0;
-                  const tokenStr = tokens > 0 ? ` — ${tokens.toLocaleString()} tokens` : '';
-                  updateItem('kb', { progress: `Indexing...${tokenStr} (${Math.round((attempts * 3) / 60)}m)` });
+                  const t = statusData.tokens || statusData.tokenCount || 0;
+                  const tokenStr = Number(t) > 0 ? ` — ${Number(t).toLocaleString()} tokens` : '';
+                  const elapsedSec = attempts * 3;
+                  const mins = Math.floor(elapsedSec / 60);
+                  const secs = elapsedSec % 60;
+                  const timeStr = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+                  updateItem('kb', { progress: `Indexing...${tokenStr} (${timeStr})` });
                 }
               }
             } catch (pollErr: any) {
@@ -350,21 +333,79 @@ const executeRestore = async () => {
             updateItem('kb', { status: 'done', progress: 'Indexing continues in background' });
           }
         } else {
-          updateItem('kb', { status: 'done', progress: 'Created' });
+          // No kbId returned — check if indexing succeeded via token count
+          if (tokens > 0) {
+            updateItem('kb', { status: 'done', progress: `${filesCount} file${filesCount === 1 ? '' : 's'}, ${Number(tokens).toLocaleString()} tokens` });
+          } else {
+            updateItem('kb', { status: 'done', progress: 'Created' });
+          }
         }
       } catch (e: any) {
         updateItem('kb', { status: 'error', errorMsg: e?.message || 'Failed' });
       }
-    } else if (kbItem) {
-      updateItem('kb', { status: 'error', errorMsg: 'No files uploaded' });
-    }
+    })();
 
-    // 4-7. Restore metadata via single server-side coordinator
+    // --- Agent deployment promise (runs independently) ---
+    let agentDeployed = false;
+    const agentPromise = (async () => {
+      updateItem('agent', { status: 'running' });
+      try {
+        const syncResp = await fetch('/api/sync-agent', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ userId: uid, create: true })
+        });
+        const syncData = await syncResp.json();
+        console.log(`[RestoreWizard] /api/sync-agent response: status=${syncResp.status}`, JSON.stringify(syncData));
+        if (!syncResp.ok) throw new Error(syncData.error || 'Agent deployment failed');
+        if (syncData.success || syncData.agentId) {
+          const agentId = syncData.agentId || syncData.agent?.id;
+          console.log(`[RestoreWizard] Agent created: agentId=${agentId}, created=${syncData.created}`);
+          // Poll for agent endpoint to become ready (deployment takes ~30-90s)
+          updateItem('agent', { progress: 'Deploying... (0s)' });
+          let endpointReady = !!syncData.agentEndpoint;
+          let elapsedSeconds = 0;
+          let lastStatus = 'Deploying';
+          const maxSeconds = 200;
+          const pollIntervalSec = 5;
+          while (!endpointReady && elapsedSeconds < maxSeconds) {
+            await new Promise(r => setTimeout(r, 1000));
+            elapsedSeconds++;
+            updateItem('agent', { progress: `${lastStatus}... (${elapsedSeconds}s)` });
+            if (elapsedSeconds % pollIntervalSec === 0) {
+              try {
+                const statusResp = await fetch('/api/agent-setup-status', { credentials: 'include' });
+                if (statusResp.ok) {
+                  const statusData = await statusResp.json();
+                  if (statusData.endpointReady) {
+                    endpointReady = true;
+                  } else if (statusData.status) {
+                    lastStatus = statusData.status;
+                  }
+                }
+              } catch { /* continue polling */ }
+            }
+          }
+          agentDeployed = true;
+          updateItem('agent', { status: 'done', progress: endpointReady ? 'Ready' : 'Deploying in background' });
+        } else {
+          throw new Error(syncData.error || 'Agent not available');
+        }
+      } catch (e: any) {
+        console.error(`[RestoreWizard] Agent deploy failed:`, e?.message);
+        updateItem('agent', { status: 'error', errorMsg: e?.message || 'Failed' });
+      }
+    })();
+
+    // Wait for BOTH to complete
+    await Promise.all([kbPromise, agentPromise]);
+
+    // 3. Restore metadata via single server-side coordinator
     // This batches medications, summary, chats, and instructions into one call
     const hasMetadata = state?.currentMedications || state?.patientSummary || state?.savedChats?.chats?.length || state?.agentInstructions;
     if (hasMetadata) {
-      console.log(`[RestoreWizard] Step 4: Restore metadata via /api/restore. meds=${!!state?.currentMedications}, summary=${!!state?.patientSummary}, chats=${state?.savedChats?.chats?.length || 0}, instructions=${!!state?.agentInstructions}`);
-      // Mark all metadata items as running
+      console.log(`[RestoreWizard] Step 3: Restore metadata via /api/restore. meds=${!!state?.currentMedications}, summary=${!!state?.patientSummary}, chats=${state?.savedChats?.chats?.length || 0}, instructions=${!!state?.agentInstructions}`);
       for (const key of ['medications', 'summary', 'chats', 'instructions']) {
         const item = restoreItems.value.find(i => i.key === key && i.needed);
         if (item) updateItem(key, { status: 'running' });
@@ -392,12 +433,11 @@ const executeRestore = async () => {
         const r = restoreData.results || {};
         console.log(`[RestoreWizard] /api/restore response:`, JSON.stringify(r));
 
-        // Update individual item statuses based on results
         if (restoreItems.value.find(i => i.key === 'medications' && i.needed)) {
-          updateItem('medications', r.medications ? { status: 'done', progress: 'Saved' } : { status: 'error', errorMsg: 'Not saved' });
+          updateItem('medications', r.medications ? { status: 'done', progress: 'Restored' } : { status: 'error', errorMsg: 'Not saved' });
         }
         if (restoreItems.value.find(i => i.key === 'summary' && i.needed)) {
-          updateItem('summary', r.summary ? { status: 'done', progress: 'Saved' } : { status: 'error', errorMsg: 'Not saved' });
+          updateItem('summary', r.summary ? { status: 'done', progress: 'Restored' } : { status: 'error', errorMsg: 'Not saved' });
         }
         if (restoreItems.value.find(i => i.key === 'chats' && i.needed)) {
           updateItem('chats', { status: 'done', progress: r.chats > 0 ? `${r.chats} restored` : 'None' });
@@ -406,7 +446,7 @@ const executeRestore = async () => {
           if (!agentDeployed) {
             updateItem('instructions', { status: 'error', errorMsg: 'Agent not deployed' });
           } else {
-            updateItem('instructions', r.instructions ? { status: 'done', progress: 'Saved' } : { status: 'error', errorMsg: 'Not saved' });
+            updateItem('instructions', r.instructions ? { status: 'done', progress: 'Applied' } : { status: 'error', errorMsg: 'Not saved' });
           }
         }
       } catch (e: any) {
