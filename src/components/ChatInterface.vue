@@ -817,6 +817,7 @@ interface Props {
   } | null;
   rehydrationFiles?: any[] | null;
   rehydrationActive?: boolean;
+  restoreActive?: boolean;
   suppressWizard?: boolean;
   folderAccessTier?: 'chrome' | 'safari' | 'basic';
   passkeyWithoutFolder?: boolean;
@@ -1639,7 +1640,7 @@ const loadProviders = async () => {
         selectedProvider.value = providerLabels.digitalocean;
         showPrivateUnavailableDialog.value = false; // clear in case it was shown before refetch
       } else {
-        if (initialLoadComplete.value && !showAgentSetupDialog.value) {
+        if (initialLoadComplete.value && !showAgentSetupDialog.value && !props.restoreActive) {
           showPrivateUnavailableDialog.value = true;
         }
         selectFirstNonPrivateProvider();
@@ -1657,7 +1658,7 @@ const loadProviders = async () => {
       selectedProvider.value = providerLabels.digitalocean;
       showPrivateUnavailableDialog.value = false;
     } else {
-      if (initialLoadComplete.value && !showAgentSetupDialog.value) {
+      if (initialLoadComplete.value && !showAgentSetupDialog.value && !props.restoreActive) {
         showPrivateUnavailableDialog.value = true;
       }
       selectFirstNonPrivateProvider();
@@ -1690,7 +1691,7 @@ watch(
       return;
     }
     if (getProviderKey(selectedProvider.value) === 'digitalocean') {
-      if (initialLoadComplete.value && !showAgentSetupDialog.value) {
+      if (initialLoadComplete.value && !showAgentSetupDialog.value && !props.restoreActive) {
         showPrivateUnavailableDialog.value = true;
       }
       selectFirstNonPrivateProvider();

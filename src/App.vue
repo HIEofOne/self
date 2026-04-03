@@ -172,6 +172,7 @@
             :restore-chat-state="restoredChatState"
             :rehydration-files="rehydrationFiles"
             :rehydration-active="rehydrationActive"
+            :restore-active="showRestoreWizard"
             :suppress-wizard="suppressWizard"
             :folder-access-tier="folderAccessTier"
             :passkey-without-folder="passkeyWithoutFolder"

@@ -8611,19 +8611,16 @@ app.post('/api/restore', async (req, res) => {
       }
     }
 
-    // 5. Save chats
+    // 5. Save chats — preserve original _id so /api/user-chats filter works
+    // (filter expects _id starting with "${userId}-")
     if (savedChats?.chats?.length > 0) {
       for (const chat of savedChats.chats) {
         try {
-          // Use the same format as save-group-chat
+          // Strip _rev so CouchDB treats it as a new doc
+          const { _rev, ...chatFields } = chat;
           const chatDoc = {
-            _id: `chat:${userId}:${chat._id || chat.chatId || Date.now()}`,
-            type: 'chat',
-            userId,
-            messages: chat.messages || [],
-            title: chat.title || 'Restored chat',
-            providerKey: chat.providerKey || 'Private AI',
-            createdAt: chat.createdAt || new Date().toISOString(),
+            ...chatFields,
+            _id: chat._id || `${userId}-chat_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
             updatedAt: new Date().toISOString()
           };
           await cloudant.saveDocument('maia_chats', chatDoc);

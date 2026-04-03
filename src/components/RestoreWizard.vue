@@ -6,7 +6,7 @@
           {{ phase === 'complete' ? 'Restore Complete' : 'Restoring Your MAIA' }}
         </div>
         <div v-if="phase !== 'complete'" class="text-caption text-grey-7 q-mt-xs">
-          Rebuilding cloud account for <strong>{{ userId }}</strong> from local backup
+          Rebuilding cloud account for <strong>{{ userId }}</strong> from local backup. This can take 5 to 60 minutes.
         </div>
       </q-card-section>
 
