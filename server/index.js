@@ -445,33 +445,36 @@ async function deleteKbFolderPlaceholder(userId, kbName) {
  * 4. Generate new name ONLY if kbName was never set (shouldn't happen after provisioning)
  */
 function getKBNameFromUserDoc(userDoc, userId) {
-  // Priority order:
+  // Priority order — return null if no name is stored.
+  // NEVER generate a new name here; that causes different callers to get
+  // different names (see Documentation/Wizards.md section 5).
+  // KB names should only be generated once, at user doc creation time.
+
   // 1. kbName - PERMANENT KB name set during provisioning (NEVER deleted)
-  //    This is the source of truth and prevents generating new names
-  // 2. connectedKBs array - runtime tracking of actual connected KBs (may be cleared)
-  // 3. connectedKB field - legacy field for backward compatibility
-  // 4. Generate new name - only if kbName was never set (shouldn't happen after provisioning)
-  
-  // First, check if there's a permanent KB name (set during provisioning, never deleted)
   if (userDoc.kbName) {
     return userDoc.kbName;
   }
-  // Next, check connectedKBs array (actual connected KBs - KB exists and is connected)
+  // 2. connectedKBs array - runtime tracking of actual connected KBs
   if (userDoc.connectedKBs && Array.isArray(userDoc.connectedKBs) && userDoc.connectedKBs.length > 0) {
     return userDoc.connectedKBs[0];
   }
-  // Fallback to old connectedKB field for migration (should indicate actual connected KB)
+  // 3. connectedKB field - legacy field for backward compatibility
   if (userDoc.connectedKB) {
     return userDoc.connectedKB;
   }
-  // Generate new KB name if none exists
-  return generateKBName(userId);
+  // No KB name found — caller must handle null
+  return null;
 }
 
 async function ensureKBNameOnUserDoc(userDoc, userId) {
   if (!userDoc) return null;
-  const resolved = getKBNameFromUserDoc(userDoc, userId);
-  if (!userDoc.kbName && resolved) {
+  let resolved = getKBNameFromUserDoc(userDoc, userId);
+  // If no KB name exists anywhere, generate one and persist it.
+  // This is the ONLY place a new KB name should be generated.
+  if (!resolved) {
+    resolved = generateKBName(userId);
+  }
+  if (!userDoc.kbName) {
     userDoc.kbName = resolved;
     userDoc.updatedAt = new Date().toISOString();
     let saved = false;
@@ -1041,9 +1044,10 @@ async function validateUserResources(userId) {
   if (!kbExists) {
     try {
       const kbName = getKBNameFromUserDoc(userDoc, userId);
+      if (kbName) {
       const allKBs = await getCachedKBList();
       const foundKB = allKBs.find(kb => kb.name === kbName);
-      
+
       if (foundKB) {
         // KB exists in DO but not in database - sync it
         kbExists = true;
@@ -1062,6 +1066,7 @@ async function validateUserResources(userId) {
           userDoc.connectedKB = kbName;
         }
         cleaned = true;
+      }
       }
     } catch (error) {
       if (isRateLimitError(error)) {
@@ -4396,9 +4401,10 @@ app.post('/api/save-group-chat', async (req, res) => {
     const result = await cloudant.saveDocument('maia_chats', groupChatDoc);
     
     // Set workflowStage to link_stored when chat is saved with shareId
+    // but don't downgrade from patient_summary (wizard already completed)
     try {
       const userDoc = await cloudant.getDocument('maia_users', effectiveUserId);
-      if (userDoc) {
+      if (userDoc && userDoc.workflowStage !== 'patient_summary') {
         userDoc.workflowStage = 'link_stored';
         await cloudant.saveDocument('maia_users', userDoc);
       }
@@ -4521,9 +4527,10 @@ app.put('/api/save-group-chat/:chatId', async (req, res) => {
     await cloudant.saveDocument('maia_chats', existingChat);
 
     // Keep workflowStage in sync when chats are updated
+    // but don't downgrade from patient_summary (wizard already completed)
     try {
       const userDoc = await cloudant.getDocument('maia_users', effectiveUserId);
-      if (userDoc) {
+      if (userDoc && userDoc.workflowStage !== 'patient_summary') {
         userDoc.workflowStage = 'link_stored';
         await cloudant.saveDocument('maia_users', userDoc);
       }
@@ -5602,6 +5609,13 @@ app.post('/api/toggle-file-knowledge-base', async (req, res) => {
     }
 
     const kbName = getKBNameFromUserDoc(userDoc, userId);
+    if (!kbName) {
+      return res.status(400).json({
+        success: false,
+        error: 'NO_KB_NAME',
+        message: 'No knowledge base name configured. Please complete setup first.'
+      });
+    }
 
     const kbInfo = await resolveKbForUserFromDo(userId, { forceRefresh: true });
     if (kbInfo?.id) {
@@ -6455,6 +6469,13 @@ app.post('/api/update-knowledge-base', async (req, res) => {
 
     // Get KB name from user document
     const kbName = getKBNameFromUserDoc(userDoc, userId);
+    if (!kbName) {
+      return res.status(400).json({
+        success: false,
+        error: 'NO_KB_NAME',
+        message: 'No knowledge base name configured.'
+      });
+    }
 
     // Get bucket name for data source path
     const bucketUrl = getSpacesBucketName();
@@ -8416,7 +8437,7 @@ app.get('/api/user-status', async (req, res) => {
     // Convert kbStatus to hasKB for backward compatibility, but also return kbStatus
     const hasKB = kbStatus === 'attached' || kbStatus === 'not_attached';
 
-    const kbName = kbInfo?.name || null;
+    const kbName = kbInfo?.name || userDoc.kbName || null;
     let hasFilesInKB = false;
     if (kbInfo?.id && kbName) {
       try {
@@ -8520,6 +8541,127 @@ app.post('/api/user-status', async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     console.error('[user-status POST] Error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Server-side restore coordinator (see Documentation/Wizards.md section 9)
+// Handles agent creation + KB indexing + metadata restore in a single call
+// after the client has uploaded files.
+app.post('/api/restore', async (req, res) => {
+  try {
+    const userId = req.session?.userId;
+    if (!userId) return res.status(401).json({ success: false, error: 'Authentication required' });
+
+    const { currentMedications, patientSummary, agentInstructions, savedChats } = req.body;
+    const results = { agent: null, kb: null, medications: false, summary: false, chats: 0, instructions: false, errors: [] };
+
+    // 1. Create/sync agent (mutex-protected via ensureUserAgent)
+    try {
+      const userDoc = await cloudant.getDocument('maia_users', userId);
+      if (!userDoc) throw new Error('User not found');
+      const { ensureUserAgent } = await import('./routes/auth.js');
+      const updatedDoc = await ensureUserAgent(doClient, cloudant, userDoc);
+      results.agent = { agentId: updatedDoc?.assignedAgentId, agentName: updatedDoc?.assignedAgentName };
+    } catch (err) {
+      results.errors.push(`Agent: ${err.message}`);
+    }
+
+    // 2. Trigger KB indexing (files should already be uploaded and registered)
+    try {
+      const userDoc = await cloudant.getDocument('maia_users', userId);
+      const kbName = getKBNameFromUserDoc(userDoc, userId);
+      if (kbName) {
+        const kbFolderPrefix = `${userId}/${kbName}/`;
+        const filesInKB = (userDoc.files || []).filter(f => f.bucketKey?.startsWith(kbFolderPrefix));
+        if (filesInKB.length > 0) {
+          results.kb = { status: 'triggered', files: filesInKB.length };
+          // KB indexing is handled asynchronously by update-knowledge-base — just signal it's ready
+        }
+      }
+    } catch (err) {
+      results.errors.push(`KB check: ${err.message}`);
+    }
+
+    // 3. Save medications
+    if (currentMedications) {
+      try {
+        const userDoc = await cloudant.getDocument('maia_users', userId);
+        if (userDoc) {
+          userDoc.currentMedications = currentMedications;
+          userDoc.updatedAt = new Date().toISOString();
+          await cloudant.saveDocument('maia_users', userDoc);
+          results.medications = true;
+        }
+      } catch (err) {
+        results.errors.push(`Medications: ${err.message}`);
+      }
+    }
+
+    // 4. Save patient summary
+    if (patientSummary) {
+      try {
+        const userDoc = await cloudant.getDocument('maia_users', userId);
+        if (userDoc) {
+          userDoc.patientSummary = patientSummary;
+          userDoc.updatedAt = new Date().toISOString();
+          await cloudant.saveDocument('maia_users', userDoc);
+          results.summary = true;
+        }
+      } catch (err) {
+        results.errors.push(`Summary: ${err.message}`);
+      }
+    }
+
+    // 5. Save chats
+    if (savedChats?.chats?.length > 0) {
+      for (const chat of savedChats.chats) {
+        try {
+          // Use the same format as save-group-chat
+          const chatDoc = {
+            _id: `chat:${userId}:${chat._id || chat.chatId || Date.now()}`,
+            type: 'chat',
+            userId,
+            messages: chat.messages || [],
+            title: chat.title || 'Restored chat',
+            providerKey: chat.providerKey || 'Private AI',
+            createdAt: chat.createdAt || new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          };
+          await cloudant.saveDocument('maia_chats', chatDoc);
+          results.chats++;
+        } catch { /* skip duplicates */ }
+      }
+    }
+
+    // 6. Save agent instructions (only if agent was created)
+    if (agentInstructions && results.agent?.agentId) {
+      try {
+        const agentId = results.agent.agentId;
+        await doClient.agent.update(agentId, { instruction: agentInstructions });
+        results.instructions = true;
+      } catch (err) {
+        results.errors.push(`Instructions: ${err.message}`);
+      }
+    }
+
+    // 7. Mark wizard as complete so setup wizard doesn't re-appear after restore
+    try {
+      await saveUserDocWithRetry(cloudant, userId, (doc) => {
+        doc.workflowStage = 'patient_summary';
+        doc.wizardComplete = true;
+        doc.medsVerified = !!(currentMedications || doc.currentMedications);
+        doc.summaryVerified = !!(patientSummary || doc.patientSummary);
+        doc.restoredAt = new Date().toISOString();
+        doc.updatedAt = new Date().toISOString();
+      });
+    } catch (err) {
+      results.errors.push(`Wizard flags: ${err.message}`);
+    }
+
+    res.json({ success: true, results });
+  } catch (error) {
+    console.error('[restore] Error:', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });

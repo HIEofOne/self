@@ -2478,6 +2478,11 @@ const parseUserAgent = (): string => {
 };
 
 const addSetupLogLine = (step: string, detail: string, ok: boolean) => {
+  // Deduplicate: skip if the most recent entry in the current session has the same step + detail
+  const lastSessionIdx = setupLogLines.value.map(l => l.step).lastIndexOf('Session Start');
+  const sessionLines = lastSessionIdx >= 0 ? setupLogLines.value.slice(lastSessionIdx) : setupLogLines.value;
+  const last = sessionLines[sessionLines.length - 1];
+  if (last && last.step === step && last.detail === detail) return;
   setupLogLines.value.push({
     time: new Date().toISOString(),
     step,
@@ -2896,8 +2901,11 @@ const generateSetupLogPdf = async () => {
   doc.text('Summary', margin, y);
   y += 6;
   doc.setFontSize(9);
-  const totalFiles = setupLogLines.value.filter(l => l.step === 'File Uploaded').length;
-  const failedUploads = setupLogLines.value.filter(l => l.step === 'Upload Failed' || l.step === 'Upload Error').length;
+  // Count files only from the LAST session (after the last "Session Start" marker)
+  const lastSessionIdx = setupLogLines.value.map(l => l.step).lastIndexOf('Session Start');
+  const currentSessionLines = lastSessionIdx >= 0 ? setupLogLines.value.slice(lastSessionIdx) : setupLogLines.value;
+  const totalFiles = currentSessionLines.filter(l => l.step === 'File Uploaded').length;
+  const failedUploads = currentSessionLines.filter(l => l.step === 'Upload Failed' || l.step === 'Upload Error').length;
   const hasIndexing = setupLogLines.value.some(l => l.step === 'Indexing Complete');
   const indexTokens = indexingStatus.value?.tokens || '0';
   const hasMeds = wizardCurrentMedications.value;

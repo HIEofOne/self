@@ -23,6 +23,7 @@
             <q-item-section>
               <q-item-label :class="{ 'text-grey-5': item.status === 'pending' }">
                 {{ item.label }}
+                <q-chip v-if="item.isAppleHealth" color="blue-6" text-color="white" size="sm" dense class="q-ml-xs">Apple Health</q-chip>
                 <span v-if="item.status === 'running' && item.progress" class="text-primary text-caption q-ml-sm">{{ item.progress }}</span>
                 <span v-if="item.status === 'done' && item.progress" class="text-green text-caption q-ml-sm">{{ item.progress }}</span>
               </q-item-label>
@@ -60,6 +61,7 @@ interface RestoreItem {
   status: 'pending' | 'running' | 'done' | 'error' | 'skipped';
   progress?: string;
   errorMsg?: string;
+  isAppleHealth?: boolean;
 }
 
 interface CloudHealth {
@@ -76,6 +78,7 @@ const props = defineProps<{
   localState: MaiaState | null;
   localFolderHandle: FileSystemDirectoryHandle | null;
   safariFolderFiles?: File[] | null;
+  kbName?: string | null;
 }>();
 
 defineEmits<{
@@ -94,8 +97,11 @@ const updateItem = (key: string, updates: Partial<RestoreItem>) => {
   }
 };
 
-/** Get the KB name for this user, creating one if needed */
+/** Get the KB name for this user — prefer the prop passed from recreate response */
 const resolveKbName = async (uid: string): Promise<string | null> => {
+  // 1. Use the kbName prop (set at user doc creation time, always correct)
+  if (props.kbName) return props.kbName;
+  // 2. Fall back to user-status (which now also falls back to userDoc.kbName)
   try {
     const resp = await fetch(`/api/user-status?userId=${encodeURIComponent(uid)}`, { credentials: 'include' });
     if (resp.ok) {
@@ -103,7 +109,8 @@ const resolveKbName = async (uid: string): Promise<string | null> => {
       if (data.kbName) return data.kbName;
     }
   } catch { /* fall through */ }
-  // Default KB name pattern
+  // 3. Last resort — should not happen if recreate worked correctly
+  console.warn(`[RestoreWizard] Could not resolve kbName for ${uid}, using fallback`);
   return `${uid}-kb`;
 };
 
@@ -114,28 +121,36 @@ const buildRestoreItems = () => {
 
   // Individual file lines
   for (const f of files) {
+    // Detect Apple Health files by filename pattern (same as used elsewhere in the app)
+    const isAppleHealth = /^apple/i.test(f.fileName) && /\.pdf$/i.test(f.fileName);
     items.push({
       key: `file:${f.fileName}`,
       label: f.fileName,
       needed: true,
-      status: 'pending'
+      status: 'pending',
+      isAppleHealth
     });
   }
 
-  // Agent deployment
-  items.push({ key: 'agent', label: 'Deploy AI Agent', needed: true, status: 'pending' });
-
-  // Knowledge Base indexing
+  // Knowledge Base indexing (starts as soon as files are in Spaces, does NOT need agent)
   if (files.length > 0) {
     items.push({ key: 'kb', label: 'Index Knowledge Base', needed: true, status: 'pending' });
   }
 
-  // Current Medications (from local state)
+  // Agent deployment (runs in parallel with KB indexing)
+  items.push({ key: 'agent', label: 'Deploy AI Agent', needed: true, status: 'pending' });
+
+  // Agent Instructions (needs agent deployed)
+  if (state?.agentInstructions) {
+    items.push({ key: 'instructions', label: 'Restore Agent Instructions', needed: true, status: 'pending' });
+  }
+
+  // Current Medications (from local backup)
   if (state?.currentMedications) {
     items.push({ key: 'medications', label: 'Restore Current Medications', needed: true, status: 'pending' });
   }
 
-  // Patient Summary (from local state)
+  // Patient Summary (from local backup)
   if (state?.patientSummary) {
     items.push({ key: 'summary', label: 'Restore Patient Summary', needed: true, status: 'pending' });
   }
@@ -144,11 +159,6 @@ const buildRestoreItems = () => {
   const chatCount = Array.isArray(state?.savedChats?.chats) ? state.savedChats.chats.length : 0;
   if (chatCount > 0) {
     items.push({ key: 'chats', label: `Restore ${chatCount} saved chat${chatCount === 1 ? '' : 's'}`, needed: true, status: 'pending' });
-  }
-
-  // Agent Instructions
-  if (state?.agentInstructions) {
-    items.push({ key: 'instructions', label: 'Restore Agent Instructions', needed: true, status: 'pending' });
   }
 
   restoreItems.value = items;
@@ -252,36 +262,18 @@ const executeRestore = async () => {
       }
     }
 
-    // 2. Deploy Agent (create if needed)
-    console.log(`[RestoreWizard] Step 2: Deploy agent for ${uid}`);
-    let agentDeployed = false;
-    updateItem('agent', { status: 'running' });
-    try {
-      const syncResp = await fetch('/api/sync-agent', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ userId: uid, create: true })
-      });
-      const syncData = await syncResp.json();
-      console.log(`[RestoreWizard] /api/sync-agent response: status=${syncResp.status}`, JSON.stringify(syncData));
-      if (!syncResp.ok) throw new Error(syncData.error || 'Agent deployment failed');
-      if (syncData.success || syncData.agentId) {
-        agentDeployed = true;
-        updateItem('agent', { status: 'done', progress: syncData.created ? 'Created' : 'Synced' });
-        console.log(`[RestoreWizard] Agent deployed: agentId=${syncData.agentId}, created=${syncData.created}`);
-      } else {
-        throw new Error(syncData.error || 'Agent not available');
-      }
-    } catch (e: any) {
-      console.error(`[RestoreWizard] Agent deploy failed:`, e?.message);
-      updateItem('agent', { status: 'error', errorMsg: e?.message || 'Failed' });
-    }
+    // 2. Start KB indexing AND agent deployment IN PARALLEL
+    // KB indexing only needs files in Spaces — it does NOT need the agent.
+    // Agent deployment takes ~60-90s. KB creation + indexing is independent.
+    console.log(`[RestoreWizard] Step 2: Start KB indexing and agent deployment in parallel`);
 
-    // 3. Index Knowledge Base (files are already in KB folder)
-    console.log(`[RestoreWizard] Step 3: Index KB. filesUploaded=${filesUploaded}`);
+    // --- KB indexing promise (runs independently) ---
     const kbItem = restoreItems.value.find(i => i.key === 'kb' && i.needed);
-    if (kbItem && filesUploaded > 0) {
+    const kbPromise = (async () => {
+      if (!kbItem || filesUploaded === 0) {
+        if (kbItem) updateItem('kb', { status: 'error', errorMsg: 'No files uploaded' });
+        return;
+      }
       updateItem('kb', { status: 'running', progress: 'Creating...' });
       try {
         console.log(`[RestoreWizard] Calling /api/update-knowledge-base for ${uid}`);
@@ -297,28 +289,39 @@ const executeRestore = async () => {
           throw new Error(errData.message || `KB update failed: ${indexResp.status}`);
         }
         const indexData = await indexResp.json();
-        const jobId = indexData.jobId;
+        const kbId = indexData.kbId;
+        const jobId = indexData.jobId || kbId; // Prefer jobId for status polling
+        const filesCount = indexData.filesIndexed || indexData.filesCount || 0;
+        const tokens = indexData.totalTokens || indexData.tokenCount || 0;
 
-        if (jobId) {
+        if (kbId) {
           updateItem('kb', { progress: 'Indexing...' });
           let done = false;
           let attempts = 0;
           while (!done && attempts < 120) {
             await new Promise(r => setTimeout(r, 3000));
             try {
-              const statusResp = await fetch(`/api/kb-indexing-status/${jobId}`, { credentials: 'include' });
+              const statusResp = await fetch(`/api/kb-indexing-status/${jobId}?userId=${encodeURIComponent(uid)}`, { credentials: 'include' });
               if (statusResp.ok) {
                 const statusData = await statusResp.json();
-                if (statusData.status === 'completed' || statusData.completed) {
+                if (statusData.completed || statusData.backendCompleted) {
                   done = true;
-                  const tokens = statusData.tokenCount || statusData.total_tokens || 0;
-                  updateItem('kb', { status: 'done', progress: tokens ? `${tokens.toLocaleString()} tokens indexed` : 'Indexed' });
-                } else if (statusData.status === 'failed') {
+                  const t = statusData.tokens || statusData.tokenCount || statusData.total_tokens || tokens || 0;
+                  const f = statusData.filesIndexed || filesCount || 0;
+                  const parts = [];
+                  if (f) parts.push(`${f} file${f === 1 ? '' : 's'}`);
+                  if (t) parts.push(`${Number(t).toLocaleString()} tokens`);
+                  updateItem('kb', { status: 'done', progress: parts.join(', ') || 'Indexed' });
+                } else if (statusData.status === 'INDEX_JOB_STATUS_FAILED') {
                   throw new Error(statusData.error || 'Indexing failed');
                 } else {
-                  const tokens = statusData.tokenCount || statusData.total_tokens || 0;
-                  const tokenStr = tokens > 0 ? ` — ${tokens.toLocaleString()} tokens` : '';
-                  updateItem('kb', { progress: `Indexing...${tokenStr} (${Math.round((attempts * 3) / 60)}m)` });
+                  const t = statusData.tokens || statusData.tokenCount || 0;
+                  const tokenStr = Number(t) > 0 ? ` — ${Number(t).toLocaleString()} tokens` : '';
+                  const elapsedSec = attempts * 3;
+                  const mins = Math.floor(elapsedSec / 60);
+                  const secs = elapsedSec % 60;
+                  const timeStr = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+                  updateItem('kb', { progress: `Indexing...${tokenStr} (${timeStr})` });
                 }
               }
             } catch (pollErr: any) {
@@ -330,104 +333,127 @@ const executeRestore = async () => {
             updateItem('kb', { status: 'done', progress: 'Indexing continues in background' });
           }
         } else {
-          updateItem('kb', { status: 'done', progress: 'Created' });
+          // No kbId returned — check if indexing succeeded via token count
+          if (tokens > 0) {
+            updateItem('kb', { status: 'done', progress: `${filesCount} file${filesCount === 1 ? '' : 's'}, ${Number(tokens).toLocaleString()} tokens` });
+          } else {
+            updateItem('kb', { status: 'done', progress: 'Created' });
+          }
         }
       } catch (e: any) {
         updateItem('kb', { status: 'error', errorMsg: e?.message || 'Failed' });
       }
-    } else if (kbItem) {
-      updateItem('kb', { status: 'error', errorMsg: 'No files uploaded' });
-    }
+    })();
 
-    // 4. Restore Current Medications
-    console.log(`[RestoreWizard] Step 4: Restore medications. has=${!!state?.currentMedications}`);
-    const medsItem = restoreItems.value.find(i => i.key === 'medications' && i.needed);
-    if (medsItem && state?.currentMedications) {
-      updateItem('medications', { status: 'running' });
+    // --- Agent deployment promise (runs independently) ---
+    let agentDeployed = false;
+    const agentPromise = (async () => {
+      updateItem('agent', { status: 'running' });
       try {
-        const resp = await fetch('/api/user-current-medications', {
+        const syncResp = await fetch('/api/sync-agent', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
-          body: JSON.stringify({ userId: uid, currentMedications: state.currentMedications })
+          body: JSON.stringify({ userId: uid, create: true })
         });
-        if (!resp.ok) throw new Error(`Save failed: ${resp.status}`);
-        updateItem('medications', { status: 'done', progress: 'Saved' });
-      } catch (e: any) {
-        updateItem('medications', { status: 'error', errorMsg: e?.message || 'Failed' });
-      }
-    }
-
-    // 5. Restore Patient Summary
-    console.log(`[RestoreWizard] Step 5: Restore summary. has=${!!state?.patientSummary}`);
-    const summaryItem = restoreItems.value.find(i => i.key === 'summary' && i.needed);
-    if (summaryItem && state?.patientSummary) {
-      updateItem('summary', { status: 'running' });
-      try {
-        const resp = await fetch('/api/patient-summary', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify({ userId: uid, summary: state.patientSummary })
-        });
-        if (!resp.ok) throw new Error(`Save failed: ${resp.status}`);
-        updateItem('summary', { status: 'done', progress: 'Saved' });
-      } catch (e: any) {
-        updateItem('summary', { status: 'error', errorMsg: e?.message || 'Failed' });
-      }
-    }
-
-    // 6. Restore Saved Chats
-    console.log(`[RestoreWizard] Step 6: Restore chats. count=${state?.savedChats?.chats?.length || 0}`);
-    const chatsItem = restoreItems.value.find(i => i.key === 'chats' && i.needed);
-    if (chatsItem && state?.savedChats?.chats) {
-      updateItem('chats', { status: 'running' });
-      try {
-        const chats = state.savedChats.chats;
-        let restored = 0;
-        for (const chat of chats) {
-          try {
-            await fetch('/api/save-group-chat', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              credentials: 'include',
-              body: JSON.stringify({
-                userId: uid,
-                chatId: chat._id || chat.chatId,
-                messages: chat.messages || [],
-                title: chat.title || 'Restored chat',
-                providerKey: chat.providerKey || 'Private AI'
-              })
-            });
-            restored++;
-          } catch { /* continue */ }
+        const syncData = await syncResp.json();
+        console.log(`[RestoreWizard] /api/sync-agent response: status=${syncResp.status}`, JSON.stringify(syncData));
+        if (!syncResp.ok) throw new Error(syncData.error || 'Agent deployment failed');
+        if (syncData.success || syncData.agentId) {
+          const agentId = syncData.agentId || syncData.agent?.id;
+          console.log(`[RestoreWizard] Agent created: agentId=${agentId}, created=${syncData.created}`);
+          // Poll for agent endpoint to become ready (deployment takes ~30-90s)
+          updateItem('agent', { progress: 'Deploying... (0s)' });
+          let endpointReady = !!syncData.agentEndpoint;
+          let elapsedSeconds = 0;
+          let lastStatus = 'Deploying';
+          const maxSeconds = 200;
+          const pollIntervalSec = 5;
+          while (!endpointReady && elapsedSeconds < maxSeconds) {
+            await new Promise(r => setTimeout(r, 1000));
+            elapsedSeconds++;
+            updateItem('agent', { progress: `${lastStatus}... (${elapsedSeconds}s)` });
+            if (elapsedSeconds % pollIntervalSec === 0) {
+              try {
+                const statusResp = await fetch('/api/agent-setup-status', { credentials: 'include' });
+                if (statusResp.ok) {
+                  const statusData = await statusResp.json();
+                  if (statusData.endpointReady) {
+                    endpointReady = true;
+                  } else if (statusData.status) {
+                    lastStatus = statusData.status;
+                  }
+                }
+              } catch { /* continue polling */ }
+            }
+          }
+          agentDeployed = true;
+          updateItem('agent', { status: 'done', progress: endpointReady ? 'Ready' : 'Deploying in background' });
+        } else {
+          throw new Error(syncData.error || 'Agent not available');
         }
-        updateItem('chats', { status: 'done', progress: `${restored} restored` });
       } catch (e: any) {
-        updateItem('chats', { status: 'error', errorMsg: e?.message || 'Failed' });
+        console.error(`[RestoreWizard] Agent deploy failed:`, e?.message);
+        updateItem('agent', { status: 'error', errorMsg: e?.message || 'Failed' });
       }
-    }
+    })();
 
-    // 7. Restore Agent Instructions (only if agent was deployed)
-    console.log(`[RestoreWizard] Step 7: Restore instructions. has=${!!state?.agentInstructions}, agentDeployed=${agentDeployed}`);
-    const instrItem = restoreItems.value.find(i => i.key === 'instructions' && i.needed);
-    if (instrItem && state?.agentInstructions) {
-      if (!agentDeployed) {
-        console.warn(`[RestoreWizard] Skipping instructions — agent not deployed`);
-        updateItem('instructions', { status: 'error', errorMsg: 'Agent not deployed' });
-      } else {
-        updateItem('instructions', { status: 'running' });
-        try {
-          const resp = await fetch('/api/agent-instructions', {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'include',
-            body: JSON.stringify({ userId: uid, instructions: state.agentInstructions })
-          });
-          if (!resp.ok) throw new Error(`Save failed: ${resp.status}`);
-          updateItem('instructions', { status: 'done', progress: 'Saved' });
-        } catch (e: any) {
-          updateItem('instructions', { status: 'error', errorMsg: e?.message || 'Failed' });
+    // Wait for BOTH to complete
+    await Promise.all([kbPromise, agentPromise]);
+
+    // 3. Restore metadata via single server-side coordinator
+    // This batches medications, summary, chats, and instructions into one call
+    const hasMetadata = state?.currentMedications || state?.patientSummary || state?.savedChats?.chats?.length || state?.agentInstructions;
+    if (hasMetadata) {
+      console.log(`[RestoreWizard] Step 3: Restore metadata via /api/restore. meds=${!!state?.currentMedications}, summary=${!!state?.patientSummary}, chats=${state?.savedChats?.chats?.length || 0}, instructions=${!!state?.agentInstructions}`);
+      for (const key of ['medications', 'summary', 'chats', 'instructions']) {
+        const item = restoreItems.value.find(i => i.key === key && i.needed);
+        if (item) updateItem(key, { status: 'running' });
+      }
+
+      try {
+        const restoreResp = await fetch('/api/restore', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({
+            currentMedications: state?.currentMedications || null,
+            patientSummary: state?.patientSummary || null,
+            savedChats: state?.savedChats || null,
+            agentInstructions: agentDeployed ? (state?.agentInstructions || null) : null
+          })
+        });
+
+        if (!restoreResp.ok) {
+          const errData = await restoreResp.json().catch(() => ({}));
+          throw new Error(errData.error || `Restore failed: ${restoreResp.status}`);
+        }
+
+        const restoreData = await restoreResp.json();
+        const r = restoreData.results || {};
+        console.log(`[RestoreWizard] /api/restore response:`, JSON.stringify(r));
+
+        if (restoreItems.value.find(i => i.key === 'medications' && i.needed)) {
+          updateItem('medications', r.medications ? { status: 'done', progress: 'Restored' } : { status: 'error', errorMsg: 'Not saved' });
+        }
+        if (restoreItems.value.find(i => i.key === 'summary' && i.needed)) {
+          updateItem('summary', r.summary ? { status: 'done', progress: 'Restored' } : { status: 'error', errorMsg: 'Not saved' });
+        }
+        if (restoreItems.value.find(i => i.key === 'chats' && i.needed)) {
+          updateItem('chats', { status: 'done', progress: r.chats > 0 ? `${r.chats} restored` : 'None' });
+        }
+        if (restoreItems.value.find(i => i.key === 'instructions' && i.needed)) {
+          if (!agentDeployed) {
+            updateItem('instructions', { status: 'error', errorMsg: 'Agent not deployed' });
+          } else {
+            updateItem('instructions', r.instructions ? { status: 'done', progress: 'Applied' } : { status: 'error', errorMsg: 'Not saved' });
+          }
+        }
+      } catch (e: any) {
+        console.error(`[RestoreWizard] /api/restore failed:`, e?.message);
+        for (const key of ['medications', 'summary', 'chats', 'instructions']) {
+          const item = restoreItems.value.find(i => i.key === key && i.needed && i.status === 'running');
+          if (item) updateItem(key, { status: 'error', errorMsg: e?.message || 'Failed' });
         }
       }
     }

@@ -680,6 +680,7 @@
       :cloud-health="cloudHealthDetails"
       :local-state="restoreWizardLocalState"
       :local-folder-handle="localFolderHandle"
+      :kb-name="restoreWizardKbName"
       @restore-complete="handleRestoreWizardComplete"
     />
 
@@ -726,25 +727,24 @@
         </q-card-section>
         <q-card-section class="text-body2">
           <p>
-            This permanently deletes your cloud data for <strong>{{ user?.userId }}</strong>.
-            Signing out is reversible; destroying is not.
+            This deletes your cloud data for <strong>{{ user?.userId }}</strong>.
+            Deep links and passkey access will not work until you restore the account.
           </p>
-          <p class="q-mt-md">
-            Type <strong>{{ user?.userId }}</strong> to confirm:
+          <p class="q-mt-sm">
+            You will need to restore the cloud account from the local backup on the computer that created the account.
           </p>
-          <q-input
-            v-model="destroyConfirm"
-            dense
-            outlined
-            placeholder="Enter user ID"
-          />
         </q-card-section>
         <q-card-actions align="right">
+          <q-btn
+            flat
+            label="CANCEL"
+            color="primary"
+            v-close-popup
+          />
           <q-btn
             label="DESTROY"
             color="negative"
             :loading="destroyLoading"
-            :disable="destroyConfirm !== user?.userId"
             @click="destroyTemporaryAccount"
           />
         </q-card-actions>
@@ -836,7 +836,6 @@ const tempStartLoading = ref(false);
 const tempStartError = ref('');
 const showTempSignOutDialog = ref(false);
 const showDestroyDialog = ref(false);
-const destroyConfirm = ref('');
 const destroyLoading = ref(false);
 const passkeyPrefillUserId = ref<string | null>(null);
 const passkeyPrefillAction = ref<'signin' | 'register' | null>(null);
@@ -862,6 +861,7 @@ const cloudHealthLoading = ref(false);
 /** [Phase 7] Restore Wizard state */
 const showRestoreWizard = ref(false);
 const restoreWizardLocalState = ref<MaiaState | null>(null);
+const restoreWizardKbName = ref<string | null>(null);
 const showDestroyedRestoreDialog = ref(false);
 const destroyedUserId = ref<string | null>(null);
 const showDevicePrivacyDialog = ref(false);
@@ -1020,29 +1020,18 @@ const handleUserCardRestore = async (ku: KnownUser) => {
   tempStartLoading.value = true;
   tempStartError.value = '';
   // Clear stale wizard flags from previous session to prevent My Lists auto-reload loop
+  // and stale agent timer from persisting across restore attempts
   try {
     sessionStorage.removeItem('autoProcessInitialFile');
     sessionStorage.removeItem('wizardMyListsAuto');
+    sessionStorage.removeItem(`wizard_agent_setup_started_${ku.userId}`);
   } catch { /* ignore */ }
   try {
-    // Recreate the user doc with the ORIGINAL userId
-    console.log(`[RESTORE] Step 1: Recreating user doc via /api/account/recreate for ${ku.userId}`);
-    const recreateResp = await fetch('/api/account/recreate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({ userId: ku.userId, displayName: ku.displayName })
-    });
-    const recreateData = await recreateResp.json();
-    console.log(`[RESTORE] /api/account/recreate response: status=${recreateResp.status} recreated=${recreateData.recreated} authenticated=${recreateData.authenticated}`);
-    if (!recreateResp.ok || !recreateData.authenticated) {
-      throw new Error(recreateData.error || 'Failed to recreate account');
-    }
-    suppressWizard.value = true; // Prevent ChatInterface from polling agent-setup-status during restore
-    setAuthenticatedUser(recreateData.user, null);
-
-    // Read local state from folder
-    console.log(`[RESTORE] Step 2: Reading local state. localFolderHandle=${!!localFolderHandle.value}`);
+    // Step 1: Read local state FIRST — must happen while we're still in the user
+    // gesture context (clicking RESTORE). Chrome's File System Access API only
+    // allows requestPermission() during a user gesture, and awaiting a network
+    // fetch exhausts that gesture window.
+    console.log(`[RESTORE] Step 1: Reading local state. localFolderHandle=${!!localFolderHandle.value}`);
     let localState: MaiaState | null = null;
     if (localFolderHandle.value) {
       const { readStateFile } = await import('./utils/localFolder');
@@ -1052,7 +1041,7 @@ const handleUserCardRestore = async (ku: KnownUser) => {
     if (!localState && ku.userId) {
       try {
         console.log(`[RESTORE] No folder handle state, trying readStateFileByUserId for ${ku.userId}`);
-        // Pass requestWrite: true — we're inside a user gesture (RESTORE click)
+        // requestWrite: true — we're inside the user gesture (RESTORE click)
         const result = await readStateFileByUserId(ku.userId, { requestWrite: true });
         if (result) {
           localState = result.state;
@@ -1063,6 +1052,22 @@ const handleUserCardRestore = async (ku: KnownUser) => {
         }
       } catch (e) {
         console.log(`[RESTORE] readStateFileByUserId error:`, e);
+      }
+    }
+    // If still no state, try prompting the user to pick their folder
+    if (!localState && !localFolderHandle.value) {
+      try {
+        console.log(`[RESTORE] No handle available, prompting user to pick folder`);
+        const { pickLocalFolder, readStateFile: readState } = await import('./utils/localFolder');
+        const picked = await pickLocalFolder(ku.userId);
+        if (picked) {
+          localFolderHandle.value = picked.handle;
+          localFolderName.value = picked.folderName;
+          localState = await readState(picked.handle);
+          console.log(`[RESTORE] User picked folder: ${picked.folderName}, state: ${localState ? `files=${localState.files?.length || 0}` : 'null'}`);
+        }
+      } catch (e) {
+        console.log(`[RESTORE] Folder picker cancelled or failed:`, e);
       }
     }
 
@@ -1108,6 +1113,33 @@ const handleUserCardRestore = async (ku: KnownUser) => {
       }
     }
 
+    // Bail out early if there's nothing to restore
+    if (!localState) {
+      console.warn(`[RESTORE] No local state found — cannot proceed with restore`);
+      if ($q && typeof $q.notify === 'function') {
+        $q.notify({ type: 'warning', message: 'No local backup found. Please use GET STARTED to set up your account.', timeout: 5000 });
+      }
+      tempStartLoading.value = false;
+      return;
+    }
+
+    // Step 2: Recreate the user doc (now we know we have local state to restore)
+    console.log(`[RESTORE] Step 2: Recreating user doc via /api/account/recreate for ${ku.userId}`);
+    const recreateResp = await fetch('/api/account/recreate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ userId: ku.userId, displayName: ku.displayName })
+    });
+    const recreateData = await recreateResp.json();
+    console.log(`[RESTORE] /api/account/recreate response: status=${recreateResp.status} recreated=${recreateData.recreated} authenticated=${recreateData.authenticated} kbName=${recreateData.kbName}`);
+    if (!recreateResp.ok || !recreateData.authenticated) {
+      throw new Error(recreateData.error || 'Failed to recreate account');
+    }
+    suppressWizard.value = true; // Prevent ChatInterface from polling agent-setup-status during restore
+    restoreWizardKbName.value = recreateData.kbName || null;
+    setAuthenticatedUser(recreateData.user, null);
+
     // Cloud health check
     console.log(`[RESTORE] Step 3: Cloud health check for ${ku.userId}`);
     try {
@@ -1127,17 +1159,10 @@ const handleUserCardRestore = async (ku: KnownUser) => {
       console.log(`[RESTORE] Cloud health check failed, using defaults`);
     }
 
-    // Launch RestoreWizard
-    if (localState) {
-      console.log(`[RESTORE] Step 4: Launching RestoreWizard with localState: files=${localState.files?.length || 0}, meds=${!!localState.currentMedications}, summary=${!!localState.patientSummary}, chats=${localState.savedChats?.chats?.length || 0}, instructions=${!!localState.agentInstructions}`);
-      restoreWizardLocalState.value = localState;
-      showRestoreWizard.value = true;
-    } else {
-      console.warn(`[RESTORE] No local state found — cannot launch RestoreWizard`);
-      if ($q && typeof $q.notify === 'function') {
-        $q.notify({ type: 'warning', message: 'No local backup found. Please use GET STARTED to set up your account.', timeout: 5000 });
-      }
-    }
+    // Launch RestoreWizard (localState is guaranteed non-null at this point)
+    console.log(`[RESTORE] Step 4: Launching RestoreWizard with localState: files=${localState.files?.length || 0}, meds=${!!localState.currentMedications}, summary=${!!localState.patientSummary}, chats=${localState.savedChats?.chats?.length || 0}, instructions=${!!localState.agentInstructions}`);
+    restoreWizardLocalState.value = localState;
+    showRestoreWizard.value = true;
   } catch (error) {
     tempStartError.value = error instanceof Error ? error.message : 'Restore failed';
   } finally {
@@ -1837,7 +1862,7 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
           kbStats: indexedCount > 0
             ? { fileCount: indexedCount, tokenCount: files?.tokenCount || 0 }
             : existingState?.kbStats || { fileCount: 0, tokenCount: 0 },
-          wizardComplete: status?.workflowStage === 'patient_summary' || existingState?.wizardComplete || false
+          wizardComplete: status?.wizardComplete || status?.workflowStage === 'patient_summary' || existingState?.wizardComplete || false
         };
         await writeStateFile(localFolderHandle.value, state);
 
@@ -2500,6 +2525,17 @@ const handleRestoreWizardComplete = async () => {
       console.warn('[RESTORE] Local state snapshot failed:', e);
     }
   }
+  // Re-sync agent status so the app recognizes the deployed agent
+  if (user.value?.userId) {
+    try {
+      const statusResp = await fetch('/api/agent-setup-status', { credentials: 'include' });
+      if (statusResp.ok) {
+        const statusData = await statusResp.json();
+        console.log(`[RESTORE] Post-restore agent status: endpoint=${statusData.endpointReady}, status=${statusData.status}`);
+      }
+    } catch { /* non-critical */ }
+  }
+  suppressWizard.value = false; // Allow normal ChatInterface operation now
   if ($q && typeof $q.notify === 'function') {
     $q.notify({ type: 'positive', message: 'Account restored successfully!', timeout: 3000 });
   }
@@ -2523,6 +2559,7 @@ const handleDestroyedRestore = async () => {
       throw new Error(recreateData.error || 'Failed to recreate account');
     }
     // Sign in with the recreated user
+    restoreWizardKbName.value = recreateData.kbName || null;
     setAuthenticatedUser(recreateData.user, null);
     showDestroyedRestoreDialog.value = false;
 
@@ -3025,7 +3062,6 @@ const startTemporarySession = async () => {
 
 const openDestroyDialog = () => {
   showTempSignOutDialog.value = false;
-  destroyConfirm.value = '';
   showDestroyDialog.value = true;
 };
 
@@ -3051,13 +3087,21 @@ const startPasskeyRegistration = async () => {
 };
 
 const destroyTemporaryAccount = async () => {
-  if (!user.value?.userId || destroyConfirm.value !== user.value.userId) {
+  if (!user.value?.userId) {
     return;
   }
   destroyLoading.value = true;
   const userIdToDelete = user.value.userId;
   console.log(`[DESTROY] Starting destroy for ${userIdToDelete}`);
   try {
+    // Save local state snapshot BEFORE deleting cloud data (preserves chats, meds, summary)
+    try {
+      console.log(`[DESTROY] Saving local state snapshot before cloud deletion...`);
+      await saveLocalSnapshot(null);
+      console.log(`[DESTROY] Local state saved successfully`);
+    } catch (snapErr) {
+      console.warn(`[DESTROY] Local state save failed (non-fatal):`, snapErr);
+    }
     const response = await fetch('/api/self/delete', {
       method: 'POST',
       headers: {

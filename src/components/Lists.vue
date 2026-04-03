@@ -174,11 +174,11 @@
           <div class="text-h6">Current Medications Saved</div>
         </q-card-section>
         <q-card-section>
-          Editing the Current Medications automatically updates the Patient Summary.
+          The Current Medications have changed. Would you like to update the Patient Summary to reflect the changes?
         </q-card-section>
         <q-card-actions align="right">
-          <q-btn flat label="CLOSE" color="grey-7" v-close-popup />
-          <q-btn flat label="SHOW SUMMARY" color="primary" @click="handleShowSummary" />
+          <q-btn flat label="NOT NOW" color="grey-7" v-close-popup />
+          <q-btn flat label="UPDATE SUMMARY" color="primary" @click="handleShowSummary" />
         </q-card-actions>
       </q-card>
     </q-dialog>
@@ -2092,20 +2092,24 @@ const reloadCategories = async () => {
 
 onMounted(async () => {
   loadWizardAutoFlow();
+  // Start loading current medications in parallel with file/category loading
+  // so the user doesn't see a multi-second spinner waiting for serial fetches.
+  const medsPromise = (wizardAutoFlow.value)
+    ? Promise.resolve().then(() => { isInitialMedsLoading.value = false; })
+    : loadCurrentMedications();
+
   // Load initial file info first (needed for PDF viewing)
   await checkInitialFile();
   await loadSavedResults(); // Check for saved results first
-  // Load current medications from user document — but skip when wizard auto
-  // flow is active and categories haven't been built yet.  processInitialFile()
-  // will populate categories and then countObservationsByPageRange() will
-  // trigger loadCurrentMedications() at the right time.
+  // If wizard mode and no saved results, defer to processInitialFile flow
   if (wizardAutoFlow.value && !hasSavedResults.value) {
-    // Wizard mode, first run — defer to processInitialFile flow
-    // Clear the initial loading spinner; the AI progress spinner will show later
     isInitialMedsLoading.value = false;
-  } else {
+  } else if (wizardAutoFlow.value && hasSavedResults.value) {
+    // Wizard was active but we have saved results — load meds now
     loadCurrentMedications();
   }
+  // Wait for parallel meds load to finish before continuing
+  await medsPromise;
 
   if (!hasSavedResults.value) {
     await nextTick();
