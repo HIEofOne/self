@@ -1798,12 +1798,32 @@ app.post('/api/sync-agent', async (req, res) => {
     const userAgent = await findUserAgent(doClient, userId);
     
     if (!userAgent) {
-      // No agent found in DO - ensure database is clean
+      // No agent found in DO — create one if requested (restore flow)
+      const shouldCreate = req.body?.create === true || req.query?.create === 'true';
+      if (shouldCreate) {
+        console.log(`[SYNC-AGENT] No agent found for ${userId}, creating...`);
+        try {
+          const { ensureUserAgent } = await import('./routes/auth.js');
+          const updatedDoc = await ensureUserAgent(doClient, cloudant, validatedUserDoc);
+          if (updatedDoc?.assignedAgentId) {
+            return res.json({
+              success: true,
+              created: true,
+              agentId: updatedDoc.assignedAgentId,
+              agentName: updatedDoc.assignedAgentName,
+              agentEndpoint: updatedDoc.agentEndpoint
+            });
+          }
+        } catch (createErr) {
+          console.error(`[SYNC-AGENT] Agent creation failed for ${userId}:`, createErr.message);
+          return res.status(500).json({ success: false, error: createErr.message || 'Agent creation failed' });
+        }
+      }
       if (validatedUserDoc.assignedAgentId) {
         console.log(`⚠️ No agent found in DO for user ${userId}, but database has ${validatedUserDoc.assignedAgentId}. Already cleaned by validateUserResources.`);
       }
-      return res.status(200).json({ 
-        success: false, 
+      return res.status(200).json({
+        success: false,
         message: 'No agent found for user',
         error: 'AGENT_NOT_FOUND'
       });
@@ -6407,7 +6427,7 @@ app.post('/api/update-knowledge-base', async (req, res) => {
     const { userId } = req.body;
     let cleanupEphemeralIndexing = async () => {};
     
-    console.log(`[KB Update] Received request for userId: ${userId}`);
+    originalConsoleLog(`[KB-INDEX] Received request for userId: ${userId}`);
     
     if (!userId) {
       return res.status(400).json({ 
@@ -6535,10 +6555,15 @@ app.post('/api/update-knowledge-base', async (req, res) => {
     await deleteKbFolderPlaceholder(userId, kbName);
 
     // Get list of files currently in KB (tracked by folder path)
+    // Re-read userDoc in case files were registered after initial read
+    userDoc = await cloudant.getDocument('maia_users', userId);
     const kbFolderPrefix = `${userId}/${kbName}/`;
+    originalConsoleLog(`[KB-INDEX] Looking for files with prefix: ${kbFolderPrefix}`);
+    originalConsoleLog(`[KB-INDEX] userDoc.files (${(userDoc.files || []).length} total):`, JSON.stringify((userDoc.files || []).map(f => f.bucketKey)));
     let filesInKB = (userDoc.files || [])
       .map(file => file.bucketKey)
       .filter(key => typeof key === 'string' && key.startsWith(kbFolderPrefix));
+    originalConsoleLog(`[KB-INDEX] Files matching KB prefix: ${filesInKB.length}`, filesInKB);
 
     if (filesInKB.length === 0) {
       return res.status(400).json({
@@ -7827,28 +7852,50 @@ async function deleteUserAndResources(userId, options = {}) {
     deletionDetails.errors.push(`Failed to delete Knowledge Base: ${error.message}`);
   }
 
-  // 3. Delete Agent (optional)
+  // 3. Delete Agent (optional) — delete ALL agents matching userId pattern, not just stored ID
   if (deleteAgent) {
     try {
-      console.log(`[DESTROY] Deleting agent for ${userId}`);
-      const agentId = userDoc.assignedAgentId;
-      if (agentId) {
+      console.log(`[DESTROY] Deleting agents for ${userId}`);
+      let deletedCount = 0;
+      // First delete the stored agent ID
+      const storedAgentId = userDoc.assignedAgentId;
+      if (storedAgentId) {
         try {
-          await doClient.agent.delete(agentId);
-          deletionDetails.agentDeleted = true;
-          console.log(`[DESTROY] Agent deleted for ${userId} (${agentId})`);
+          await doClient.agent.delete(storedAgentId);
+          deletedCount++;
+          console.log(`[DESTROY] Deleted stored agent ${storedAgentId}`);
         } catch (error) {
           if (error.statusCode === 404 || error.message?.includes('not found')) {
-            deletionDetails.agentDeleted = true; // Already deleted, consider it success
-            console.log(`[DESTROY] Agent not found for ${userId} (${agentId})`);
+            console.log(`[DESTROY] Stored agent not found: ${storedAgentId}`);
           } else {
             throw error;
           }
         }
-      } else {
-        deletionDetails.agentDeleted = true; // No agent to delete
-        console.log(`[DESTROY] No agentId stored for ${userId}`);
       }
+      // Then scan for any orphaned agents matching the naming pattern
+      try {
+        const { AgentClient } = await import('../lib/do-client/agent.js');
+        const agentClient = new AgentClient(doClient);
+        const allAgents = await agentClient.list();
+        const agentPattern = new RegExp(`^${userId}-agent-`);
+        const orphanedAgents = allAgents.filter(a => agentPattern.test(a.name) && (a.uuid || a.id) !== storedAgentId);
+        for (const orphan of orphanedAgents) {
+          const orphanId = orphan.uuid || orphan.id;
+          try {
+            await doClient.agent.delete(orphanId);
+            deletedCount++;
+            console.log(`[DESTROY] Deleted orphaned agent ${orphan.name} (${orphanId})`);
+          } catch (err) {
+            if (!(err.statusCode === 404 || err.message?.includes('not found'))) {
+              console.warn(`[DESTROY] Failed to delete orphaned agent ${orphanId}: ${err.message}`);
+            }
+          }
+        }
+      } catch (listErr) {
+        console.warn(`[DESTROY] Could not scan for orphaned agents: ${listErr.message}`);
+      }
+      deletionDetails.agentDeleted = true;
+      console.log(`[DESTROY] Agent cleanup complete: ${deletedCount} deleted`);
     } catch (error) {
       console.error(`[DESTROY] Agent deletion failed for ${userId}:`, error.message);
       deletionDetails.errors.push(`Failed to delete Agent: ${error.message}`);
@@ -7946,7 +7993,96 @@ async function deleteUserAndResources(userId, options = {}) {
     throw deleteError;
   }
 
-  console.log(`[DESTROY] Completed deletion for ${userId}`);
+  console.log(`[DESTROY] Completed deletion for ${userId}:`, JSON.stringify(deletionDetails));
+
+  // ── Post-deletion verification ──────────────────────────────────
+  console.log(`[DESTROY-VERIFY] Verifying deletion for ${userId}...`);
+
+  // Verify CouchDB user doc is gone
+  try {
+    const checkDoc = await cloudant.getDocument('maia_users', userId);
+    if (checkDoc) {
+      console.error(`[DESTROY-VERIFY] ❌ User doc STILL EXISTS in CouchDB for ${userId}`);
+    } else {
+      console.log(`[DESTROY-VERIFY] ✅ User doc deleted from CouchDB`);
+    }
+  } catch (e) {
+    if (e.statusCode === 404 || e.message?.includes('not found')) {
+      console.log(`[DESTROY-VERIFY] ✅ User doc deleted from CouchDB (404)`);
+    } else {
+      console.warn(`[DESTROY-VERIFY] CouchDB check error:`, e.message);
+    }
+  }
+
+  // Verify DO agent is gone
+  const agentId = userDoc?.assignedAgentId;
+  if (agentId) {
+    try {
+      const agentCheck = await doClient.agent.get(agentId);
+      if (agentCheck) {
+        console.error(`[DESTROY-VERIFY] ❌ Agent STILL EXISTS in DO: ${agentId}`);
+      }
+    } catch (e) {
+      if (e.statusCode === 404 || e.message?.includes('not found')) {
+        console.log(`[DESTROY-VERIFY] ✅ Agent deleted from DO (${agentId})`);
+      } else {
+        console.warn(`[DESTROY-VERIFY] Agent check error:`, e.message);
+      }
+    }
+  } else {
+    console.log(`[DESTROY-VERIFY] ℹ️ No agent ID was stored`);
+  }
+
+  // Verify DO KB is gone
+  const kbId = userDoc?.kbId;
+  if (kbId) {
+    try {
+      const kbCheck = await doClient.kb.get(kbId);
+      if (kbCheck) {
+        console.error(`[DESTROY-VERIFY] ❌ KB STILL EXISTS in DO: ${kbId}`);
+      }
+    } catch (e) {
+      if (e.statusCode === 404 || e.message?.includes('not found')) {
+        console.log(`[DESTROY-VERIFY] ✅ KB deleted from DO (${kbId})`);
+      } else {
+        console.warn(`[DESTROY-VERIFY] KB check error:`, e.message);
+      }
+    }
+  } else {
+    console.log(`[DESTROY-VERIFY] ℹ️ No KB ID was stored`);
+  }
+
+  // Verify Spaces files are gone
+  try {
+    const bucketUrl = getSpacesBucketName();
+    if (bucketUrl) {
+      const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+      const s3Verify = new S3Client({
+        endpoint: getSpacesEndpoint(),
+        region: 'us-east-1',
+        forcePathStyle: process.env.S3_FORCE_PATH_STYLE === 'true',
+        credentials: {
+          accessKeyId: process.env.DIGITALOCEAN_AWS_ACCESS_KEY_ID || '',
+          secretAccessKey: process.env.DIGITALOCEAN_AWS_SECRET_ACCESS_KEY || ''
+        }
+      });
+      const listResp = await s3Verify.send(new ListObjectsV2Command({
+        Bucket: bucketName,
+        Prefix: `${userId}/`,
+        MaxKeys: 5
+      }));
+      const remaining = listResp.KeyCount || 0;
+      if (remaining > 0) {
+        console.error(`[DESTROY-VERIFY] ❌ ${remaining} files STILL in Spaces under ${userId}/`);
+      } else {
+        console.log(`[DESTROY-VERIFY] ✅ Spaces bucket empty for ${userId}/`);
+      }
+    }
+  } catch (e) {
+    console.warn(`[DESTROY-VERIFY] Spaces check error:`, e.message);
+  }
+
+  console.log(`[DESTROY-VERIFY] Verification complete for ${userId}`);
   return deletionDetails;
 }
 
@@ -8058,9 +8194,9 @@ app.post('/api/local/delete', async (req, res) => {
     if (!userId || typeof userId !== 'string') {
       return res.status(400).json({ success: false, error: 'userId required' });
     }
-    // Only allow UUID-format userIds (temporary users)
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    if (!uuidRegex.test(userId.trim())) {
+    // Basic sanitization: alphanumeric, hyphens, underscores, dots, @; max 128 chars
+    const safeIdRegex = /^[a-zA-Z0-9_@.\-]{1,128}$/;
+    if (!safeIdRegex.test(userId.trim())) {
       return res.status(400).json({ success: false, error: 'Invalid userId format' });
     }
     // Never allow deleting the admin user
@@ -8349,6 +8485,42 @@ app.get('/api/user-status', async (req, res) => {
       message: `Failed to fetch user status: ${error.message}`,
       error: 'FETCH_FAILED'
     });
+  }
+});
+
+// Update user workflow stage (used by RestoreWizard completion)
+app.post('/api/user-status', async (req, res) => {
+  try {
+    const userId = req.session?.userId || req.body?.userId;
+    if (!userId) {
+      return res.status(401).json({ success: false, error: 'Authentication required' });
+    }
+    const { workflowStage } = req.body;
+    if (!workflowStage) {
+      return res.status(400).json({ success: false, error: 'workflowStage required' });
+    }
+    let saved = false;
+    let attempts = 0;
+    while (!saved && attempts < 3) {
+      attempts++;
+      const userDoc = await cloudant.getDocument('maia_users', userId);
+      if (!userDoc) {
+        return res.status(404).json({ success: false, error: 'User not found' });
+      }
+      userDoc.workflowStage = workflowStage;
+      userDoc.updatedAt = new Date().toISOString();
+      try {
+        await cloudant.saveDocument('maia_users', userDoc);
+        saved = true;
+      } catch (saveErr) {
+        if (saveErr?.statusCode === 409 && attempts < 3) continue;
+        throw saveErr;
+      }
+    }
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[user-status POST] Error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
@@ -8722,18 +8894,29 @@ app.post('/api/generate-patient-summary', async (req, res) => {
     
     try {
       // chat() method signature: chat(messages, options, onUpdate)
-      // messages: array of message objects
-      // options: object with model, stream, etc.
-      const summaryResponse = await agentProvider.chat(
-        [{ role: 'user', content: summaryPrompt }], // messages array
-        { 
-          model: userDoc.agentModelName || 'openai-gpt-oss-120b',
-          stream: false
-        } // options object
-      );
+      const chatMessages = [{ role: 'user', content: summaryPrompt }];
+      const chatOptions = { model: userDoc.agentModelName || 'openai-gpt-oss-120b', stream: false };
+
+      let summaryResponse;
+      try {
+        summaryResponse = await agentProvider.chat(chatMessages, chatOptions);
+      } catch (firstError) {
+        const statusCode = firstError.status || firstError.statusCode || 0;
+        if (statusCode === 401 && userDoc.assignedAgentId) {
+          // Agent API key is stale — recreate and retry once
+          console.warn(`⚠️ [SUMMARY] 401 from agent for ${userId}, recreating API key...`);
+          const { recreateAgentApiKey } = await import('./utils/agent-helper.js');
+          const newApiKey = await recreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
+          console.log(`✅ [SUMMARY] Recreated API key for agent ${userDoc.assignedAgentId}`);
+          const retryProvider = new DigitalOceanProvider(newApiKey, { baseURL: userDoc.agentEndpoint });
+          summaryResponse = await retryProvider.chat(chatMessages, chatOptions);
+        } else {
+          throw firstError;
+        }
+      }
 
       const summary = summaryResponse.content || summaryResponse.text || '';
-      
+
       if (!summary || summary.trim().length === 0) {
         throw new Error('Empty summary received from agent');
       }

@@ -119,6 +119,19 @@ export async function storeDirectoryHandle(
   });
 }
 
+/**
+ * Check if a stored folder handle exists for this userId (no permission needed).
+ */
+export async function hasStoredHandle(userId: string): Promise<boolean> {
+  if (!isFileSystemAccessSupported()) return false;
+  try {
+    const handle = await getStoredHandle(userId);
+    return handle != null;
+  } catch {
+    return false;
+  }
+}
+
 async function getStoredHandle(
   userId: string
 ): Promise<FileSystemDirectoryHandle | null> {

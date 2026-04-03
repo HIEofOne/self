@@ -1013,13 +1013,20 @@ const handleUserCardContinue = (ku: KnownUser) => {
 
 /** Handle RESTORE on a user card — uses /api/account/recreate to preserve original userId */
 const handleUserCardRestore = async (ku: KnownUser) => {
+  console.log(`[RESTORE] handleUserCardRestore starting for ${ku.userId}`);
   selectedWelcomeUserId.value = ku.userId;
   setActiveUserId(ku.userId);
   welcomeLocalUserId.value = ku.userId;
   tempStartLoading.value = true;
   tempStartError.value = '';
+  // Clear stale wizard flags from previous session to prevent My Lists auto-reload loop
+  try {
+    sessionStorage.removeItem('autoProcessInitialFile');
+    sessionStorage.removeItem('wizardMyListsAuto');
+  } catch { /* ignore */ }
   try {
     // Recreate the user doc with the ORIGINAL userId
+    console.log(`[RESTORE] Step 1: Recreating user doc via /api/account/recreate for ${ku.userId}`);
     const recreateResp = await fetch('/api/account/recreate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1027,29 +1034,62 @@ const handleUserCardRestore = async (ku: KnownUser) => {
       body: JSON.stringify({ userId: ku.userId, displayName: ku.displayName })
     });
     const recreateData = await recreateResp.json();
+    console.log(`[RESTORE] /api/account/recreate response: status=${recreateResp.status} recreated=${recreateData.recreated} authenticated=${recreateData.authenticated}`);
     if (!recreateResp.ok || !recreateData.authenticated) {
       throw new Error(recreateData.error || 'Failed to recreate account');
     }
+    suppressWizard.value = true; // Prevent ChatInterface from polling agent-setup-status during restore
     setAuthenticatedUser(recreateData.user, null);
 
     // Read local state from folder
+    console.log(`[RESTORE] Step 2: Reading local state. localFolderHandle=${!!localFolderHandle.value}`);
     let localState: MaiaState | null = null;
     if (localFolderHandle.value) {
       const { readStateFile } = await import('./utils/localFolder');
       localState = await readStateFile(localFolderHandle.value);
+      console.log(`[RESTORE] Read state from folder handle: ${localState ? `files=${localState.files?.length || 0}, meds=${!!localState.currentMedications}, summary=${!!localState.patientSummary}` : 'null'}`);
     }
     if (!localState && ku.userId) {
       try {
-        const result = await readStateFileByUserId(ku.userId);
+        console.log(`[RESTORE] No folder handle state, trying readStateFileByUserId for ${ku.userId}`);
+        // Pass requestWrite: true — we're inside a user gesture (RESTORE click)
+        const result = await readStateFileByUserId(ku.userId, { requestWrite: true });
         if (result) {
           localState = result.state;
           localFolderHandle.value = result.handle;
+          console.log(`[RESTORE] Got state from IndexedDB handle: files=${localState?.files?.length || 0}, meds=${!!localState?.currentMedications}, summary=${!!localState?.patientSummary}`);
+        } else {
+          console.log(`[RESTORE] readStateFileByUserId returned null`);
         }
-      } catch { /* not available */ }
+      } catch (e) {
+        console.log(`[RESTORE] readStateFileByUserId error:`, e);
+      }
     }
+
+    // Validate folder identity matches the userId being restored
+    if (localState && localFolderHandle.value) {
+      try {
+        const folderIdentity = await readIdentityFile(localFolderHandle.value);
+        console.log(`[RESTORE] Folder identity: ${folderIdentity ? `userId=${folderIdentity.userId}` : 'null'}`);
+        if (folderIdentity && folderIdentity.userId && folderIdentity.userId !== ku.userId) {
+          console.warn(`[RESTORE] Folder identity mismatch: folder=${folderIdentity.userId} restore=${ku.userId}`);
+          if ($q && typeof $q.notify === 'function') {
+            $q.notify({
+              type: 'warning',
+              message: `This folder belongs to ${folderIdentity.displayName || folderIdentity.userId}, not ${ku.userId}. Cannot restore from a mismatched folder.`,
+              timeout: 7000
+            });
+          }
+          localState = null;
+        }
+      } catch { /* identity file unreadable — proceed with caution */ }
+    }
+
     if (!localState) {
+      console.log(`[RESTORE] No folder state, trying IndexedDB snapshot for ${ku.userId}`);
       const snapshot = await getUserSnapshot(ku.userId);
       if (snapshot) {
+        console.log(`[RESTORE] Got IndexedDB snapshot: files=${snapshot.fileStatusSummary?.length || 0}`);
         localState = {
           version: 1,
           userId: ku.userId,
@@ -1063,15 +1103,19 @@ const handleUserCardRestore = async (ku: KnownUser) => {
           savedChats: snapshot.savedChats || undefined,
           currentChat: snapshot.currentChat || undefined
         };
+      } else {
+        console.log(`[RESTORE] No IndexedDB snapshot found`);
       }
     }
 
     // Cloud health check
+    console.log(`[RESTORE] Step 3: Cloud health check for ${ku.userId}`);
     try {
       const healthResp = await fetch(`/api/cloud-health?userId=${encodeURIComponent(ku.userId)}`, { credentials: 'include' });
       if (healthResp.ok) {
         const health = await healthResp.json();
         cloudHealthDetails.value = health.details || null;
+        console.log(`[RESTORE] Cloud health:`, JSON.stringify(health.details));
       }
     } catch {
       cloudHealthDetails.value = {
@@ -1080,13 +1124,16 @@ const handleUserCardRestore = async (ku: KnownUser) => {
         knowledgeBase: { ok: false, error: 'Not created' },
         spacesFiles: { ok: false, error: 'No files' }
       };
+      console.log(`[RESTORE] Cloud health check failed, using defaults`);
     }
 
     // Launch RestoreWizard
     if (localState) {
+      console.log(`[RESTORE] Step 4: Launching RestoreWizard with localState: files=${localState.files?.length || 0}, meds=${!!localState.currentMedications}, summary=${!!localState.patientSummary}, chats=${localState.savedChats?.chats?.length || 0}, instructions=${!!localState.agentInstructions}`);
       restoreWizardLocalState.value = localState;
       showRestoreWizard.value = true;
     } else {
+      console.warn(`[RESTORE] No local state found — cannot launch RestoreWizard`);
       if ($q && typeof $q.notify === 'function') {
         $q.notify({ type: 'warning', message: 'No local backup found. Please use GET STARTED to set up your account.', timeout: 5000 });
       }
@@ -1249,6 +1296,17 @@ const loadWelcomeStatus = async () => {
         localSummaryVerified = !!(snapshot.patientSummary != null && String(snapshot.patientSummary).trim() !== '');
         foundLocalState = true;
         console.log(`[WELCOME] IndexedDB snapshot for ${localId}: files=${localFileCount}, indexed=${localIndexedCount}, medsVerified=${localMedsVerified}, summaryVerified=${localSummaryVerified}`);
+      }
+      // If folder/IndexedDB reads failed, check if a stored folder handle exists
+      // (doesn't need permission) — the user can re-grant via RESTORE click
+      if (!foundLocalState && localId) {
+        try {
+          const { hasStoredHandle } = await import('./utils/localFolder');
+          if (await hasStoredHandle(localId)) {
+            foundLocalState = true;
+            console.log(`[WELCOME] stored folder handle exists for ${localId} (needs permission to read)`);
+          }
+        } catch { /* ignore */ }
       }
       if (foundLocalState) {
         welcomeLocalSnapshot.value = {
@@ -1864,8 +1922,23 @@ const handleConnectFolderFromDialog = async () => {
       if (user.value?.userId) {
         await storeDirectoryHandle(user.value.userId, handle);
       }
-      // Read/create identity file
+      // Read/create identity file — reject if folder belongs to a different known user
       const existing = await readIdentityFile(handle);
+      if (existing && existing.userId && user.value?.userId && existing.userId !== user.value.userId) {
+        const otherKnown = getKnownUsers().find(u => u.userId === existing.userId);
+        if (otherKnown) {
+          if ($q && typeof $q.notify === 'function') {
+            $q.notify({
+              type: 'warning',
+              message: `This folder belongs to ${existing.displayName || existing.userId}. Please choose a different folder.`,
+              timeout: 7000
+            });
+          }
+          localFolderHandle.value = null;
+          localFolderName.value = '';
+          return;
+        }
+      }
       if (!existing && user.value?.userId) {
         await writeIdentityFile(handle, {
           userId: user.value.userId,
@@ -1892,11 +1965,22 @@ const handleLocalFolderConnected = async (payload: { handle: FileSystemDirectory
   try {
     const existing = await readIdentityFile(payload.handle);
     if (existing) {
-      // Folder already belongs to a user
-      if (user.value?.userId && existing.userId !== user.value.userId) {
-        // Identity mismatch — this folder belongs to a different user.
-        // For now, log a warning; Phase 3 will add a conflict dialog.
-        console.warn(`[IDENTITY] Folder "${payload.folderName}" belongs to ${existing.userId}, but current user is ${user.value.userId}`);
+      // Folder already belongs to a user — reject if it's a different known user
+      if (user.value?.userId && existing.userId && existing.userId !== user.value.userId) {
+        const otherKnown = getKnownUsers().find(u => u.userId === existing.userId);
+        if (otherKnown) {
+          console.warn(`[IDENTITY] Folder "${payload.folderName}" belongs to ${existing.userId}, rejecting for ${user.value.userId}`);
+          if ($q && typeof $q.notify === 'function') {
+            $q.notify({
+              type: 'warning',
+              message: `This folder belongs to ${existing.displayName || existing.userId}. Please choose a different folder.`,
+              timeout: 7000
+            });
+          }
+          localFolderHandle.value = null;
+          localFolderName.value = '';
+          return;
+        }
       }
     } else if (user.value?.userId) {
       // New folder — stamp it with the current user's identity
@@ -2221,6 +2305,26 @@ const confirmDeleteLocalUser = async () => {
     if (getActiveUserId() === localId) {
       setActiveUserId(null);
     }
+    // Clean up MAIA files from local folder before releasing handle
+    const handleToClean = localFolderHandle.value;
+    if (handleToClean) {
+      try {
+        // Remove maia-state.json so a new user won't inherit old data
+        await handleToClean.removeEntry('maia-state.json').catch(() => {});
+        await handleToClean.removeEntry('maia-identity.json').catch(() => {});
+        // Remove webloc files (maia.webloc, maia-for-*.webloc)
+        for await (const [name] of (handleToClean as any).entries()) {
+          if (name.endsWith('.webloc')) {
+            await handleToClean.removeEntry(name).catch(() => {});
+          }
+        }
+        console.log(`[WELCOME] Cleaned MAIA files from local folder for ${localId}`);
+      } catch (cleanErr) {
+        console.warn(`[WELCOME] Could not clean local folder files (may need manual cleanup):`, cleanErr);
+      }
+      localFolderHandle.value = null;
+      localFolderName.value = '';
+    }
     try {
       await clearDirectoryHandle(localId);
     } catch { /* non-fatal */ }
@@ -2375,6 +2479,26 @@ const handleRestoreWizardComplete = async () => {
     } catch (e) {
       console.warn('[RESTORE] Failed to re-stamp identity:', e);
     }
+    // Write personalized webloc (same as handleWizardComplete)
+    try {
+      const { readStateFile, writeWeblocFile, extractPatientName } = await import('./utils/localFolder');
+      const currentState = await readStateFile(localFolderHandle.value);
+      const patientName = extractPatientName(currentState?.patientSummary);
+      await writeWeblocFile(localFolderHandle.value, window.location.origin, {
+        patientName: patientName || undefined,
+        userId: user.value.userId
+      });
+      console.log(`[RESTORE] Webloc written: patientName=${patientName || 'none'}, userId=${user.value.userId}`);
+    } catch (e) {
+      console.warn('[RESTORE] Webloc update failed:', e);
+    }
+    // Save local state snapshot so maia-state.json reflects restored data
+    try {
+      await saveLocalSnapshot(null);
+      console.log('[RESTORE] Local state snapshot saved');
+    } catch (e) {
+      console.warn('[RESTORE] Local state snapshot failed:', e);
+    }
   }
   if ($q && typeof $q.notify === 'function') {
     $q.notify({ type: 'positive', message: 'Account restored successfully!', timeout: 3000 });
@@ -2516,6 +2640,12 @@ const restoreSavedChats = async (snapshot: any) => {
 };
 
 const createTemporarySession = async () => {
+  // Clear stale wizard flags from any previous session (e.g. destroyed user)
+  try {
+    sessionStorage.removeItem('autoProcessInitialFile');
+    sessionStorage.removeItem('wizardMyListsAuto');
+  } catch { /* ignore */ }
+
   const response = await fetch('/api/temporary/start', {
     method: 'POST',
     credentials: 'include'
@@ -2813,30 +2943,36 @@ const startTemporarySession = async () => {
         // If check fails, continue with restore flow
       }
 
-      const agentResponse = await fetch(`/api/agent-exists?userId=${encodeURIComponent(activeUserId)}`);
-      const agentData = agentResponse.ok ? await agentResponse.json() : null;
-      if (agentData && agentData.exists) {
-        const restoreResponse = await fetch('/api/temporary/restore', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          credentials: 'include',
-          body: JSON.stringify({ userId: activeUserId })
-        });
+      // Try to restore temporary session for the known userId.
+      // If restore fails (404 = user destroyed), fall through to create a new account.
+      const restoreResponse = await fetch('/api/temporary/restore', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        credentials: 'include',
+        body: JSON.stringify({ userId: activeUserId })
+      });
+      if (restoreResponse.ok) {
         const restoreData = await restoreResponse.json();
-        if (restoreResponse.ok && restoreData.authenticated && restoreData.user) {
+        if (restoreData.authenticated && restoreData.user) {
           setAuthenticatedUser(restoreData.user, null);
         } else {
           throw new Error(restoreData.error || 'Unable to restore temporary account');
         }
-      } else if (agentResponse.ok) {
-        // Agent missing — update cloud status to show RESTORE card on Welcome page
-        const statusMap = { ...welcomeUserCloudStatus.value };
-        statusMap[activeUserId] = 'restore';
-        welcomeUserCloudStatus.value = statusMap;
-        tempStartLoading.value = false;
-        return;
+      } else {
+        // User was destroyed or doesn't exist in cloud — delegate to restore wizard
+        // which can re-request folder permission (user gesture) and recover local data
+        console.log('[AUTH] Restore failed for', activeUserId, '— triggering restore wizard');
+        const ku = knownUsers.value.find(u => u.userId === activeUserId);
+        if (ku) {
+          tempStartLoading.value = false;
+          await handleUserCardRestore(ku);
+          return;
+        }
+        // No known user entry — fall through to create new account
+        const newUser = await createTemporarySession();
+        if (!newUser) return;
       }
     } else {
       // Phase 4: If known users exist, confirm before creating a new account
@@ -2920,6 +3056,7 @@ const destroyTemporaryAccount = async () => {
   }
   destroyLoading.value = true;
   const userIdToDelete = user.value.userId;
+  console.log(`[DESTROY] Starting destroy for ${userIdToDelete}`);
   try {
     const response = await fetch('/api/self/delete', {
       method: 'POST',
@@ -2929,17 +3066,24 @@ const destroyTemporaryAccount = async () => {
       credentials: 'include',
       body: JSON.stringify({ userId: userIdToDelete })
     });
+    const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      const data = await response.json().catch(() => ({}));
+      console.error(`[DESTROY] Server returned ${response.status}:`, data);
       throw new Error(data.error || 'Failed to delete temporary account');
     }
+    console.log(`[DESTROY] Server response:`, JSON.stringify(data.details || data));
+    // Keep the user in knownUsers and keep the local folder handle so the
+    // Welcome page can offer RESTORE from local data.  Only clear the IndexedDB
+    // snapshot (cloud state is gone, but folder-based state remains).
     await clearUserSnapshot(userIdToDelete);
-    removeKnownUser(userIdToDelete);
-    knownUsers.value = knownUsers.value.filter(u => u.userId !== userIdToDelete);
+    console.log(`[DESTROY] Cleared IndexedDB snapshot for ${userIdToDelete}`);
+    refreshKnownUsers();
+    console.log(`[DESTROY] Known users after destroy:`, knownUsers.value.map(u => u.userId));
     resetAuthState();
     showDestroyDialog.value = false;
+    console.log(`[DESTROY] Destroy complete for ${userIdToDelete}`);
   } catch (error) {
-    console.error('Temporary account deletion error:', error);
+    console.error('[DESTROY] Temporary account deletion error:', error);
   } finally {
     destroyLoading.value = false;
   }

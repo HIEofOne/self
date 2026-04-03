@@ -1221,15 +1221,15 @@ interface Props {
   rehydrationFiles?: Array<{ fileName?: string; bucketKey?: string; fileSize?: number; uploadedAt?: string }>;
   rehydrationActive?: boolean;
   wizardActive?: boolean;
-  /** When true and dialog opens on summary tab, trigger one requestNewSummary() then clear (avoids duplicate with wizard). */
-  requestSummaryOnOpen?: boolean;
+  /** Action for the wizard controller to request. MyStuffDialog executes and emits 'request-action-done'. */
+  requestAction?: 'generate-summary' | null;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   initialTab: 'files',
   messages: () => [],
   originalMessages: () => [],
-  requestSummaryOnOpen: false
+  requestAction: null
 });
 
 const emit = defineEmits<{
@@ -1248,20 +1248,15 @@ const emit = defineEmits<{
   'patient-summary-verified': [data: { userId: string }];
   'rehydration-complete': [payload: { hasInitialFile: boolean }];
   'rehydration-file-removed': [payload: { bucketKey?: string; fileName?: string }];
-  'request-summary-done': [];
+  'request-action-done': [];
+  'show-patient-summary': [];
   'file-added-to-kb': [data: { fileName: string; bucketKey: string }];
 }>();
 
-// Handle show patient summary from Lists component
-const handleShowPatientSummary = async () => {
-  // Switch to Patient Summary tab
+// Handle show patient summary from Lists component — emit upward so the wizard controller decides
+const handleShowPatientSummary = () => {
   currentTab.value = 'summary';
-  
-  // Wait a bit for tab to switch, then trigger new summary generation
-  await nextTick();
-  setTimeout(() => {
-    requestNewSummary();
-  }, 300);
+  emit('show-patient-summary');
 };
 
 const handleCurrentMedicationsSaved = (payload: { value: string; edited: boolean }) => {
@@ -5012,8 +5007,24 @@ const loadPatientSummary = async () => {
 };
 
 const requestNewSummary = async () => {
-  // Always proceed directly - no pre-generation confirmation
-  // If slots are full, the replace dialog will show after generation
+  // Guard: verify session is ready before calling agent endpoint
+  if (!props.userId) {
+    console.warn('[MyStuff] requestNewSummary skipped — no userId');
+    return;
+  }
+  try {
+    const sessionCheck = await fetch(`/api/user-status?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
+    if (!sessionCheck.ok) {
+      console.warn(`[MyStuff] Session not ready (${sessionCheck.status}), falling back to loading existing summary`);
+      await loadPatientSummary();
+      return;
+    }
+  } catch {
+    console.warn('[MyStuff] Session check failed, falling back to loading existing summary');
+    await loadPatientSummary();
+    return;
+  }
+
   loadingSummary.value = true;
   summaryError.value = '';
 
@@ -5519,22 +5530,6 @@ watch(() => props.modelValue, async (newValue) => {
           listsComponentRef.value.attemptAutoProcessInitialFile();
         }
       });
-    } else if (currentTab.value === 'summary' && props.requestSummaryOnOpen) {
-      // Wizard asked for one summary generation on open (avoids duplicate API call)
-      if (summaryDismissedThisSession.value && !props.wizardActive) {
-        // User already dismissed summary this session — skip auto-generation (not during wizard)
-        emit('request-summary-done');
-        loadPatientSummary();
-      } else {
-        // Set loadingSummary immediately to prevent flash of empty state
-        loadingSummary.value = true;
-        nextTick(() => {
-          setTimeout(() => {
-            requestNewSummary();
-            emit('request-summary-done');
-          }, 300);
-        });
-      }
     }
 
   }
@@ -5542,8 +5537,24 @@ watch(() => props.modelValue, async (newValue) => {
 
 watch(() => props.initialTab, (newTab) => {
   if (newTab && isOpen.value) {
+    // If switching to summary with a pending requestAction, set loading immediately to prevent flash
+    if (newTab === 'summary' && props.requestAction === 'generate-summary') {
+      loadingSummary.value = true;
+    }
     currentTab.value = newTab;
   }
+});
+
+// Wizard action controller: parent sets requestAction prop, we execute and acknowledge.
+// Default flush so loadingSummary is set BEFORE the tab renders (avoids flash of empty state).
+watch(() => props.requestAction, (action) => {
+  if (!action || !isOpen.value) return;
+  if (action === 'generate-summary') {
+    loadingSummary.value = true;
+    currentTab.value = 'summary';
+    requestNewSummary();
+  }
+  emit('request-action-done');
 });
 
 watch(isOpen, (newValue) => {
