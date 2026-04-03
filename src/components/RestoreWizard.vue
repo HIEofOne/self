@@ -155,6 +155,11 @@ const buildRestoreItems = () => {
     items.push({ key: 'summary', label: 'Restore Patient Summary', needed: true, status: 'pending' });
   }
 
+  // My Lists (from local backup)
+  if (state?.listsMarkdown) {
+    items.push({ key: 'lists', label: 'Restore My Lists', needed: true, status: 'pending' });
+  }
+
   // Saved Chats
   const chatCount = Array.isArray(state?.savedChats?.chats) ? state.savedChats.chats.length : 0;
   if (chatCount > 0) {
@@ -172,7 +177,7 @@ const executeRestore = async () => {
   let filesUploaded = 0;
 
   console.log(`[RestoreWizard] executeRestore starting for ${uid}`);
-  console.log(`[RestoreWizard] Local state: files=${files.length}, meds=${!!state?.currentMedications}, summary=${!!state?.patientSummary}, chats=${state?.savedChats?.chats?.length || 0}, instructions=${!!state?.agentInstructions}`);
+  console.log(`[RestoreWizard] Local state: files=${files.length}, meds=${!!state?.currentMedications}, summary=${!!state?.patientSummary}, chats=${state?.savedChats?.chats?.length || 0}, instructions=${!!state?.agentInstructions}, lists=${!!state?.listsMarkdown}`);
   console.log(`[RestoreWizard] Folder handle: ${!!props.localFolderHandle}, Safari files: ${props.safariFolderFiles?.length || 0}`);
 
   try {
@@ -458,6 +463,29 @@ const executeRestore = async () => {
       }
     }
 
+    // 4. Restore Lists markdown to S3
+    const listsItem = restoreItems.value.find(i => i.key === 'lists' && i.needed);
+    if (listsItem && state?.listsMarkdown) {
+      updateItem('lists', { status: 'running' });
+      try {
+        const listsResp = await fetch('/api/files/lists/restore-markdown', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ markdown: state.listsMarkdown })
+        });
+        if (!listsResp.ok) {
+          const errData = await listsResp.json().catch(() => ({}));
+          throw new Error(errData.error || `Lists restore failed: ${listsResp.status}`);
+        }
+        updateItem('lists', { status: 'done', progress: 'Restored' });
+        console.log(`[RestoreWizard] Lists markdown restored to S3`);
+      } catch (e: any) {
+        console.error(`[RestoreWizard] Lists restore failed:`, e?.message);
+        updateItem('lists', { status: 'error', errorMsg: e?.message || 'Failed' });
+      }
+    }
+
     // Build summary
     console.log(`[RestoreWizard] All steps complete. Items:`, restoreItems.value.map(i => `${i.key}:${i.status}`).join(', '));
     const doneItems = restoreItems.value.filter(i => i.status === 'done');
@@ -468,6 +496,7 @@ const executeRestore = async () => {
     if (doneItems.some(i => i.key === 'kb')) parts.push('knowledge base indexed');
     if (doneItems.some(i => i.key === 'medications')) parts.push('medications restored');
     if (doneItems.some(i => i.key === 'summary')) parts.push('summary restored');
+    if (doneItems.some(i => i.key === 'lists')) parts.push('lists restored');
     if (doneItems.some(i => i.key === 'chats')) parts.push('chats restored');
     if (errorItems.length > 0) parts.push(`${errorItems.length} failed`);
     restoreSummary.value = parts.join(', ') + '.';

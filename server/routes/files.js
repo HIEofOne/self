@@ -2910,5 +2910,44 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       res.status(500).json({ error: `Failed to get current medications: ${error.message}` });
     }
   });
+
+  // ── Restore Lists markdown from local backup ──────────────────────────
+  app.post('/api/files/lists/restore-markdown', async (req, res) => {
+    try {
+      const userId = req.session?.userId || req.session?.deepLinkUserId;
+      if (!userId) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+
+      const { markdown, fileName } = req.body;
+      if (!markdown || typeof markdown !== 'string') {
+        return res.status(400).json({ error: 'markdown is required' });
+      }
+
+      const { client: s3Client, bucketName } = getS3Client();
+      const listsFolder = `${userId}/Lists/`;
+      // Use provided fileName or default
+      const mdFileName = fileName || 'restored.md';
+      const bucketKey = `${listsFolder}${mdFileName}`;
+
+      await putObjectWithLog({
+        s3Client,
+        bucketName,
+        key: bucketKey,
+        body: markdown,
+        contentType: 'text/markdown',
+        metadata: {
+          restoredAt: new Date().toISOString(),
+          userId
+        }
+      });
+
+      console.log(`✅ [LISTS-RESTORE] Wrote ${bucketKey} (${markdown.length} chars) for ${userId}`);
+      res.json({ success: true, bucketKey });
+    } catch (error) {
+      console.error('❌ [LISTS-RESTORE] Error:', error);
+      res.status(500).json({ error: `Failed to restore lists: ${error.message}` });
+    }
+  });
 }
 

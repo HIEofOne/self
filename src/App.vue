@@ -1775,12 +1775,13 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
   try {
     // Fetch all user data in parallel (v2: also fetch agent instructions)
     const uid = encodeURIComponent(user.value.userId);
-    const [filesResponse, chatsResponse, statusResponse, summaryResponse, instrResponse] = await Promise.all([
+    const [filesResponse, chatsResponse, statusResponse, summaryResponse, instrResponse, listsResponse] = await Promise.all([
       fetch(`/api/user-files?userId=${uid}`, { credentials: 'include' }),
       fetch(`/api/user-chats?userId=${uid}`, { credentials: 'include' }),
       fetch(`/api/user-status?userId=${uid}`, { credentials: 'include' }),
       fetch(`/api/patient-summary?userId=${uid}`, { credentials: 'include' }),
-      fetch(`/api/agent-instructions?userId=${uid}`, { credentials: 'include' }).catch(() => null)
+      fetch(`/api/agent-instructions?userId=${uid}`, { credentials: 'include' }).catch(() => null),
+      fetch('/api/files/lists/markdown', { credentials: 'include' }).catch(() => null)
     ]);
 
     const files = filesResponse.ok ? await filesResponse.json() : null;
@@ -1788,6 +1789,7 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
     const status = statusResponse.ok ? await statusResponse.json() : null;
     const summary = summaryResponse.ok ? await summaryResponse.json() : null;
     const instrData = instrResponse && instrResponse.ok ? await instrResponse.json() : null;
+    const listsData = listsResponse && listsResponse.ok ? await listsResponse.json() : null;
     const filesList = Array.isArray(files?.files) ? files.files : [];
     const indexedSet = new Set(Array.isArray(files?.indexedFiles) ? files.indexedFiles : []);
     const kbName = files?.kbName || null;
@@ -1858,6 +1860,7 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
           savedChats: (savedChats?.chats?.length || savedChats?.length) ? savedChats : (existingState?.savedChats || undefined),
           currentChat: snapshot?.currentChat || existingState?.currentChat || undefined,
           agentInstructions: (instrData?.instructions && instrData.instructions.trim()) ? instrData.instructions : (existingState?.agentInstructions || null),
+          listsMarkdown: (listsData?.hasMarkdown && listsData?.markdown) ? listsData.markdown : (existingState?.listsMarkdown || null),
           kbStats: indexedCount > 0
             ? { fileCount: indexedCount, tokenCount: files?.tokenCount || 0 }
             : existingState?.kbStats || { fileCount: 0, tokenCount: 0 },

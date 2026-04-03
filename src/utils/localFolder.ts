@@ -76,6 +76,7 @@ export interface MaiaState {
   savedChats?: any;
   currentChat?: any;
   agentInstructions?: string | null;
+  listsMarkdown?: string | null;
   kbStats?: { fileCount: number; tokenCount: number } | null;
   wizardComplete?: boolean;
   settings?: Record<string, any>;
