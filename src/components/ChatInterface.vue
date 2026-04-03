@@ -315,374 +315,194 @@
     </q-card>
 
     <q-dialog v-model="showAgentSetupDialog" persistent>
-      <q-card style="min-width: 760px; max-width: 980px; width: 80vw">
-        <q-card-section class="row items-center">
-          <div
-            v-if="wizardSlideIndex === 0 && wizardIntroHeaderHtml"
-            class="text-h6 wizard-heading"
-            v-html="wizardIntroHeaderHtml"
+      <q-card style="min-width: 560px; max-width: 680px">
+        <q-card-section>
+          <div class="row items-center">
+            <div class="col">
+              <div class="text-h6">Setting Up Your MAIA</div>
+              <div class="text-caption text-grey-7 q-mt-xs">
+                Creating account for <strong>{{ props.user?.userId || 'Guest' }}</strong>
+              </div>
+            </div>
+            <q-btn flat round dense icon="close" color="grey-7" @click="dismissWizard" />
+          </div>
+        </q-card-section>
+
+        <q-card-section class="q-pt-none text-body2">
+          <!-- Safari hidden file input -->
+          <input
+            v-if="props.folderAccessTier === 'safari'"
+            ref="safariFolderInputRef"
+            type="file"
+            webkitdirectory
+            multiple
+            style="display: none"
+            @change="handleSafariFolderSelected"
           />
-          <q-space />
+
+          <!-- Action button: Choose the patient folder -->
+          <div v-if="!setupFolderConnected" class="q-mb-md">
+            <!-- Chrome: persistent folder access -->
+            <q-btn
+              v-if="localFolderSupported"
+              unelevated
+              color="primary"
+              label="Choose the patient folder"
+              icon="folder_open"
+              :disable="localFolderAutoRunActive"
+              @click="handlePickLocalFolder"
+            />
+            <!-- Safari: one-time folder read -->
+            <q-btn
+              v-else-if="props.folderAccessTier === 'safari'"
+              unelevated
+              color="primary"
+              label="Select your MAIA folder"
+              icon="folder_open"
+              :disable="localFolderAutoRunActive"
+              @click="handlePickSafariFolder"
+            />
+            <!-- Other browsers: file upload -->
+            <q-btn
+              v-else
+              unelevated
+              color="primary"
+              label="Upload health files"
+              icon="upload_file"
+              :disable="isUploadingFile"
+              @click="triggerFileInput"
+            />
+          </div>
+
+          <!-- Progress checklist -->
+          <q-list dense>
+            <!-- Per-file upload lines (only when folder connected and files found) -->
+            <q-item v-for="file in setupChecklistFiles" :key="`setup-file:${file.name}`" dense class="q-py-xs">
+              <q-item-section avatar style="min-width: 28px">
+                <q-spinner v-if="file.status === 'running'" size="sm" color="primary" />
+                <q-icon v-else-if="file.status === 'done'" name="check_circle" color="green" size="sm" />
+                <q-icon v-else-if="file.status === 'error'" name="error" color="negative" size="sm" />
+                <q-icon v-else name="radio_button_unchecked" color="grey-4" size="sm" />
+              </q-item-section>
+              <q-item-section>
+                <q-item-label :class="{ 'text-grey-5': file.status === 'pending' }">
+                  {{ file.name }}
+                  <q-chip v-if="file.isAppleHealth" color="blue-6" text-color="white" size="sm" dense class="q-ml-xs">Apple Health</q-chip>
+                  <span v-if="file.progress" class="text-caption q-ml-sm" :class="file.status === 'done' ? 'text-green' : 'text-primary'">{{ file.progress }}</span>
+                </q-item-label>
+              </q-item-section>
+            </q-item>
+
+            <!-- Deploy AI Agent -->
+            <q-item dense class="q-py-xs">
+              <q-item-section avatar style="min-width: 28px">
+                <q-spinner v-if="!wizardStage1Complete && agentSetupPollingActive" size="sm" color="primary" />
+                <q-icon v-else-if="wizardStage1Complete" name="check_circle" color="green" size="sm" />
+                <q-icon v-else-if="agentSetupTimedOut" name="error" color="negative" size="sm" />
+                <q-icon v-else name="radio_button_unchecked" color="grey-4" size="sm" />
+              </q-item-section>
+              <q-item-section>
+                <q-item-label :class="{ 'text-grey-5': !wizardStage1Complete && !agentSetupPollingActive }">
+                  Deploy AI Agent
+                  <span v-if="wizardStage1Complete" class="text-green text-caption q-ml-sm">Ready</span>
+                  <span v-else-if="agentSetupPollingActive" class="text-primary text-caption q-ml-sm">{{ wizardStage1StatusLine }}</span>
+                  <span v-else-if="agentSetupTimedOut" class="text-negative text-caption q-ml-sm">Timed out</span>
+                </q-item-label>
+              </q-item-section>
+            </q-item>
+
+            <!-- Index Knowledge Base -->
+            <q-item v-if="setupChecklistFiles.length > 0 || stage3HasFiles" dense class="q-py-xs">
+              <q-item-section avatar style="min-width: 28px">
+                <q-spinner v-if="stage3IndexingActive" size="sm" color="primary" />
+                <q-icon v-else-if="indexingStatus?.phase === 'complete'" name="check_circle" color="green" size="sm" />
+                <q-icon v-else name="radio_button_unchecked" color="grey-4" size="sm" />
+              </q-item-section>
+              <q-item-section>
+                <q-item-label :class="{ 'text-grey-5': !stage3IndexingActive && indexingStatus?.phase !== 'complete' }">
+                  Index Knowledge Base
+                  <span v-if="stage3IndexingActive" class="text-primary text-caption q-ml-sm">
+                    {{ stage2StatusDisplay.tokens !== '0' ? `${stage2StatusDisplay.tokens} tokens` : 'Indexing...' }}
+                    {{ stage3IndexingStartedAt ? `(${formatElapsed(stage3IndexingStartedAt)})` : '' }}
+                  </span>
+                  <span v-else-if="indexingStatus?.phase === 'complete'" class="text-green text-caption q-ml-sm">
+                    {{ stage2StatusDisplay.files }} files, {{ stage2StatusDisplay.tokens }} tokens
+                  </span>
+                </q-item-label>
+              </q-item-section>
+            </q-item>
+
+            <!-- Current Medications -->
+            <q-item v-if="stage2StatusDisplay.show || wizardCurrentMedications" dense class="q-py-xs">
+              <q-item-section avatar style="min-width: 28px">
+                <q-icon v-if="wizardCurrentMedications" name="check_circle" color="green" size="sm" />
+                <q-icon v-else name="radio_button_unchecked" color="grey-4" size="sm" />
+              </q-item-section>
+              <q-item-section>
+                <q-item-label :class="{ 'text-grey-5': !wizardCurrentMedications && !stage2StatusDisplay.completed }">
+                  Current Medications
+                  <span v-if="wizardCurrentMedications" class="text-green text-caption q-ml-sm">Verified</span>
+                  <q-btn
+                    v-else-if="stage2StatusDisplay.completed && wizardStage1Complete"
+                    flat dense size="sm" color="orange-8" label="Verify"
+                    class="q-ml-sm"
+                    @click="handleWizardMedsAction"
+                  />
+                </q-item-label>
+              </q-item-section>
+            </q-item>
+
+            <!-- Patient Summary -->
+            <q-item v-if="stage2StatusDisplay.show || wizardPatientSummary" dense class="q-py-xs">
+              <q-item-section avatar style="min-width: 28px">
+                <q-icon v-if="wizardPatientSummary" name="check_circle" color="green" size="sm" />
+                <q-icon v-else name="radio_button_unchecked" color="grey-4" size="sm" />
+              </q-item-section>
+              <q-item-section>
+                <q-item-label :class="{ 'text-grey-5': !wizardPatientSummary && !stage2StatusDisplay.completed }">
+                  Patient Summary
+                  <span v-if="wizardPatientSummary" class="text-green text-caption q-ml-sm">Verified</span>
+                  <q-btn
+                    v-else-if="stage2StatusDisplay.completed && wizardStage1Complete && (!wizardHasAppleHealthFile || wizardCurrentMedications)"
+                    flat dense size="sm" color="orange-8" label="Verify"
+                    class="q-ml-sm"
+                    @click="handleWizardSummaryAction"
+                  />
+                </q-item-label>
+              </q-item-section>
+            </q-item>
+          </q-list>
+
+          <!-- Active phase status -->
+          <div v-if="localFolderAutoRunActive" class="text-caption text-primary q-mt-md">
+            <q-spinner size="14px" class="q-mr-xs" />
+            {{ localFolderAutoRunPhase }}
+          </div>
+        </q-card-section>
+
+        <q-card-actions align="right">
           <q-btn
-            flat
-            round
-            dense
-            icon="close"
-            color="grey-7"
+            v-if="wizardStage1Complete && (indexingStatus?.phase === 'complete' || !stage3HasFiles)"
+            unelevated label="Continue" color="primary"
             @click="dismissWizard"
           />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
+    <!-- Restore Complete sub-dialog (shown after restore flow) -->
+    <q-dialog v-model="showRestoreCompleteDialog" persistent>
+      <q-card style="min-width: 480px; max-width: 640px">
+        <q-card-section>
+          <div class="text-h6">Account Restored</div>
         </q-card-section>
-        <q-card-section class="q-pt-none wizard-slide-scroll">
-          <div v-if="wizardSlideIndex === 0">
-            <div
-              v-if="wizardIntroBodyHtml"
-              class="text-body2 wizard-intro wizard-slide-intro"
-              ref="wizardIntroContainer"
-              v-html="wizardIntroBodyHtml"
-            />
-            <div v-if="wizardIntroBodyHtml" ref="wizardInlineDots" class="wizard-page-dots wizard-page-dots--inline">
-              <button
-                v-for="(_, idx) in wizardSlides"
-                :key="`wizard-page-inline-${idx}`"
-                type="button"
-                class="wizard-page-dot"
-                :class="{ 'wizard-page-dot--active': idx === wizardSlideIndex }"
-                :aria-label="`Go to page ${idx + 1}`"
-                @click="wizardSlideIndex = idx"
-              />
-            </div>
-            <div v-if="agentSetupPollingActive || agentSetupTimedOut" class="q-mt-sm">
-            <p class="text-caption text-negative q-mt-sm" v-if="agentSetupTimedOut">
-              Agent setup did not complete in 15 minutes. Please try again later.
-            </p>
-          <q-btn
-            v-if="agentSetupTimedOut"
-            flat
-            dense
-            color="negative"
-            label="CLOSE"
-            class="q-mt-xs"
-            @click="dismissWizard"
-          />
-            </div>
-
-          <q-dialog v-model="showRestoreCompleteDialog" persistent>
-            <q-card style="min-width: 480px; max-width: 640px">
-              <q-card-section>
-                <div class="text-h6">Account Restored</div>
-              </q-card-section>
-              <q-card-section class="text-body2">
-                Your account has been restored. The Patient Summary, Private AI knowledge base, and Saved Chats are available. Deep links that were not accessible during account dormancy are available again.
-                <br /><br />
-                Your private information will be in the cloud until you sign out again.
-              </q-card-section>
-              <q-card-actions align="right">
-                <q-btn flat label="OK" color="primary" v-close-popup />
-              </q-card-actions>
-            </q-card>
-          </q-dialog>
-
-
-            <!-- Local Folder: "Select your MAIA folder" button (Chrome 122+) -->
-            <div v-if="localFolderSupported" class="q-mt-md q-mb-sm">
-              <div v-if="!localFolderHandle" class="wizard-slide-box q-pa-md">
-                <div class="text-subtitle2 text-weight-bold q-mb-xs">Local Folder</div>
-                <div class="text-caption text-grey-7 q-mb-sm">
-                  Select a folder on your computer. MAIA will import PDFs, save state, and write a setup log there.
-                </div>
-                <q-btn
-                  unelevated
-                  color="primary"
-                  label="Select your MAIA folder"
-                  icon="folder_open"
-                  :disable="localFolderAutoRunActive"
-                  @click="handlePickLocalFolder"
-                />
-              </div>
-              <div v-else class="wizard-slide-box q-pa-md">
-                <div class="text-subtitle2 text-weight-bold q-mb-xs">
-                  <q-icon name="folder" color="primary" class="q-mr-xs" />
-                  {{ localFolderName }}
-                </div>
-                <div v-if="localFolderAutoRunActive" class="text-caption text-primary q-mt-xs">
-                  <q-spinner size="14px" class="q-mr-xs" />
-                  {{ localFolderAutoRunPhase }}
-                </div>
-                <div v-else-if="localFolderFiles.length > 0" class="text-caption text-grey-7 q-mt-xs">
-                  {{ localFolderFiles.length }} PDF file(s) found
-                </div>
-                <div v-if="setupLogLines.length > 0 && !localFolderAutoRunActive" class="text-caption text-green-7 q-mt-xs">
-                  ✓ Setup complete — maia-setup-log.pdf written to folder
-                </div>
-              </div>
-            </div>
-
-            <!-- Safari Folder: webkitdirectory one-time folder read -->
-            <div v-else-if="props.folderAccessTier === 'safari'" class="q-mt-md q-mb-sm">
-              <input
-                ref="safariFolderInputRef"
-                type="file"
-                webkitdirectory
-                multiple
-                style="display: none"
-                @change="handleSafariFolderSelected"
-              />
-              <div v-if="!safariFolderName" class="wizard-slide-box q-pa-md">
-                <div class="text-subtitle2 text-weight-bold q-mb-xs">Local Folder</div>
-                <div class="text-caption text-grey-7 q-mb-sm">
-                  Select your MAIA health records folder. This browser can read the folder once;
-                  future updates will require you to re-select the folder when prompted at sign-out.
-                </div>
-                <q-btn
-                  unelevated
-                  color="primary"
-                  label="Select your MAIA folder"
-                  icon="folder_open"
-                  :disable="localFolderAutoRunActive"
-                  @click="handlePickSafariFolder"
-                />
-              </div>
-              <div v-else class="wizard-slide-box q-pa-md">
-                <div class="text-subtitle2 text-weight-bold q-mb-xs">
-                  <q-icon name="folder" color="primary" class="q-mr-xs" />
-                  {{ safariFolderName }}
-                </div>
-                <!-- Recovered session: folder name from localStorage but no live files -->
-                <div v-if="safariNeedsReselect && !wizardStage3Complete && !stage3IndexingActive" class="q-mt-sm">
-                  <div class="text-caption text-orange-8 q-mb-sm">
-                    Page was reloaded. Please re-select your folder to continue uploading files.
-                  </div>
-                  <q-btn
-                    dense unelevated
-                    color="primary"
-                    label="Re-select folder"
-                    icon="folder_open"
-                    size="sm"
-                    @click="handlePickSafariFolder"
-                  />
-                </div>
-                <div v-else-if="safariNeedsReselect" class="text-caption text-green-7 q-mt-xs">
-                  Session recovered — files already uploaded
-                </div>
-                <div v-else-if="localFolderAutoRunActive" class="text-caption text-primary q-mt-xs">
-                  <q-spinner size="14px" class="q-mr-xs" />
-                  {{ localFolderAutoRunPhase }}
-                </div>
-                <div v-else-if="safariFolderFiles.length > 0" class="text-caption text-grey-7 q-mt-xs">
-                  {{ safariFolderFiles.length }} PDF file(s) imported
-                </div>
-                <div v-if="setupLogLines.length > 0 && !localFolderAutoRunActive" class="text-caption text-green-7 q-mt-xs">
-                  ✓ Setup complete
-                </div>
-              </div>
-            </div>
-
-            <!-- Folder/Safari mode: scrolling activity log -->
-            <div v-if="localFolderHandle || safariFolderName" class="q-mt-md">
-              <div class="wizard-slide-box q-pa-sm" style="max-height: 260px; overflow-y: auto; font-family: monospace; font-size: 12px; background: #f5f5f5; border-radius: 6px;">
-                <div v-if="setupLogLines.length === 0" class="text-grey-6 text-center q-pa-md">
-                  Waiting for setup to begin...
-                </div>
-                <div v-for="(line, idx) in setupLogLines" :key="idx" class="q-mb-xs" style="line-height: 1.4;">
-                  <span :style="{ color: line.ok ? '#2e7d32' : '#c62828' }">{{ line.ok ? '✓' : '✗' }}</span>
-                  <span class="text-grey-7">[{{ new Date(line.time).toLocaleTimeString() }}]</span>
-                  <span class="text-weight-medium">{{ line.step }}:</span>
-                  <span>{{ line.detail }}</span>
-                </div>
-              </div>
-
-              <!-- Status summary lines (agent, indexing, meds, summary) -->
-              <div class="text-caption q-mt-md" :class="wizardStage1Complete ? 'text-green-7' : (wizardStage1TimerActive ? 'text-green-7' : 'text-grey-7')">
-                Private AI agent deployment status: {{ wizardStage1StatusLine }}
-              </div>
-              <div
-                v-if="stage2StatusDisplay.show"
-                class="text-caption q-mt-sm"
-                :class="stage2StatusDisplay.active ? 'text-green-7' : 'text-grey-7'"
-              >
-                <span>{{ stage2StatusDisplay.text }}</span>
-                <span class="q-ml-xs">Files: {{ stage2StatusDisplay.files }} &bull; Tokens: {{ stage2StatusDisplay.tokens }}</span>
-              </div>
-              <div
-                v-if="stage2StatusDisplay.show"
-                class="text-caption q-mt-xs"
-                :class="wizardCurrentMedications ? 'text-green-7' : 'text-orange-8'"
-              >
-                Current Medications: {{ wizardCurrentMedications ? '✓ Verified' : 'Pending' }}
-              </div>
-              <div
-                v-if="stage2StatusDisplay.show"
-                class="text-caption q-mt-xs"
-                :class="wizardPatientSummary ? 'text-green-7' : 'text-orange-8'"
-              >
-                Patient Summary: {{ wizardPatientSummary ? '✓ Verified' : 'Pending' }}
-              </div>
-            </div>
-
-            <!-- Non-local-folder fallback: original file list, checkboxes, buttons (only when local folder API not supported and no Safari folder access) -->
-            <template v-else-if="!localFolderSupported && props.folderAccessTier !== 'safari'">
-            <div class="q-mt-lg">
-            <div class="wizard-slide-box">
-              <div class="text-subtitle1 text-weight-bold q-mb-sm">Files to be indexed</div>
-              <div v-if="!stage3IndexingActive" class="wizard-slide-list">
-                <div v-for="file in stage3DisplayFiles" :key="file.name" class="wizard-slide-item">
-                  <q-checkbox
-                    :model-value="file.inKnowledgeBase"
-                    :disable="!!file.needsRestore || wizardKbTogglePending.has(file.bucketKey || file.name) || stage3IndexingActive || stage3PendingUploadActive || (!file.needsRestore && !file.bucketKey)"
-                    :color="file.pendingKbAdd ? 'grey-6' : 'primary'"
-                    @click.stop="!file.needsRestore && toggleWizardKbCheckbox(file)"
-                  />
-                  <q-spinner
-                    v-if="wizardKbTogglePending.has(file.bucketKey || file.name)"
-                    size="18px"
-                    color="primary"
-                    class="q-ml-xs"
-                  />
-                  <span class="q-ml-sm">{{ file.name }}</span>
-                  <q-chip
-                    v-if="file.isAppleHealth"
-                    color="blue-6"
-                    text-color="white"
-                    size="sm"
-                    dense
-                    class="q-ml-xs"
-                  >
-                    Apple Health
-                  </q-chip>
-                </div>
-                <div class="wizard-slide-item q-mt-sm">
-                  <q-btn
-                    unelevated
-                    dense
-                    size="sm"
-                    color="primary"
-                    :label="(wizardRestoreActive && (wizardRestoreTargetName || firstUnrestoredFileName)) ? `Add file: ${wizardRestoreTargetName || firstUnrestoredFileName}` : 'Add a file'"
-                    :disable="stage3IndexingActive || stage3PendingUploadActive || (wizardRestoreActive && !firstUnrestoredFileName)"
-                    @click="handleStage3Action"
-                  />
-                </div>
-                <div class="wizard-slide-box-actions">
-                  <q-btn
-                    unelevated
-                    dense
-                    size="sm"
-                    color="primary"
-                    label="No more files to add - Index now"
-                    :class="{ 'wizard-index-now-highlight': !isUploadingFile && stage3DisplayFiles.length > 0 && !stage3IndexingActive && wizardNeedsIndexing }"
-                    :disable="!wizardNeedsIndexing || stage3IndexingActive || stage3PendingUploadActive"
-                    @click="() => handleStage3Index(wizardRestoreActive ? stage3DisplayFiles.map(f => f.name) : undefined, wizardRestoreActive)"
-                  />
-                </div>
-              </div>
-              <div v-else-if="indexingStatus?.phase === 'complete' && wizardKbAttached" class="wizard-slide-box-actions">
-                <q-btn
-                  v-if="wizardHasAppleHealthFile"
-                  unelevated
-                  dense
-                  size="sm"
-                  color="primary"
-                  label="Create and Verify your Current Medications"
-                  @click="handleWizardMedsAction"
-                />
-                <q-btn
-                  v-else
-                  unelevated
-                  dense
-                  size="sm"
-                  color="primary"
-                  label="Create and Verify your Patient Summary"
-                  @click="handleWizardSummaryAction"
-                />
-              </div>
-            </div>
-          </div>
-
-            <div
-              v-if="isUploadingFile || (stage3DisplayFiles.length > 0 && !stage3IndexingActive)"
-              class="text-caption q-mt-sm"
-              :class="isUploadingFile ? 'text-primary' : 'text-grey-7'"
-            >
-              {{ isUploadingFile ? 'Uploading...' : 'Add more files or begin indexing.' }}
-            </div>
-
-            <div class="text-caption q-mt-md" :class="wizardStage1Complete ? 'text-green-7' : (wizardStage1TimerActive ? 'text-green-7' : 'text-grey-7')">
-            Private AI agent deployment status: {{ wizardStage1StatusLine }}
-          </div>
-
-            <div
-            v-if="stage2StatusDisplay.show"
-            class="text-caption q-mt-sm"
-            :class="stage2StatusDisplay.active ? 'text-green-7' : 'text-grey-7'"
-          >
-            <span>{{ stage2StatusDisplay.text }}</span>
-            <span class="q-ml-xs">
-              Files: {{ stage2StatusDisplay.files }} &bull; Tokens: {{ stage2StatusDisplay.tokens }}
-            </span>
-          </div>
-            <div
-              v-if="stage2StatusDisplay.show"
-              class="text-caption q-mt-xs wizard-status-row q-pa-xs rounded-borders"
-              :class="[
-                wizardCurrentMedications ? 'text-grey-7' : 'text-orange-8',
-                { 'wizard-medications-not-verified-outline': !wizardCurrentMedications && wizardStage1Complete && stage2StatusDisplay.completed }
-              ]"
-            >
-            Current Medications are {{ wizardCurrentMedications ? 'verified' : 'not verified' }}.
-            <q-btn
-              v-if="!wizardCurrentMedications"
-              unelevated
-              dense
-              size="sm"
-              color="orange-8"
-              label="Verify"
-              :disable="!wizardStage1Complete || !stage2StatusDisplay.completed"
-              @click="handleWizardMedsAction"
-              class="q-ml-xs wizard-verify-btn"
-            />
-          </div>
-            <div v-if="stage2StatusDisplay.show" class="text-caption q-mt-xs wizard-status-row" :class="wizardPatientSummary ? 'text-grey-7' : 'text-orange-8'">
-            Patient Summary is {{ wizardPatientSummary ? 'verified' : 'not verified' }}.
-            <q-btn
-              v-if="!wizardPatientSummary"
-              unelevated
-              dense
-              size="sm"
-              color="orange-8"
-              label="Verify"
-              :disable="!wizardStage1Complete || !stage2StatusDisplay.completed || (wizardHasAppleHealthFile && !wizardCurrentMedications)"
-              @click="handleWizardSummaryAction"
-              class="q-ml-xs wizard-verify-btn"
-            />
-            </div>
-            </template>
-          </div>
-          <div v-else class="wizard-slide-text">
-            <img
-              v-if="wizardSlides[wizardSlideIndex].image"
-              :src="wizardSlides[wizardSlideIndex].image"
-              :alt="wizardSlides[wizardSlideIndex].alt"
-              class="wizard-slide-image"
-            />
-            <div v-else>
-              <div v-for="(line, idx) in wizardSlides[wizardSlideIndex].lines" :key="idx">
-                {{ line }}
-              </div>
-            </div>
-          </div>
-
+        <q-card-section class="text-body2">
+          Your account has been restored. The Patient Summary, Private AI knowledge base, and Saved Chats are available. Deep links that were not accessible during account dormancy are available again.
+          <br /><br />
+          Your private information will be in the cloud until you sign out again.
         </q-card-section>
-        <q-card-actions class="wizard-slide-footer" align="center">
-          <div class="wizard-page-dots">
-            <button
-              v-for="(_, idx) in wizardSlides"
-              :key="`wizard-page-${idx}`"
-              type="button"
-              class="wizard-page-dot"
-              :class="{ 'wizard-page-dot--active': idx === wizardSlideIndex }"
-              :aria-label="`Go to page ${idx + 1}`"
-              @click="wizardSlideIndex = idx"
-            />
-          </div>
+        <q-card-actions align="right">
+          <q-btn flat label="OK" color="primary" v-close-popup />
         </q-card-actions>
       </q-card>
     </q-dialog>
@@ -756,7 +576,7 @@
       v-model="showMyStuffDialog"
       :userId="props.user?.userId || ''"
       :initial-tab="myStuffInitialTab"
-      :request-summary-on-open="wizardRequestSummaryOnOpen"
+      :request-action="wizardRequestAction"
       :messages="messages"
       :original-messages="trulyOriginalMessages.length > 0 ? trulyOriginalMessages : originalMessages"
       :wizard-active="showAgentSetupDialog"
@@ -773,7 +593,8 @@
       @current-medications-saved="handleCurrentMedicationsSaved"
       @patient-summary-saved="handlePatientSummarySaved"
       @patient-summary-verified="handlePatientSummaryVerified"
-      @request-summary-done="wizardRequestSummaryOnOpen = false"
+      @request-action-done="wizardRequestAction = null"
+      @show-patient-summary="handleMyStuffShowSummary"
       @rehydration-file-removed="handleRehydrationFileRemoved"
       @rehydration-complete="handleRehydrationComplete"
       @file-added-to-kb="handleFileAddedToKb"
@@ -1046,7 +867,7 @@ const showSavedChatsModal = ref(false);
 const savedChatCount = ref(0);
 const showMyStuffDialog = ref(false);
 const myStuffInitialTab = ref<string>('files');
-const wizardRequestSummaryOnOpen = ref(false);
+const wizardRequestAction = ref<'generate-summary' | null>(null);
 const contextualTip = ref('Loading...');
 const editingMessageIdx = ref<number[]>([]);
 const editingOriginalContent = ref<Record<number, string>>({});
@@ -2614,7 +2435,7 @@ const handleWizardSummaryAction = () => {
   if (!props.user?.userId) return;
   myStuffInitialTab.value = 'summary';
   showMyStuffDialog.value = true;
-  wizardRequestSummaryOnOpen.value = true;
+  wizardRequestAction.value = 'generate-summary';
   wizardPatientSummary.value = false;
 };
 
@@ -5477,6 +5298,10 @@ const startSetupWizardPolling = () => {
     initialLoadComplete.value = true;
     return;
   }
+  if (props.suppressWizard) {
+    initialLoadComplete.value = true;
+    return;
+  }
   const userId = props.user.userId;
   const agentSetupKey = wizardAgentSetupStartedKey(userId);
   const maxAttempts = 60; // 15 minutes at 15s
@@ -5520,7 +5345,7 @@ const startSetupWizardPolling = () => {
           // Meds done, summary pending → resume at summary phase
           wizardFlowPhase.value = 'summary';
           myStuffInitialTab.value = 'summary';
-          wizardRequestSummaryOnOpen.value = true;
+          wizardRequestAction.value = 'generate-summary';
           showMyStuffDialog.value = true;
         } else if (!wizardCurrentMedications.value) {
           // Meds still pending → resume at medications phase
@@ -5624,6 +5449,62 @@ const stage3IndexingActive = computed(() =>
   indexingStatus.value?.phase === 'indexing' ||
   !!stage3IndexingPoll.value
 );
+
+/** True when the user has connected a local folder (Chrome handle or Safari folder name). */
+const setupFolderConnected = computed(() => !!localFolderHandle.value || !!safariFolderName.value);
+
+/** Checklist file items for the simplified setup wizard. */
+const setupChecklistFiles = computed(() => {
+  // Build from setup log lines (files uploaded during auto-run)
+  const uploadedSet = new Set<string>();
+  const errorSet = new Set<string>();
+  const runningSet = new Set<string>();
+  for (const line of setupLogLines.value) {
+    if (line.step === 'File Uploaded' && line.ok) {
+      // Extract filename: "filename.pdf (123 KB)" or "filename.pdf (123 KB) [Apple Health]"
+      const name = line.detail.split(' (')[0];
+      if (name) uploadedSet.add(name);
+    } else if ((line.step === 'Upload Failed' || line.step === 'Upload Error') && !line.ok) {
+      const name = line.detail.split(':')[0];
+      if (name) errorSet.add(name);
+    }
+  }
+  // If auto-run is active, files being uploaded show as running
+  if (localFolderAutoRunActive.value && localFolderAutoRunPhase.value.startsWith('Uploading ')) {
+    const match = localFolderAutoRunPhase.value.match(/^Uploading (.+)\.\.\.$/);
+    if (match) runningSet.add(match[1]);
+  }
+
+  // Combine: local folder files (pending/running) + uploaded files (done) + failed files (error)
+  const items: Array<{ name: string; status: 'pending' | 'running' | 'done' | 'error'; progress?: string; isAppleHealth?: boolean }> = [];
+  const seen = new Set<string>();
+
+  // Files from local folder scan (not yet uploaded)
+  for (const f of localFolderFiles.value) {
+    if (f.name.toLowerCase() === 'maia-setup-log.pdf' || f.name.toLowerCase() === 'maia-setup-log.json') continue;
+    if (seen.has(f.name)) continue;
+    seen.add(f.name);
+    const isApple = stage3DisplayFiles.value.some(df => df.name === f.name && df.isAppleHealth);
+    if (uploadedSet.has(f.name)) {
+      items.push({ name: f.name, status: 'done', progress: 'Uploaded', isAppleHealth: isApple });
+    } else if (errorSet.has(f.name)) {
+      items.push({ name: f.name, status: 'error', isAppleHealth: isApple });
+    } else if (runningSet.has(f.name)) {
+      items.push({ name: f.name, status: 'running', isAppleHealth: isApple });
+    } else {
+      items.push({ name: f.name, status: 'pending', isAppleHealth: isApple });
+    }
+  }
+
+  // Files from stage3 that may have been uploaded before folder was scanned (e.g. Safari)
+  for (const f of stage3DisplayFiles.value) {
+    if (seen.has(f.name)) continue;
+    seen.add(f.name);
+    items.push({ name: f.name, status: f.inKnowledgeBase ? 'done' : 'pending', progress: f.inKnowledgeBase ? 'Uploaded' : undefined, isAppleHealth: f.isAppleHealth });
+  }
+
+  return items;
+});
 
 // Log when indexing completes (watch indexingStatus phase transition to 'complete')
 // Placed here because indexingStatus must be declared before the watcher.
@@ -5731,11 +5612,11 @@ const handleIndexingFinished = (_data: { jobId: string; phase: string; error?: s
 const handlePostIndexingUpdateSummary = () => {
   showPostIndexingSummaryPrompt.value = false;
   myStuffInitialTab.value = 'summary';
-  wizardRequestSummaryOnOpen.value = true;
+  wizardRequestAction.value = 'generate-summary';
   if (!showMyStuffDialog.value) {
     showMyStuffDialog.value = true;
   }
-  // If dialog is already open, the requestSummaryOnOpen watcher handles the switch
+  // If dialog is already open, the requestAction watcher handles the switch
 };
 
 const handleFilesArchived = (archivedBucketKeys: string[]) => {
@@ -5939,10 +5820,15 @@ const handleCurrentMedicationsSaved = async () => {
     wizardFlowPhase.value = 'summary';
     addSetupLogLine('Wizard Flow', 'Current Medications saved — opening Patient Summary', true);
     void generateSetupLogPdf();
-    // Switch tab in-place (no close/reopen) — the requestSummaryOnOpen watcher triggers generation
+    // Switch tab and trigger summary generation in-place via requestAction
     myStuffInitialTab.value = 'summary';
-    wizardRequestSummaryOnOpen.value = true;
+    wizardRequestAction.value = 'generate-summary';
   }
+};
+
+const handleMyStuffShowSummary = () => {
+  myStuffInitialTab.value = 'summary';
+  wizardRequestAction.value = 'generate-summary';
 };
 
 const handlePatientSummarySaved = async () => {
@@ -6156,7 +6042,7 @@ onMounted(async () => {
         if (wizardFlowPhase.value === 'summary') {
           void nextTick(() => {
             myStuffInitialTab.value = 'summary';
-            wizardRequestSummaryOnOpen.value = true;
+            wizardRequestAction.value = 'generate-summary';
             showMyStuffDialog.value = true;
           });
           return;

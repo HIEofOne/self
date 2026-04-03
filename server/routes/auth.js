@@ -876,6 +876,7 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
   app.post('/api/account/recreate', async (req, res) => {
     try {
       const { userId, displayName } = req.body || {};
+      console.log(`[RECREATE] /api/account/recreate called for userId=${userId}`);
       if (!userId || typeof userId !== 'string') {
         return res.status(400).json({ success: false, error: 'userId required' });
       }
@@ -911,6 +912,10 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       }
 
       // Recreate the user doc with the same userId
+      // Generate kbName up front so RestoreWizard and update-knowledge-base
+      // use the same name (see Documentation/Wizards.md section 5)
+      const dateStr = new Date().toISOString().replace(/[-:]/g, '').split('T')[0];
+      const kbName = `${userId}-kb-${dateStr}${Date.now().toString().slice(-6)}`;
       const userDoc = {
         _id: userId,
         userId,
@@ -920,12 +925,13 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
         type: 'user',
         workflowStage: 'active',
         temporaryAccount: true,
+        kbName,
         restoredAt: new Date().toISOString(),
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       };
       await cloudant.saveDocument('maia_users', userDoc);
-      console.log(`[RECREATE] User doc recreated for ${userId}`);
+      console.log(`[RECREATE] User doc recreated for ${userId} with kbName=${kbName}`);
 
       // Sign them in
       req.session.userId = userId;
@@ -1091,10 +1097,12 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       }
       console.log('[SAVE-RESTORE] Temporary restore requested', { userId: restoreUserId });
 
-      const agent = await findUserAgent(doClient, restoreUserId);
-      if (!agent) {
-        console.log('[SAVE-RESTORE] Temporary restore failed: agent not found', { userId: restoreUserId });
-        return res.status(404).json({ success: false, error: 'Agent not found' });
+      // Agent lookup is optional — user may not have a cloud agent yet (wizard will create one)
+      let agent = null;
+      try {
+        agent = await findUserAgent(doClient, restoreUserId);
+      } catch (agentErr) {
+        console.warn('[SAVE-RESTORE] Agent lookup failed (non-fatal):', agentErr.message);
       }
 
       let userDoc = null;
@@ -1114,8 +1122,8 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
           type: 'user',
           workflowStage: 'active',
           temporaryAccount: true,
-          assignedAgentId: agent.uuid || agent.id || null,
-          assignedAgentName: agent.name || null,
+          assignedAgentId: agent ? (agent.uuid || agent.id || null) : null,
+          assignedAgentName: agent ? (agent.name || null) : null,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString()
         };

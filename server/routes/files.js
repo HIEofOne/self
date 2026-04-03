@@ -820,6 +820,57 @@ export default function setupFileRoutes(app, cloudant, doClient) {
   });
 
   /**
+   * Register an uploaded file in the user document's files array.
+   * POST /api/files/register
+   * Used by RestoreWizard after uploading files to the KB folder.
+   */
+  app.post('/api/files/register', async (req, res) => {
+    try {
+      const userId = req.session?.userId || req.body?.userId;
+      console.log(`[files/register] Called: userId=${userId}, fileName=${req.body?.fileName}, bucketKey=${req.body?.bucketKey}`);
+      if (!userId) return res.status(401).json({ error: 'Authentication required' });
+      const { fileName, bucketKey, fileSize } = req.body;
+      if (!fileName || !bucketKey) return res.status(400).json({ error: 'fileName and bucketKey required' });
+
+      let saved = false;
+      let attempts = 0;
+      while (!saved && attempts < 3) {
+        attempts++;
+        const userDoc = await cloudant.getDocument('maia_users', userId);
+        if (!userDoc) return res.status(404).json({ error: 'User not found' });
+        if (!Array.isArray(userDoc.files)) userDoc.files = [];
+        // Don't duplicate
+        if (!userDoc.files.some(f => f.bucketKey === bucketKey)) {
+          userDoc.files.push({
+            fileName,
+            bucketKey,
+            fileSize: fileSize || 0,
+            uploadedAt: new Date().toISOString()
+          });
+          userDoc.updatedAt = new Date().toISOString();
+        }
+        try {
+          await cloudant.saveDocument('maia_users', userDoc);
+          saved = true;
+          console.log(`[files/register] ✅ Registered ${fileName} for ${userId} (attempt ${attempts}, files now: ${userDoc.files.length})`);
+        } catch (saveErr) {
+          console.warn(`[files/register] Save attempt ${attempts} failed: ${saveErr?.statusCode || saveErr?.message}`);
+          if (saveErr?.statusCode === 409 && attempts < 3) continue;
+          throw saveErr;
+        }
+      }
+      if (!saved) {
+        console.error(`[files/register] ❌ Failed to register ${fileName} after ${attempts} attempts`);
+        return res.status(500).json({ error: 'Failed to save after retries' });
+      }
+      res.json({ success: true });
+    } catch (error) {
+      console.error('[files/register] Error:', error.message);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  /**
    * Proxy PDF files from DigitalOcean Spaces to avoid CORS issues
    * GET /api/files/proxy-pdf/:bucketKey(*)
    * For deep link users, only allows access to files under the shared chat owner's path (ownerId/...).
@@ -2121,10 +2172,14 @@ export default function setupFileRoutes(app, cloudant, doClient) {
           s3Client,
           bucketName
         );
-        if (userDoc) {
-          userDoc.appleHealthCategoriesBuiltAt = new Date().toISOString();
-          userDoc.appleHealthCategoriesSourceKey = initialFileBucketKey;
-          await cloudant.saveDocument('maia_users', userDoc);
+        try {
+          // Re-fetch to avoid revision conflict from concurrent wizard writes
+          const freshUserDoc = await cloudant.getDocument('maia_users', userId);
+          freshUserDoc.appleHealthCategoriesBuiltAt = new Date().toISOString();
+          freshUserDoc.appleHealthCategoriesSourceKey = initialFileBucketKey;
+          await cloudant.saveDocument('maia_users', freshUserDoc);
+        } catch (catSaveErr) {
+          console.warn('[VIZ] Apple Health categories flag save conflict (non-fatal):', catSaveErr?.message);
         }
         console.log(`[VIZ] Categories built for Apple Health file: ${initialFileName}`);
       }

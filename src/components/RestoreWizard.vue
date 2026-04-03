@@ -3,36 +3,17 @@
     <q-card style="min-width: 560px; max-width: 680px">
       <q-card-section>
         <div class="text-h6">
-          {{ phase === 'assess' ? 'Checking Account...' : phase === 'explain' ? 'Restore Your MAIA' : phase === 'execute' ? 'Restoring...' : 'Restore Complete' }}
+          {{ phase === 'complete' ? 'Restore Complete' : 'Restoring Your MAIA' }}
+        </div>
+        <div v-if="phase !== 'complete'" class="text-caption text-grey-7 q-mt-xs">
+          Rebuilding cloud account for <strong>{{ userId }}</strong> from local backup
         </div>
       </q-card-section>
 
-      <!-- Assessment phase: spinner -->
-      <q-card-section v-if="phase === 'assess'" class="text-center q-py-lg">
-        <q-spinner size="2.5em" color="primary" />
-        <div class="text-body2 text-grey-7 q-mt-md">Checking what needs to be restored...</div>
-      </q-card-section>
-
-      <!-- Explanation phase: checklist of what will be restored -->
-      <q-card-section v-else-if="phase === 'explain'" class="text-body2">
-        <p>Some cloud resources for <strong>{{ userId }}</strong> are missing. The following will be restored from your local backup:</p>
-        <q-list dense class="q-mt-sm">
-          <q-item v-for="item in restoreItems" :key="item.key" dense>
-            <q-item-section avatar style="min-width: 28px">
-              <q-icon :name="item.needed ? 'check_box_outline_blank' : 'check_box'" :color="item.needed ? 'grey-5' : 'green'" size="sm" />
-            </q-item-section>
-            <q-item-section>
-              <q-item-label>{{ item.label }}</q-item-label>
-              <q-item-label caption v-if="item.detail">{{ item.detail }}</q-item-label>
-            </q-item-section>
-          </q-item>
-        </q-list>
-      </q-card-section>
-
-      <!-- Execution phase: live checklist with progress -->
-      <q-card-section v-else-if="phase === 'execute'" class="text-body2">
+      <!-- Live progress checklist -->
+      <q-card-section v-if="phase === 'execute'" class="text-body2">
         <q-list dense>
-          <q-item v-for="item in restoreItems" :key="item.key" dense>
+          <q-item v-for="item in restoreItems" :key="item.key" dense class="q-py-xs">
             <q-item-section avatar style="min-width: 28px">
               <q-spinner v-if="item.status === 'running'" size="sm" color="primary" />
               <q-icon v-else-if="item.status === 'done'" name="check_circle" color="green" size="sm" />
@@ -43,6 +24,7 @@
               <q-item-label :class="{ 'text-grey-5': item.status === 'pending' }">
                 {{ item.label }}
                 <span v-if="item.status === 'running' && item.progress" class="text-primary text-caption q-ml-sm">{{ item.progress }}</span>
+                <span v-if="item.status === 'done' && item.progress" class="text-green text-caption q-ml-sm">{{ item.progress }}</span>
               </q-item-label>
               <q-item-label v-if="item.status === 'error' && item.errorMsg" caption class="text-negative">{{ item.errorMsg }}</q-item-label>
             </q-item-section>
@@ -51,7 +33,7 @@
       </q-card-section>
 
       <!-- Completion phase -->
-      <q-card-section v-else class="text-body2">
+      <q-card-section v-else-if="phase === 'complete'" class="text-body2">
         <div class="text-center q-py-md">
           <q-icon name="cloud_done" color="green" size="3em" />
           <div class="text-h6 text-green q-mt-sm">All Restored</div>
@@ -61,8 +43,6 @@
       </q-card-section>
 
       <q-card-actions align="right">
-        <q-btn v-if="phase === 'explain'" flat label="Cancel" color="grey-7" @click="$emit('update:modelValue', false)" />
-        <q-btn v-if="phase === 'explain'" unelevated label="Start Restore" color="primary" @click="executeRestore" />
         <q-btn v-if="phase === 'complete'" unelevated label="Continue" color="primary" @click="$emit('restore-complete')" />
       </q-card-actions>
     </q-card>
@@ -76,7 +56,6 @@ import type { MaiaState } from '../utils/localFolder';
 interface RestoreItem {
   key: string;
   label: string;
-  detail?: string;
   needed: boolean;
   status: 'pending' | 'running' | 'done' | 'error' | 'skipped';
   progress?: string;
@@ -104,110 +83,9 @@ defineEmits<{
   'restore-complete': [];
 }>();
 
-const phase = ref<'assess' | 'explain' | 'execute' | 'complete'>('assess');
+const phase = ref<'execute' | 'complete'>('execute');
 const restoreItems = ref<RestoreItem[]>([]);
 const restoreSummary = ref('');
-
-const buildRestoreItems = () => {
-  const items: RestoreItem[] = [];
-  const health = props.cloudHealth;
-  const state = props.localState;
-
-  // Database/user doc (only if destroyed — normally ok)
-  if (health?.database && !health.database.ok) {
-    items.push({
-      key: 'database',
-      label: 'Recreate user account',
-      detail: `Restore ${props.userId} in cloud database`,
-      needed: true,
-      status: 'pending'
-    });
-  }
-
-  // Files upload
-  const fileCount = state?.files?.length || 0;
-  if (health?.spacesFiles && !health.spacesFiles.ok && fileCount > 0) {
-    items.push({
-      key: 'files',
-      label: `Upload ${fileCount} file${fileCount === 1 ? '' : 's'} to cloud storage`,
-      detail: state?.files?.map(f => f.fileName).join(', '),
-      needed: true,
-      status: 'pending'
-    });
-  } else {
-    items.push({ key: 'files', label: 'Cloud storage', detail: 'Already available', needed: false, status: 'skipped' });
-  }
-
-  // Knowledge Base
-  if (health?.knowledgeBase && !health.knowledgeBase.ok) {
-    const tokens = state?.kbStats?.tokenCount || 0;
-    items.push({
-      key: 'kb',
-      label: `Create Knowledge Base and index ${fileCount} file${fileCount === 1 ? '' : 's'}`,
-      detail: tokens > 0 ? `~${tokens.toLocaleString()} tokens` : undefined,
-      needed: true,
-      status: 'pending'
-    });
-  } else {
-    items.push({ key: 'kb', label: 'Knowledge Base', detail: 'Already available', needed: false, status: 'skipped' });
-  }
-
-  // Agent
-  if (health?.agent && !health.agent.ok) {
-    items.push({
-      key: 'agent',
-      label: 'Deploy AI Agent',
-      detail: state?.agentInstructions ? 'With saved instructions' : undefined,
-      needed: true,
-      status: 'pending'
-    });
-  } else {
-    items.push({ key: 'agent', label: 'AI Agent', detail: 'Already available', needed: false, status: 'skipped' });
-  }
-
-  // Medications
-  if (state?.currentMedications) {
-    items.push({
-      key: 'medications',
-      label: 'Restore Current Medications',
-      needed: true,
-      status: 'pending'
-    });
-  }
-
-  // Patient Summary
-  if (state?.patientSummary) {
-    items.push({
-      key: 'summary',
-      label: 'Restore Patient Summary',
-      needed: true,
-      status: 'pending'
-    });
-  }
-
-  // Saved Chats
-  const chatCount = Array.isArray(state?.savedChats?.chats) ? state.savedChats.chats.length : 0;
-  if (chatCount > 0) {
-    items.push({
-      key: 'chats',
-      label: `Restore ${chatCount} Saved Chat${chatCount === 1 ? '' : 's'}`,
-      needed: true,
-      status: 'pending'
-    });
-  }
-
-  // Agent Instructions
-  if (state?.agentInstructions) {
-    items.push({
-      key: 'instructions',
-      label: 'Restore Agent Instructions',
-      needed: true,
-      status: 'pending'
-    });
-  }
-
-  restoreItems.value = items;
-};
 
 const updateItem = (key: string, updates: Partial<RestoreItem>) => {
   const idx = restoreItems.value.findIndex(i => i.key === key);
@@ -216,105 +94,213 @@ const updateItem = (key: string, updates: Partial<RestoreItem>) => {
   }
 };
 
+/** Get the KB name for this user, creating one if needed */
+const resolveKbName = async (uid: string): Promise<string | null> => {
+  try {
+    const resp = await fetch(`/api/user-status?userId=${encodeURIComponent(uid)}`, { credentials: 'include' });
+    if (resp.ok) {
+      const data = await resp.json();
+      if (data.kbName) return data.kbName;
+    }
+  } catch { /* fall through */ }
+  // Default KB name pattern
+  return `${uid}-kb`;
+};
+
+const buildRestoreItems = () => {
+  const items: RestoreItem[] = [];
+  const state = props.localState;
+  const files = state?.files || [];
+
+  // Individual file lines
+  for (const f of files) {
+    items.push({
+      key: `file:${f.fileName}`,
+      label: f.fileName,
+      needed: true,
+      status: 'pending'
+    });
+  }
+
+  // Agent deployment
+  items.push({ key: 'agent', label: 'Deploy AI Agent', needed: true, status: 'pending' });
+
+  // Knowledge Base indexing
+  if (files.length > 0) {
+    items.push({ key: 'kb', label: 'Index Knowledge Base', needed: true, status: 'pending' });
+  }
+
+  // Current Medications (from local state)
+  if (state?.currentMedications) {
+    items.push({ key: 'medications', label: 'Restore Current Medications', needed: true, status: 'pending' });
+  }
+
+  // Patient Summary (from local state)
+  if (state?.patientSummary) {
+    items.push({ key: 'summary', label: 'Restore Patient Summary', needed: true, status: 'pending' });
+  }
+
+  // Saved Chats
+  const chatCount = Array.isArray(state?.savedChats?.chats) ? state.savedChats.chats.length : 0;
+  if (chatCount > 0) {
+    items.push({ key: 'chats', label: `Restore ${chatCount} saved chat${chatCount === 1 ? '' : 's'}`, needed: true, status: 'pending' });
+  }
+
+  // Agent Instructions
+  if (state?.agentInstructions) {
+    items.push({ key: 'instructions', label: 'Restore Agent Instructions', needed: true, status: 'pending' });
+  }
+
+  restoreItems.value = items;
+};
+
 const executeRestore = async () => {
   phase.value = 'execute';
   const uid = props.userId;
   const state = props.localState;
+  const files = state?.files || [];
   let filesUploaded = 0;
 
+  console.log(`[RestoreWizard] executeRestore starting for ${uid}`);
+  console.log(`[RestoreWizard] Local state: files=${files.length}, meds=${!!state?.currentMedications}, summary=${!!state?.patientSummary}, chats=${state?.savedChats?.chats?.length || 0}, instructions=${!!state?.agentInstructions}`);
+  console.log(`[RestoreWizard] Folder handle: ${!!props.localFolderHandle}, Safari files: ${props.safariFolderFiles?.length || 0}`);
+
   try {
-    // 0. Recreate user doc if destroyed
-    const dbItem = restoreItems.value.find(i => i.key === 'database' && i.needed);
-    if (dbItem) {
-      updateItem('database', { status: 'running' });
+    // Resolve KB name for file uploads
+    const kbName = await resolveKbName(uid);
+    console.log(`[RestoreWizard] Resolved KB name: ${kbName}`);
+
+    // 1. Upload files to KB folder so they're ready for indexing
+    const uploadFile = async (file: File, fileName: string) => {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('userId', uid);
+      if (kbName) {
+        formData.append('isInitialImport', 'true');
+        formData.append('subfolder', kbName);
+      }
+      const resp = await fetch('/api/files/upload', {
+        method: 'POST',
+        credentials: 'include',
+        body: formData
+      });
+      if (!resp.ok) throw new Error(`Upload failed: ${resp.status}`);
+      const data = await resp.json();
+      // Register file in user doc so KB update can find it
       try {
-        const resp = await fetch('/api/account/recreate', {
+        const regResp = await fetch('/api/files/register', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
-          body: JSON.stringify({ userId: uid })
+          body: JSON.stringify({
+            userId: uid,
+            fileName,
+            bucketKey: data.fileInfo?.bucketKey,
+            fileSize: data.fileInfo?.size
+          })
         });
-        if (!resp.ok) throw new Error('Failed to recreate account');
-        updateItem('database', { status: 'done' });
-      } catch (e: any) {
-        updateItem('database', { status: 'error', errorMsg: e?.message || 'Failed' });
-        // Can't continue without user doc
-        phase.value = 'complete';
-        restoreSummary.value = 'Account recreation failed. Cannot proceed with restore.';
-        return;
+        if (!regResp.ok) {
+          const regErr = await regResp.text().catch(() => '');
+          console.error(`[RestoreWizard] files/register failed: ${regResp.status} ${regErr}`);
+        } else {
+          console.log(`[RestoreWizard] files/register OK for ${fileName}`);
+        }
+      } catch (regError: any) {
+        console.error(`[RestoreWizard] files/register network error:`, regError?.message);
       }
-    }
+      return data;
+    };
 
-    // 1. Upload files
-    const filesItem = restoreItems.value.find(i => i.key === 'files' && i.needed);
-    if (filesItem && props.localFolderHandle) {
-      updateItem('files', { status: 'running', progress: '0/' + (state?.files?.length || 0) });
-      const folderFiles = state?.files || [];
-      for (let i = 0; i < folderFiles.length; i++) {
-        const fileInfo = folderFiles[i];
+    console.log(`[RestoreWizard] Step 1: Upload ${files.length} files. hasHandle=${!!props.localFolderHandle}, hasSafariFiles=${!!props.safariFolderFiles}`);
+    if (files.length > 0 && props.localFolderHandle) {
+      for (const fileInfo of files) {
+        const key = `file:${fileInfo.fileName}`;
+        updateItem(key, { status: 'running' });
         try {
+          console.log(`[RestoreWizard] Uploading file: ${fileInfo.fileName}`);
           const fileHandle = await props.localFolderHandle.getFileHandle(fileInfo.fileName);
           const file = await fileHandle.getFile();
-          const formData = new FormData();
-          formData.append('file', file);
-          formData.append('userId', uid);
-          await fetch('/api/files/upload', {
-            method: 'POST',
-            credentials: 'include',
-            body: formData
-          });
+          const result = await uploadFile(file, fileInfo.fileName);
           filesUploaded++;
-          updateItem('files', { progress: `${filesUploaded}/${folderFiles.length}` });
-        } catch (e) {
-          console.warn(`[RestoreWizard] Failed to upload ${fileInfo.fileName}:`, e);
+          console.log(`[RestoreWizard] File uploaded: ${fileInfo.fileName}, bucketKey=${result?.fileInfo?.bucketKey}`);
+          updateItem(key, { status: 'done', progress: 'Uploaded' });
+        } catch (e: any) {
+          console.error(`[RestoreWizard] File upload failed: ${fileInfo.fileName}:`, e?.message);
+          updateItem(key, { status: 'error', errorMsg: e?.message || 'Upload failed' });
         }
       }
-      updateItem('files', { status: 'done', progress: `${filesUploaded} uploaded` });
-    } else if (filesItem && props.safariFolderFiles) {
-      // Safari: use the File objects directly
-      updateItem('files', { status: 'running', progress: '0/' + props.safariFolderFiles.length });
-      for (let i = 0; i < props.safariFolderFiles.length; i++) {
-        const file = props.safariFolderFiles[i];
+    } else if (files.length > 0 && props.safariFolderFiles) {
+      for (const fileInfo of files) {
+        const key = `file:${fileInfo.fileName}`;
+        const safariFile = props.safariFolderFiles.find(f => f.name === fileInfo.fileName);
+        if (!safariFile) {
+          updateItem(key, { status: 'error', errorMsg: 'File not found in local folder' });
+          continue;
+        }
+        updateItem(key, { status: 'running' });
         try {
-          const formData = new FormData();
-          formData.append('file', file);
-          formData.append('userId', uid);
-          await fetch('/api/files/upload', {
-            method: 'POST',
-            credentials: 'include',
-            body: formData
-          });
+          await uploadFile(safariFile, fileInfo.fileName);
           filesUploaded++;
-          updateItem('files', { progress: `${filesUploaded}/${props.safariFolderFiles.length}` });
-        } catch (e) {
-          console.warn(`[RestoreWizard] Failed to upload ${file.name}:`, e);
+          updateItem(key, { status: 'done', progress: 'Uploaded' });
+        } catch (e: any) {
+          updateItem(key, { status: 'error', errorMsg: e?.message || 'Upload failed' });
         }
       }
-      updateItem('files', { status: 'done', progress: `${filesUploaded} uploaded` });
-    } else if (filesItem) {
-      // Files need restoring but no folder handle or Safari files available
-      updateItem('files', { status: 'error', errorMsg: 'No local folder connected. Files cannot be uploaded.' });
-      console.warn('[RestoreWizard] Files needed but no folder handle or Safari files available');
+    } else if (files.length > 0) {
+      for (const fileInfo of files) {
+        updateItem(`file:${fileInfo.fileName}`, { status: 'error', errorMsg: 'No local folder connected' });
+      }
     }
 
-    // 2. Create/index Knowledge Base
+    // 2. Deploy Agent (create if needed)
+    console.log(`[RestoreWizard] Step 2: Deploy agent for ${uid}`);
+    let agentDeployed = false;
+    updateItem('agent', { status: 'running' });
+    try {
+      const syncResp = await fetch('/api/sync-agent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ userId: uid, create: true })
+      });
+      const syncData = await syncResp.json();
+      console.log(`[RestoreWizard] /api/sync-agent response: status=${syncResp.status}`, JSON.stringify(syncData));
+      if (!syncResp.ok) throw new Error(syncData.error || 'Agent deployment failed');
+      if (syncData.success || syncData.agentId) {
+        agentDeployed = true;
+        updateItem('agent', { status: 'done', progress: syncData.created ? 'Created' : 'Synced' });
+        console.log(`[RestoreWizard] Agent deployed: agentId=${syncData.agentId}, created=${syncData.created}`);
+      } else {
+        throw new Error(syncData.error || 'Agent not available');
+      }
+    } catch (e: any) {
+      console.error(`[RestoreWizard] Agent deploy failed:`, e?.message);
+      updateItem('agent', { status: 'error', errorMsg: e?.message || 'Failed' });
+    }
+
+    // 3. Index Knowledge Base (files are already in KB folder)
+    console.log(`[RestoreWizard] Step 3: Index KB. filesUploaded=${filesUploaded}`);
     const kbItem = restoreItems.value.find(i => i.key === 'kb' && i.needed);
-    if (kbItem) {
+    if (kbItem && filesUploaded > 0) {
       updateItem('kb', { status: 'running', progress: 'Creating...' });
       try {
+        console.log(`[RestoreWizard] Calling /api/update-knowledge-base for ${uid}`);
         const indexResp = await fetch('/api/update-knowledge-base', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
           body: JSON.stringify({ userId: uid })
         });
-        if (!indexResp.ok) throw new Error('KB update failed');
+        if (!indexResp.ok) {
+          const errData = await indexResp.json().catch(() => ({}));
+          console.error(`[RestoreWizard] KB update failed: status=${indexResp.status}`, JSON.stringify(errData));
+          throw new Error(errData.message || `KB update failed: ${indexResp.status}`);
+        }
         const indexData = await indexResp.json();
         const jobId = indexData.jobId;
 
         if (jobId) {
           updateItem('kb', { progress: 'Indexing...' });
-          // Poll for completion
           let done = false;
           let attempts = 0;
           while (!done && attempts < 120) {
@@ -326,20 +312,22 @@ const executeRestore = async () => {
                 if (statusData.status === 'completed' || statusData.completed) {
                   done = true;
                   const tokens = statusData.tokenCount || statusData.total_tokens || 0;
-                  updateItem('kb', { status: 'done', progress: tokens ? `${tokens.toLocaleString()} tokens` : 'Complete' });
+                  updateItem('kb', { status: 'done', progress: tokens ? `${tokens.toLocaleString()} tokens indexed` : 'Indexed' });
                 } else if (statusData.status === 'failed') {
                   throw new Error(statusData.error || 'Indexing failed');
                 } else {
-                  updateItem('kb', { progress: `Indexing... (${Math.round((attempts * 3) / 60)}m)` });
+                  const tokens = statusData.tokenCount || statusData.total_tokens || 0;
+                  const tokenStr = tokens > 0 ? ` — ${tokens.toLocaleString()} tokens` : '';
+                  updateItem('kb', { progress: `Indexing...${tokenStr} (${Math.round((attempts * 3) / 60)}m)` });
                 }
               }
-            } catch {
-              // continue polling
+            } catch (pollErr: any) {
+              if (pollErr?.message?.includes('failed')) throw pollErr;
             }
             attempts++;
           }
           if (!done) {
-            updateItem('kb', { status: 'done', progress: 'Indexing in background' });
+            updateItem('kb', { status: 'done', progress: 'Indexing continues in background' });
           }
         } else {
           updateItem('kb', { status: 'done', progress: 'Created' });
@@ -347,61 +335,50 @@ const executeRestore = async () => {
       } catch (e: any) {
         updateItem('kb', { status: 'error', errorMsg: e?.message || 'Failed' });
       }
+    } else if (kbItem) {
+      updateItem('kb', { status: 'error', errorMsg: 'No files uploaded' });
     }
 
-    // 3. Deploy Agent
-    const agentItem = restoreItems.value.find(i => i.key === 'agent' && i.needed);
-    if (agentItem) {
-      updateItem('agent', { status: 'running' });
-      try {
-        const syncResp = await fetch('/api/sync-agent', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify({ userId: uid })
-        });
-        if (!syncResp.ok) throw new Error('Agent sync failed');
-        updateItem('agent', { status: 'done' });
-      } catch (e: any) {
-        updateItem('agent', { status: 'error', errorMsg: e?.message || 'Failed' });
-      }
-    }
-
-    // 4. Restore Medications
+    // 4. Restore Current Medications
+    console.log(`[RestoreWizard] Step 4: Restore medications. has=${!!state?.currentMedications}`);
     const medsItem = restoreItems.value.find(i => i.key === 'medications' && i.needed);
     if (medsItem && state?.currentMedications) {
       updateItem('medications', { status: 'running' });
       try {
-        await fetch('/api/user-current-medications', {
+        const resp = await fetch('/api/user-current-medications', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
-          body: JSON.stringify({ userId: uid, medications: state.currentMedications })
+          body: JSON.stringify({ userId: uid, currentMedications: state.currentMedications })
         });
-        updateItem('medications', { status: 'done' });
+        if (!resp.ok) throw new Error(`Save failed: ${resp.status}`);
+        updateItem('medications', { status: 'done', progress: 'Saved' });
       } catch (e: any) {
         updateItem('medications', { status: 'error', errorMsg: e?.message || 'Failed' });
       }
     }
 
     // 5. Restore Patient Summary
+    console.log(`[RestoreWizard] Step 5: Restore summary. has=${!!state?.patientSummary}`);
     const summaryItem = restoreItems.value.find(i => i.key === 'summary' && i.needed);
     if (summaryItem && state?.patientSummary) {
       updateItem('summary', { status: 'running' });
       try {
-        await fetch('/api/patient-summary', {
+        const resp = await fetch('/api/patient-summary', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
           body: JSON.stringify({ userId: uid, summary: state.patientSummary })
         });
-        updateItem('summary', { status: 'done' });
+        if (!resp.ok) throw new Error(`Save failed: ${resp.status}`);
+        updateItem('summary', { status: 'done', progress: 'Saved' });
       } catch (e: any) {
         updateItem('summary', { status: 'error', errorMsg: e?.message || 'Failed' });
       }
     }
 
     // 6. Restore Saved Chats
+    console.log(`[RestoreWizard] Step 6: Restore chats. count=${state?.savedChats?.chats?.length || 0}`);
     const chatsItem = restoreItems.value.find(i => i.key === 'chats' && i.needed);
     if (chatsItem && state?.savedChats?.chats) {
       updateItem('chats', { status: 'running' });
@@ -423,9 +400,7 @@ const executeRestore = async () => {
               })
             });
             restored++;
-          } catch {
-            // continue with next chat
-          }
+          } catch { /* continue */ }
         }
         updateItem('chats', { status: 'done', progress: `${restored} restored` });
       } catch (e: any) {
@@ -433,27 +408,43 @@ const executeRestore = async () => {
       }
     }
 
-    // 7. Restore Agent Instructions
+    // 7. Restore Agent Instructions (only if agent was deployed)
+    console.log(`[RestoreWizard] Step 7: Restore instructions. has=${!!state?.agentInstructions}, agentDeployed=${agentDeployed}`);
     const instrItem = restoreItems.value.find(i => i.key === 'instructions' && i.needed);
     if (instrItem && state?.agentInstructions) {
-      updateItem('instructions', { status: 'running' });
-      try {
-        await fetch('/api/agent-instructions', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify({ instructions: state.agentInstructions })
-        });
-        updateItem('instructions', { status: 'done' });
-      } catch (e: any) {
-        updateItem('instructions', { status: 'error', errorMsg: e?.message || 'Failed' });
+      if (!agentDeployed) {
+        console.warn(`[RestoreWizard] Skipping instructions — agent not deployed`);
+        updateItem('instructions', { status: 'error', errorMsg: 'Agent not deployed' });
+      } else {
+        updateItem('instructions', { status: 'running' });
+        try {
+          const resp = await fetch('/api/agent-instructions', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ userId: uid, instructions: state.agentInstructions })
+          });
+          if (!resp.ok) throw new Error(`Save failed: ${resp.status}`);
+          updateItem('instructions', { status: 'done', progress: 'Saved' });
+        } catch (e: any) {
+          updateItem('instructions', { status: 'error', errorMsg: e?.message || 'Failed' });
+        }
       }
     }
 
     // Build summary
-    const doneItems = restoreItems.value.filter(i => i.status === 'done' && i.needed);
+    console.log(`[RestoreWizard] All steps complete. Items:`, restoreItems.value.map(i => `${i.key}:${i.status}`).join(', '));
+    const doneItems = restoreItems.value.filter(i => i.status === 'done');
     const errorItems = restoreItems.value.filter(i => i.status === 'error');
-    restoreSummary.value = `${doneItems.length} item${doneItems.length === 1 ? '' : 's'} restored${errorItems.length > 0 ? `, ${errorItems.length} failed` : ''}.`;
+    const parts: string[] = [];
+    if (filesUploaded > 0) parts.push(`${filesUploaded} file${filesUploaded === 1 ? '' : 's'} uploaded`);
+    if (doneItems.some(i => i.key === 'agent')) parts.push('agent deployed');
+    if (doneItems.some(i => i.key === 'kb')) parts.push('knowledge base indexed');
+    if (doneItems.some(i => i.key === 'medications')) parts.push('medications restored');
+    if (doneItems.some(i => i.key === 'summary')) parts.push('summary restored');
+    if (doneItems.some(i => i.key === 'chats')) parts.push('chats restored');
+    if (errorItems.length > 0) parts.push(`${errorItems.length} failed`);
+    restoreSummary.value = parts.join(', ') + '.';
 
     phase.value = 'complete';
   } catch (e) {
@@ -463,15 +454,11 @@ const executeRestore = async () => {
   }
 };
 
-// Auto-assess when dialog opens
+// Auto-start when dialog opens
 watch(() => props.modelValue, (open) => {
   if (open) {
-    phase.value = 'assess';
     buildRestoreItems();
-    // If we already have cloudHealth, skip to explain
-    if (props.cloudHealth) {
-      phase.value = 'explain';
-    }
+    executeRestore();
   }
 }, { immediate: true });
 </script>
