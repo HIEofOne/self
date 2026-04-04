@@ -7127,7 +7127,16 @@ const runPoll = async () => {
             console.log(`[KB AUTO] ✅ Token-stable completion for job ${activeJobId}: tokens=${tokens} stable for ${tokenStableCount} polls (status still=${status})`);
           }
 
-          const isCompleted = statusCompleted || tokenStableCompleted;
+          // Time-based fallback: if polling for 15+ minutes with no completion signal,
+          // the DO API job status is stuck. Complete with whatever state we have.
+          // This handles the 0-token "no changes" case where the DO API never transitions.
+          const elapsedPollingMs = Date.now() - startTime;
+          const timeBasedCompleted = !statusCompleted && !tokenStableCompleted && elapsedPollingMs > 15 * 60 * 1000;
+          if (timeBasedCompleted) {
+            console.log(`[KB AUTO] ✅ Time-based completion for job ${activeJobId}: elapsed=${Math.floor(elapsedPollingMs / 60000)}m tokens=${tokens} status=${status}`);
+          }
+
+          const isCompleted = statusCompleted || tokenStableCompleted || timeBasedCompleted;
 
            const phase = isCompleted
              ? 'complete'
@@ -7148,7 +7157,7 @@ const runPoll = async () => {
            }
 
            if (isCompleted) {
-            const reason = statusCompleted ? 'status_completed' : 'token_stable';
+            const reason = statusCompleted ? 'status_completed' : tokenStableCompleted ? 'token_stable' : 'time_based';
             console.log(`[KB AUTO] ✅ Completion detected for job ${activeJobId} (reason=${reason} status=${status} tokens=${tokens})`);
             await completeIndexing(job, fileCount, tokens, indexedFiles, reason);
             await logFinalIndexingStatus(reason);
