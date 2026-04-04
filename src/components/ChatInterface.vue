@@ -1129,9 +1129,6 @@ watch(
       if (!showAgentSetupDialog.value) {
         showAgentSetupDialog.value = true;
       }
-      console.log('[SAVE-RESTORE] Wizard reopened for rehydration', {
-        userId: props.user?.userId || null
-      });
     }
   },
   { immediate: true }
@@ -1145,10 +1142,6 @@ watch(
       if (!showAgentSetupDialog.value) {
         showAgentSetupDialog.value = true;
       }
-      console.log('[SAVE-RESTORE] Rehydration files updated', {
-        userId: props.user?.userId || null,
-        count
-      });
     }
   },
   { immediate: true }
@@ -1696,18 +1689,10 @@ watch(
   }
 );
 
-// Token estimation helper
-const estimateTokenCount = (text: string) => {
-  const averageTokenLength = 2.75;
-  return Math.ceil((text.length / averageTokenLength) * 1.15);
-};
-
 // Send message (streaming)
 const sendMessage = async () => {
   if (!inputMessage.value || isStreaming.value || isRequestSent.value) return;
   emit('session-dirty');
-
-  const startTime = Date.now();
 
   const userLabel = getUserLabel();
   const userMessage: Message = {
@@ -1764,7 +1749,7 @@ const sendMessage = async () => {
         }
       } catch (err) {
         // If fetching summary fails, continue with normal chat flow
-        console.log('Could not fetch existing summary, generating new one:', err);
+        console.warn('Could not fetch existing summary, generating new one:', err);
       }
     }
     // Build messages with file context
@@ -1788,21 +1773,6 @@ const sendMessage = async () => {
       role: msg.role,
       content: msg.content
     }));
-    
-    // Calculate tokens and context size for logging
-    const allMessagesText = sanitizedMessages.map(msg => msg.content).join('\n');
-    const totalTokens = estimateTokenCount(allMessagesText);
-    const contextSizeKB = Math.round(allMessagesText.length / 1024 * 100) / 100;
-    const uploadedFilesCount = uploadedFiles.value.length;
-    
-    // Calculate just the file context for additional logging
-    const filesContextText = uploadedFiles.value.map(file => 
-      `File: ${file.name} (${file.type})\nContent:\n${file.type === 'pdf' ? file.content : file.content}`
-    ).join('\n\n');
-    const filesTokens = estimateTokenCount(filesContextText);
-    const filesSizeKB = Math.round(filesContextText.length / 1024 * 100) / 100;
-    
-    console.log(`[*] AI Query: ${totalTokens} tokens (${filesTokens} from files), ${contextSizeKB}KB context (${filesSizeKB}KB files), ${uploadedFilesCount} files`);
     
     // Convert displayed label to API key
     const providerKey = getProviderKey(selectedProvider.value);
@@ -1871,25 +1841,7 @@ const sendMessage = async () => {
             
             if (data.isComplete) {
               isStreaming.value = false;
-              const responseTime = Date.now() - startTime;
-              console.log(`[*] AI Response time: ${responseTime}ms`);
-              
-              // [RAG] Debug: Log the full response for RAG queries
-              const lastUserMessage = messages.value.filter(m => m.role === 'user').pop()?.content || '';
-              if (lastUserMessage.toLowerCase().includes('find the encounter note') || 
-                  lastUserMessage.toLowerCase().includes('document and page')) {
-                console.log('[RAG] Full AI response:', assistantMessage.content);
-                console.log('[RAG] Original query:', lastUserMessage);
-                
-                // Extract filename and page from response if present
-                const filenameMatch = assistantMessage.content.match(/(?:File|Filename|Document|Source):\s*([A-Za-z0-9_\-\.]+\.(?:PDF|pdf))/i);
-                const pageMatch = assistantMessage.content.match(/Page:\s*(\d+)/i);
-                if (filenameMatch || pageMatch) {
-                  console.log('[RAG] Extracted filename:', filenameMatch?.[1] || 'not found');
-                  console.log('[RAG] Extracted page:', pageMatch?.[1] || 'not found');
-                }
-              }
-              
+
               // Save patient summary if this was a summary request
               if (isPatientSummaryRequest && props.user?.userId && assistantMessage.content) {
                 savePatientSummary(assistantMessage.content);
@@ -1910,9 +1862,7 @@ const sendMessage = async () => {
     }
 
     isStreaming.value = false;
-    const responseTime = Date.now() - startTime;
-    console.log(`[*] AI Response time: ${responseTime}ms`);
-    
+
     // Save patient summary if this was a summary request
     if (isPatientSummaryRequest && props.user?.userId && assistantMessage.content) {
       savePatientSummary(assistantMessage.content);
@@ -1923,9 +1873,7 @@ const sendMessage = async () => {
     // Update trulyOriginalMessages when assistant response completes (new message added)
     trulyOriginalMessages.value = JSON.parse(JSON.stringify(messages.value));
   } catch (error) {
-    const responseTime = Date.now() - startTime;
     console.error('Chat error:', error);
-    console.log(`[*] AI Response time: ${responseTime}ms (failed)`);
     
     // Build error message
     let errorMessage = '';
@@ -2353,9 +2301,7 @@ const savePatientSummary = async (summary: string) => {
       })
     });
     
-    if (response.ok) {
-      console.log('Patient summary saved successfully');
-    } else {
+    if (!response.ok) {
       console.error('Failed to save patient summary');
     }
   } catch (error) {
@@ -3280,7 +3226,6 @@ const handleFileSelect = async (event: Event) => {
       if (result) {
         localFolderHandle.value = result.handle;
         localFolderName.value = result.folderName;
-        console.log(`[localFolder] Reconnected to "${result.folderName}" during file select gesture`);
       }
     } catch (e) {
       // Not critical — file will still upload to cloud
@@ -3465,7 +3410,6 @@ const uploadPDFFile = async (file: File) => {
 
   const parseResult = await parseResponse.json();
   
-  console.log(`[*] PDF parsed: ${file.name}, ${file.size} bytes → ${parseResult.text.length} chars (${parseResult.pages} pages)`);
 
   // Upload to bucket
   const uploadFormData = new FormData();
@@ -3531,12 +3475,9 @@ const uploadPDFFile = async (file: File) => {
               await writeStateFile(localFolderHandle.value, state);
             }
           }
-          console.log(`[localFolder] Paperclip file "${file.name}" copied to local folder`);
         } catch (folderErr) {
           console.warn('[localFolder] Failed to copy paperclip file to local folder:', folderErr);
         }
-      } else {
-        console.log('[localFolder] No local folder connected — skipping local copy of paperclip file');
       }
     } catch (error) {
       console.warn('Failed to save file metadata to user document:', error);
@@ -5678,10 +5619,6 @@ const handleFilesArchived = (archivedBucketKeys: string[]) => {
     viewingFile.value = null;
   }
   
-  if (archivedBucketKeys.length > 0) {
-    console.log(`[Files] Cleared ${archivedBucketKeys.length} file badge(s) from chat (moved to archived or KB)`);
-  }
-  
   // Update status tip immediately after files are archived
   updateContextualTip();
 };
@@ -5695,12 +5632,10 @@ const handleFileAddedToKb = async (data: { fileName: string; bucketKey: string }
       if (result) {
         localFolderHandle.value = result.handle;
         localFolderName.value = result.folderName;
-        console.log(`[localFolder] Reconnected to "${result.folderName}" during KB file add`);
       }
     } catch { /* ignore */ }
   }
   if (!localFolderHandle.value) {
-    console.log('[localFolder] No local folder connected — skipping local copy of KB file');
     return;
   }
   try {
@@ -5905,10 +5840,6 @@ const handlePatientSummaryVerified = async () => {
 };
 
 const handleRehydrationFileRemoved = (payload: { bucketKey?: string; fileName?: string }) => {
-  console.log('[SAVE-RESTORE] Rehydration file removed (wizard)', {
-    userId: props.user?.userId || null,
-    fileName: payload?.fileName || payload?.bucketKey || null
-  });
   emit('rehydration-file-removed', payload);
 };
 

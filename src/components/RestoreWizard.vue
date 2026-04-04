@@ -176,14 +176,9 @@ const executeRestore = async () => {
   const files = state?.files || [];
   let filesUploaded = 0;
 
-  console.log(`[RestoreWizard] executeRestore starting for ${uid}`);
-  console.log(`[RestoreWizard] Local state: files=${files.length}, meds=${!!state?.currentMedications}, summary=${!!state?.patientSummary}, chats=${state?.savedChats?.chats?.length || 0}, instructions=${!!state?.agentInstructions}, lists=${!!state?.listsMarkdown}`);
-  console.log(`[RestoreWizard] Folder handle: ${!!props.localFolderHandle}, Safari files: ${props.safariFolderFiles?.length || 0}`);
-
   try {
     // Resolve KB name for file uploads
     const kbName = await resolveKbName(uid);
-    console.log(`[RestoreWizard] Resolved KB name: ${kbName}`);
 
     // 1. Upload files to KB folder so they're ready for indexing
     const uploadFile = async (file: File, fileName: string) => {
@@ -217,8 +212,6 @@ const executeRestore = async () => {
         if (!regResp.ok) {
           const regErr = await regResp.text().catch(() => '');
           console.error(`[RestoreWizard] files/register failed: ${regResp.status} ${regErr}`);
-        } else {
-          console.log(`[RestoreWizard] files/register OK for ${fileName}`);
         }
       } catch (regError: any) {
         console.error(`[RestoreWizard] files/register network error:`, regError?.message);
@@ -226,18 +219,15 @@ const executeRestore = async () => {
       return data;
     };
 
-    console.log(`[RestoreWizard] Step 1: Upload ${files.length} files. hasHandle=${!!props.localFolderHandle}, hasSafariFiles=${!!props.safariFolderFiles}`);
     if (files.length > 0 && props.localFolderHandle) {
       for (const fileInfo of files) {
         const key = `file:${fileInfo.fileName}`;
         updateItem(key, { status: 'running' });
         try {
-          console.log(`[RestoreWizard] Uploading file: ${fileInfo.fileName}`);
           const fileHandle = await props.localFolderHandle.getFileHandle(fileInfo.fileName);
           const file = await fileHandle.getFile();
-          const result = await uploadFile(file, fileInfo.fileName);
+          await uploadFile(file, fileInfo.fileName);
           filesUploaded++;
-          console.log(`[RestoreWizard] File uploaded: ${fileInfo.fileName}, bucketKey=${result?.fileInfo?.bucketKey}`);
           updateItem(key, { status: 'done', progress: 'Uploaded' });
         } catch (e: any) {
           console.error(`[RestoreWizard] File upload failed: ${fileInfo.fileName}:`, e?.message);
@@ -270,8 +260,6 @@ const executeRestore = async () => {
     // 2. Start KB indexing AND agent deployment IN PARALLEL
     // KB indexing only needs files in Spaces — it does NOT need the agent.
     // Agent deployment takes ~60-90s. KB creation + indexing is independent.
-    console.log(`[RestoreWizard] Step 2: Start KB indexing and agent deployment in parallel`);
-
     // --- KB indexing promise (runs independently) ---
     const kbItem = restoreItems.value.find(i => i.key === 'kb' && i.needed);
     const kbPromise = (async () => {
@@ -281,7 +269,6 @@ const executeRestore = async () => {
       }
       updateItem('kb', { status: 'running', progress: 'Creating...' });
       try {
-        console.log(`[RestoreWizard] Calling /api/update-knowledge-base for ${uid}`);
         const indexResp = await fetch('/api/update-knowledge-base', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -362,11 +349,8 @@ const executeRestore = async () => {
           body: JSON.stringify({ userId: uid, create: true })
         });
         const syncData = await syncResp.json();
-        console.log(`[RestoreWizard] /api/sync-agent response: status=${syncResp.status}`, JSON.stringify(syncData));
         if (!syncResp.ok) throw new Error(syncData.error || 'Agent deployment failed');
         if (syncData.success || syncData.agentId) {
-          const agentId = syncData.agentId || syncData.agent?.id;
-          console.log(`[RestoreWizard] Agent created: agentId=${agentId}, created=${syncData.created}`);
           // Poll for agent endpoint to become ready (deployment takes ~30-90s)
           updateItem('agent', { progress: 'Deploying... (0s)' });
           let endpointReady = !!syncData.agentEndpoint;
@@ -410,7 +394,6 @@ const executeRestore = async () => {
     // This batches medications, summary, chats, and instructions into one call
     const hasMetadata = state?.currentMedications || state?.patientSummary || state?.savedChats?.chats?.length || state?.agentInstructions;
     if (hasMetadata) {
-      console.log(`[RestoreWizard] Step 3: Restore metadata via /api/restore. meds=${!!state?.currentMedications}, summary=${!!state?.patientSummary}, chats=${state?.savedChats?.chats?.length || 0}, instructions=${!!state?.agentInstructions}`);
       for (const key of ['medications', 'summary', 'chats', 'instructions']) {
         const item = restoreItems.value.find(i => i.key === key && i.needed);
         if (item) updateItem(key, { status: 'running' });
@@ -436,8 +419,6 @@ const executeRestore = async () => {
 
         const restoreData = await restoreResp.json();
         const r = restoreData.results || {};
-        console.log(`[RestoreWizard] /api/restore response:`, JSON.stringify(r));
-
         if (restoreItems.value.find(i => i.key === 'medications' && i.needed)) {
           updateItem('medications', r.medications ? { status: 'done', progress: 'Restored' } : { status: 'error', errorMsg: 'Not saved' });
         }
@@ -479,7 +460,6 @@ const executeRestore = async () => {
           throw new Error(errData.error || `Lists restore failed: ${listsResp.status}`);
         }
         updateItem('lists', { status: 'done', progress: 'Restored' });
-        console.log(`[RestoreWizard] Lists markdown restored to S3`);
       } catch (e: any) {
         console.error(`[RestoreWizard] Lists restore failed:`, e?.message);
         updateItem('lists', { status: 'error', errorMsg: e?.message || 'Failed' });
@@ -487,7 +467,6 @@ const executeRestore = async () => {
     }
 
     // Build summary
-    console.log(`[RestoreWizard] All steps complete. Items:`, restoreItems.value.map(i => `${i.key}:${i.status}`).join(', '));
     const doneItems = restoreItems.value.filter(i => i.status === 'done');
     const errorItems = restoreItems.value.filter(i => i.status === 'error');
     const parts: string[] = [];

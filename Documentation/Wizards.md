@@ -1,298 +1,368 @@
-# Account Provisioning, Destroy, and Restore
+# Account Lifecycle: Welcome, Setup, Sign-out, Destroy, and Restore
 
-This document describes how new user setup, account destruction, and account
-restoration work in MAIA, including known fragility points and architectural
-issues that have caused recurring bugs.
+This document describes MAIA's account lifecycle flows, the modals involved
+in each, verification steps, and how multiple family members are kept
+separate.
 
 ---
 
 ## 1. Architecture Overview
 
-Account lifecycle involves three systems that must stay in sync:
+Account state lives in three systems:
 
-| System | What it stores | Source of truth? |
-|--------|---------------|-----------------|
-| **CouchDB** (`maia_users`) | User doc with `assignedAgentId`, `kbId`, `kbName`, `files[]`, `workflowStage` | For user metadata and file registry |
-| **DigitalOcean API** | Agent (GenAI platform), Knowledge Base, Spaces (S3) files | For actual cloud resources |
-| **Browser** | IndexedDB folder handle, localStorage `knownUsers`, sessionStorage flags, `maia-state.json` in local folder | For local/offline state |
-
-The fundamental fragility is that these three systems are updated independently
-by multiple code paths, with no transaction or saga pattern to ensure
-consistency. A failure or race at any point leaves them out of sync.
+| System | What it stores |
+|--------|---------------|
+| **CouchDB** (`maia_users`) | User doc: `assignedAgentId`, `kbId`, `kbName`, `files[]`, `workflowStage`, `currentMedications`, `patientSummary` |
+| **DigitalOcean** | Agent (GenAI platform), Knowledge Base, Spaces (S3) files |
+| **Browser** | IndexedDB folder handle, localStorage (`knownUsers[]`, snapshot data), sessionStorage flags, `maia-state.json` in local folder |
 
 ---
 
-## 2. New User Setup (Provisioning)
+## 2. Welcome Page (App.vue)
 
-### Flow
+Every session begins here when the user is not authenticated.
 
-1. **Welcome page** → user clicks "Get Started"
-2. **`startTemporarySession`** (App.vue) → `POST /api/temporary-session` →
-   creates CouchDB user doc, returns session cookie
-3. **ChatInterface setup wizard** opens (`showAgentSetupDialog`)
-4. User picks local folder → files scanned
-5. Files uploaded via `POST /api/files/upload` with `isInitialImport=true`
-6. **Agent created** by `/api/agent-setup-status` polling (see below)
-7. **KB indexed** via `POST /api/update-knowledge-base`
-8. Medications and Summary verified via AI
-9. Wizard complete → `maia-state.json` and `.webloc` written to local folder
+### Known User Cards
 
-### Agent Creation During Setup
+If `knownUsers` (from localStorage) contains entries, each is displayed as
+a status card with color-coded border and icon:
 
-The agent is created by the **ChatInterface deployment poller**, not by the
-wizard directly. On mount, ChatInterface starts polling
-`GET /api/agent-setup-status` every few seconds. This endpoint calls
-`ensureUserAgent()` if no `assignedAgentId` exists on the user doc, which
-creates a new DO agent and saves the ID to the user doc.
+| Cloud status | Border color | Icon | Action button |
+|-------------|-------------|------|---------------|
+| `ready` | Green | check_circle | SIGN IN / CONTINUE |
+| `loading` | Grey | hourglass_empty | (spinner) |
+| `restore` | Orange | warning | RESTORE |
 
-**Key point**: Agent creation is a side effect of a polling endpoint, not an
-explicit wizard step.
+Each card shows the user's display name, userId, folder name, and an X
+button to remove from this device. Below the cards, an "Add family member"
+button starts a fresh new-user flow.
 
-### KB Name Generation
+If no known users exist, a simple text line offers to sign in with a
+passkey or create a new account.
 
-When a user doc has no `kbName` field, `getKBNameFromUserDoc()` calls
-`generateKBName(userId)` which produces a **timestamped** name:
+### Welcome Page Controls
 
-```
-{userId}-kb-{YYYYMMDD}{last6msDigits}
-// Example: chloe73-kb-20260403885202
-```
+- **GET STARTED** button (blue, full width) — calls
+  `handleGetStartedNoPassword()`. When restorable users exist, shows a
+  disambiguation dialog first (see below).
+- **Introduction** — loaded from `public/welcome.md`, rendered via
+  vue-markdown.
+- **Footer links**: Privacy | FAQ | About — each opens
+  `WelcomeContentDialog` with the corresponding markdown section.
 
-`ensureKBNameOnUserDoc()` then persists this generated name to the user doc.
-The timestamp portion makes every generated name unique, which means **calling
-`getKBNameFromUserDoc` twice without persisting produces two different names**.
+### Get Started Disambiguation
+
+**Modal: `showGetStartedChoiceDialog`**
+
+When a user clicks GET STARTED and there are restorable (destroyed) users
+in knownUsers, this dialog appears to prevent accidentally creating a new
+account when the user intended to restore:
+
+- One **Restore {name}** button per restorable user
+- An **Add a new family member** button for genuinely new accounts
 
 ---
 
-## 3. Account Destruction
+## 3. New User Setup
 
-### Flow
+### Step 1: Device Privacy Dialog
 
-1. User clicks Destroy on Welcome page
-2. **`destroyTemporaryAccount`** (App.vue) → `POST /api/self/delete`
-3. Server calls `deleteUserAndResources(userId)`:
+When a truly new user clicks GET STARTED (no knownUsers at all):
+
+**Modal: `showDevicePrivacyDialog`** (persistent)
+- "Is this a private computer or a shared computer?"
+- **PRIVATE**: Sets `sharedComputerMode = false`, proceeds to create
+  session.
+- **SHARED**: Sets `sharedComputerMode = true`, shows a warning that a
+  passkey will be required, then proceeds.
+
+### Step 2: Temporary Session
+
+`startTemporarySession()` calls `POST /api/temporary-session`, which
+creates a CouchDB user doc and returns a session cookie. The user is now
+authenticated and the main ChatInterface loads. The new userId is added
+to `knownUsers` in localStorage.
+
+If `sharedComputerMode` is true, passkey registration is started
+immediately after authentication.
+
+### Step 3: Setup Wizard (ChatInterface)
+
+**Modal: `showAgentSetupDialog`** (persistent, non-dismissible until
+complete)
+
+The wizard has three stages displayed as a vertical checklist:
+
+**Stage 1 — Private AI Agent Deployment**
+- Triggered automatically on ChatInterface mount.
+- ChatInterface polls `GET /api/agent-setup-status` every few seconds.
+- This endpoint calls `ensureUserAgent()` to create a DO agent if none
+  exists.
+- A countdown timer shows elapsed time (typically 2-5 minutes).
+- Complete when `assignedAgentId` exists and agent is deployed.
+- Status line: "Ready to chat" when done.
+
+**Stage 2 — File Upload and Import**
+- User can pick a local folder (via File System Access API) or select
+  individual files.
+- Files are uploaded via `POST /api/files/upload`.
+- If an Apple Health PDF is detected, it becomes the `initialFile` and
+  triggers Current Medications extraction.
+- Medications verification: user reviews AI-extracted medication list
+  before proceeding to Stage 3.
+- "No device" option: user can skip file upload entirely.
+
+**Stage 3 — Knowledge Base Indexing**
+- Triggered by `POST /api/update-knowledge-base`.
+- Server creates or reuses a DO Knowledge Base, copies files into an
+  ephemeral Spaces bucket, and starts an indexing job.
+- **Server-side polling** (every 15s): tracks DO job status, token
+  counts, and token stability. Completion is detected by:
+  1. DO API job status transitioning to "completed"
+  2. Token-stable detection: tokens > 0 and unchanged for 4+ polls (60s)
+  3. Time-based fallback: 15 minutes elapsed
+- **Client-side polling** (every 15s): reads `kbIndexingStatus` from
+  CouchDB. Completion fallbacks:
+  1. `backendCompleted` flag set by server
+  2. `inferredComplete`: no active job and tokens > 0
+  3. `tokenTimeoutComplete`: tokens > 0 and 7 minutes elapsed
+  4. `pureTimeoutComplete`: 20 minutes elapsed (catches 0-token case)
+- Console logging is state-change-only (logs only when poll state
+  differs from previous poll).
+
+**Wizard Completion**
+- All three stages green → FINISH button enabled.
+- `handleWizardComplete()` writes `maia-state.json` and a personalized
+  `.webloc` shortcut to the user's local folder.
+- Wizard state is persisted to localStorage so it survives page reload.
+
+### Wizard Logging
+
+Every stage transition and modal open/close is logged to the setup log
+file via `POST /api/wizard-event`. Progress entries are written every
+~60 seconds during polling.
+
+---
+
+## 4. Sign-out Flows
+
+Sign-out behavior depends on the account type.
+
+### Temporary Account Sign-out
+
+**Modal: `showTempSignOutDialog`**
+- "You're signed into a temporary account."
+- **CREATE A PASSKEY**: Opens passkey registration (converts temporary
+  to persistent).
+- **DESTROY ACCOUNT**: Opens the Destroy dialog (see Section 5).
+- **SIGN OUT**: Calls `handleTemporarySignOut()` — signs out without
+  destroying. The temp session cookie persists; user can resume later.
+
+### Authenticated (Passkey) Account Sign-out
+
+1. If the user has shared deep links: shows the Dormant Dialog.
+2. If no deep links and no local backup: offers Passkey Backup first.
+3. Otherwise: proceeds directly to dormant sign-out.
+
+**Modal: `showDormantDialog`**
+- "Deep links require a running server."
+- **KEEP SERVER LIVE**: Signs out locally but server stays active for
+  deep-link recipients. Saves local snapshot.
+- **GO DORMANT**: Saves local snapshot, calls `POST /api/account/dormant`
+  to pause the server, then signs out.
+
+### Passkey Backup Flow
+
+**Modal: `showPasskeyBackupPromptModal`**
+- "Encrypt a backup with a 4-digit PIN?"
+- **NO**: Skips backup, proceeds to sign-out. Sets a flag so the prompt
+  doesn't repeat.
+- **YES**: Opens PIN dialog.
+
+**Modal: `showPasskeyBackupPinDialog`**
+- User enters a 4-digit PIN.
+- Snapshot is encrypted with the PIN and saved to localStorage.
+- Then proceeds to sign-out.
+
+### Local State Snapshot
+
+During sign-out, `saveLocalSnapshot()` writes the user's current state
+to their local folder as `maia-state.json` (files list, medications,
+patient summary, saved chats, agent instructions). This enables restore.
+
+---
+
+## 5. Account Destruction
+
+### From Sign-out Dialog
+
+Temporary users can reach Destroy via the sign-out dialog's
+"DESTROY ACCOUNT" button.
+
+**Modal: `showDestroyDialog`** (persistent)
+
+**Verification step**: user must type their exact userId to confirm.
+
+- Displays: "This permanently deletes your cloud data for {userId}.
+  Signing out is reversible; destroying is not."
+- Input field: "Enter user ID"
+- **DESTROY** button: enabled only when typed text matches `user.userId`
+  exactly.
+
+### Destroy Process
+
+`destroyTemporaryAccount()`:
+1. Saves a local state snapshot (for potential restore)
+2. Calls `POST /api/self/delete`, which runs
+   `deleteUserAndResources(userId)`:
    - Deletes Spaces files under `{userId}/`
-   - Deletes KB by `userDoc.kbId` (if stored)
-   - Deletes agent by `userDoc.assignedAgentId` + scans for orphans
-   - Deletes session docs
-   - Deletes user doc from CouchDB
-4. Post-destroy verification logs (agent 404, KB 404, Spaces empty, doc gone)
-5. Client clears IndexedDB snapshot, but keeps `knownUsers` entry (for restore)
-
-### Fragility Points
-
-**KB deletion relies on stored `kbId`**: If `kbId` was never saved to the user
-doc (e.g. because the save got a 409 conflict), the KB in DigitalOcean becomes
-orphaned. The destroy code does attempt to find the KB by name pattern as a
-fallback, but the name lookup can race with validation code that clears the ID.
-
-**Agent stored vs actual**: Before the orphan-scan fix, destroy only deleted
-`userDoc.assignedAgentId`. If multiple agents were created (see below), the
-extras were orphaned in DigitalOcean.
-
-**User doc null guard**: If the user doc was already deleted (e.g. by a
-previous destroy attempt), `deleteUserAndResources` crashes with
-`Cannot read properties of null (reading 'assignedAgentId')` because it reads
-the user doc early and doesn't guard against null throughout.
+   - Deletes Knowledge Base by stored `kbId`
+   - Deletes Agent by `assignedAgentId` + scans for orphan agents
+   - Deletes session documents
+   - Deletes the user document from CouchDB
+3. Clears IndexedDB snapshot
+4. Resets auth state (back to Welcome page)
+5. The `knownUsers` entry is preserved with `cloudStatus: 'restore'`
+   so the Welcome page shows the user card with a RESTORE button.
 
 ---
 
-## 4. Account Restoration
+## 6. Account Restoration
 
-### Flow
+When a destroyed user's card shows on the Welcome page with status
+"restore" (orange), the user clicks RESTORE.
 
-1. Welcome page shows destroyed user card with "GET STARTED" button
-2. **`handleUserCardRestore`** (App.vue):
-   a. `POST /api/account/recreate` → creates fresh user doc (no agent, no KB,
-      no files, no kbName)
-   b. Reads local state from folder handle (`maia-state.json`)
-   c. `GET /api/cloud-health` → checks what exists in cloud
-   d. Launches **RestoreWizard** with local state
-3. **RestoreWizard** `executeRestore()` runs automatically:
-   - Step 1: Upload files from local folder → `POST /api/files/upload` +
-     `POST /api/files/register`
-   - Step 2: Deploy agent → `POST /api/sync-agent?create=true`
-   - Step 3: Index KB → `POST /api/update-knowledge-base`
-   - Step 4-7: Restore medications, summary, chats, instructions
+### Restore Flow (`handleUserCardRestore`)
 
-### The Restore Runs Instantly
+1. **Read local state**: Tries in order:
+   - Stored folder handle → reads `maia-state.json`
+   - IndexedDB saved handle → reads `maia-state.json`
+   - Prompts user to pick their local folder
+   - Falls back to IndexedDB snapshot
+2. **Recreate user doc**: `POST /api/account/recreate` → creates fresh
+   CouchDB user doc with `kbName` pre-set (from snapshot or generated).
+3. **Cloud health check**: `GET /api/cloud-health` → verifies what
+   exists in DigitalOcean.
+4. **Launch RestoreWizard**: Opens with local state and cloud health.
 
-The RestoreWizard auto-executes all steps as soon as it mounts. There is no
-user interaction required. The entire flow completes in ~2 seconds (file upload
-+ agent create + KB attempt + metadata restore). The user sees the wizard flash
-briefly and then it's done — but with errors.
+### RestoreWizard
 
-**The "too fast" perception is correct**: the wizard completes all steps
-without waiting for any of them to actually propagate. The agent is created but
-not yet deployed. The KB indexing fails. The user ends up in a half-restored
-state.
+**Modal: RestoreWizard component** (full-screen dialog)
 
----
+Runs automatically on mount — no user interaction required:
 
-## 5. Root Cause: KB Name Mismatch (NO_KB_FILES)
+- **Step 1**: Upload files from local state → `POST /api/files/upload`
+  and register metadata
+- **Step 2**: Deploy agent → `POST /api/sync-agent?create=true`
+- **Step 3**: Index KB → `POST /api/update-knowledge-base`
+- **Steps 4-7**: Restore medications, patient summary, saved chats,
+  and agent instructions from the local state snapshot
 
-This is the central bug that has persisted across multiple fix attempts.
+After RestoreWizard completes, the setup wizard reopens if there are
+rehydration files (files that need re-uploading from the user's device).
 
-### What happens
+### Post-Restore Verification
 
-1. `/api/account/recreate` creates a user doc with **no `kbName` field**
-2. RestoreWizard calls `resolveKbName(uid)` which fetches `/api/user-status`
-   → user doc has no `kbName` → falls back to simple `"{userId}-kb"`
-3. Files are uploaded to Spaces under `{userId}/{userId}-kb/{file}`
-4. Files are registered in user doc with `bucketKey: "{userId}/{userId}-kb/{file}"`
-5. RestoreWizard calls `POST /api/update-knowledge-base`
-6. Server calls `ensureKBNameOnUserDoc()` → `getKBNameFromUserDoc()` → no
-   `kbName` stored → `generateKBName()` → creates **timestamped** name
-   `"{userId}-kb-20260403885202"` and saves it to user doc
-7. Server looks for files with prefix `{userId}/{userId}-kb-20260403885202/`
-8. User doc files have prefix `{userId}/{userId}-kb/` → **NO MATCH → 400 NO_KB_FILES**
-
-### Terminal proof
-
-```
-[files/register] ✅ Registered ... bucketKey=chloe73/chloe73-kb/GROPPER_ADRIAN_6KB.PDF
-[KB-INDEX] Looking for files with prefix: chloe73/chloe73-kb-20260403885202/
-[KB-INDEX] userDoc.files: ["chloe73/chloe73-kb/GROPPER_ADRIAN_6KB.PDF", ...]
-[KB-INDEX] Files matching KB prefix: 0 []
-```
-
-### Why it works for new users
-
-During new user setup, `ensureKBNameOnUserDoc` is called BEFORE file upload
-(during agent provisioning or the first `/api/files/upload` call). So the
-timestamped name gets persisted to the user doc first, and then the upload
-uses that same name. The RestoreWizard's `resolveKbName` would also find the
-stored `kbName` if it had been set.
-
-### Fix required
-
-Either:
-- (a) RestoreWizard should call an endpoint to generate and persist the KB name
-  BEFORE uploading files, so both upload and index use the same name
-- (b) The server's `/api/update-knowledge-base` should accept a `kbName`
-  parameter and use it instead of generating a new one
-- (c) `/api/account/recreate` should generate and store `kbName` in the new
-  user doc
-
-Option (c) is simplest and most correct: the recreated user doc should have a
-`kbName` from the start, just like a normally-provisioned user doc does.
+After the RestoreWizard completes:
+- Folder identity is re-stamped with the current userId
+- A personalized `.webloc` shortcut is written
+- Local state snapshot is updated
+- Agent status is checked to confirm endpoint is ready
 
 ---
 
-## 6. Duplicate Agent Creation
+## 7. More Choices (Account Management)
 
-### What happens
+Accessed via the **MORE CHOICES** button on the Welcome page.
 
-1. RestoreWizard calls `POST /api/sync-agent?create=true` → creates agent A,
-   saves `assignedAgentId=A` to user doc
-2. Meanwhile, ChatInterface mounts and starts polling
-   `GET /api/agent-setup-status`
-3. The polling endpoint finds no `assignedAgentId` (because the sync-agent
-   save hasn't completed yet, or there was a 409 conflict) → calls
-   `ensureUserAgent()` → creates agent B
-4. Result: two agents in DigitalOcean, only one stored in user doc
+**Modal: `showOtherAccountOptionsDialog`**
 
-### Terminal proof
+Available actions depend on user type:
+- **Sign in as a different user**: Opens passkey auth.
+- **Delete Cloud Account for {userId}**: Requires passkey verification
+  first.
+- **Delete Local Storage for {userId}**: Clears localStorage snapshot.
 
-```
-[SYNC-AGENT] No agent found for chloe73, creating...
-[AGENT] Deployment status for chloe73 (779e0f19...): STATUS_WAITING_FOR_DEPLOYMENT
-                                        ^^^^^^^^ agent from polling
-📝 Updating agent instructions for ... agent 78da697d...
-                                              ^^^^^^^^ agent from sync-agent
-[AGENT] Deployment status for chloe73 (78da697d...): STATUS_WAITING_FOR_DEPLOYMENT
-                                        ^^^^^^^^ now polling finds this one too
-```
+### Cloud Account Deletion
 
-### Why it happens
+**Modal: `showMoreChoicesConfirmDialog`** (kind = 'delete-cloud')
 
-Three different code paths can create agents:
-1. `POST /api/sync-agent` with `create=true` → calls `ensureUserAgent()`
-2. `GET /api/agent-setup-status` polling → calls `ensureUserAgent()` if no
-   `assignedAgentId`
-3. `POST /api/temporary-session` during initial provisioning → calls
-   `ensureUserAgent()`
+For cloud users (with passkey):
+- **Keep local backup and delete cloud**: Saves snapshot locally, then
+  calls `POST /api/account/dormant`.
+- **Delete everything**: Calls `POST /api/self/delete` and clears local
+  snapshot.
 
-All three use `ensureUserAgent()` which checks `userDoc.assignedAgentId`, but
-they can race: if two requests read the user doc before either saves the new
-agent ID, both will create an agent.
+For local-only users:
+- Single **DELETE** button: restores temp session, calls
+  `POST /api/self/delete`, clears snapshot, signs out.
 
-### Fix required
+### Local Storage Deletion
 
-- RestoreWizard should suppress the ChatInterface agent-setup-status polling
-  during restore, OR
-- `ensureUserAgent` should use a mutex/lock per userId, OR
-- The sync-agent endpoint should be the ONLY path that creates agents during
-  restore, with polling disabled until restore is complete
+**Modal: `showMoreChoicesConfirmDialog`** (kind = 'delete-local')
+- Single **DELETE** button: clears `userSnapshot` for the userId from
+  localStorage, reloads welcome status.
 
 ---
 
-## 7. Other Issues
+## 8. Multi-Family-Member Separation
 
-### Webloc file missing after restore
+MAIA supports multiple family members using the same device.
 
-The RestoreWizard's completion handler writes a generic `maia.webloc` instead
-of the personalized `maia-for-{patientName}-as-{userId}.webloc`. The original
-wizard writes the personalized version during `handleWizardComplete`. The
-restore path needs to replicate this.
+### The knownUsers Registry
 
-### My Lists tab reloading (regression)
+`knownUsers` is an array in localStorage. Each entry contains:
+- `userId` — unique identifier (e.g. "chloe73")
+- `displayName` — patient name for display
+- `folderName` — local folder associated with this user
+- `hasPasskey` — whether the user has registered a passkey
 
-After restore, the `process-initial-file` endpoint is called repeatedly (10+
-times in the terminal log) for the same Apple Health file. This suggests a
-watcher or polling loop is re-triggering the file processing, likely because
-the `initialFile` field on the user doc keeps changing or the completion flag
-isn't being set.
+The Welcome page displays a card for each known user with their current
+cloud status.
 
-### Cloud health check returns agent.ok=true after destroy
+### Cloud Isolation
+- Each user has their own CouchDB document, DO agent, KB, and Spaces
+  folder (all prefixed by userId).
+- Session cookies are per-user.
 
-After destroy and recreate, `GET /api/cloud-health` returns
-`agent.ok: true` even though no agent has been created yet. This is because
-the endpoint checks `!userDoc?.agentId` (line 8294): if `agentId` was never
-set (which it wasn't on the fresh recreated doc), it considers agent status
-"ok". This is misleading — "no agent needed" is different from "agent is
-healthy".
+### Local Storage Isolation
+- Snapshots are keyed by userId in localStorage.
+- Folder handles in IndexedDB are per-user.
+- `maia-state.json` in each user's folder stores their state.
 
----
+### Verification Safeguards
+- **Destroy**: Requires typing the exact userId to confirm.
+- **Passkey**: Each user registers their own passkey, tied to their
+  userId.
+- **Shared device mode**: Forces passkey registration immediately after
+  account creation, preventing unauthorized access.
+- **User cards**: Color-coded (green/grey/orange) to make each user's
+  status immediately obvious.
+- **Disambiguation dialog**: When restorable users exist and someone
+  clicks GET STARTED, a dialog prevents accidentally creating a new
+  account instead of restoring.
 
-## 8. State Fragmentation Summary
+### Removing a Family Member
 
-The following fields track overlapping state across the system:
-
-| Field | Location | Set by | Problem |
-|-------|----------|--------|---------|
-| `assignedAgentId` | CouchDB | ensureUserAgent, sync-agent | Multiple writers race |
-| `kbName` | CouchDB | ensureKBNameOnUserDoc | Generated differently each call if not stored |
-| `kbId` | CouchDB | update-knowledge-base | May not get saved (409 conflict) |
-| `files[]` | CouchDB | files/register, files/upload | Can be overwritten by stale doc saves |
-| `workflowStage` | CouchDB | Multiple endpoints | Set to different values by different paths |
-| `wizardComplete` | maia-state.json | handleWizardComplete | Only in local folder, not in cloud |
-| `knownUsers` | localStorage | App.vue | Survives destroy, used for restore card |
-| `folderHandle` | IndexedDB | App.vue | Requires re-permission grant on new session |
-| `agentSetupInProgress` | CouchDB | agent-setup-status | Races with workflowStage updates |
-
-The fundamental issue is that there is no single "provision" or "restore"
-transaction. Each step independently reads and writes the user doc, and any
-step can fail or race with any other step, leaving the system in a partially
-consistent state.
+Each user card has an X button that calls `handleDeleteLocalUser()`:
+1. Removes the user from `knownUsers`
+2. Cleans MAIA files from their local folder (if handle available)
+3. Clears their IndexedDB snapshot
+4. Optionally deletes their cloud account if still active
 
 ---
 
-## 9. Recommended Architecture Changes
+## 9. Versioning
 
-1. **Single provisioning coordinator**: A server-side function that creates all
-   resources in order (user doc → KB name → agent → upload → index) and
-   returns the complete result. No client-side orchestration of individual
-   endpoints.
+MAIA uses semantic versioning with these rules:
 
-2. **Idempotent KB name**: `kbName` should be set exactly once (at user doc
-   creation) and never regenerated. Remove `generateKBName()` from
-   `getKBNameFromUserDoc()` — if no name is stored, return null rather than
-   generating a new one.
+| Segment | When it changes |
+|---------|----------------|
+| **Major** (X.0.0) | Incompatible database or backup/restore format changes |
+| **Minor** (0.X.0) | Major new functionality added |
+| **Patch** (0.0.X) | Each app update (bug fixes, UI tweaks, minor improvements) |
 
-3. **Agent creation mutex**: Use a per-user lock or "creating" flag in the user
-   doc to prevent concurrent agent creation from racing.
-
-4. **RestoreWizard should wait**: The wizard should show progress and wait for
-   actual completion (agent deployed, KB indexed) before dismissing, like the
-   new user wizard does.
+The version is stored in `package.json` and can be displayed in the
+app's About section. A major version bump signals that existing backups
+or CouchDB documents may not be compatible and migration steps are
+needed.
