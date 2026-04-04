@@ -4969,8 +4969,10 @@ const loadPatientSummary = async () => {
     // Check medications consistency after loading summary — but only if this
     // is NOT the first-ever summary (initial creation naturally differs from the
     // verified medications list because the AI uses its own wording).
+    // Also skip during wizard: the server auto-generates a summary during
+    // provisioning, so the user's first regeneration is already summaryCount=2.
     const summaryCount = (result.summaries || []).length;
-    if (loadedSummary && !medsMismatchAcknowledged.value && summaryCount > 1) {
+    if (loadedSummary && !medsMismatchAcknowledged.value && !props.wizardActive && summaryCount > 1) {
       await checkMedicationsConsistency();
     }
   } catch (err) {
@@ -5132,6 +5134,13 @@ const checkMedicationsConsistency = async () => {
 
     if (normalizedList !== normalizedSummary) {
       showMedsMismatchDialog.value = true;
+      // Log to setup log
+      fetch('/api/wizard-event', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ userId: props.userId, event: 'Dialog: Medications Mismatch shown', details: {} })
+      }).catch(() => {});
     }
   } catch (err) {
     console.warn('[MyStuff] Failed to check medications consistency:', err);
@@ -5184,6 +5193,10 @@ const replaceMedicationsInSummary = (summaryText: string, newMedsText: string): 
 const handleMedsMismatchUpdate = async () => {
   showMedsMismatchDialog.value = false;
   medsMismatchAcknowledged.value = true;
+  fetch('/api/wizard-event', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+    body: JSON.stringify({ userId: props.userId, event: 'Dialog: Medications Mismatch — user chose UPDATE', details: {} })
+  }).catch(() => {});
 
   const meds = verifiedCurrentMedications.value;
   if (!meds || !patientSummary.value) return;
@@ -5241,6 +5254,10 @@ const handleMedsMismatchUpdate = async () => {
 const handleMedsMismatchAcknowledge = () => {
   showMedsMismatchDialog.value = false;
   medsMismatchAcknowledged.value = true;
+  fetch('/api/wizard-event', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+    body: JSON.stringify({ userId: props.userId, event: 'Dialog: Medications Mismatch — user chose I UNDERSTAND', details: {} })
+  }).catch(() => {});
 };
 
 const saveSummaryFromTab = async () => {
