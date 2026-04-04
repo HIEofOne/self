@@ -1176,6 +1176,7 @@ watch(
   () => showAgentSetupDialog.value,
   (isOpen, wasOpen) => {
     if (isOpen) {
+      addSetupLogLine('Wizard Dialog', 'Setup wizard opened', true);
       wizardSlideIndex.value = 0;
       void loadWizardMessages();
       void positionWizardInlineDots();
@@ -1197,6 +1198,7 @@ watch(
         }, 1000);
       }
     } else if (wasOpen) {
+      addSetupLogLine('Wizard Dialog', 'Setup wizard closed', true);
       nextTick(() => void checkAndShowNeedsIndexingPrompt());
     }
   }
@@ -1207,6 +1209,26 @@ watch(
     void positionWizardInlineDots();
   }
 );
+
+// Log wizard stage transitions
+watch(() => wizardStage1Complete.value, (done, was) => {
+  if (done && !was) addSetupLogLine('Wizard Stage', 'Stage 1 complete — Agent deployed', true);
+});
+watch(() => wizardStage2Complete.value, (done, was) => {
+  if (done && !was) addSetupLogLine('Wizard Stage', 'Stage 2 complete — Medications imported', true);
+});
+watch(() => wizardStage3Complete.value, (done, was) => {
+  if (done && !was) addSetupLogLine('Wizard Stage', 'Stage 3 complete — KB indexing done', true);
+});
+watch(() => showPrivateUnavailableDialog.value, (open) => {
+  if (open) addSetupLogLine('Dialog', 'Private AI Unavailable dialog shown', false);
+});
+watch(() => showRestoreCompleteDialog.value, (open) => {
+  if (open) addSetupLogLine('Dialog', 'Restore complete dialog shown', true);
+});
+watch(() => showMyStuffDialog.value, (open, was) => {
+  if (open && !was) addSetupLogLine('Dialog', 'My Stuff dialog opened', true);
+});
 
 // Deferred-indexing watcher removed — indexing now starts immediately in runAutoWizard.
 // wizardPatientSummary auto-dismiss watcher removed — guided flow handles this via wizardFlowPhase.
@@ -2239,15 +2261,26 @@ const refreshWizardState = async () => {
                 const inferredComplete = !liveActive && Number(tokens) > 0;
                 // Also complete if DO API says not active for > 5 minutes (handles 0-token edge case)
                 const timedOutInactive = !liveActive && !backendDone && elapsedPollMs > 5 * 60 * 1000;
-                const isCompleted = backendDone || inferredComplete || timedOutInactive;
+                // Client-side safety net: if tokens > 0 for > 7 minutes, complete even if liveActive=true
+                const tokenTimeoutComplete = !backendDone && !inferredComplete && Number(tokens) > 0 && elapsedPollMs > 7 * 60 * 1000;
+                // Pure time-based fallback: 20+ min with no completion signal at all (0-token "no changes" case)
+                const pureTimeoutComplete = !backendDone && !inferredComplete && !tokenTimeoutComplete && elapsedPollMs > 20 * 60 * 1000;
+                const isCompleted = backendDone || inferredComplete || timedOutInactive || tokenTimeoutComplete || pureTimeoutComplete;
                 if (inferredComplete && !backendDone) {
                   console.log(`[KB-POLL] ⚠️ Inferred completion: liveActive=${liveActive} tokens=${tokens} (backendCompleted not yet set)`);
                 }
                 if (timedOutInactive && !backendDone && !inferredComplete) {
                   console.log(`[KB-POLL] ⚠️ Timed-out inactive fallback: liveActive=${liveActive} tokens=${tokens} elapsed=${elapsedPollMin}m`);
                 }
+                if (tokenTimeoutComplete) {
+                  console.log(`[KB-POLL] ⚠️ Token-timeout completion: liveActive=${liveActive} tokens=${tokens} elapsed=${elapsedPollMin}m`);
+                }
+                if (pureTimeoutComplete) {
+                  console.log(`[KB-POLL] ⚠️ Pure timeout completion: elapsed=${elapsedPollMin}m (no completion signal after 20 min)`);
+                }
                 if (isCompleted) {
-                  console.log(`[KB-POLL] ✅ Indexing complete! tokens=${tokens} files=${storedStatus.filesIndexed || 0}`);
+                  const completionReason = backendDone ? 'backendCompleted' : inferredComplete ? 'inferredComplete' : timedOutInactive ? 'timedOutInactive' : tokenTimeoutComplete ? 'tokenTimeout' : 'pureTimeout';
+                  console.log(`[KB-POLL] ✅ Indexing complete! tokens=${tokens} files=${storedStatus.filesIndexed || 0} reason=${completionReason}`);
                   if (stage3IndexingPoll.value) {
                     clearInterval(stage3IndexingPoll.value);
                     stage3IndexingPoll.value = null;
@@ -2419,6 +2452,7 @@ const handleWizardSummaryAction = () => {
 };
 
 const dismissWizard = () => {
+  addSetupLogLine('Wizard Action', 'User dismissed setup wizard', true);
   wizardDismissed.value = true;
   showAgentSetupDialog.value = false;
   stopAgentSetupTimer();
@@ -3185,16 +3219,29 @@ const handleStage3Index = async (overrideNames?: string[], fromRestore = false) 
           const inferredComplete = !liveActive && Number(tokens) > 0;
           // Also complete if DO API says not active for > 5 minutes (handles 0-token edge case)
           const timedOutInactive = !liveActive && !backendDone && elapsedPollMs > 5 * 60 * 1000;
-          const isCompleted = backendDone || inferredComplete || timedOutInactive;
+          // Client-side safety net: if tokens > 0 for > 7 minutes, complete even if
+          // liveActive is true (DO API job status can lag indefinitely behind actual completion)
+          const tokenTimeoutComplete = !backendDone && !inferredComplete && Number(tokens) > 0 && elapsedPollMs > 7 * 60 * 1000;
+          // Pure time-based fallback: if 20+ minutes elapsed with no completion signal at all,
+          // the DO API is stuck. Complete to unblock the wizard (handles 0-token "no changes" case).
+          const pureTimeoutComplete = !backendDone && !inferredComplete && !tokenTimeoutComplete && elapsedPollMs > 20 * 60 * 1000;
+          const isCompleted = backendDone || inferredComplete || timedOutInactive || tokenTimeoutComplete || pureTimeoutComplete;
           if (inferredComplete && !backendDone) {
             console.log(`[KB-POLL] ⚠️ Inferred completion: liveActive=${liveActive} tokens=${tokens}`);
           }
           if (timedOutInactive && !backendDone && !inferredComplete) {
             console.log(`[KB-POLL] ⚠️ Timed-out inactive fallback: liveActive=${liveActive} tokens=${tokens} elapsed=${elapsedPollMin}m`);
           }
+          if (tokenTimeoutComplete) {
+            console.log(`[KB-POLL] ⚠️ Token-timeout completion: liveActive=${liveActive} tokens=${tokens} elapsed=${elapsedPollMin}m (DO API job status unreliable)`);
+          }
+          if (pureTimeoutComplete) {
+            console.log(`[KB-POLL] ⚠️ Pure timeout completion: liveActive=${liveActive} tokens=${tokens} elapsed=${elapsedPollMin}m (no completion signal after 20 min)`);
+          }
+          const completionReason = backendDone ? 'backendCompleted' : inferredComplete ? 'inferredComplete' : timedOutInactive ? 'timedOutInactive' : tokenTimeoutComplete ? 'tokenTimeout' : pureTimeoutComplete ? 'pureTimeout' : '';
           if (isCompleted) {
-            console.log(`[KB-POLL] ✅ Indexing complete! tokens=${tokens} files=${kbStatus.filesIndexed || 0} reason=${backendDone ? 'backendCompleted' : inferredComplete ? 'inferredComplete' : 'timedOutInactive'}`);
-            addSetupLogLine('Indexing Complete', `${kbStatus.filesIndexed || 0} file(s) indexed, ${tokens} tokens`, true);
+            console.log(`[KB-POLL] ✅ Indexing complete! tokens=${tokens} files=${kbStatus.filesIndexed || 0} reason=${completionReason}`);
+            addSetupLogLine('Indexing Complete', `${kbStatus.filesIndexed || 0} file(s) indexed, ${tokens} tokens (${completionReason})`, true);
             if (stage3IndexingPoll.value) {
               clearInterval(stage3IndexingPoll.value);
               stage3IndexingPoll.value = null;
