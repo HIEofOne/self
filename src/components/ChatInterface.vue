@@ -321,7 +321,7 @@
             <div class="col">
               <div class="text-h6">Setting Up Your MAIA</div>
               <div class="text-caption text-grey-7 q-mt-xs">
-                Creating account for <strong>{{ props.user?.userId || 'Guest' }}</strong>
+                Creating account for <strong>{{ props.user?.userId || 'Guest' }}</strong>. This can take 5 to 60 minutes.
               </div>
             </div>
             <q-btn flat round dense icon="close" color="grey-7" @click="dismissWizard" />
@@ -2076,9 +2076,13 @@ const refreshWizardState = async () => {
         ? filesResult.kbIndexedDataSourceCount
         : null;
       indexedCountFromFiles = kbIndexedCount !== null ? kbIndexedCount : null;
-      indexingActiveFromFiles = !!filesResult?.kbIndexingActive;
+      // Trust backendCompleted from CouchDB over the live DO API status.
+      // The DO API can lag behind — it may still report isActive after the backend
+      // has already detected completion, causing the wizard to never finish.
+      const backendDone = filesResult?.kbIndexingStatus?.backendCompleted === true;
+      indexingActiveFromFiles = backendDone ? false : !!filesResult?.kbIndexingActive;
       indexingJobIdFromFiles = filesResult?.kbIndexingJobId || filesResult?.kbLatestJobId || null;
-      stage3CompleteFromFiles = !indexingActiveFromFiles && (indexedCountFromFiles ?? 0) > 0;
+      stage3CompleteFromFiles = backendDone || (!indexingActiveFromFiles && (indexedCountFromFiles ?? 0) > 0);
       wizardHasFilesInKB.value = (indexedCountFromFiles ?? 0) > 0;
       tokensFromFiles = filesResult?.kbTotalTokens ? String(filesResult.kbTotalTokens) : null;
       const kbFiles = files.filter((file: { inKnowledgeBase?: boolean }) => !!file.inKnowledgeBase);
@@ -2205,17 +2209,22 @@ const refreshWizardState = async () => {
                 }
                 const statusResult = await statusResponse.json();
                 const storedStatus = statusResult?.kbIndexingStatus || {};
+                const liveActive = !!statusResult?.kbIndexingActive;
+                const backendDone = storedStatus.backendCompleted === true;
+                const tokens = storedStatus.tokens || statusResult?.kbTotalTokens || '0';
+                console.log(`[KB-POLL] backendCompleted=${backendDone} liveActive=${liveActive} tokens=${tokens} phase=${storedStatus.phase || '?'}`);
                 if (storedStatus.jobId && indexingJobIdFromFiles && storedStatus.jobId !== indexingJobIdFromFiles) {
                   return;
                 }
                 if (indexingStatus.value) {
                   indexingStatus.value.phase = storedStatus.phase || indexingStatus.value.phase;
-                  indexingStatus.value.tokens = storedStatus.tokens || indexingStatus.value.tokens;
+                  indexingStatus.value.tokens = tokens;
                   indexingStatus.value.filesIndexed = storedStatus.filesIndexed || 0;
                   indexingStatus.value.progress = storedStatus.progress || 0;
                 }
-                const isCompleted = storedStatus.backendCompleted === true;
+                const isCompleted = backendDone;
                 if (isCompleted) {
+                  console.log(`[KB-POLL] ✅ Indexing complete! tokens=${tokens} files=${storedStatus.filesIndexed || 0}`);
                   if (stage3IndexingPoll.value) {
                     clearInterval(stage3IndexingPoll.value);
                     stage3IndexingPoll.value = null;
@@ -2232,8 +2241,8 @@ const refreshWizardState = async () => {
                   } catch { /* ignore */ }
                   refreshWizardState();
                 }
-              } catch (_error) {
-                // ignore polling errors
+              } catch (pollError) {
+                console.warn('[KB-POLL] Error:', pollError);
               }
             }, 10000);
           }
