@@ -7103,15 +7103,20 @@ const runPoll = async () => {
            const phase = isCompleted
              ? 'complete'
              : (status === 'INDEX_JOB_STATUS_PENDING' ? 'indexing_started' : 'indexing');
-           await persistKbIndexingStatus(userId, {
+           // Don't overwrite backendCompleted here — completeIndexing() sets it to true.
+           // Writing false on every poll created a race where the client could read
+           // false between this write and the completeIndexing() write.
+           const statusUpdate = {
              jobId: currentJobId || activeJobId,
              status,
              phase,
              tokens,
              filesIndexed: fileCount,
-             progress: isCompleted ? 1.0 : (phase === 'indexing_started' ? 0.1 : 0.5),
-             backendCompleted: false
-           });
+             progress: isCompleted ? 1.0 : (phase === 'indexing_started' ? 0.1 : 0.5)
+           };
+           if (!isCompleted) {
+             await persistKbIndexingStatus(userId, statusUpdate);
+           }
 
            if (isCompleted) {
             console.log(`[KB AUTO] ✅ Completion detected for job ${activeJobId} (status=${status})`);

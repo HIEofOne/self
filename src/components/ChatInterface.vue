@@ -2222,7 +2222,13 @@ const refreshWizardState = async () => {
                   indexingStatus.value.filesIndexed = storedStatus.filesIndexed || 0;
                   indexingStatus.value.progress = storedStatus.progress || 0;
                 }
-                const isCompleted = backendDone;
+                // Also treat as complete if DO API says not active and tokens > 0
+                // (covers edge case where backend polling crashed before setting backendCompleted)
+                const inferredComplete = !liveActive && Number(tokens) > 0;
+                const isCompleted = backendDone || inferredComplete;
+                if (inferredComplete && !backendDone) {
+                  console.log(`[KB-POLL] ⚠️ Inferred completion: liveActive=${liveActive} tokens=${tokens} (backendCompleted not yet set)`);
+                }
                 if (isCompleted) {
                   console.log(`[KB-POLL] ✅ Indexing complete! tokens=${tokens} files=${storedStatus.filesIndexed || 0}`);
                   if (stage3IndexingPoll.value) {
@@ -2493,9 +2499,11 @@ const handlePickLocalFolder = async () => {
   addSetupLogLine('Session Info', `App URL: ${window.location.origin}`, true);
   addSetupLogLine('Folder Selected', `Folder: ${result.folderName}`, true);
 
-  // Write maia.webloc shortcut immediately
+  // Write maia.webloc shortcut immediately (with userId if available; patient name added at wizard completion)
   try {
-    await writeWeblocFile(result.handle, window.location.origin);
+    await writeWeblocFile(result.handle, window.location.origin, {
+      userId: props.user?.userId || undefined
+    });
     addSetupLogLine('Shortcut Created', 'maia.webloc written to folder', true);
   } catch (e) {
     addSetupLogLine('Shortcut Error', `Failed to write maia.webloc: ${e instanceof Error ? e.message : 'Unknown'}`, false);
@@ -5354,6 +5362,7 @@ const startSetupWizardPolling = () => {
         wizardStage1Complete.value = true;
         agentSetupPollingActive.value = false;
         stopAgentSetupTimer();
+        addSetupLogLine('Agent Status', `Agent deployed and ready (${agentSetupElapsed.value}s)`, true);
         try {
           if (agentSetupKey) sessionStorage.removeItem(agentSetupKey);
         } catch { /* ignore */ }
