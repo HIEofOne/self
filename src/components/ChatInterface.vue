@@ -763,6 +763,7 @@ import {
   type MaiaFileEntry,
   type MaiaState
 } from '../utils/localFolder';
+import packageJson from '../../package.json';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -2847,6 +2848,8 @@ const generateSetupLogPdf = async () => {
   doc.setFontSize(10);
   doc.text(`Generated: ${new Date().toLocaleString()}`, margin, y);
   y += 6;
+  doc.text(`Version: ${packageJson.version}`, margin, y);
+  y += 6;
   doc.text(`User: ${props.user?.userId || 'unknown'}`, margin, y);
   y += 6;
   doc.text(`App URL: ${window.location.origin}`, margin, y);
@@ -2855,6 +2858,15 @@ const generateSetupLogPdf = async () => {
   y += 6;
   const ua = parseUserAgent();
   doc.text(`Browser: ${ua}`, margin, y);
+  y += 6;
+  // API versions
+  const availableApis = providers.value.map(p => {
+    const label = providerLabels[p] || p;
+    if (p === 'digitalocean') return `${label} (openai-gpt-oss-120b)`;
+    if (p === 'anthropic') return `${label} (claude-opus-4-6)`;
+    return label;
+  }).join(', ');
+  doc.text(`Chat providers: ${availableApis || 'none'}`, margin, y);
   y += 8;
 
   // Summary section
