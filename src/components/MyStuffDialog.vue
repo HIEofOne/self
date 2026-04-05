@@ -320,6 +320,14 @@
                 <q-linear-progress indeterminate color="primary" class="q-mb-sm" />
                 <div class="text-body2">{{ indexingStatus.message || 'Indexing job started...' }}</div>
                 <div class="text-caption text-grey-7 q-mt-xs">This may take several minutes</div>
+                <q-btn
+                  flat
+                  dense
+                  color="negative"
+                  label="Cancel Indexing"
+                  class="q-mt-sm"
+                  @click="cancelIndexingAndRestore"
+                />
               </div>
 
               <!-- Phase 4: Indexing In Progress -->
@@ -343,6 +351,14 @@
                 <div class="text-caption text-grey-6 q-mt-xs">
                   This may take up to 60 minutes.
                 </div>
+                <q-btn
+                  flat
+                  dense
+                  color="negative"
+                  label="Cancel Indexing"
+                  class="q-mt-sm"
+                  @click="cancelIndexingAndRestore"
+                />
               </div>
 
               <!-- Phase 5: Complete -->

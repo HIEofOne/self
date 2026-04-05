@@ -6824,6 +6824,20 @@ app.post('/api/update-knowledge-base', async (req, res) => {
       await cleanupEphemeralIndexing('no_indexing');
     }
 
+    // Persist new indexing status BEFORE responding so the client's first
+    // poll never sees stale backendCompleted:true from a previous job.
+    if (jobId) {
+      await persistKbIndexingStatus(userId, {
+        jobId,
+        status: 'INDEX_JOB_STATUS_IN_PROGRESS',
+        phase: 'indexing',
+        tokens: '0',
+        filesIndexed: '0',
+        progress: 0,
+        backendCompleted: false
+      });
+    }
+
     res.json({
       success: true,
       message: indexingStarted ? 'Knowledge base updated, indexing started' : 'Knowledge base updated successfully',
@@ -6832,17 +6846,6 @@ app.post('/api/update-knowledge-base', async (req, res) => {
       jobId: jobId || null,
       phase: indexingStarted ? 'indexing_started' : 'kb_created'
     });
-    if (jobId) {
-      await persistKbIndexingStatus(userId, {
-        jobId,
-        status: 'INDEX_JOB_STATUS_IN_PROGRESS',
-        phase: 'indexing',
-        tokens: '0',
-        filesIndexed: 0,
-        progress: 0,
-        backendCompleted: false
-      });
-    }
     
     // Only start polling if we actually started a new job
     // Don't poll if we didn't start a job - that would find old completed jobs incorrectly
@@ -7301,6 +7304,96 @@ app.get('/api/kb-indexing-status/:jobId', async (req, res) => {
       message: `Failed to get indexing status: ${error.message}`,
       phase: 'error'
     });
+  }
+});
+
+// Cancel KB indexing and restore files to archived folder
+app.post('/api/cancel-kb-indexing', async (req, res) => {
+  try {
+    const userId = resolveUserId(req, res);
+    if (!userId) return;
+    const { jobId } = req.body;
+
+    if (!jobId) {
+      return res.status(400).json({ success: false, error: 'MISSING_JOB_ID', message: 'Job ID is required' });
+    }
+
+    let userDoc = await cloudant.getDocument('maia_users', userId);
+    if (!userDoc) {
+      return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+    }
+
+    // Check if already completed
+    if (userDoc.kbIndexingStatus?.backendCompleted && userDoc.kbIndexingStatus?.jobId === jobId) {
+      return res.json({ success: false, alreadyCompleted: true, error: 'ALREADY_COMPLETED', message: 'Indexing has already completed.' });
+    }
+
+    // Cancel via DO API (best-effort)
+    try {
+      await doClient.indexing.cancel(jobId);
+      console.log(`[KB Cancel] Cancelled indexing job ${jobId} for ${userId}`);
+    } catch (cancelError) {
+      const code = cancelError.statusCode || cancelError.$metadata?.httpStatusCode;
+      if (code === 405 || code === 404) {
+        console.log(`[KB Cancel] Job ${jobId} cannot be cancelled (${code}) — may already be done`);
+      } else {
+        console.warn(`[KB Cancel] Error cancelling job ${jobId}:`, cancelError.message);
+      }
+    }
+
+    // Move files from KB folder back to archived
+    const kbName = getKBNameFromUserDoc(userDoc, userId);
+    if (kbName) {
+      const { S3Client, CopyObjectCommand, DeleteObjectCommand, ListObjectsV2Command } = await import('@aws-sdk/client-s3');
+      const bucketUrl = getSpacesBucketName();
+      const bucketName = bucketUrl?.split('//')[1]?.split('.')[0] || 'maia';
+      const s3Client = new S3Client({
+        endpoint: getSpacesEndpoint(),
+        region: 'us-east-1',
+        forcePathStyle: process.env.S3_FORCE_PATH_STYLE === 'true',
+        credentials: {
+          accessKeyId: process.env.DIGITALOCEAN_AWS_ACCESS_KEY_ID || '',
+          secretAccessKey: process.env.DIGITALOCEAN_AWS_SECRET_ACCESS_KEY || ''
+        }
+      });
+
+      const kbPrefix = `${userId}/${kbName}/`;
+      const listResult = await s3Client.send(new ListObjectsV2Command({ Bucket: bucketName, Prefix: kbPrefix }));
+      const kbFiles = (listResult.Contents || []).filter(f => f.Key && f.Key !== kbPrefix);
+
+      for (const file of kbFiles) {
+        const fileName = file.Key.split('/').pop();
+        if (!fileName) continue;
+        const archivedKey = `${userId}/archived/${fileName}`;
+        try {
+          await s3Client.send(new CopyObjectCommand({ Bucket: bucketName, CopySource: `${bucketName}/${file.Key}`, Key: archivedKey }));
+          await s3Client.send(new DeleteObjectCommand({ Bucket: bucketName, Key: file.Key }));
+          // Update userDoc.files bucketKey
+          const idx = userDoc.files?.findIndex(f => f.bucketKey === file.Key);
+          if (idx >= 0) {
+            userDoc.files[idx].bucketKey = archivedKey;
+            userDoc.files[idx].updatedAt = new Date().toISOString();
+          }
+          console.log(`[KB Cancel] Restored: ${file.Key} → ${archivedKey}`);
+        } catch (fileErr) {
+          console.warn(`[KB Cancel] Failed to restore ${file.Key}:`, fileErr.message);
+        }
+      }
+    }
+
+    // Clear indexing status
+    userDoc.kbIndexingStatus = {
+      jobId,
+      phase: 'cancelled',
+      backendCompleted: false,
+      updatedAt: new Date().toISOString()
+    };
+    await cloudant.saveDocument('maia_users', userDoc);
+
+    res.json({ success: true, message: 'Indexing cancelled and files restored to archived folder' });
+  } catch (error) {
+    console.error('[KB Cancel] Error:', error);
+    res.status(500).json({ success: false, error: 'CANCEL_FAILED', message: error.message });
   }
 });
 
