@@ -1864,12 +1864,15 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
           displayName: user.value.displayName,
           updatedAt: now,
           exportedAt: now,
-          files: filesList.length > 0 ? filesList.map((f: any) => ({
-            fileName: f.fileName,
-            size: f.fileSize,
-            cloudStatus: indexedSet.has(f.bucketKey || '') ? 'indexed' as const : 'pending' as const,
-            bucketKey: f.bucketKey
-          })) : existingState?.files || [],
+          files: filesList.length > 0 ? filesList.map((f: any) => {
+            const bk = f.bucketKey || '';
+            const kbPrefix = kbName ? `${user.value?.userId}/${kbName}/` : null;
+            const inKB = kbPrefix ? bk.startsWith(kbPrefix) : false;
+            let cs: 'indexed' | 'pending' | 'not_in_kb' | 'uploaded' = 'not_in_kb';
+            if (inKB && indexedSet.has(bk)) cs = 'indexed';
+            else if (inKB) cs = 'pending';
+            return { fileName: f.fileName, size: f.fileSize, cloudStatus: cs, bucketKey: bk };
+          }) : existingState?.files || [],
           currentMedications: (status?.currentMedications && status.currentMedications.trim()) ? status.currentMedications : (existingState?.currentMedications || null),
           patientSummary: (summary?.summary && summary.summary.trim()) ? summary.summary : (existingState?.patientSummary || null),
           savedChats: (savedChats?.chats?.length || savedChats?.length) ? savedChats : (existingState?.savedChats || undefined),
@@ -2263,12 +2266,15 @@ const downloadStateAsFile = async () => {
       userId: user.value.userId,
       displayName: user.value.displayName,
       updatedAt: new Date().toISOString(),
-      files: filesList.map((f: any) => ({
-        fileName: f.fileName,
-        size: f.fileSize,
-        cloudStatus: indexedSet.has(f.bucketKey || '') ? 'indexed' : 'pending',
-        bucketKey: f.bucketKey
-      })),
+      files: filesList.map((f: any) => {
+        const bk = f.bucketKey || '';
+        const kbPrefix = files?.kbName ? `${user.value?.userId}/${files.kbName}/` : null;
+        const inKB = kbPrefix ? bk.startsWith(kbPrefix) : false;
+        let cs: string = 'not_in_kb';
+        if (inKB && indexedSet.has(bk)) cs = 'indexed';
+        else if (inKB) cs = 'pending';
+        return { fileName: f.fileName, size: f.fileSize, cloudStatus: cs, bucketKey: bk };
+      }),
       currentMedications: status?.currentMedications || null,
       patientSummary: summary?.summary || null
     };

@@ -232,19 +232,31 @@
                         color="amber"
                         text-color="white"
                         size="sm"
-                        clickable
-                        @click="file.inKnowledgeBase = true; onCheckboxChange(file)"
+                        :clickable="!cancellingIndexing"
+                        :disable="cancellingIndexing"
+                        @click="!cancellingIndexing && (file.inKnowledgeBase = true, onCheckboxChange(file))"
                       >
                         Add to Knowledge Base
                       </q-chip>
-                      <!-- In KB but not indexed - show warning "To be added and indexed" -->
+                      <!-- In KB, indexing active on server - show "Indexing in progress" -->
+                      <q-chip
+                        v-else-if="file.inKnowledgeBase && !isFileIndexed(file.bucketKey) && (indexingKB || kbIndexingActiveOnServer)"
+                        color="blue"
+                        text-color="white"
+                        size="sm"
+                      >
+                        <q-spinner size="12px" class="q-mr-xs" />
+                        Indexing in progress
+                      </q-chip>
+                      <!-- In KB but not indexed and no indexing active - show warning "To be added and indexed" -->
                       <q-chip
                         v-else-if="file.inKnowledgeBase && !isFileIndexed(file.bucketKey)"
                         color="orange"
                         text-color="white"
                         size="sm"
-                        clickable
-                        @click="file.inKnowledgeBase = false; onCheckboxChange(file)"
+                        :clickable="!cancellingIndexing"
+                        :disable="cancellingIndexing"
+                        @click="!cancellingIndexing && (file.inKnowledgeBase = false, onCheckboxChange(file))"
                       >
                         To be added and indexed
                       </q-chip>
@@ -254,8 +266,9 @@
                         color="primary"
                         text-color="white"
                         size="sm"
-                        clickable
-                        @click="file.inKnowledgeBase = false; onCheckboxChange(file)"
+                        :clickable="!cancellingIndexing"
+                        :disable="cancellingIndexing"
+                        @click="!cancellingIndexing && (file.inKnowledgeBase = false, onCheckboxChange(file))"
                       >
                         Indexed in Knowledge Base
                       </q-chip>
@@ -265,6 +278,7 @@
                         dense
                         icon="delete"
                         color="negative"
+                        :disable="cancellingIndexing"
                         @click="confirmDeleteFile(file)"
                         title="Delete file"
                       />
@@ -296,7 +310,7 @@
                   label="Update and Index KB"
                   color="primary"
                   @click="updateAndIndexKB"
-                    :disable="indexingKB"
+                    :disable="indexingKB || cancellingIndexing"
                   :loading="indexingKB"
                 />
                 </div>
@@ -320,6 +334,14 @@
                 <q-linear-progress indeterminate color="primary" class="q-mb-sm" />
                 <div class="text-body2">{{ indexingStatus.message || 'Indexing job started...' }}</div>
                 <div class="text-caption text-grey-7 q-mt-xs">This may take several minutes</div>
+                <q-btn
+                  flat
+                  dense
+                  color="negative"
+                  label="Cancel Indexing"
+                  class="q-mt-sm"
+                  @click="cancelIndexingAndRestore"
+                />
               </div>
 
               <!-- Phase 4: Indexing In Progress -->
@@ -343,6 +365,14 @@
                 <div class="text-caption text-grey-6 q-mt-xs">
                   This may take up to 60 minutes.
                 </div>
+                <q-btn
+                  flat
+                  dense
+                  color="negative"
+                  label="Cancel Indexing"
+                  class="q-mt-sm"
+                  @click="cancelIndexingAndRestore"
+                />
               </div>
 
               <!-- Phase 5: Complete -->
@@ -360,9 +390,16 @@
               <!-- Phase 6: Error -->
               <div v-if="indexingKB && indexingStatus.phase === 'error'" class="q-mt-md q-pa-md" style="background-color: #ffebee; border-radius: 4px; border: 1px solid #f44336;">
                 <div class="text-body2 text-negative">
-                  ❌ {{ indexingStatus.error || 'Indexing failed' }}
+                  {{ indexingStatus.error || 'Indexing failed' }}
                 </div>
                 <div v-if="indexingStatus.kb" class="text-caption text-grey-7 q-mt-xs">KB: {{ indexingStatus.kb }}</div>
+              </div>
+
+              <!-- Cancelling state -->
+              <div v-if="cancellingIndexing" class="q-mt-md q-pa-md" style="background-color: #fff3e0; border-radius: 4px; border: 1px solid #ff9800;">
+                <q-linear-progress indeterminate color="orange" class="q-mb-sm" />
+                <div class="text-body2">Cancelling indexing and restoring files to archived folder...</div>
+                <div class="text-caption text-grey-7 q-mt-xs">Please wait. File changes are disabled until cancel completes.</div>
               </div>
             </div>
           </q-tab-panel>
@@ -1268,7 +1305,7 @@ const handleCurrentMedicationsSaved = (payload: { value: string; edited: boolean
 
 const isOpen = ref(props.modelValue);
 const currentTab = ref(props.initialTab || 'files');
-const loadingFiles = ref(false);
+const loadingFiles = ref(true);
 const filesError = ref('');
 const userFiles = ref<UserFile[]>([]);
 const updatingFiles = ref(new Set<string>());
@@ -1358,6 +1395,7 @@ const summaryDismissedThisSession = ref(false);
 const showSummaryAttention = computed(() => showWizardSummaryActions.value || summaryNeedsVerify.value);
 const kbDataSourceCount = ref<number | null>(null);
 const kbIndexedDataSourceCount = ref<number | null>(null);
+const kbIndexingActiveOnServer = ref(false);
 // Rehydration flow (temporary account restore)
 const rehydrationQueue = ref<Array<{ fileName?: string; bucketKey?: string; fileSize?: number; uploadedAt?: string; chipStatus?: string; kbName?: string | null; isInitial?: boolean }>>([]);
 const rehydrationCompleted = ref<Set<string>>(new Set());
@@ -1539,6 +1577,7 @@ const isFileIndexed = computed(() => {
 });
 
 const indexingKB = ref(false);
+const cancellingIndexing = ref(false);
 const indexingStatus = ref({
   phase: 'moving', // 'moving' | 'kb_setup' | 'indexing_started' | 'indexing' | 'complete' | 'error'
   message: '',
@@ -1608,7 +1647,29 @@ const loadFiles = async () => {
   filesError.value = '';
 
   try {
-    // no-op
+    // Auto-archive any files at root level (userId/) to archived folder.
+    // Paperclip uploads land at root and are temporary (removed on reload).
+    // Archiving preserves them so they appear in Saved Files with proper badges.
+    try {
+      const archiveResponse = await fetch('/api/archive-user-files', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ userId: props.userId })
+      });
+
+      if (archiveResponse.ok) {
+        const archiveResult = await archiveResponse.json();
+        if (archiveResult.archivedFiles?.length > 0) {
+          const originalRootKeys = archiveResult.archivedFiles.map(
+            (fileName: string) => `${props.userId}/${fileName}`
+          );
+          emit('files-archived', originalRootKeys);
+        }
+      }
+    } catch (archiveErr) {
+      console.warn('Failed to auto-archive files:', archiveErr);
+    }
 
     // Then load files as normal
     const response = await fetch(`/api/user-files?userId=${encodeURIComponent(props.userId)}&source=saved`, {
@@ -1655,6 +1716,7 @@ const loadFiles = async () => {
     }
     
     const indexingActive = !!result.kbIndexingActive;
+    kbIndexingActiveOnServer.value = indexingActive;
     kbDataSourceCount.value = typeof result.kbDataSourceCount === 'number' ? result.kbDataSourceCount : null;
     kbIndexedDataSourceCount.value = typeof result.kbIndexedDataSourceCount === 'number' ? result.kbIndexedDataSourceCount : null;
 
@@ -2437,6 +2499,7 @@ const cancelIndexingAndRestore = async () => {
   }
 
   const jobId = currentIndexingJobId.value;
+  cancellingIndexing.value = true;
 
   try {
     // Stop polling
@@ -2485,7 +2548,9 @@ const cancelIndexingAndRestore = async () => {
       
       // Reload files to get current state
       await loadFiles();
-      
+
+      cancellingIndexing.value = false;
+
       if ($q && typeof $q.notify === 'function') {
         $q.notify({
           type: 'info',
@@ -2521,22 +2586,25 @@ const cancelIndexingAndRestore = async () => {
 
     // Reload files to get restored state (this updates bucketKeys)
     await loadFiles();
-    
+
     // Force a small delay to ensure file list is fully updated before any PDF access
     await new Promise(resolve => setTimeout(resolve, 100));
-    
+
     // Emit event to refresh any open PDF viewers with updated bucketKeys
     emit('files-archived', []); // Empty array signals a refresh without specific files
+
+    cancellingIndexing.value = false;
 
     // Show notification
     if ($q && typeof $q.notify === 'function') {
       $q.notify({
         type: 'positive',
-        message: 'Indexing cancelled and files restored to original state',
+        message: 'Indexing cancelled and files restored to archived folder',
         timeout: 3000
       });
     }
   } catch (err) {
+    cancellingIndexing.value = false;
     if ($q && typeof $q.notify === 'function') {
       $q.notify({
         type: 'negative',
@@ -2681,6 +2749,7 @@ const pollIndexingProgress = async (jobId: string) => {
         // This ensures the UI updates when status='INDEX_JOB_STATUS_COMPLETED' even if phase is still 'indexing'
         indexingStatus.value.phase = 'complete';
         indexingStatus.value.message = 'Knowledge base indexed successfully!';
+        kbIndexingActiveOnServer.value = false;
         
         if (statusResult.tokens !== undefined) {
           kbSummaryTokens.value = statusResult.tokens;

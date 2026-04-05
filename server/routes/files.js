@@ -826,7 +826,12 @@ export default function setupFileRoutes(app, cloudant, doClient) {
    */
   app.post('/api/files/register', async (req, res) => {
     try {
-      const userId = req.session?.userId || req.body?.userId;
+      const sessionUserId = req.session?.userId || null;
+      const bodyUserId = req.body?.userId || null;
+      if (sessionUserId && bodyUserId && sessionUserId !== bodyUserId) {
+        return res.status(403).json({ error: 'User ID mismatch', type: 'USER_ID_MISMATCH' });
+      }
+      const userId = sessionUserId || bodyUserId;
       console.log(`[files/register] Called: userId=${userId}, fileName=${req.body?.fileName}, bucketKey=${req.body?.bucketKey}`);
       if (!userId) return res.status(401).json({ error: 'Authentication required' });
       const { fileName, bucketKey, fileSize } = req.body;

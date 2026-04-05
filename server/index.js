@@ -1341,6 +1341,27 @@ const slugifyName = (value = '') => {
 
 const ensureArray = (value) => (Array.isArray(value) ? value : value ? [value] : []);
 
+/**
+ * Resolve userId from session, body, and query — and enforce that body/query
+ * cannot override the session userId.  Returns the resolved userId or null
+ * (after sending a 403 response) when there is a mismatch.
+ */
+function resolveUserId(req, res) {
+  const sessionUserId = req.session?.userId || null;
+  const requestUserId = req.body?.userId || req.query?.userId || null;
+
+  if (sessionUserId && requestUserId && sessionUserId !== requestUserId) {
+    res.status(403).json({
+      success: false,
+      message: 'User ID mismatch',
+      error: 'USER_ID_MISMATCH'
+    });
+    return null;
+  }
+
+  return sessionUserId || requestUserId;
+}
+
 const getChatByShareId = async (shareId) => {
   if (!shareId) return null;
   const result = await cloudant.findDocuments('maia_chats', {
@@ -1783,16 +1804,9 @@ app.post('/api/deep-link/login', async (req, res) => {
 // Agent sync endpoint - find and configure user's agent
 app.post('/api/sync-agent', async (req, res) => {
   try {
-    const userId = req.session?.userId || req.body?.userId;
-    
-    if (!userId) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'User not authenticated',
-        error: 'NOT_AUTHENTICATED'
-      });
-    }
-    
+    const userId = resolveUserId(req, res);
+    if (!userId) return; // 403 already sent on mismatch
+
     // First, validate existing resources to clean up any stale references
     const { userDoc: validatedUserDoc } = await validateUserResources(userId);
     
@@ -2293,11 +2307,9 @@ function getProvisionPage(userId) {
 // Provision status endpoint - for polling
 app.get('/api/admin/provision-status', async (req, res) => {
   try {
-    const { userId } = req.query;
-    if (!userId) {
-      return res.status(400).json({ error: 'User ID required' });
-    }
-    
+    const userId = resolveUserId(req, res);
+    if (!userId) return; // 403 already sent on mismatch
+
     const status = provisioningStatus.get(userId);
     if (!status) {
       return res.json({ status: 'not_started' });
@@ -2312,11 +2324,10 @@ app.get('/api/admin/provision-status', async (req, res) => {
 // Provision logs endpoint - for viewing server logs
 app.get('/api/admin/provision-logs', async (req, res) => {
   try {
-    const { userId, since } = req.query;
-    if (!userId) {
-      return res.status(400).json({ error: 'User ID required' });
-    }
-    
+    const userId = resolveUserId(req, res);
+    if (!userId) return; // 403 already sent on mismatch
+    const { since } = req.query;
+
     const logs = provisioningLogs.get(userId) || [];
     
     // Filter by timestamp if 'since' parameter provided
@@ -2339,19 +2350,8 @@ app.get('/api/admin/provision-logs', async (req, res) => {
 // Admin agent diagnostic endpoint - identify which agent is connected to a user
 app.get('/api/admin/agent-diagnostic', async (req, res) => {
   try {
-    const { userId } = req.query;
-    
-    if (!userId) {
-      return res.status(400).send(`
-        <html>
-          <head><title>Agent Diagnostic</title></head>
-          <body style="font-family: Arial, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px;">
-            <h2 style="color: #d32f2f;">❌ Missing Parameter</h2>
-            <p>User ID is required. Use: <code>/api/admin/agent-diagnostic?userId=USERNAME</code></p>
-          </body>
-        </html>
-      `);
-    }
+    const userId = resolveUserId(req, res);
+    if (!userId) return; // 403 already sent on mismatch
 
     // Get user document
     let userDoc;
@@ -4759,12 +4759,14 @@ app.delete('/api/delete-chat/:chatId', async (req, res) => {
 // User file metadata endpoint - updates user document with file info
 app.post('/api/user-file-metadata', async (req, res) => {
   try {
-    const { userId, fileMetadata, updateInitialFile } = req.body;
-    
-    if (!userId || !fileMetadata) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'User ID and file metadata are required',
+    const userId = resolveUserId(req, res);
+    if (!userId) return; // 403 already sent on mismatch
+    const { fileMetadata, updateInitialFile } = req.body;
+
+    if (!fileMetadata) {
+      return res.status(400).json({
+        success: false,
+        message: 'File metadata is required',
         error: 'MISSING_REQUIRED_FIELDS'
       });
     }
@@ -4820,8 +4822,9 @@ app.post('/api/user-file-metadata', async (req, res) => {
         };
       }
 
-      // Set workflowStage to files_stored if files exist
-      if (userDoc.files.length > 0) {
+      // Set workflowStage to files_stored only if not already past that stage
+      const postFileStages = ['files_archived', 'indexing', 'patient_summary', 'link_stored'];
+      if (userDoc.files.length > 0 && !postFileStages.includes(userDoc.workflowStage)) {
         userDoc.workflowStage = 'files_stored';
       }
 
@@ -4888,19 +4891,12 @@ app.post('/api/user-file-metadata', async (req, res) => {
 // Called on page reload to remove files that were imported but not explicitly saved
 app.post('/api/cleanup-imported-files', async (req, res) => {
   try {
-    const { userId } = req.body;
-    
-    if (!userId) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'User ID is required',
-        error: 'MISSING_USER_ID'
-      });
-    }
+    const userId = resolveUserId(req, res);
+    if (!userId) return; // 403 already sent on mismatch
 
     // Get the user document
     let userDoc = await cloudant.getDocument('maia_users', userId);
-    
+
     if (!userDoc) {
       return res.status(404).json({ 
         success: false, 
@@ -5018,19 +5014,12 @@ app.post('/api/cleanup-imported-files', async (req, res) => {
 // Only called when user explicitly opens Saved Files tab
 app.post('/api/archive-user-files', async (req, res) => {
   try {
-    const { userId } = req.body;
-    
-    if (!userId) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'User ID is required',
-        error: 'MISSING_USER_ID'
-      });
-    }
+    const userId = resolveUserId(req, res);
+    if (!userId) return; // 403 already sent on mismatch
 
     // Get the user document
     let userDoc = await cloudant.getDocument('maia_users', userId);
-    
+
     if (!userDoc) {
       return res.status(404).json({ 
         success: false, 
@@ -5620,20 +5609,25 @@ app.post('/api/toggle-file-knowledge-base', async (req, res) => {
       });
     }
 
+    // Block file moves while indexing is truly active (not cancelled)
     const kbInfo = await resolveKbForUserFromDo(userId, { forceRefresh: true });
     if (kbInfo?.id) {
-      const indexingStatus = await getKbIndexingStatusFromDo(kbInfo.id);
-      if (indexingStatus?.isActive) {
-        return res.status(409).json({
-          success: false,
-          message: 'Indexing in progress. Try again when indexing completes.',
-          error: 'INDEXING_IN_PROGRESS'
-        });
+      // If user cancelled indexing, allow file moves even if DO job hasn't stopped yet
+      const persistedPhase = userDoc.kbIndexingStatus?.phase;
+      if (persistedPhase !== 'cancelled') {
+        const indexingStatus = await getKbIndexingStatusFromDo(kbInfo.id);
+        if (indexingStatus?.isActive) {
+          return res.status(409).json({
+            success: false,
+            message: 'Indexing in progress. Try again when indexing completes.',
+            error: 'INDEXING_IN_PROGRESS'
+          });
+        }
       }
     }
 
     userDoc.files[fileIndex].updatedAt = new Date().toISOString();
-    
+
     // Import S3 client operations for file moves
     const { S3Client } = await import('@aws-sdk/client-s3');
 
@@ -5950,13 +5944,14 @@ app.get('/api/user-settings', async (req, res) => {
 // Save current medications to user document
 app.post('/api/user-current-medications', async (req, res) => {
   try {
-    const userId = req.body.userId || req.session?.userId;
+    const userId = resolveUserId(req, res);
+    if (!userId) return; // 403 already sent on mismatch
     const currentMedications = req.body.currentMedications;
 
-    if (!userId || currentMedications === undefined) {
+    if (currentMedications === undefined) {
       return res.status(400).json({
         success: false,
-        message: 'User ID and currentMedications are required',
+        message: 'currentMedications is required',
         error: 'MISSING_REQUIRED_FIELDS'
       });
     }
@@ -6017,22 +6012,15 @@ app.post('/api/user-current-medications', async (req, res) => {
 // This allows testing the deep link flow without creating a new patient
 app.post('/api/test-medications-token', async (req, res) => {
   try {
-    const userId = req.session?.userId || req.body?.userId;
-    
-    if (!userId) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'User ID is required',
-        error: 'MISSING_USER_ID'
-      });
-    }
+    const userId = resolveUserId(req, res);
+    if (!userId) return; // 403 already sent on mismatch
 
     // Get the user document
     const userDoc = await cloudant.getDocument('maia_users', userId);
-    
+
     if (!userDoc) {
-      return res.status(404).json({ 
-        success: false, 
+      return res.status(404).json({
+        success: false,
         message: 'User not found',
         error: 'USER_NOT_FOUND'
       });
@@ -6150,12 +6138,14 @@ app.get('/api/verify-medications-token', async (req, res) => {
 // Update user settings
 app.put('/api/user-settings', async (req, res) => {
   try {
-    const { userId, allowDeepLinkPrivateAI } = req.body;
-    
-    if (!userId || typeof allowDeepLinkPrivateAI !== 'boolean') {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'User ID and allowDeepLinkPrivateAI (boolean) are required',
+    const userId = resolveUserId(req, res);
+    if (!userId) return; // 403 already sent on mismatch
+    const { allowDeepLinkPrivateAI } = req.body;
+
+    if (typeof allowDeepLinkPrivateAI !== 'boolean') {
+      return res.status(400).json({
+        success: false,
+        message: 'allowDeepLinkPrivateAI (boolean) is required',
         error: 'MISSING_REQUIRED_FIELDS'
       });
     }
@@ -6215,12 +6205,14 @@ app.put('/api/user-settings', async (req, res) => {
 // Delete file from Spaces and user document
 app.delete('/api/delete-file', async (req, res) => {
   try {
-    const { userId, bucketKey } = req.body;
-    
-    if (!userId || !bucketKey) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'User ID and bucket key are required',
+    const userId = resolveUserId(req, res);
+    if (!userId) return; // 403 already sent on mismatch
+    const { bucketKey } = req.body;
+
+    if (!bucketKey) {
+      return res.status(400).json({
+        success: false,
+        message: 'Bucket key is required',
         error: 'MISSING_REQUIRED_FIELDS'
       });
     }
@@ -6441,18 +6433,11 @@ async function setupKnowledgeBase(userId, kbName, filesInKB, bucketName, existin
 // Update knowledge base - setup KB and trigger indexing (files already moved by checkboxes)
 app.post('/api/update-knowledge-base', async (req, res) => {
   try {
-    const { userId } = req.body;
+    const userId = resolveUserId(req, res);
+    if (!userId) return; // 403 already sent on mismatch
     let cleanupEphemeralIndexing = async () => {};
-    
+
     originalConsoleLog(`[KB-INDEX] Received request for userId: ${userId}`);
-    
-    if (!userId) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'User ID is required',
-        error: 'MISSING_USER_ID'
-      });
-    }
 
     // Get user document (files may need relocation to KB folder)
     let userDoc = await cloudant.getDocument('maia_users', userId);
@@ -6844,6 +6829,20 @@ app.post('/api/update-knowledge-base', async (req, res) => {
       await cleanupEphemeralIndexing('no_indexing');
     }
 
+    // Persist new indexing status BEFORE responding so the client's first
+    // poll never sees stale backendCompleted:true from a previous job.
+    if (jobId) {
+      await persistKbIndexingStatus(userId, {
+        jobId,
+        status: 'INDEX_JOB_STATUS_IN_PROGRESS',
+        phase: 'indexing',
+        tokens: '0',
+        filesIndexed: '0',
+        progress: 0,
+        backendCompleted: false
+      });
+    }
+
     res.json({
       success: true,
       message: indexingStarted ? 'Knowledge base updated, indexing started' : 'Knowledge base updated successfully',
@@ -6852,17 +6851,6 @@ app.post('/api/update-knowledge-base', async (req, res) => {
       jobId: jobId || null,
       phase: indexingStarted ? 'indexing_started' : 'kb_created'
     });
-    if (jobId) {
-      await persistKbIndexingStatus(userId, {
-        jobId,
-        status: 'INDEX_JOB_STATUS_IN_PROGRESS',
-        phase: 'indexing',
-        tokens: '0',
-        filesIndexed: 0,
-        progress: 0,
-        backendCompleted: false
-      });
-    }
     
     // Only start polling if we actually started a new job
     // Don't poll if we didn't start a job - that would find old completed jobs incorrectly
@@ -7030,6 +7018,14 @@ const runPoll = async () => {
           console.log(`[KB AUTO] ⚠️ User doc not found while polling. Stopping polling for job ${activeJobId}.`);
           console.log(`[KB AUTO] ⚠️ Polling stopped for job ${activeJobId} (reason=user_doc_missing)`);
           await logFinalIndexingStatus('user_doc_missing');
+          finished = true;
+          clearPollTimer();
+          return;
+        }
+
+        // Check if cancel was requested — stop polling immediately
+        if (currentUserDoc.kbIndexingStatus?.phase === 'cancelled') {
+          console.log(`[KB AUTO] ⚠️ Indexing cancelled for job ${activeJobId} — stopping polling`);
           finished = true;
           clearPollTimer();
           return;
@@ -7321,6 +7317,96 @@ app.get('/api/kb-indexing-status/:jobId', async (req, res) => {
       message: `Failed to get indexing status: ${error.message}`,
       phase: 'error'
     });
+  }
+});
+
+// Cancel KB indexing and restore files to archived folder
+app.post('/api/cancel-kb-indexing', async (req, res) => {
+  try {
+    const userId = resolveUserId(req, res);
+    if (!userId) return;
+    const { jobId } = req.body;
+
+    if (!jobId) {
+      return res.status(400).json({ success: false, error: 'MISSING_JOB_ID', message: 'Job ID is required' });
+    }
+
+    let userDoc = await cloudant.getDocument('maia_users', userId);
+    if (!userDoc) {
+      return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+    }
+
+    // Check if already completed
+    if (userDoc.kbIndexingStatus?.backendCompleted && userDoc.kbIndexingStatus?.jobId === jobId) {
+      return res.json({ success: false, alreadyCompleted: true, error: 'ALREADY_COMPLETED', message: 'Indexing has already completed.' });
+    }
+
+    // Cancel via DO API (best-effort)
+    try {
+      await doClient.indexing.cancel(jobId);
+      console.log(`[KB Cancel] Cancelled indexing job ${jobId} for ${userId}`);
+    } catch (cancelError) {
+      const code = cancelError.statusCode || cancelError.$metadata?.httpStatusCode;
+      if (code === 405 || code === 404) {
+        console.log(`[KB Cancel] Job ${jobId} cannot be cancelled (${code}) — may already be done`);
+      } else {
+        console.warn(`[KB Cancel] Error cancelling job ${jobId}:`, cancelError.message);
+      }
+    }
+
+    // Move files from KB folder back to archived
+    const kbName = getKBNameFromUserDoc(userDoc, userId);
+    if (kbName) {
+      const { S3Client, CopyObjectCommand, DeleteObjectCommand, ListObjectsV2Command } = await import('@aws-sdk/client-s3');
+      const bucketUrl = getSpacesBucketName();
+      const bucketName = bucketUrl?.split('//')[1]?.split('.')[0] || 'maia';
+      const s3Client = new S3Client({
+        endpoint: getSpacesEndpoint(),
+        region: 'us-east-1',
+        forcePathStyle: process.env.S3_FORCE_PATH_STYLE === 'true',
+        credentials: {
+          accessKeyId: process.env.DIGITALOCEAN_AWS_ACCESS_KEY_ID || '',
+          secretAccessKey: process.env.DIGITALOCEAN_AWS_SECRET_ACCESS_KEY || ''
+        }
+      });
+
+      const kbPrefix = `${userId}/${kbName}/`;
+      const listResult = await s3Client.send(new ListObjectsV2Command({ Bucket: bucketName, Prefix: kbPrefix }));
+      const kbFiles = (listResult.Contents || []).filter(f => f.Key && f.Key !== kbPrefix);
+
+      for (const file of kbFiles) {
+        const fileName = file.Key.split('/').pop();
+        if (!fileName) continue;
+        const archivedKey = `${userId}/archived/${fileName}`;
+        try {
+          await s3Client.send(new CopyObjectCommand({ Bucket: bucketName, CopySource: `${bucketName}/${file.Key}`, Key: archivedKey }));
+          await s3Client.send(new DeleteObjectCommand({ Bucket: bucketName, Key: file.Key }));
+          // Update userDoc.files bucketKey
+          const idx = userDoc.files?.findIndex(f => f.bucketKey === file.Key);
+          if (idx >= 0) {
+            userDoc.files[idx].bucketKey = archivedKey;
+            userDoc.files[idx].updatedAt = new Date().toISOString();
+          }
+          console.log(`[KB Cancel] Restored: ${file.Key} → ${archivedKey}`);
+        } catch (fileErr) {
+          console.warn(`[KB Cancel] Failed to restore ${file.Key}:`, fileErr.message);
+        }
+      }
+    }
+
+    // Clear indexing status
+    userDoc.kbIndexingStatus = {
+      jobId,
+      phase: 'cancelled',
+      backendCompleted: false,
+      updatedAt: new Date().toISOString()
+    };
+    await cloudant.saveDocument('maia_users', userDoc);
+
+    res.json({ success: true, message: 'Indexing cancelled and files restored to archived folder' });
+  } catch (error) {
+    console.error('[KB Cancel] Error:', error);
+    res.status(500).json({ success: false, error: 'CANCEL_FAILED', message: error.message });
   }
 });
 
@@ -8554,10 +8640,8 @@ app.get('/api/user-status', async (req, res) => {
 // Update user workflow stage (used by RestoreWizard completion)
 app.post('/api/user-status', async (req, res) => {
   try {
-    const userId = req.session?.userId || req.body?.userId;
-    if (!userId) {
-      return res.status(401).json({ success: false, error: 'Authentication required' });
-    }
+    const userId = resolveUserId(req, res);
+    if (!userId) return; // 403 already sent on mismatch
     const { workflowStage } = req.body;
     if (!workflowStage) {
       return res.status(400).json({ success: false, error: 'workflowStage required' });
@@ -9883,4 +9967,3 @@ const providers = chatClient.getAvailableProviders();
 console.log(`📊 Available Chat Providers: ${providers.join(', ')}`);
 
 export default app;
-

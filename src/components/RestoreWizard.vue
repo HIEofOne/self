@@ -133,7 +133,9 @@ const buildRestoreItems = () => {
   }
 
   // Knowledge Base indexing (starts as soon as files are in Spaces, does NOT need agent)
-  if (files.length > 0) {
+  // Only needed if at least one file was previously indexed or pending — archived-only files skip KB
+  const hasKBFiles = files.some(f => f.cloudStatus === 'indexed' || f.cloudStatus === 'pending');
+  if (files.length > 0 && hasKBFiles) {
     items.push({ key: 'kb', label: 'Index Knowledge Base', needed: true, status: 'pending' });
   }
 
@@ -175,17 +177,18 @@ const executeRestore = async () => {
   const state = props.localState;
   const files = state?.files || [];
   let filesUploaded = 0;
+  let filesUploadedToKB = 0;
 
   try {
     // Resolve KB name for file uploads
     const kbName = await resolveKbName(uid);
 
-    // 1. Upload files to KB folder so they're ready for indexing
-    const uploadFile = async (file: File, fileName: string) => {
+    // 1. Upload files — KB-bound files go to KB folder, archived-only files go to root (auto-archived later)
+    const uploadFile = async (file: File, fileName: string, toKB: boolean = true) => {
       const formData = new FormData();
       formData.append('file', file);
       formData.append('userId', uid);
-      if (kbName) {
+      if (toKB && kbName) {
         formData.append('isInitialImport', 'true');
         formData.append('subfolder', kbName);
       }
@@ -222,13 +225,17 @@ const executeRestore = async () => {
     if (files.length > 0 && props.localFolderHandle) {
       for (const fileInfo of files) {
         const key = `file:${fileInfo.fileName}`;
+        // Only upload to KB folder if the file was previously indexed or pending indexing.
+        // Files that were only in archived/ (not_in_kb) go to root → auto-archived on next Saved Files open.
+        const shouldGoToKB = fileInfo.cloudStatus === 'indexed' || fileInfo.cloudStatus === 'pending';
         updateItem(key, { status: 'running' });
         try {
           const fileHandle = await props.localFolderHandle.getFileHandle(fileInfo.fileName);
           const file = await fileHandle.getFile();
-          await uploadFile(file, fileInfo.fileName);
+          await uploadFile(file, fileInfo.fileName, shouldGoToKB);
           filesUploaded++;
-          updateItem(key, { status: 'done', progress: 'Uploaded' });
+          if (shouldGoToKB) filesUploadedToKB++;
+          updateItem(key, { status: 'done', progress: shouldGoToKB ? 'Uploaded to KB' : 'Uploaded to archive' });
         } catch (e: any) {
           console.error(`[RestoreWizard] File upload failed: ${fileInfo.fileName}:`, e?.message);
           updateItem(key, { status: 'error', errorMsg: e?.message || 'Upload failed' });
@@ -242,11 +249,13 @@ const executeRestore = async () => {
           updateItem(key, { status: 'error', errorMsg: 'File not found in local folder' });
           continue;
         }
+        const shouldGoToKB = fileInfo.cloudStatus === 'indexed' || fileInfo.cloudStatus === 'pending';
         updateItem(key, { status: 'running' });
         try {
-          await uploadFile(safariFile, fileInfo.fileName);
+          await uploadFile(safariFile, fileInfo.fileName, shouldGoToKB);
           filesUploaded++;
-          updateItem(key, { status: 'done', progress: 'Uploaded' });
+          if (shouldGoToKB) filesUploadedToKB++;
+          updateItem(key, { status: 'done', progress: shouldGoToKB ? 'Uploaded to KB' : 'Uploaded to archive' });
         } catch (e: any) {
           updateItem(key, { status: 'error', errorMsg: e?.message || 'Upload failed' });
         }
@@ -263,8 +272,8 @@ const executeRestore = async () => {
     // --- KB indexing promise (runs independently) ---
     const kbItem = restoreItems.value.find(i => i.key === 'kb' && i.needed);
     const kbPromise = (async () => {
-      if (!kbItem || filesUploaded === 0) {
-        if (kbItem) updateItem('kb', { status: 'error', errorMsg: 'No files uploaded' });
+      if (!kbItem || filesUploadedToKB === 0) {
+        if (kbItem) updateItem('kb', { status: 'skipped', errorMsg: filesUploaded > 0 ? 'No files need indexing' : 'No files uploaded' });
         return;
       }
       updateItem('kb', { status: 'running', progress: 'Creating...' });
