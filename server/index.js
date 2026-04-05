@@ -4822,8 +4822,9 @@ app.post('/api/user-file-metadata', async (req, res) => {
         };
       }
 
-      // Set workflowStage to files_stored if files exist
-      if (userDoc.files.length > 0) {
+      // Set workflowStage to files_stored only if not already past that stage
+      const postFileStages = ['files_archived', 'indexing', 'patient_summary', 'link_stored'];
+      if (userDoc.files.length > 0 && !postFileStages.includes(userDoc.workflowStage)) {
         userDoc.workflowStage = 'files_stored';
       }
 
@@ -9860,4 +9861,3 @@ const providers = chatClient.getAvailableProviders();
 console.log(`📊 Available Chat Providers: ${providers.join(', ')}`);
 
 export default app;
-
