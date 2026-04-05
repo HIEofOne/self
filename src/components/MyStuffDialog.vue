@@ -237,7 +237,17 @@
                       >
                         Add to Knowledge Base
                       </q-chip>
-                      <!-- In KB but not indexed - show warning "To be added and indexed" -->
+                      <!-- In KB, indexing active on server - show "Indexing in progress" -->
+                      <q-chip
+                        v-else-if="file.inKnowledgeBase && !isFileIndexed(file.bucketKey) && (indexingKB || kbIndexingActiveOnServer)"
+                        color="blue"
+                        text-color="white"
+                        size="sm"
+                      >
+                        <q-spinner size="12px" class="q-mr-xs" />
+                        Indexing in progress
+                      </q-chip>
+                      <!-- In KB but not indexed and no indexing active - show warning "To be added and indexed" -->
                       <q-chip
                         v-else-if="file.inKnowledgeBase && !isFileIndexed(file.bucketKey)"
                         color="orange"
@@ -1284,7 +1294,7 @@ const handleCurrentMedicationsSaved = (payload: { value: string; edited: boolean
 
 const isOpen = ref(props.modelValue);
 const currentTab = ref(props.initialTab || 'files');
-const loadingFiles = ref(false);
+const loadingFiles = ref(true);
 const filesError = ref('');
 const userFiles = ref<UserFile[]>([]);
 const updatingFiles = ref(new Set<string>());
@@ -1374,6 +1384,7 @@ const summaryDismissedThisSession = ref(false);
 const showSummaryAttention = computed(() => showWizardSummaryActions.value || summaryNeedsVerify.value);
 const kbDataSourceCount = ref<number | null>(null);
 const kbIndexedDataSourceCount = ref<number | null>(null);
+const kbIndexingActiveOnServer = ref(false);
 // Rehydration flow (temporary account restore)
 const rehydrationQueue = ref<Array<{ fileName?: string; bucketKey?: string; fileSize?: number; uploadedAt?: string; chipStatus?: string; kbName?: string | null; isInitial?: boolean }>>([]);
 const rehydrationCompleted = ref<Set<string>>(new Set());
@@ -1693,6 +1704,7 @@ const loadFiles = async () => {
     }
     
     const indexingActive = !!result.kbIndexingActive;
+    kbIndexingActiveOnServer.value = indexingActive;
     kbDataSourceCount.value = typeof result.kbDataSourceCount === 'number' ? result.kbDataSourceCount : null;
     kbIndexedDataSourceCount.value = typeof result.kbIndexedDataSourceCount === 'number' ? result.kbIndexedDataSourceCount : null;
 
@@ -2719,6 +2731,7 @@ const pollIndexingProgress = async (jobId: string) => {
         // This ensures the UI updates when status='INDEX_JOB_STATUS_COMPLETED' even if phase is still 'indexing'
         indexingStatus.value.phase = 'complete';
         indexingStatus.value.message = 'Knowledge base indexed successfully!';
+        kbIndexingActiveOnServer.value = false;
         
         if (statusResult.tokens !== undefined) {
           kbSummaryTokens.value = statusResult.tokens;
