@@ -1608,7 +1608,29 @@ const loadFiles = async () => {
   filesError.value = '';
 
   try {
-    // no-op
+    // Auto-archive any files at root level (userId/) to archived folder.
+    // Paperclip uploads land at root and are temporary (removed on reload).
+    // Archiving preserves them so they appear in Saved Files with proper badges.
+    try {
+      const archiveResponse = await fetch('/api/archive-user-files', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ userId: props.userId })
+      });
+
+      if (archiveResponse.ok) {
+        const archiveResult = await archiveResponse.json();
+        if (archiveResult.archivedFiles?.length > 0) {
+          const originalRootKeys = archiveResult.archivedFiles.map(
+            (fileName: string) => `${props.userId}/${fileName}`
+          );
+          emit('files-archived', originalRootKeys);
+        }
+      }
+    } catch (archiveErr) {
+      console.warn('Failed to auto-archive files:', archiveErr);
+    }
 
     // Then load files as normal
     const response = await fetch(`/api/user-files?userId=${encodeURIComponent(props.userId)}&source=saved`, {
