@@ -315,374 +315,194 @@
     </q-card>
 
     <q-dialog v-model="showAgentSetupDialog" persistent>
-      <q-card style="min-width: 760px; max-width: 980px; width: 80vw">
-        <q-card-section class="row items-center">
-          <div
-            v-if="wizardSlideIndex === 0 && wizardIntroHeaderHtml"
-            class="text-h6 wizard-heading"
-            v-html="wizardIntroHeaderHtml"
+      <q-card style="min-width: 560px; max-width: 680px">
+        <q-card-section>
+          <div class="row items-center">
+            <div class="col">
+              <div class="text-h6">Setting Up Your MAIA</div>
+              <div class="text-caption text-grey-7 q-mt-xs">
+                Creating account for <strong>{{ props.user?.userId || 'Guest' }}</strong>. This can take 5 to 60 minutes.
+              </div>
+            </div>
+            <q-btn flat round dense icon="close" color="grey-7" @click="dismissWizard" />
+          </div>
+        </q-card-section>
+
+        <q-card-section class="q-pt-none text-body2">
+          <!-- Safari hidden file input -->
+          <input
+            v-if="props.folderAccessTier === 'safari'"
+            ref="safariFolderInputRef"
+            type="file"
+            webkitdirectory
+            multiple
+            style="display: none"
+            @change="handleSafariFolderSelected"
           />
-          <q-space />
+
+          <!-- Action button: Choose the patient folder -->
+          <div v-if="!setupFolderConnected" class="q-mb-md">
+            <!-- Chrome: persistent folder access -->
+            <q-btn
+              v-if="localFolderSupported"
+              unelevated
+              color="primary"
+              label="Choose the patient folder"
+              icon="folder_open"
+              :disable="localFolderAutoRunActive"
+              @click="handlePickLocalFolder"
+            />
+            <!-- Safari: one-time folder read -->
+            <q-btn
+              v-else-if="props.folderAccessTier === 'safari'"
+              unelevated
+              color="primary"
+              label="Select your MAIA folder"
+              icon="folder_open"
+              :disable="localFolderAutoRunActive"
+              @click="handlePickSafariFolder"
+            />
+            <!-- Other browsers: file upload -->
+            <q-btn
+              v-else
+              unelevated
+              color="primary"
+              label="Upload health files"
+              icon="upload_file"
+              :disable="isUploadingFile"
+              @click="triggerFileInput"
+            />
+          </div>
+
+          <!-- Progress checklist -->
+          <q-list dense>
+            <!-- Per-file upload lines (only when folder connected and files found) -->
+            <q-item v-for="file in setupChecklistFiles" :key="`setup-file:${file.name}`" dense class="q-py-xs">
+              <q-item-section avatar style="min-width: 28px">
+                <q-spinner v-if="file.status === 'running'" size="sm" color="primary" />
+                <q-icon v-else-if="file.status === 'done'" name="check_circle" color="green" size="sm" />
+                <q-icon v-else-if="file.status === 'error'" name="error" color="negative" size="sm" />
+                <q-icon v-else name="radio_button_unchecked" color="grey-4" size="sm" />
+              </q-item-section>
+              <q-item-section>
+                <q-item-label :class="{ 'text-grey-5': file.status === 'pending' }">
+                  {{ file.name }}
+                  <q-chip v-if="file.isAppleHealth" color="blue-6" text-color="white" size="sm" dense class="q-ml-xs">Apple Health</q-chip>
+                  <span v-if="file.progress" class="text-caption q-ml-sm" :class="file.status === 'done' ? 'text-green' : 'text-primary'">{{ file.progress }}</span>
+                </q-item-label>
+              </q-item-section>
+            </q-item>
+
+            <!-- Deploy AI Agent -->
+            <q-item dense class="q-py-xs">
+              <q-item-section avatar style="min-width: 28px">
+                <q-spinner v-if="!wizardStage1Complete && agentSetupPollingActive" size="sm" color="primary" />
+                <q-icon v-else-if="wizardStage1Complete" name="check_circle" color="green" size="sm" />
+                <q-icon v-else-if="agentSetupTimedOut" name="error" color="negative" size="sm" />
+                <q-icon v-else name="radio_button_unchecked" color="grey-4" size="sm" />
+              </q-item-section>
+              <q-item-section>
+                <q-item-label :class="{ 'text-grey-5': !wizardStage1Complete && !agentSetupPollingActive }">
+                  Deploy AI Agent
+                  <span v-if="wizardStage1Complete" class="text-green text-caption q-ml-sm">Ready</span>
+                  <span v-else-if="agentSetupPollingActive" class="text-primary text-caption q-ml-sm">{{ wizardStage1StatusLine }}</span>
+                  <span v-else-if="agentSetupTimedOut" class="text-negative text-caption q-ml-sm">Timed out</span>
+                </q-item-label>
+              </q-item-section>
+            </q-item>
+
+            <!-- Index Knowledge Base -->
+            <q-item v-if="setupChecklistFiles.length > 0 || stage3HasFiles" dense class="q-py-xs">
+              <q-item-section avatar style="min-width: 28px">
+                <q-spinner v-if="stage3IndexingActive" size="sm" color="primary" />
+                <q-icon v-else-if="indexingStatus?.phase === 'complete'" name="check_circle" color="green" size="sm" />
+                <q-icon v-else name="radio_button_unchecked" color="grey-4" size="sm" />
+              </q-item-section>
+              <q-item-section>
+                <q-item-label :class="{ 'text-grey-5': !stage3IndexingActive && indexingStatus?.phase !== 'complete' }">
+                  Index Knowledge Base
+                  <span v-if="stage3IndexingActive" class="text-primary text-caption q-ml-sm">
+                    {{ stage2StatusDisplay.tokens !== '0' ? `${stage2StatusDisplay.tokens} tokens` : 'Indexing...' }}
+                    {{ stage3IndexingStartedAt ? `(${formatElapsed(stage3IndexingStartedAt)})` : '' }}
+                  </span>
+                  <span v-else-if="indexingStatus?.phase === 'complete'" class="text-green text-caption q-ml-sm">
+                    {{ stage2StatusDisplay.files }} files, {{ stage2StatusDisplay.tokens }} tokens
+                  </span>
+                </q-item-label>
+              </q-item-section>
+            </q-item>
+
+            <!-- Current Medications -->
+            <q-item v-if="stage2StatusDisplay.show || wizardCurrentMedications" dense class="q-py-xs">
+              <q-item-section avatar style="min-width: 28px">
+                <q-icon v-if="wizardCurrentMedications" name="check_circle" color="green" size="sm" />
+                <q-icon v-else name="radio_button_unchecked" color="grey-4" size="sm" />
+              </q-item-section>
+              <q-item-section>
+                <q-item-label :class="{ 'text-grey-5': !wizardCurrentMedications && !stage2StatusDisplay.completed }">
+                  Current Medications
+                  <span v-if="wizardCurrentMedications" class="text-green text-caption q-ml-sm">Verified</span>
+                  <q-btn
+                    v-else-if="stage2StatusDisplay.completed && wizardStage1Complete"
+                    flat dense size="sm" color="orange-8" label="Verify"
+                    class="q-ml-sm"
+                    @click="handleWizardMedsAction"
+                  />
+                </q-item-label>
+              </q-item-section>
+            </q-item>
+
+            <!-- Patient Summary -->
+            <q-item v-if="stage2StatusDisplay.show || wizardPatientSummary" dense class="q-py-xs">
+              <q-item-section avatar style="min-width: 28px">
+                <q-icon v-if="wizardPatientSummary" name="check_circle" color="green" size="sm" />
+                <q-icon v-else name="radio_button_unchecked" color="grey-4" size="sm" />
+              </q-item-section>
+              <q-item-section>
+                <q-item-label :class="{ 'text-grey-5': !wizardPatientSummary && !stage2StatusDisplay.completed }">
+                  Patient Summary
+                  <span v-if="wizardPatientSummary" class="text-green text-caption q-ml-sm">Verified</span>
+                  <q-btn
+                    v-else-if="stage2StatusDisplay.completed && wizardStage1Complete && (!wizardHasAppleHealthFile || wizardCurrentMedications)"
+                    flat dense size="sm" color="orange-8" label="Verify"
+                    class="q-ml-sm"
+                    @click="handleWizardSummaryAction"
+                  />
+                </q-item-label>
+              </q-item-section>
+            </q-item>
+          </q-list>
+
+          <!-- Active phase status -->
+          <div v-if="localFolderAutoRunActive" class="text-caption text-primary q-mt-md">
+            <q-spinner size="14px" class="q-mr-xs" />
+            {{ localFolderAutoRunPhase }}
+          </div>
+        </q-card-section>
+
+        <q-card-actions align="right">
           <q-btn
-            flat
-            round
-            dense
-            icon="close"
-            color="grey-7"
+            v-if="wizardStage1Complete && (indexingStatus?.phase === 'complete' || !stage3HasFiles)"
+            unelevated label="Continue" color="primary"
             @click="dismissWizard"
           />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
+    <!-- Restore Complete sub-dialog (shown after restore flow) -->
+    <q-dialog v-model="showRestoreCompleteDialog" persistent>
+      <q-card style="min-width: 480px; max-width: 640px">
+        <q-card-section>
+          <div class="text-h6">Account Restored</div>
         </q-card-section>
-        <q-card-section class="q-pt-none wizard-slide-scroll">
-          <div v-if="wizardSlideIndex === 0">
-            <div
-              v-if="wizardIntroBodyHtml"
-              class="text-body2 wizard-intro wizard-slide-intro"
-              ref="wizardIntroContainer"
-              v-html="wizardIntroBodyHtml"
-            />
-            <div v-if="wizardIntroBodyHtml" ref="wizardInlineDots" class="wizard-page-dots wizard-page-dots--inline">
-              <button
-                v-for="(_, idx) in wizardSlides"
-                :key="`wizard-page-inline-${idx}`"
-                type="button"
-                class="wizard-page-dot"
-                :class="{ 'wizard-page-dot--active': idx === wizardSlideIndex }"
-                :aria-label="`Go to page ${idx + 1}`"
-                @click="wizardSlideIndex = idx"
-              />
-            </div>
-            <div v-if="agentSetupPollingActive || agentSetupTimedOut" class="q-mt-sm">
-            <p class="text-caption text-negative q-mt-sm" v-if="agentSetupTimedOut">
-              Agent setup did not complete in 15 minutes. Please try again later.
-            </p>
-          <q-btn
-            v-if="agentSetupTimedOut"
-            flat
-            dense
-            color="negative"
-            label="CLOSE"
-            class="q-mt-xs"
-            @click="dismissWizard"
-          />
-            </div>
-
-          <q-dialog v-model="showRestoreCompleteDialog" persistent>
-            <q-card style="min-width: 480px; max-width: 640px">
-              <q-card-section>
-                <div class="text-h6">Account Restored</div>
-              </q-card-section>
-              <q-card-section class="text-body2">
-                Your account has been restored. The Patient Summary, Private AI knowledge base, and Saved Chats are available. Deep links that were not accessible during account dormancy are available again.
-                <br /><br />
-                Your private information will be in the cloud until you sign out again.
-              </q-card-section>
-              <q-card-actions align="right">
-                <q-btn flat label="OK" color="primary" v-close-popup />
-              </q-card-actions>
-            </q-card>
-          </q-dialog>
-
-
-            <!-- Local Folder: "Select your MAIA folder" button (Chrome 122+) -->
-            <div v-if="localFolderSupported" class="q-mt-md q-mb-sm">
-              <div v-if="!localFolderHandle" class="wizard-slide-box q-pa-md">
-                <div class="text-subtitle2 text-weight-bold q-mb-xs">Local Folder</div>
-                <div class="text-caption text-grey-7 q-mb-sm">
-                  Select a folder on your computer. MAIA will import PDFs, save state, and write a setup log there.
-                </div>
-                <q-btn
-                  unelevated
-                  color="primary"
-                  label="Select your MAIA folder"
-                  icon="folder_open"
-                  :disable="localFolderAutoRunActive"
-                  @click="handlePickLocalFolder"
-                />
-              </div>
-              <div v-else class="wizard-slide-box q-pa-md">
-                <div class="text-subtitle2 text-weight-bold q-mb-xs">
-                  <q-icon name="folder" color="primary" class="q-mr-xs" />
-                  {{ localFolderName }}
-                </div>
-                <div v-if="localFolderAutoRunActive" class="text-caption text-primary q-mt-xs">
-                  <q-spinner size="14px" class="q-mr-xs" />
-                  {{ localFolderAutoRunPhase }}
-                </div>
-                <div v-else-if="localFolderFiles.length > 0" class="text-caption text-grey-7 q-mt-xs">
-                  {{ localFolderFiles.length }} PDF file(s) found
-                </div>
-                <div v-if="setupLogLines.length > 0 && !localFolderAutoRunActive" class="text-caption text-green-7 q-mt-xs">
-                  ✓ Setup complete — maia-setup-log.pdf written to folder
-                </div>
-              </div>
-            </div>
-
-            <!-- Safari Folder: webkitdirectory one-time folder read -->
-            <div v-else-if="props.folderAccessTier === 'safari'" class="q-mt-md q-mb-sm">
-              <input
-                ref="safariFolderInputRef"
-                type="file"
-                webkitdirectory
-                multiple
-                style="display: none"
-                @change="handleSafariFolderSelected"
-              />
-              <div v-if="!safariFolderName" class="wizard-slide-box q-pa-md">
-                <div class="text-subtitle2 text-weight-bold q-mb-xs">Local Folder</div>
-                <div class="text-caption text-grey-7 q-mb-sm">
-                  Select your MAIA health records folder. This browser can read the folder once;
-                  future updates will require you to re-select the folder when prompted at sign-out.
-                </div>
-                <q-btn
-                  unelevated
-                  color="primary"
-                  label="Select your MAIA folder"
-                  icon="folder_open"
-                  :disable="localFolderAutoRunActive"
-                  @click="handlePickSafariFolder"
-                />
-              </div>
-              <div v-else class="wizard-slide-box q-pa-md">
-                <div class="text-subtitle2 text-weight-bold q-mb-xs">
-                  <q-icon name="folder" color="primary" class="q-mr-xs" />
-                  {{ safariFolderName }}
-                </div>
-                <!-- Recovered session: folder name from localStorage but no live files -->
-                <div v-if="safariNeedsReselect && !wizardStage3Complete && !stage3IndexingActive" class="q-mt-sm">
-                  <div class="text-caption text-orange-8 q-mb-sm">
-                    Page was reloaded. Please re-select your folder to continue uploading files.
-                  </div>
-                  <q-btn
-                    dense unelevated
-                    color="primary"
-                    label="Re-select folder"
-                    icon="folder_open"
-                    size="sm"
-                    @click="handlePickSafariFolder"
-                  />
-                </div>
-                <div v-else-if="safariNeedsReselect" class="text-caption text-green-7 q-mt-xs">
-                  Session recovered — files already uploaded
-                </div>
-                <div v-else-if="localFolderAutoRunActive" class="text-caption text-primary q-mt-xs">
-                  <q-spinner size="14px" class="q-mr-xs" />
-                  {{ localFolderAutoRunPhase }}
-                </div>
-                <div v-else-if="safariFolderFiles.length > 0" class="text-caption text-grey-7 q-mt-xs">
-                  {{ safariFolderFiles.length }} PDF file(s) imported
-                </div>
-                <div v-if="setupLogLines.length > 0 && !localFolderAutoRunActive" class="text-caption text-green-7 q-mt-xs">
-                  ✓ Setup complete
-                </div>
-              </div>
-            </div>
-
-            <!-- Folder/Safari mode: scrolling activity log -->
-            <div v-if="localFolderHandle || safariFolderName" class="q-mt-md">
-              <div class="wizard-slide-box q-pa-sm" style="max-height: 260px; overflow-y: auto; font-family: monospace; font-size: 12px; background: #f5f5f5; border-radius: 6px;">
-                <div v-if="setupLogLines.length === 0" class="text-grey-6 text-center q-pa-md">
-                  Waiting for setup to begin...
-                </div>
-                <div v-for="(line, idx) in setupLogLines" :key="idx" class="q-mb-xs" style="line-height: 1.4;">
-                  <span :style="{ color: line.ok ? '#2e7d32' : '#c62828' }">{{ line.ok ? '✓' : '✗' }}</span>
-                  <span class="text-grey-7">[{{ new Date(line.time).toLocaleTimeString() }}]</span>
-                  <span class="text-weight-medium">{{ line.step }}:</span>
-                  <span>{{ line.detail }}</span>
-                </div>
-              </div>
-
-              <!-- Status summary lines (agent, indexing, meds, summary) -->
-              <div class="text-caption q-mt-md" :class="wizardStage1Complete ? 'text-green-7' : (wizardStage1TimerActive ? 'text-green-7' : 'text-grey-7')">
-                Private AI agent deployment status: {{ wizardStage1StatusLine }}
-              </div>
-              <div
-                v-if="stage2StatusDisplay.show"
-                class="text-caption q-mt-sm"
-                :class="stage2StatusDisplay.active ? 'text-green-7' : 'text-grey-7'"
-              >
-                <span>{{ stage2StatusDisplay.text }}</span>
-                <span class="q-ml-xs">Files: {{ stage2StatusDisplay.files }} &bull; Tokens: {{ stage2StatusDisplay.tokens }}</span>
-              </div>
-              <div
-                v-if="stage2StatusDisplay.show"
-                class="text-caption q-mt-xs"
-                :class="wizardCurrentMedications ? 'text-green-7' : 'text-orange-8'"
-              >
-                Current Medications: {{ wizardCurrentMedications ? '✓ Verified' : 'Pending' }}
-              </div>
-              <div
-                v-if="stage2StatusDisplay.show"
-                class="text-caption q-mt-xs"
-                :class="wizardPatientSummary ? 'text-green-7' : 'text-orange-8'"
-              >
-                Patient Summary: {{ wizardPatientSummary ? '✓ Verified' : 'Pending' }}
-              </div>
-            </div>
-
-            <!-- Non-local-folder fallback: original file list, checkboxes, buttons (only when local folder API not supported and no Safari folder access) -->
-            <template v-else-if="!localFolderSupported && props.folderAccessTier !== 'safari'">
-            <div class="q-mt-lg">
-            <div class="wizard-slide-box">
-              <div class="text-subtitle1 text-weight-bold q-mb-sm">Files to be indexed</div>
-              <div v-if="!stage3IndexingActive" class="wizard-slide-list">
-                <div v-for="file in stage3DisplayFiles" :key="file.name" class="wizard-slide-item">
-                  <q-checkbox
-                    :model-value="file.inKnowledgeBase"
-                    :disable="!!file.needsRestore || wizardKbTogglePending.has(file.bucketKey || file.name) || stage3IndexingActive || stage3PendingUploadActive || (!file.needsRestore && !file.bucketKey)"
-                    :color="file.pendingKbAdd ? 'grey-6' : 'primary'"
-                    @click.stop="!file.needsRestore && toggleWizardKbCheckbox(file)"
-                  />
-                  <q-spinner
-                    v-if="wizardKbTogglePending.has(file.bucketKey || file.name)"
-                    size="18px"
-                    color="primary"
-                    class="q-ml-xs"
-                  />
-                  <span class="q-ml-sm">{{ file.name }}</span>
-                  <q-chip
-                    v-if="file.isAppleHealth"
-                    color="blue-6"
-                    text-color="white"
-                    size="sm"
-                    dense
-                    class="q-ml-xs"
-                  >
-                    Apple Health
-                  </q-chip>
-                </div>
-                <div class="wizard-slide-item q-mt-sm">
-                  <q-btn
-                    unelevated
-                    dense
-                    size="sm"
-                    color="primary"
-                    :label="(wizardRestoreActive && (wizardRestoreTargetName || firstUnrestoredFileName)) ? `Add file: ${wizardRestoreTargetName || firstUnrestoredFileName}` : 'Add a file'"
-                    :disable="stage3IndexingActive || stage3PendingUploadActive || (wizardRestoreActive && !firstUnrestoredFileName)"
-                    @click="handleStage3Action"
-                  />
-                </div>
-                <div class="wizard-slide-box-actions">
-                  <q-btn
-                    unelevated
-                    dense
-                    size="sm"
-                    color="primary"
-                    label="No more files to add - Index now"
-                    :class="{ 'wizard-index-now-highlight': !isUploadingFile && stage3DisplayFiles.length > 0 && !stage3IndexingActive && wizardNeedsIndexing }"
-                    :disable="!wizardNeedsIndexing || stage3IndexingActive || stage3PendingUploadActive"
-                    @click="() => handleStage3Index(wizardRestoreActive ? stage3DisplayFiles.map(f => f.name) : undefined, wizardRestoreActive)"
-                  />
-                </div>
-              </div>
-              <div v-else-if="indexingStatus?.phase === 'complete' && wizardKbAttached" class="wizard-slide-box-actions">
-                <q-btn
-                  v-if="wizardHasAppleHealthFile"
-                  unelevated
-                  dense
-                  size="sm"
-                  color="primary"
-                  label="Create and Verify your Current Medications"
-                  @click="handleWizardMedsAction"
-                />
-                <q-btn
-                  v-else
-                  unelevated
-                  dense
-                  size="sm"
-                  color="primary"
-                  label="Create and Verify your Patient Summary"
-                  @click="handleWizardSummaryAction"
-                />
-              </div>
-            </div>
-          </div>
-
-            <div
-              v-if="isUploadingFile || (stage3DisplayFiles.length > 0 && !stage3IndexingActive)"
-              class="text-caption q-mt-sm"
-              :class="isUploadingFile ? 'text-primary' : 'text-grey-7'"
-            >
-              {{ isUploadingFile ? 'Uploading...' : 'Add more files or begin indexing.' }}
-            </div>
-
-            <div class="text-caption q-mt-md" :class="wizardStage1Complete ? 'text-green-7' : (wizardStage1TimerActive ? 'text-green-7' : 'text-grey-7')">
-            Private AI agent deployment status: {{ wizardStage1StatusLine }}
-          </div>
-
-            <div
-            v-if="stage2StatusDisplay.show"
-            class="text-caption q-mt-sm"
-            :class="stage2StatusDisplay.active ? 'text-green-7' : 'text-grey-7'"
-          >
-            <span>{{ stage2StatusDisplay.text }}</span>
-            <span class="q-ml-xs">
-              Files: {{ stage2StatusDisplay.files }} &bull; Tokens: {{ stage2StatusDisplay.tokens }}
-            </span>
-          </div>
-            <div
-              v-if="stage2StatusDisplay.show"
-              class="text-caption q-mt-xs wizard-status-row q-pa-xs rounded-borders"
-              :class="[
-                wizardCurrentMedications ? 'text-grey-7' : 'text-orange-8',
-                { 'wizard-medications-not-verified-outline': !wizardCurrentMedications && wizardStage1Complete && stage2StatusDisplay.completed }
-              ]"
-            >
-            Current Medications are {{ wizardCurrentMedications ? 'verified' : 'not verified' }}.
-            <q-btn
-              v-if="!wizardCurrentMedications"
-              unelevated
-              dense
-              size="sm"
-              color="orange-8"
-              label="Verify"
-              :disable="!wizardStage1Complete || !stage2StatusDisplay.completed"
-              @click="handleWizardMedsAction"
-              class="q-ml-xs wizard-verify-btn"
-            />
-          </div>
-            <div v-if="stage2StatusDisplay.show" class="text-caption q-mt-xs wizard-status-row" :class="wizardPatientSummary ? 'text-grey-7' : 'text-orange-8'">
-            Patient Summary is {{ wizardPatientSummary ? 'verified' : 'not verified' }}.
-            <q-btn
-              v-if="!wizardPatientSummary"
-              unelevated
-              dense
-              size="sm"
-              color="orange-8"
-              label="Verify"
-              :disable="!wizardStage1Complete || !stage2StatusDisplay.completed || (wizardHasAppleHealthFile && !wizardCurrentMedications)"
-              @click="handleWizardSummaryAction"
-              class="q-ml-xs wizard-verify-btn"
-            />
-            </div>
-            </template>
-          </div>
-          <div v-else class="wizard-slide-text">
-            <img
-              v-if="wizardSlides[wizardSlideIndex].image"
-              :src="wizardSlides[wizardSlideIndex].image"
-              :alt="wizardSlides[wizardSlideIndex].alt"
-              class="wizard-slide-image"
-            />
-            <div v-else>
-              <div v-for="(line, idx) in wizardSlides[wizardSlideIndex].lines" :key="idx">
-                {{ line }}
-              </div>
-            </div>
-          </div>
-
+        <q-card-section class="text-body2">
+          Your account has been restored. The Patient Summary, Private AI knowledge base, and Saved Chats are available. Deep links that were not accessible during account dormancy are available again.
+          <br /><br />
+          Your private information will be in the cloud until you sign out again.
         </q-card-section>
-        <q-card-actions class="wizard-slide-footer" align="center">
-          <div class="wizard-page-dots">
-            <button
-              v-for="(_, idx) in wizardSlides"
-              :key="`wizard-page-${idx}`"
-              type="button"
-              class="wizard-page-dot"
-              :class="{ 'wizard-page-dot--active': idx === wizardSlideIndex }"
-              :aria-label="`Go to page ${idx + 1}`"
-              @click="wizardSlideIndex = idx"
-            />
-          </div>
+        <q-card-actions align="right">
+          <q-btn flat label="OK" color="primary" v-close-popup />
         </q-card-actions>
       </q-card>
     </q-dialog>
@@ -756,7 +576,7 @@
       v-model="showMyStuffDialog"
       :userId="props.user?.userId || ''"
       :initial-tab="myStuffInitialTab"
-      :request-summary-on-open="wizardRequestSummaryOnOpen"
+      :request-action="wizardRequestAction"
       :messages="messages"
       :original-messages="trulyOriginalMessages.length > 0 ? trulyOriginalMessages : originalMessages"
       :wizard-active="showAgentSetupDialog"
@@ -773,7 +593,8 @@
       @current-medications-saved="handleCurrentMedicationsSaved"
       @patient-summary-saved="handlePatientSummarySaved"
       @patient-summary-verified="handlePatientSummaryVerified"
-      @request-summary-done="wizardRequestSummaryOnOpen = false"
+      @request-action-done="wizardRequestAction = null"
+      @show-patient-summary="handleMyStuffShowSummary"
       @rehydration-file-removed="handleRehydrationFileRemoved"
       @rehydration-complete="handleRehydrationComplete"
       @file-added-to-kb="handleFileAddedToKb"
@@ -996,6 +817,7 @@ interface Props {
   } | null;
   rehydrationFiles?: any[] | null;
   rehydrationActive?: boolean;
+  restoreActive?: boolean;
   suppressWizard?: boolean;
   folderAccessTier?: 'chrome' | 'safari' | 'basic';
   passkeyWithoutFolder?: boolean;
@@ -1046,7 +868,7 @@ const showSavedChatsModal = ref(false);
 const savedChatCount = ref(0);
 const showMyStuffDialog = ref(false);
 const myStuffInitialTab = ref<string>('files');
-const wizardRequestSummaryOnOpen = ref(false);
+const wizardRequestAction = ref<'generate-summary' | null>(null);
 const contextualTip = ref('Loading...');
 const editingMessageIdx = ref<number[]>([]);
 const editingOriginalContent = ref<Record<number, string>>({});
@@ -1072,13 +894,6 @@ const agentSetupPollingActive = ref(false);
 let agentSetupTimer: ReturnType<typeof setInterval> | null = null;
 const wizardOtherFilesCount = ref(0);
 const wizardSlideIndex = ref(0);
-const wizardSlides = [
-  { lines: [] },
-  { image: '/wizard-slides/slide-1.png', alt: 'Wizard slide 1' },
-  { image: '/wizard-slides/slide-2.png', alt: 'Wizard slide 2' },
-  { image: '/wizard-slides/slide-3.png', alt: 'Wizard slide 3' },
-  { image: '/wizard-slides/slide-4.png', alt: 'Wizard slide 4' }
-];
 const wizardHasFilesInKB = ref(false);
 const wizardCurrentMedications = ref(false);
 const wizardPatientSummary = ref(false);
@@ -1102,14 +917,6 @@ const wizardStage2Complete = ref(false);
 const wizardStage3Complete = ref(false);
 const wizardStage2Pending = ref(false);
 const stage3LastImportedName = ref<string | null>(null);
-const wizardStage1TimerActive = computed(() =>
-  agentSetupElapsed.value > 0 && !wizardStage1Complete.value && !agentSetupTimedOut.value
-);
-const wizardIntroHeaderHtml = computed(() => {
-  const firstLine = wizardIntroLines.value.find(line => line.trim().length > 0);
-  if (!firstLine) return '';
-  return markdownParser.renderInline(firstLine);
-});
 const wizardIntroBodyHtml = computed(() => {
   if (wizardIntroLines.value.length === 0) {
     return '';
@@ -1144,12 +951,6 @@ const wizardStage2NoDeviceKey = computed(() => props.user?.userId ? `wizardStage
 const wizardAgentSetupStartedKey = (userId: string | undefined) => userId ? `wizard_agent_setup_started_${userId}` : null;
 const wizardStage3IndexingStartedKey = (userId: string | undefined) => userId ? `wizard_stage3_indexing_started_${userId}` : null;
 const wizardRestoreActive = computed(() => !!props.rehydrationActive && (Array.isArray(props.rehydrationFiles) ? props.rehydrationFiles.length > 0 : false));
-const firstUnrestoredFileName = computed(() => {
-  if (!wizardRestoreActive.value) return null;
-  const files = Array.isArray(props.rehydrationFiles) ? props.rehydrationFiles : [];
-  const first = files.find((f: { restored?: boolean }) => !f.restored);
-  return first ? (first.fileName || (first.bucketKey ? first.bucketKey.split('/').pop() : null)) : null;
-});
 const showRestoreCompleteDialog = ref(false);
 const restoreIndexingActive = ref(false);
 const restoreIndexingQueued = ref(false);
@@ -1196,7 +997,6 @@ const wizardKbIndexedKeys = ref<string[]>([]);
 const wizardKbTogglePending = ref<Set<string>>(new Set());
 const wizardAutoCheckedKeys = ref<Set<string>>(new Set());
 const wizardHasAppleHealthFile = computed(() => stage3DisplayFiles.value.some(file => !!file.isAppleHealth));
-const wizardKbAttached = computed(() => !!(userResourceStatus.value?.hasKB && userResourceStatus.value?.hasAgent));
 const stage2StatusDisplay = computed(() => {
   const isIndexing = indexingStatus.value?.phase === 'indexing' || indexingStatus.value?.phase === 'indexing_started';
   const files = indexingStatus.value?.filesIndexed ?? stage3DisplayFiles.value.length;
@@ -1252,20 +1052,6 @@ const stage3DisplayFiles = computed(() => {
     }));
 });
 const stage3HasFiles = computed(() => stage3DisplayFiles.value.length > 0);
-const wizardNeedsIndexing = computed(() => {
-  if (wizardRestoreActive.value) {
-    const files = Array.isArray(props.rehydrationFiles) ? props.rehydrationFiles : [];
-    const unrestored = files.filter((f: { restored?: boolean }) => !f.restored);
-    return unrestored.length === 0 && files.length > 0;
-  }
-  const indexedKeys = new Set(wizardKbIndexedKeys.value || []);
-  return stage3DisplayFiles.value.some(file => !!file.inKnowledgeBase && !!file.bucketKey && !indexedKeys.has(file.bucketKey));
-});
-const stage3PendingUploadActive = computed(() => {
-  const name = stage3PendingUploadName.value;
-  if (!name) return false;
-  return !wizardStage3Files.value.some(file => file.name === name);
-});
 
 
 
@@ -1343,9 +1129,6 @@ watch(
       if (!showAgentSetupDialog.value) {
         showAgentSetupDialog.value = true;
       }
-      console.log('[SAVE-RESTORE] Wizard reopened for rehydration', {
-        userId: props.user?.userId || null
-      });
     }
   },
   { immediate: true }
@@ -1359,10 +1142,6 @@ watch(
       if (!showAgentSetupDialog.value) {
         showAgentSetupDialog.value = true;
       }
-      console.log('[SAVE-RESTORE] Rehydration files updated', {
-        userId: props.user?.userId || null,
-        count
-      });
     }
   },
   { immediate: true }
@@ -1390,6 +1169,7 @@ watch(
   () => showAgentSetupDialog.value,
   (isOpen, wasOpen) => {
     if (isOpen) {
+      addSetupLogLine('Wizard Dialog', 'Setup wizard opened', true);
       wizardSlideIndex.value = 0;
       void loadWizardMessages();
       void positionWizardInlineDots();
@@ -1411,6 +1191,7 @@ watch(
         }, 1000);
       }
     } else if (wasOpen) {
+      addSetupLogLine('Wizard Dialog', 'Setup wizard closed', true);
       nextTick(() => void checkAndShowNeedsIndexingPrompt());
     }
   }
@@ -1421,6 +1202,26 @@ watch(
     void positionWizardInlineDots();
   }
 );
+
+// Log wizard stage transitions
+watch(() => wizardStage1Complete.value, (done, was) => {
+  if (done && !was) addSetupLogLine('Wizard Stage', 'Stage 1 complete — Agent deployed', true);
+});
+watch(() => wizardStage2Complete.value, (done, was) => {
+  if (done && !was) addSetupLogLine('Wizard Stage', 'Stage 2 complete — Medications imported', true);
+});
+watch(() => wizardStage3Complete.value, (done, was) => {
+  if (done && !was) addSetupLogLine('Wizard Stage', 'Stage 3 complete — KB indexing done', true);
+});
+watch(() => showPrivateUnavailableDialog.value, (open) => {
+  if (open) addSetupLogLine('Dialog', 'Private AI Unavailable dialog shown', false);
+});
+watch(() => showRestoreCompleteDialog.value, (open) => {
+  if (open) addSetupLogLine('Dialog', 'Restore complete dialog shown', true);
+});
+watch(() => showMyStuffDialog.value, (open, was) => {
+  if (open && !was) addSetupLogLine('Dialog', 'My Stuff dialog opened', true);
+});
 
 // Deferred-indexing watcher removed — indexing now starts immediately in runAutoWizard.
 // wizardPatientSummary auto-dismiss watcher removed — guided flow handles this via wizardFlowPhase.
@@ -1463,7 +1264,7 @@ const startRestoreIndexing = async () => {
  * Dismissed with NOT YET stays until reload.
  */
 const checkAndShowNeedsIndexingPrompt = async () => {
-  if (!props.user?.userId || props.rehydrationActive || isDeepLink.value || needsIndexingPromptDismissedThisSession.value) return;
+  if (!props.user?.userId || props.rehydrationActive || props.restoreActive || isDeepLink.value || needsIndexingPromptDismissedThisSession.value) return;
   try {
     const [filesRes, statusRes] = await Promise.all([
       fetch(`/api/user-files?userId=${encodeURIComponent(props.user.userId)}`, { credentials: 'include' }),
@@ -1818,7 +1619,7 @@ const loadProviders = async () => {
         selectedProvider.value = providerLabels.digitalocean;
         showPrivateUnavailableDialog.value = false; // clear in case it was shown before refetch
       } else {
-        if (initialLoadComplete.value && !showAgentSetupDialog.value) {
+        if (initialLoadComplete.value && !showAgentSetupDialog.value && !props.restoreActive) {
           showPrivateUnavailableDialog.value = true;
         }
         selectFirstNonPrivateProvider();
@@ -1836,7 +1637,7 @@ const loadProviders = async () => {
       selectedProvider.value = providerLabels.digitalocean;
       showPrivateUnavailableDialog.value = false;
     } else {
-      if (initialLoadComplete.value && !showAgentSetupDialog.value) {
+      if (initialLoadComplete.value && !showAgentSetupDialog.value && !props.restoreActive) {
         showPrivateUnavailableDialog.value = true;
       }
       selectFirstNonPrivateProvider();
@@ -1869,7 +1670,7 @@ watch(
       return;
     }
     if (getProviderKey(selectedProvider.value) === 'digitalocean') {
-      if (initialLoadComplete.value && !showAgentSetupDialog.value) {
+      if (initialLoadComplete.value && !showAgentSetupDialog.value && !props.restoreActive) {
         showPrivateUnavailableDialog.value = true;
       }
       selectFirstNonPrivateProvider();
@@ -1888,18 +1689,10 @@ watch(
   }
 );
 
-// Token estimation helper
-const estimateTokenCount = (text: string) => {
-  const averageTokenLength = 2.75;
-  return Math.ceil((text.length / averageTokenLength) * 1.15);
-};
-
 // Send message (streaming)
 const sendMessage = async () => {
   if (!inputMessage.value || isStreaming.value || isRequestSent.value) return;
   emit('session-dirty');
-
-  const startTime = Date.now();
 
   const userLabel = getUserLabel();
   const userMessage: Message = {
@@ -1956,7 +1749,7 @@ const sendMessage = async () => {
         }
       } catch (err) {
         // If fetching summary fails, continue with normal chat flow
-        console.log('Could not fetch existing summary, generating new one:', err);
+        console.warn('Could not fetch existing summary, generating new one:', err);
       }
     }
     // Build messages with file context
@@ -1980,21 +1773,6 @@ const sendMessage = async () => {
       role: msg.role,
       content: msg.content
     }));
-    
-    // Calculate tokens and context size for logging
-    const allMessagesText = sanitizedMessages.map(msg => msg.content).join('\n');
-    const totalTokens = estimateTokenCount(allMessagesText);
-    const contextSizeKB = Math.round(allMessagesText.length / 1024 * 100) / 100;
-    const uploadedFilesCount = uploadedFiles.value.length;
-    
-    // Calculate just the file context for additional logging
-    const filesContextText = uploadedFiles.value.map(file => 
-      `File: ${file.name} (${file.type})\nContent:\n${file.type === 'pdf' ? file.content : file.content}`
-    ).join('\n\n');
-    const filesTokens = estimateTokenCount(filesContextText);
-    const filesSizeKB = Math.round(filesContextText.length / 1024 * 100) / 100;
-    
-    console.log(`[*] AI Query: ${totalTokens} tokens (${filesTokens} from files), ${contextSizeKB}KB context (${filesSizeKB}KB files), ${uploadedFilesCount} files`);
     
     // Convert displayed label to API key
     const providerKey = getProviderKey(selectedProvider.value);
@@ -2063,25 +1841,7 @@ const sendMessage = async () => {
             
             if (data.isComplete) {
               isStreaming.value = false;
-              const responseTime = Date.now() - startTime;
-              console.log(`[*] AI Response time: ${responseTime}ms`);
-              
-              // [RAG] Debug: Log the full response for RAG queries
-              const lastUserMessage = messages.value.filter(m => m.role === 'user').pop()?.content || '';
-              if (lastUserMessage.toLowerCase().includes('find the encounter note') || 
-                  lastUserMessage.toLowerCase().includes('document and page')) {
-                console.log('[RAG] Full AI response:', assistantMessage.content);
-                console.log('[RAG] Original query:', lastUserMessage);
-                
-                // Extract filename and page from response if present
-                const filenameMatch = assistantMessage.content.match(/(?:File|Filename|Document|Source):\s*([A-Za-z0-9_\-\.]+\.(?:PDF|pdf))/i);
-                const pageMatch = assistantMessage.content.match(/Page:\s*(\d+)/i);
-                if (filenameMatch || pageMatch) {
-                  console.log('[RAG] Extracted filename:', filenameMatch?.[1] || 'not found');
-                  console.log('[RAG] Extracted page:', pageMatch?.[1] || 'not found');
-                }
-              }
-              
+
               // Save patient summary if this was a summary request
               if (isPatientSummaryRequest && props.user?.userId && assistantMessage.content) {
                 savePatientSummary(assistantMessage.content);
@@ -2102,9 +1862,7 @@ const sendMessage = async () => {
     }
 
     isStreaming.value = false;
-    const responseTime = Date.now() - startTime;
-    console.log(`[*] AI Response time: ${responseTime}ms`);
-    
+
     // Save patient summary if this was a summary request
     if (isPatientSummaryRequest && props.user?.userId && assistantMessage.content) {
       savePatientSummary(assistantMessage.content);
@@ -2115,9 +1873,7 @@ const sendMessage = async () => {
     // Update trulyOriginalMessages when assistant response completes (new message added)
     trulyOriginalMessages.value = JSON.parse(JSON.stringify(messages.value));
   } catch (error) {
-    const responseTime = Date.now() - startTime;
     console.error('Chat error:', error);
-    console.log(`[*] AI Response time: ${responseTime}ms (failed)`);
     
     // Build error message
     let errorMessage = '';
@@ -2290,10 +2046,16 @@ const refreshWizardState = async () => {
         ? filesResult.kbIndexedDataSourceCount
         : null;
       indexedCountFromFiles = kbIndexedCount !== null ? kbIndexedCount : null;
-      indexingActiveFromFiles = !!filesResult?.kbIndexingActive;
+      // Trust backendCompleted from CouchDB over the live DO API status.
+      // The DO API can lag behind — it may still report isActive after the backend
+      // has already detected completion, causing the wizard to never finish.
+      const backendDone = filesResult?.kbIndexingStatus?.backendCompleted === true;
+      indexingActiveFromFiles = backendDone ? false : !!filesResult?.kbIndexingActive;
       indexingJobIdFromFiles = filesResult?.kbIndexingJobId || filesResult?.kbLatestJobId || null;
-      stage3CompleteFromFiles = !indexingActiveFromFiles && (indexedCountFromFiles ?? 0) > 0;
-      wizardHasFilesInKB.value = (indexedCountFromFiles ?? 0) > 0;
+      const liveTokenCount = Number(filesResult?.kbTotalTokens || 0);
+      // Complete if backendCompleted, OR if DO API not active and either indexed count > 0 or live tokens > 0
+      stage3CompleteFromFiles = backendDone || (!indexingActiveFromFiles && ((indexedCountFromFiles ?? 0) > 0 || liveTokenCount > 0));
+      wizardHasFilesInKB.value = (indexedCountFromFiles ?? 0) > 0 || liveTokenCount > 0;
       tokensFromFiles = filesResult?.kbTotalTokens ? String(filesResult.kbTotalTokens) : null;
       const kbFiles = files.filter((file: { inKnowledgeBase?: boolean }) => !!file.inKnowledgeBase);
       const kbName = filesResult?.kbName || wizardKbName.value || '';
@@ -2409,6 +2171,7 @@ const refreshWizardState = async () => {
             if (stage3IndexingPoll.value) {
               clearInterval(stage3IndexingPoll.value);
             }
+            let prevPollState2 = '';
             stage3IndexingPoll.value = setInterval(async () => {
               try {
                 const statusResponse = await fetch(`/api/user-files?userId=${encodeURIComponent(props.user?.userId || '')}&source=wizard`, {
@@ -2419,17 +2182,47 @@ const refreshWizardState = async () => {
                 }
                 const statusResult = await statusResponse.json();
                 const storedStatus = statusResult?.kbIndexingStatus || {};
+                const liveActive = !!statusResult?.kbIndexingActive;
+                const backendDone = storedStatus.backendCompleted === true;
+                // Fix: '0' is truthy in JS, so use Number() to properly fall through to kbTotalTokens
+                const storedTokens = storedStatus.tokens;
+                const liveTokens = statusResult?.kbTotalTokens ? String(statusResult.kbTotalTokens) : '0';
+                const tokens = (Number(storedTokens) > 0) ? storedTokens : liveTokens;
+                const elapsedPollMs = stage3IndexingStartedAt.value ? Date.now() - stage3IndexingStartedAt.value : 0;
+                const elapsedPollMin = Math.floor(elapsedPollMs / 60000);
+                const elapsedPollSec = Math.floor((elapsedPollMs % 60000) / 1000);
+                // Only log to console when state changes
+                const curPollState2 = `${backendDone}|${liveActive}|${tokens}|${storedStatus.phase || '?'}`;
+                if (curPollState2 !== prevPollState2) {
+                  console.log(`[KB-POLL] backendCompleted=${backendDone} liveActive=${liveActive} tokens=${tokens} phase=${storedStatus.phase || '?'} elapsed=${elapsedPollMin}m${elapsedPollSec}s`);
+                  prevPollState2 = curPollState2;
+                }
                 if (storedStatus.jobId && indexingJobIdFromFiles && storedStatus.jobId !== indexingJobIdFromFiles) {
                   return;
                 }
                 if (indexingStatus.value) {
                   indexingStatus.value.phase = storedStatus.phase || indexingStatus.value.phase;
-                  indexingStatus.value.tokens = storedStatus.tokens || indexingStatus.value.tokens;
+                  indexingStatus.value.tokens = tokens;
                   indexingStatus.value.filesIndexed = storedStatus.filesIndexed || 0;
                   indexingStatus.value.progress = storedStatus.progress || 0;
                 }
-                const isCompleted = storedStatus.backendCompleted === true;
+                // Log progress every ~60s (every 6th poll at 10s interval)
+                if (elapsedPollMs > 0 && Math.floor(elapsedPollMs / 60000) !== Math.floor((elapsedPollMs - 10000) / 60000)) {
+                  addSetupLogLine('Indexing Progress', `${elapsedPollMin}m elapsed — tokens=${tokens} files=${storedStatus.filesIndexed || 0} active=${liveActive} backendDone=${backendDone}`, true);
+                }
+                // Also treat as complete if DO API says not active and tokens > 0
+                // (covers edge case where backend polling crashed before setting backendCompleted)
+                const inferredComplete = !liveActive && Number(tokens) > 0;
+                // Also complete if DO API says not active for > 5 minutes (handles 0-token edge case)
+                const timedOutInactive = !liveActive && !backendDone && elapsedPollMs > 5 * 60 * 1000;
+                // Client-side safety net: if tokens > 0 for > 7 minutes, complete even if liveActive=true
+                const tokenTimeoutComplete = !backendDone && !inferredComplete && Number(tokens) > 0 && elapsedPollMs > 7 * 60 * 1000;
+                // Pure time-based fallback: 20+ min with no completion signal at all (0-token "no changes" case)
+                const pureTimeoutComplete = !backendDone && !inferredComplete && !tokenTimeoutComplete && elapsedPollMs > 20 * 60 * 1000;
+                const isCompleted = backendDone || inferredComplete || timedOutInactive || tokenTimeoutComplete || pureTimeoutComplete;
+                const completionReason = backendDone ? 'backendCompleted' : inferredComplete ? 'inferredComplete' : timedOutInactive ? 'timedOutInactive' : tokenTimeoutComplete ? 'tokenTimeout' : 'pureTimeout';
                 if (isCompleted) {
+                  console.log(`[KB-POLL] ✅ Indexing complete: tokens=${tokens} files=${storedStatus.filesIndexed || 0} reason=${completionReason} elapsed=${elapsedPollMin}m${elapsedPollSec}s`);
                   if (stage3IndexingPoll.value) {
                     clearInterval(stage3IndexingPoll.value);
                     stage3IndexingPoll.value = null;
@@ -2446,8 +2239,8 @@ const refreshWizardState = async () => {
                   } catch { /* ignore */ }
                   refreshWizardState();
                 }
-              } catch (_error) {
-                // ignore polling errors
+              } catch (pollError) {
+                console.warn('[KB-POLL] Error:', pollError);
               }
             }, 10000);
           }
@@ -2508,9 +2301,7 @@ const savePatientSummary = async (summary: string) => {
       })
     });
     
-    if (response.ok) {
-      console.log('Patient summary saved successfully');
-    } else {
+    if (!response.ok) {
       console.error('Failed to save patient summary');
     }
   } catch (error) {
@@ -2521,24 +2312,6 @@ const savePatientSummary = async (summary: string) => {
 const triggerFileInput = () => {
   if (isRequestSent.value) return;
   fileInput.value?.click();
-};
-
-const triggerWizardFileInput = async () => {
-  logWizardEvent('stage2_file_input_trigger', {
-    hasRef: !!fileInput.value,
-    intent: wizardUploadIntent.value
-  });
-  if (fileInput.value) {
-    (fileInput.value as HTMLInputElement | null)?.click();
-    return;
-  }
-  await nextTick();
-  if (fileInput.value) {
-    (fileInput.value as HTMLInputElement | null)?.click();
-    return;
-  }
-  const fallbackInput = document.querySelector<HTMLInputElement>('input[type="file"]');
-  fallbackInput?.click();
 };
 
 const handleWizardFileSelect = () => {
@@ -2614,11 +2387,12 @@ const handleWizardSummaryAction = () => {
   if (!props.user?.userId) return;
   myStuffInitialTab.value = 'summary';
   showMyStuffDialog.value = true;
-  wizardRequestSummaryOnOpen.value = true;
+  wizardRequestAction.value = 'generate-summary';
   wizardPatientSummary.value = false;
 };
 
 const dismissWizard = () => {
+  addSetupLogLine('Wizard Action', 'User dismissed setup wizard', true);
   wizardDismissed.value = true;
   showAgentSetupDialog.value = false;
   stopAgentSetupTimer();
@@ -2656,7 +2430,18 @@ const parseUserAgent = (): string => {
   return `${browser} on ${os}`;
 };
 
+// Steps that should only appear once per session (watcher-driven, can re-fire on remount)
+const oneTimeLogSteps = new Set(['Indexing Complete', 'Current Medications', 'Wizard Flow']);
+
 const addSetupLogLine = (step: string, detail: string, ok: boolean) => {
+  // Deduplicate within current session
+  const lastSessionIdx = setupLogLines.value.map(l => l.step).lastIndexOf('Session Start');
+  const sessionLines = lastSessionIdx >= 0 ? setupLogLines.value.slice(lastSessionIdx) : setupLogLines.value;
+  // For one-time steps, skip if ANY entry in the session has the same step + detail
+  if (oneTimeLogSteps.has(step) && sessionLines.some(l => l.step === step && l.detail === detail)) return;
+  // For other steps, skip only if the immediately preceding entry is identical
+  const last = sessionLines[sessionLines.length - 1];
+  if (last && last.step === step && last.detail === detail) return;
   setupLogLines.value.push({
     time: new Date().toISOString(),
     step,
@@ -2705,9 +2490,11 @@ const handlePickLocalFolder = async () => {
   addSetupLogLine('Session Info', `App URL: ${window.location.origin}`, true);
   addSetupLogLine('Folder Selected', `Folder: ${result.folderName}`, true);
 
-  // Write maia.webloc shortcut immediately
+  // Write maia.webloc shortcut immediately (with userId if available; patient name added at wizard completion)
   try {
-    await writeWeblocFile(result.handle, window.location.origin);
+    await writeWeblocFile(result.handle, window.location.origin, {
+      userId: props.user?.userId || undefined
+    });
     addSetupLogLine('Shortcut Created', 'maia.webloc written to folder', true);
   } catch (e) {
     addSetupLogLine('Shortcut Error', `Failed to write maia.webloc: ${e instanceof Error ? e.message : 'Unknown'}`, false);
@@ -3075,8 +2862,11 @@ const generateSetupLogPdf = async () => {
   doc.text('Summary', margin, y);
   y += 6;
   doc.setFontSize(9);
-  const totalFiles = setupLogLines.value.filter(l => l.step === 'File Uploaded').length;
-  const failedUploads = setupLogLines.value.filter(l => l.step === 'Upload Failed' || l.step === 'Upload Error').length;
+  // Count files only from the LAST session (after the last "Session Start" marker)
+  const lastSessionIdx = setupLogLines.value.map(l => l.step).lastIndexOf('Session Start');
+  const currentSessionLines = lastSessionIdx >= 0 ? setupLogLines.value.slice(lastSessionIdx) : setupLogLines.value;
+  const totalFiles = currentSessionLines.filter(l => l.step === 'File Uploaded').length;
+  const failedUploads = currentSessionLines.filter(l => l.step === 'Upload Failed' || l.step === 'Upload Error').length;
   const hasIndexing = setupLogLines.value.some(l => l.step === 'Indexing Complete');
   const indexTokens = indexingStatus.value?.tokens || '0';
   const hasMeds = wizardCurrentMedications.value;
@@ -3335,6 +3125,7 @@ const handleStage3Index = async (overrideNames?: string[], fromRestore = false) 
         const hasInitialFile = files.some((item: { isInitial?: boolean }) => !!item?.isInitial);
         emit('rehydration-complete', { hasInitialFile });
       }
+      let prevPollState = '';
       stage3IndexingPoll.value = setInterval(async () => {
         try {
           const statusResponse = await fetch(`/api/user-files?userId=${encodeURIComponent(props.user?.userId || '')}&source=wizard`, {
@@ -3345,14 +3136,46 @@ const handleStage3Index = async (overrideNames?: string[], fromRestore = false) 
           }
           const statusResult = await statusResponse.json();
           const kbStatus = statusResult.kbIndexingStatus || {};
+          const liveActive = !!statusResult?.kbIndexingActive;
+          const backendDone = kbStatus.backendCompleted === true;
+          // Fix: '0' is truthy in JS, so use Number() to properly fall through to kbTotalTokens
+          const storedTokens = kbStatus.tokens;
+          const liveTokens = statusResult?.kbTotalTokens ? String(statusResult.kbTotalTokens) : '0';
+          const tokens = (Number(storedTokens) > 0) ? storedTokens : liveTokens;
+          const elapsedPollMs = stage3IndexingStartedAt.value ? Date.now() - stage3IndexingStartedAt.value : 0;
+          const elapsedPollMin = Math.floor(elapsedPollMs / 60000);
+          const elapsedPollSec = Math.floor((elapsedPollMs % 60000) / 1000);
+          // Only log to console when state changes
+          const curPollState = `${backendDone}|${liveActive}|${tokens}|${kbStatus.phase || '?'}`;
+          if (curPollState !== prevPollState) {
+            console.log(`[KB-POLL] backendCompleted=${backendDone} liveActive=${liveActive} tokens=${tokens} phase=${kbStatus.phase || '?'} elapsed=${elapsedPollMin}m${elapsedPollSec}s`);
+            prevPollState = curPollState;
+          }
           if (indexingStatus.value) {
             indexingStatus.value.phase = kbStatus.phase || indexingStatus.value.phase;
-            indexingStatus.value.tokens = kbStatus.tokens || indexingStatus.value.tokens;
+            indexingStatus.value.tokens = tokens;
             indexingStatus.value.filesIndexed = kbStatus.filesIndexed || 0;
             indexingStatus.value.progress = kbStatus.progress || 0;
           }
-          const isCompleted = kbStatus.backendCompleted === true;
+          // Log progress every ~60s (every 6th poll at 10s interval)
+          if (elapsedPollMs > 0 && Math.floor(elapsedPollMs / 60000) !== Math.floor((elapsedPollMs - 10000) / 60000)) {
+            addSetupLogLine('Indexing Progress', `${elapsedPollMin}m elapsed — tokens=${tokens} files=${kbStatus.filesIndexed || 0} active=${liveActive} backendDone=${backendDone}`, true);
+          }
+          // Trust backendCompleted; also infer completion if DO API says not active and tokens > 0
+          const inferredComplete = !liveActive && Number(tokens) > 0;
+          // Also complete if DO API says not active for > 5 minutes (handles 0-token edge case)
+          const timedOutInactive = !liveActive && !backendDone && elapsedPollMs > 5 * 60 * 1000;
+          // Client-side safety net: if tokens > 0 for > 7 minutes, complete even if
+          // liveActive is true (DO API job status can lag indefinitely behind actual completion)
+          const tokenTimeoutComplete = !backendDone && !inferredComplete && Number(tokens) > 0 && elapsedPollMs > 7 * 60 * 1000;
+          // Pure time-based fallback: if 20+ minutes elapsed with no completion signal at all,
+          // the DO API is stuck. Complete to unblock the wizard (handles 0-token "no changes" case).
+          const pureTimeoutComplete = !backendDone && !inferredComplete && !tokenTimeoutComplete && elapsedPollMs > 20 * 60 * 1000;
+          const isCompleted = backendDone || inferredComplete || timedOutInactive || tokenTimeoutComplete || pureTimeoutComplete;
+          const completionReason = backendDone ? 'backendCompleted' : inferredComplete ? 'inferredComplete' : timedOutInactive ? 'timedOutInactive' : tokenTimeoutComplete ? 'tokenTimeout' : pureTimeoutComplete ? 'pureTimeout' : '';
           if (isCompleted) {
+            console.log(`[KB-POLL] ✅ Indexing complete: tokens=${tokens} files=${kbStatus.filesIndexed || 0} reason=${completionReason} elapsed=${elapsedPollMin}m${elapsedPollSec}s`);
+            addSetupLogLine('Indexing Complete', `${kbStatus.filesIndexed || 0} file(s) indexed, ${tokens} tokens (${completionReason})`, true);
             if (stage3IndexingPoll.value) {
               clearInterval(stage3IndexingPoll.value);
               stage3IndexingPoll.value = null;
@@ -3373,8 +3196,8 @@ const handleStage3Index = async (overrideNames?: string[], fromRestore = false) 
               showRestoreCompleteDialog.value = true;
             }
           }
-        } catch (error) {
-          // ignore polling errors
+        } catch (pollError) {
+          console.warn('[KB-POLL] Error:', pollError);
         }
       }, 10000);
     }
@@ -3387,23 +3210,6 @@ const handleStage3Index = async (overrideNames?: string[], fromRestore = false) 
   }
 };
 
-const handleStage3Action = () => {
-  if (stage3IndexingActive.value) return;
-  if (wizardRestoreActive.value) {
-    const files = Array.isArray(props.rehydrationFiles) ? props.rehydrationFiles : [];
-    const firstUnrestored = files.find((f: { restored?: boolean }) => !f.restored);
-    const firstName = firstUnrestored ? (firstUnrestored.fileName || (firstUnrestored.bucketKey ? firstUnrestored.bucketKey.split('/').pop() : null)) : null;
-    if (!firstName) {
-      return;
-    }
-    wizardUploadIntent.value = 'restore';
-    wizardRestoreTargetName.value = firstName;
-    triggerWizardFileInput();
-    return;
-  }
-  wizardUploadIntent.value = 'other';
-  triggerWizardFileInput();
-};
 
 
 const handleFileSelect = async (event: Event) => {
@@ -3420,7 +3226,6 @@ const handleFileSelect = async (event: Event) => {
       if (result) {
         localFolderHandle.value = result.handle;
         localFolderName.value = result.folderName;
-        console.log(`[localFolder] Reconnected to "${result.folderName}" during file select gesture`);
       }
     } catch (e) {
       // Not critical — file will still upload to cloud
@@ -3605,7 +3410,6 @@ const uploadPDFFile = async (file: File) => {
 
   const parseResult = await parseResponse.json();
   
-  console.log(`[*] PDF parsed: ${file.name}, ${file.size} bytes → ${parseResult.text.length} chars (${parseResult.pages} pages)`);
 
   // Upload to bucket
   const uploadFormData = new FormData();
@@ -3671,12 +3475,9 @@ const uploadPDFFile = async (file: File) => {
               await writeStateFile(localFolderHandle.value, state);
             }
           }
-          console.log(`[localFolder] Paperclip file "${file.name}" copied to local folder`);
         } catch (folderErr) {
           console.warn('[localFolder] Failed to copy paperclip file to local folder:', folderErr);
         }
-      } else {
-        console.log('[localFolder] No local folder connected — skipping local copy of paperclip file');
       }
     } catch (error) {
       console.warn('Failed to save file metadata to user document:', error);
@@ -5477,6 +5278,10 @@ const startSetupWizardPolling = () => {
     initialLoadComplete.value = true;
     return;
   }
+  if (props.suppressWizard) {
+    initialLoadComplete.value = true;
+    return;
+  }
   const userId = props.user.userId;
   const agentSetupKey = wizardAgentSetupStartedKey(userId);
   const maxAttempts = 60; // 15 minutes at 15s
@@ -5520,7 +5325,7 @@ const startSetupWizardPolling = () => {
           // Meds done, summary pending → resume at summary phase
           wizardFlowPhase.value = 'summary';
           myStuffInitialTab.value = 'summary';
-          wizardRequestSummaryOnOpen.value = true;
+          wizardRequestAction.value = 'generate-summary';
           showMyStuffDialog.value = true;
         } else if (!wizardCurrentMedications.value) {
           // Meds still pending → resume at medications phase
@@ -5576,6 +5381,7 @@ const startSetupWizardPolling = () => {
         wizardStage1Complete.value = true;
         agentSetupPollingActive.value = false;
         stopAgentSetupTimer();
+        addSetupLogLine('Agent Status', `Agent deployed and ready (${agentSetupElapsed.value}s)`, true);
         try {
           if (agentSetupKey) sessionStorage.removeItem(agentSetupKey);
         } catch { /* ignore */ }
@@ -5624,6 +5430,62 @@ const stage3IndexingActive = computed(() =>
   indexingStatus.value?.phase === 'indexing' ||
   !!stage3IndexingPoll.value
 );
+
+/** True when the user has connected a local folder (Chrome handle or Safari folder name). */
+const setupFolderConnected = computed(() => !!localFolderHandle.value || !!safariFolderName.value);
+
+/** Checklist file items for the simplified setup wizard. */
+const setupChecklistFiles = computed(() => {
+  // Build from setup log lines (files uploaded during auto-run)
+  const uploadedSet = new Set<string>();
+  const errorSet = new Set<string>();
+  const runningSet = new Set<string>();
+  for (const line of setupLogLines.value) {
+    if (line.step === 'File Uploaded' && line.ok) {
+      // Extract filename: "filename.pdf (123 KB)" or "filename.pdf (123 KB) [Apple Health]"
+      const name = line.detail.split(' (')[0];
+      if (name) uploadedSet.add(name);
+    } else if ((line.step === 'Upload Failed' || line.step === 'Upload Error') && !line.ok) {
+      const name = line.detail.split(':')[0];
+      if (name) errorSet.add(name);
+    }
+  }
+  // If auto-run is active, files being uploaded show as running
+  if (localFolderAutoRunActive.value && localFolderAutoRunPhase.value.startsWith('Uploading ')) {
+    const match = localFolderAutoRunPhase.value.match(/^Uploading (.+)\.\.\.$/);
+    if (match) runningSet.add(match[1]);
+  }
+
+  // Combine: local folder files (pending/running) + uploaded files (done) + failed files (error)
+  const items: Array<{ name: string; status: 'pending' | 'running' | 'done' | 'error'; progress?: string; isAppleHealth?: boolean }> = [];
+  const seen = new Set<string>();
+
+  // Files from local folder scan (not yet uploaded)
+  for (const f of localFolderFiles.value) {
+    if (f.name.toLowerCase() === 'maia-setup-log.pdf' || f.name.toLowerCase() === 'maia-setup-log.json') continue;
+    if (seen.has(f.name)) continue;
+    seen.add(f.name);
+    const isApple = stage3DisplayFiles.value.some(df => df.name === f.name && df.isAppleHealth);
+    if (uploadedSet.has(f.name)) {
+      items.push({ name: f.name, status: 'done', progress: 'Uploaded', isAppleHealth: isApple });
+    } else if (errorSet.has(f.name)) {
+      items.push({ name: f.name, status: 'error', isAppleHealth: isApple });
+    } else if (runningSet.has(f.name)) {
+      items.push({ name: f.name, status: 'running', isAppleHealth: isApple });
+    } else {
+      items.push({ name: f.name, status: 'pending', isAppleHealth: isApple });
+    }
+  }
+
+  // Files from stage3 that may have been uploaded before folder was scanned (e.g. Safari)
+  for (const f of stage3DisplayFiles.value) {
+    if (seen.has(f.name)) continue;
+    seen.add(f.name);
+    items.push({ name: f.name, status: f.inKnowledgeBase ? 'done' : 'pending', progress: f.inKnowledgeBase ? 'Uploaded' : undefined, isAppleHealth: f.isAppleHealth });
+  }
+
+  return items;
+});
 
 // Log when indexing completes (watch indexingStatus phase transition to 'complete')
 // Placed here because indexingStatus must be declared before the watcher.
@@ -5730,13 +5592,12 @@ const handleIndexingFinished = (_data: { jobId: string; phase: string; error?: s
 
 const handlePostIndexingUpdateSummary = () => {
   showPostIndexingSummaryPrompt.value = false;
-  // Close and reopen MyStuff on summary tab so requestSummaryOnOpen triggers generation
-  showMyStuffDialog.value = false;
-  void nextTick(() => {
-    myStuffInitialTab.value = 'summary';
-    wizardRequestSummaryOnOpen.value = true;
+  myStuffInitialTab.value = 'summary';
+  wizardRequestAction.value = 'generate-summary';
+  if (!showMyStuffDialog.value) {
     showMyStuffDialog.value = true;
-  });
+  }
+  // If dialog is already open, the requestAction watcher handles the switch
 };
 
 const handleFilesArchived = (archivedBucketKeys: string[]) => {
@@ -5758,10 +5619,6 @@ const handleFilesArchived = (archivedBucketKeys: string[]) => {
     viewingFile.value = null;
   }
   
-  if (archivedBucketKeys.length > 0) {
-    console.log(`[Files] Cleared ${archivedBucketKeys.length} file badge(s) from chat (moved to archived or KB)`);
-  }
-  
   // Update status tip immediately after files are archived
   updateContextualTip();
 };
@@ -5775,12 +5632,10 @@ const handleFileAddedToKb = async (data: { fileName: string; bucketKey: string }
       if (result) {
         localFolderHandle.value = result.handle;
         localFolderName.value = result.folderName;
-        console.log(`[localFolder] Reconnected to "${result.folderName}" during KB file add`);
       }
     } catch { /* ignore */ }
   }
   if (!localFolderHandle.value) {
-    console.log('[localFolder] No local folder connected — skipping local copy of KB file');
     return;
   }
   try {
@@ -5940,13 +5795,15 @@ const handleCurrentMedicationsSaved = async () => {
     wizardFlowPhase.value = 'summary';
     addSetupLogLine('Wizard Flow', 'Current Medications saved — opening Patient Summary', true);
     void generateSetupLogPdf();
-    // Close and reopen MyStuff on summary tab (reopen triggers requestSummaryOnOpen)
-    showMyStuffDialog.value = false;
-    await nextTick();
+    // Switch tab and trigger summary generation in-place via requestAction
     myStuffInitialTab.value = 'summary';
-    wizardRequestSummaryOnOpen.value = true;
-    showMyStuffDialog.value = true;
+    wizardRequestAction.value = 'generate-summary';
   }
+};
+
+const handleMyStuffShowSummary = () => {
+  myStuffInitialTab.value = 'summary';
+  wizardRequestAction.value = 'generate-summary';
 };
 
 const handlePatientSummarySaved = async () => {
@@ -5983,10 +5840,6 @@ const handlePatientSummaryVerified = async () => {
 };
 
 const handleRehydrationFileRemoved = (payload: { bucketKey?: string; fileName?: string }) => {
-  console.log('[SAVE-RESTORE] Rehydration file removed (wizard)', {
-    userId: props.user?.userId || null,
-    fileName: payload?.fileName || payload?.bucketKey || null
-  });
   emit('rehydration-file-removed', payload);
 };
 
@@ -6160,7 +6013,7 @@ onMounted(async () => {
         if (wizardFlowPhase.value === 'summary') {
           void nextTick(() => {
             myStuffInitialTab.value = 'summary';
-            wizardRequestSummaryOnOpen.value = true;
+            wizardRequestAction.value = 'generate-summary';
             showMyStuffDialog.value = true;
           });
           return;

@@ -142,7 +142,7 @@
                     <a href="#" @click.prevent="welcomeDialogSection = 'faq'; showWelcomeContentDialog = true" class="welcome-footer-link">FAQ</a>
                     <span class="text-grey-5 q-mx-sm">|</span>
                     <a href="#" @click.prevent="welcomeDialogSection = 'about'; showWelcomeContentDialog = true" class="welcome-footer-link">About</a>
-                    <div class="text-caption text-grey-6 q-mt-sm">CC-BY MAIA by Adrian Gropper, MD</div>
+                    <div class="text-caption text-grey-6 q-mt-sm">CC-BY MAIA v{{ appVersion }} by Adrian Gropper, MD</div>
                   </div>
                 </div>
 
@@ -172,6 +172,7 @@
             :restore-chat-state="restoredChatState"
             :rehydration-files="rehydrationFiles"
             :rehydration-active="rehydrationActive"
+            :restore-active="showRestoreWizard"
             :suppress-wizard="suppressWizard"
             :folder-access-tier="folderAccessTier"
             :passkey-without-folder="passkeyWithoutFolder"
@@ -305,6 +306,40 @@
             color="primary"
             @click="handlePrivateDevice"
           />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
+    <!-- Get Started choice dialog — shown when restorable users exist -->
+    <q-dialog v-model="showGetStartedChoiceDialog" persistent>
+      <q-card style="min-width: 460px; max-width: 600px">
+        <q-card-section>
+          <div class="text-h6">What would you like to do?</div>
+          <div class="text-body2 text-grey-7 q-mt-xs">
+            You have saved accounts on this device.
+          </div>
+        </q-card-section>
+        <q-card-section class="q-pt-none q-gutter-sm" style="display: flex; flex-direction: column;">
+          <q-btn
+            v-for="ku in restorableUsers"
+            :key="ku.userId"
+            unelevated
+            color="primary"
+            class="full-width"
+            :label="'Restore ' + ku.displayName"
+            :loading="tempStartLoading && selectedWelcomeUserId === ku.userId"
+            @click="showGetStartedChoiceDialog = false; handleUserCardRestore(ku)"
+          />
+          <q-btn
+            outline
+            color="primary"
+            class="full-width"
+            label="Add a new family member"
+            @click="showGetStartedChoiceDialog = false; handleAddFamilyMember()"
+          />
+        </q-card-section>
+        <q-card-actions align="right">
+          <q-btn flat label="Cancel" color="grey-7" @click="showGetStartedChoiceDialog = false" />
         </q-card-actions>
       </q-card>
     </q-dialog>
@@ -680,6 +715,7 @@
       :cloud-health="cloudHealthDetails"
       :local-state="restoreWizardLocalState"
       :local-folder-handle="localFolderHandle"
+      :kb-name="restoreWizardKbName"
       @restore-complete="handleRestoreWizardComplete"
     />
 
@@ -726,25 +762,24 @@
         </q-card-section>
         <q-card-section class="text-body2">
           <p>
-            This permanently deletes your cloud data for <strong>{{ user?.userId }}</strong>.
-            Signing out is reversible; destroying is not.
+            This deletes your cloud data for <strong>{{ user?.userId }}</strong>.
+            Deep links and passkey access will not work until you restore the account.
           </p>
-          <p class="q-mt-md">
-            Type <strong>{{ user?.userId }}</strong> to confirm:
+          <p class="q-mt-sm">
+            You will need to restore the cloud account from the local backup on the computer that created the account.
           </p>
-          <q-input
-            v-model="destroyConfirm"
-            dense
-            outlined
-            placeholder="Enter user ID"
-          />
         </q-card-section>
         <q-card-actions align="right">
+          <q-btn
+            flat
+            label="CANCEL"
+            color="primary"
+            v-close-popup
+          />
           <q-btn
             label="DESTROY"
             color="negative"
             :loading="destroyLoading"
-            :disable="destroyConfirm !== user?.userId"
             @click="destroyTemporaryAccount"
           />
         </q-card-actions>
@@ -788,6 +823,9 @@ import {
   readStateFileByUserId,
   type MaiaState, type MaiaIdentity, type KnownUser
 } from './utils/localFolder';
+import packageJson from '../package.json';
+
+const appVersion = packageJson.version;
 
 interface User {
   userId: string;
@@ -836,7 +874,6 @@ const tempStartLoading = ref(false);
 const tempStartError = ref('');
 const showTempSignOutDialog = ref(false);
 const showDestroyDialog = ref(false);
-const destroyConfirm = ref('');
 const destroyLoading = ref(false);
 const passkeyPrefillUserId = ref<string | null>(null);
 const passkeyPrefillAction = ref<'signin' | 'register' | null>(null);
@@ -862,9 +899,11 @@ const cloudHealthLoading = ref(false);
 /** [Phase 7] Restore Wizard state */
 const showRestoreWizard = ref(false);
 const restoreWizardLocalState = ref<MaiaState | null>(null);
+const restoreWizardKbName = ref<string | null>(null);
 const showDestroyedRestoreDialog = ref(false);
 const destroyedUserId = ref<string | null>(null);
 const showDevicePrivacyDialog = ref(false);
+const showGetStartedChoiceDialog = ref(false);
 const showSharedDeviceWarning = ref(false);
 const deviceChoiceResolved = ref(false);
 const sharedComputerMode = ref(false);
@@ -936,6 +975,11 @@ const welcomeAgentLinkedToKb = ref<boolean | null>(null);
 /** [AUTH] Whether wizard is complete (verified patient summary). */
 const welcomeWizardComplete = ref<boolean | null>(null);
 
+/** Known users whose cloud status is 'restore' (account needs restoring). */
+const restorableUsers = computed(() =>
+  knownUsers.value.filter(ku => welcomeUserCloudStatus.value[ku.userId] === 'restore')
+);
+
 /** [AUTH] Classify welcome into New / Local / Cloud for status line and copy (USER_AUTH.md §1–2). */
 const welcomeUserType = computed(() => {
   const localId = welcomeLocalUserId.value;
@@ -952,17 +996,16 @@ const welcomeUserType = computed(() => {
 });
 
 /** [AUTH] True when cloud account is fully set up: KB exists with saved files, agent linked, wizard complete. */
+// wizardComplete from the server is derived from data presence (has agent + KB + endpoint +
+// patientSummary + currentMedications), so it already implies kb and linked are ok.
 const welcomeCloudValid = computed(() => {
   if (!welcomeLocalUserId.value) return null;
   const snap = welcomeLocalSnapshot.value;
   const savedCount = welcomeSavedFileCount.value;
-  const kbOk = welcomeKbExists.value === true;
-  const linkedOk = welcomeAgentLinkedToKb.value === true;
   const wizardOk = welcomeWizardComplete.value === true;
   // Saved files in cloud match or exceed local snapshot count
   const filesOk = savedCount !== null && (!snap || snap.fileCount === 0 || savedCount >= snap.fileCount);
-  const valid = kbOk && linkedOk && wizardOk && filesOk;
-  console.log(`[WELCOME] cloudValid: kb=${kbOk}, linked=${linkedOk}, wizard=${wizardOk}, files=${savedCount}/${snap?.fileCount ?? '?'} → ${valid}`);
+  const valid = wizardOk && filesOk;
   return valid;
 });
 
@@ -983,10 +1026,9 @@ const checkAllUserCloudStatus = async () => {
       const resp = await fetch(`/api/agent-exists?userId=${encodeURIComponent(u.userId)}`);
       if (resp.ok) {
         const data = await resp.json();
-        const kbOk = !!data.kbExists;
-        const linkedOk = !!data.agentLinkedToKb;
-        const wizardOk = !!data.wizardComplete;
-        statusMap[u.userId] = (kbOk && linkedOk && wizardOk) ? 'ready' : 'restore';
+        // wizardComplete is derived from data presence on the server
+        // (has agent + KB + endpoint + patientSummary + currentMedications)
+        statusMap[u.userId] = data.wizardComplete ? 'ready' : 'restore';
       } else {
         statusMap[u.userId] = 'restore';
       }
@@ -1018,21 +1060,18 @@ const handleUserCardRestore = async (ku: KnownUser) => {
   welcomeLocalUserId.value = ku.userId;
   tempStartLoading.value = true;
   tempStartError.value = '';
+  // Clear stale wizard flags from previous session to prevent My Lists auto-reload loop
+  // and stale agent timer from persisting across restore attempts
   try {
-    // Recreate the user doc with the ORIGINAL userId
-    const recreateResp = await fetch('/api/account/recreate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({ userId: ku.userId, displayName: ku.displayName })
-    });
-    const recreateData = await recreateResp.json();
-    if (!recreateResp.ok || !recreateData.authenticated) {
-      throw new Error(recreateData.error || 'Failed to recreate account');
-    }
-    setAuthenticatedUser(recreateData.user, null);
-
-    // Read local state from folder
+    sessionStorage.removeItem('autoProcessInitialFile');
+    sessionStorage.removeItem('wizardMyListsAuto');
+    sessionStorage.removeItem(`wizard_agent_setup_started_${ku.userId}`);
+  } catch { /* ignore */ }
+  try {
+    // Step 1: Read local state FIRST — must happen while we're still in the user
+    // gesture context (clicking RESTORE). Chrome's File System Access API only
+    // allows requestPermission() during a user gesture, and awaiting a network
+    // fetch exhausts that gesture window.
     let localState: MaiaState | null = null;
     if (localFolderHandle.value) {
       const { readStateFile } = await import('./utils/localFolder');
@@ -1040,13 +1079,48 @@ const handleUserCardRestore = async (ku: KnownUser) => {
     }
     if (!localState && ku.userId) {
       try {
-        const result = await readStateFileByUserId(ku.userId);
+        // requestWrite: true — we're inside the user gesture (RESTORE click)
+        const result = await readStateFileByUserId(ku.userId, { requestWrite: true });
         if (result) {
           localState = result.state;
           localFolderHandle.value = result.handle;
+        } else {
         }
-      } catch { /* not available */ }
+      } catch (e) {
+      }
     }
+    // If still no state, try prompting the user to pick their folder
+    if (!localState && !localFolderHandle.value) {
+      try {
+        const { pickLocalFolder, readStateFile: readState } = await import('./utils/localFolder');
+        const picked = await pickLocalFolder(ku.userId);
+        if (picked) {
+          localFolderHandle.value = picked.handle;
+          localFolderName.value = picked.folderName;
+          localState = await readState(picked.handle);
+        }
+      } catch (e) {
+      }
+    }
+
+    // Validate folder identity matches the userId being restored
+    if (localState && localFolderHandle.value) {
+      try {
+        const folderIdentity = await readIdentityFile(localFolderHandle.value);
+        if (folderIdentity && folderIdentity.userId && folderIdentity.userId !== ku.userId) {
+          console.warn(`[RESTORE] Folder identity mismatch: folder=${folderIdentity.userId} restore=${ku.userId}`);
+          if ($q && typeof $q.notify === 'function') {
+            $q.notify({
+              type: 'warning',
+              message: `This folder belongs to ${folderIdentity.displayName || folderIdentity.userId}, not ${ku.userId}. Cannot restore from a mismatched folder.`,
+              timeout: 7000
+            });
+          }
+          localState = null;
+        }
+      } catch { /* identity file unreadable — proceed with caution */ }
+    }
+
     if (!localState) {
       const snapshot = await getUserSnapshot(ku.userId);
       if (snapshot) {
@@ -1063,8 +1137,34 @@ const handleUserCardRestore = async (ku: KnownUser) => {
           savedChats: snapshot.savedChats || undefined,
           currentChat: snapshot.currentChat || undefined
         };
+      } else {
       }
     }
+
+    // Bail out early if there's nothing to restore
+    if (!localState) {
+      console.warn(`[RESTORE] No local state found — cannot proceed with restore`);
+      if ($q && typeof $q.notify === 'function') {
+        $q.notify({ type: 'warning', message: 'No local backup found. Please use GET STARTED to set up your account.', timeout: 5000 });
+      }
+      tempStartLoading.value = false;
+      return;
+    }
+
+    // Step 2: Recreate the user doc (now we know we have local state to restore)
+    const recreateResp = await fetch('/api/account/recreate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ userId: ku.userId, displayName: ku.displayName })
+    });
+    const recreateData = await recreateResp.json();
+    if (!recreateResp.ok || !recreateData.authenticated) {
+      throw new Error(recreateData.error || 'Failed to recreate account');
+    }
+    suppressWizard.value = true; // Prevent ChatInterface from polling agent-setup-status during restore
+    restoreWizardKbName.value = recreateData.kbName || null;
+    setAuthenticatedUser(recreateData.user, null);
 
     // Cloud health check
     try {
@@ -1082,15 +1182,9 @@ const handleUserCardRestore = async (ku: KnownUser) => {
       };
     }
 
-    // Launch RestoreWizard
-    if (localState) {
-      restoreWizardLocalState.value = localState;
-      showRestoreWizard.value = true;
-    } else {
-      if ($q && typeof $q.notify === 'function') {
-        $q.notify({ type: 'warning', message: 'No local backup found. Please use GET STARTED to set up your account.', timeout: 5000 });
-      }
-    }
+    // Launch RestoreWizard (localState is guaranteed non-null at this point)
+    restoreWizardLocalState.value = localState;
+    showRestoreWizard.value = true;
   } catch (error) {
     tempStartError.value = error instanceof Error ? error.message : 'Restore failed';
   } finally {
@@ -1176,7 +1270,6 @@ const loadWelcomeStatus = async () => {
   welcomeAgentLinkedToKb.value = null;
   welcomeWizardComplete.value = null;
   const localId = welcomeLocalUserId.value;
-  console.log(`[WELCOME] loadWelcomeStatus: localId=${localId || 'none'}`);
   if (localId) {
     try {
       const [snapshot, passkeyRes, agentRes] = await Promise.all([
@@ -1196,7 +1289,6 @@ const loadWelcomeStatus = async () => {
         welcomeKbExists.value = agentData?.kbExists ?? null;
         welcomeAgentLinkedToKb.value = agentData?.agentLinkedToKb ?? null;
         welcomeWizardComplete.value = agentData?.wizardComplete ?? null;
-        console.log(`[WELCOME] cloud status for ${localId}: agent=${agentData?.exists}, savedFiles=${agentData?.savedFileCount}, kb=${agentData?.kbExists}, linked=${agentData?.agentLinkedToKb}, wizardDone=${agentData?.wizardComplete}, stage=${agentData?.workflowStage}`);
       } else {
         console.warn(`[WELCOME] agent-exists call failed: ${agentRes.status}`);
         welcomeAgentExists.value = false;
@@ -1232,8 +1324,7 @@ const loadWelcomeStatus = async () => {
             localIndexedCount = Array.isArray(folderState.files) ? folderState.files.filter(f => f.cloudStatus === 'indexed').length : 0;
             localMedsVerified = !!(folderState.currentMedications != null && String(folderState.currentMedications).trim() !== '');
             localSummaryVerified = !!(folderState.patientSummary != null && String(folderState.patientSummary).trim() !== '');
-            localWizardComplete = !!folderState.wizardComplete;
-            console.log(`[WELCOME] local folder state for ${localId}: files=${localFileCount}, indexed=${localIndexedCount}, medsVerified=${localMedsVerified}, summaryVerified=${localSummaryVerified}, wizardComplete=${localWizardComplete}`);
+            localWizardComplete = localMedsVerified && localSummaryVerified;
           }
         } catch (e) {
           console.warn('[WELCOME] Failed to read local folder state:', e);
@@ -1248,7 +1339,16 @@ const loadWelcomeStatus = async () => {
         localMedsVerified = !!(snapshot.currentMedications != null && String(snapshot.currentMedications).trim() !== '');
         localSummaryVerified = !!(snapshot.patientSummary != null && String(snapshot.patientSummary).trim() !== '');
         foundLocalState = true;
-        console.log(`[WELCOME] IndexedDB snapshot for ${localId}: files=${localFileCount}, indexed=${localIndexedCount}, medsVerified=${localMedsVerified}, summaryVerified=${localSummaryVerified}`);
+      }
+      // If folder/IndexedDB reads failed, check if a stored folder handle exists
+      // (doesn't need permission) — the user can re-grant via RESTORE click
+      if (!foundLocalState && localId) {
+        try {
+          const { hasStoredHandle } = await import('./utils/localFolder');
+          if (await hasStoredHandle(localId)) {
+            foundLocalState = true;
+          }
+        } catch { /* ignore */ }
       }
       if (foundLocalState) {
         welcomeLocalSnapshot.value = {
@@ -1262,7 +1362,6 @@ const loadWelcomeStatus = async () => {
           welcomeWizardComplete.value = true;
         }
       } else {
-        console.log(`[WELCOME] no local snapshot for ${localId}`);
       }
     } catch (err) {
       console.warn('[WELCOME] loadWelcomeStatus error:', err);
@@ -1638,7 +1737,6 @@ const handleAuthenticated = async (userData: any) => {
             localFolderHandle.value = result.handle;
             localFolderName.value = known.folderName;
             passkeyWithoutFolder.value = false;
-            console.log(`[AUTH] Reconnected folder "${known.folderName}" for passkey user ${userData.userId}`);
           } else {
             // Handle exists in registry but can't reconnect — prompt user
             showConnectFolderDialog.value = true;
@@ -1693,12 +1791,13 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
   try {
     // Fetch all user data in parallel (v2: also fetch agent instructions)
     const uid = encodeURIComponent(user.value.userId);
-    const [filesResponse, chatsResponse, statusResponse, summaryResponse, instrResponse] = await Promise.all([
+    const [filesResponse, chatsResponse, statusResponse, summaryResponse, instrResponse, listsResponse] = await Promise.all([
       fetch(`/api/user-files?userId=${uid}`, { credentials: 'include' }),
       fetch(`/api/user-chats?userId=${uid}`, { credentials: 'include' }),
       fetch(`/api/user-status?userId=${uid}`, { credentials: 'include' }),
       fetch(`/api/patient-summary?userId=${uid}`, { credentials: 'include' }),
-      fetch(`/api/agent-instructions?userId=${uid}`, { credentials: 'include' }).catch(() => null)
+      fetch(`/api/agent-instructions?userId=${uid}`, { credentials: 'include' }).catch(() => null),
+      fetch('/api/files/lists/markdown', { credentials: 'include' }).catch(() => null)
     ]);
 
     const files = filesResponse.ok ? await filesResponse.json() : null;
@@ -1706,6 +1805,7 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
     const status = statusResponse.ok ? await statusResponse.json() : null;
     const summary = summaryResponse.ok ? await summaryResponse.json() : null;
     const instrData = instrResponse && instrResponse.ok ? await instrResponse.json() : null;
+    const listsData = listsResponse && listsResponse.ok ? await listsResponse.json() : null;
     const filesList = Array.isArray(files?.files) ? files.files : [];
     const indexedSet = new Set(Array.isArray(files?.indexedFiles) ? files.indexedFiles : []);
     const kbName = files?.kbName || null;
@@ -1745,9 +1845,6 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
     });
 
     // Also save to local folder if connected (v2 state file)
-    const clog = (msg: string) => { console.log(msg); fetch('/api/client-log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tag: 'SIGN-OUT', msg }) }).catch(() => {}); };
-    clog(`folderHandle=${!!localFolderHandle.value}, folderName=${localFolderName.value || 'none'}, userId=${user.value?.userId}`);
-    clog(`cloud summary="${(summary?.summary || '').substring(0, 100)}", summaryResponse.ok=${summaryResponse.ok}`);
     if (localFolderHandle.value && user.value?.userId) {
       try {
         const now = new Date().toISOString();
@@ -1758,7 +1855,6 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
           const { readStateFile } = await import('./utils/localFolder');
           existingState = await readStateFile(localFolderHandle.value);
         } catch { /* first time, no existing state */ }
-        clog(`existingState: summary="${(existingState?.patientSummary || '').substring(0, 100)}", files=${existingState?.files?.length || 0}, wizard=${existingState?.wizardComplete}`);
         const state: MaiaState = {
           version: 2,
           userId: user.value.userId,
@@ -1776,10 +1872,15 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
           savedChats: (savedChats?.chats?.length || savedChats?.length) ? savedChats : (existingState?.savedChats || undefined),
           currentChat: snapshot?.currentChat || existingState?.currentChat || undefined,
           agentInstructions: (instrData?.instructions && instrData.instructions.trim()) ? instrData.instructions : (existingState?.agentInstructions || null),
+          listsMarkdown: (listsData?.hasMarkdown && listsData?.markdown) ? listsData.markdown : (existingState?.listsMarkdown || null),
           kbStats: indexedCount > 0
             ? { fileCount: indexedCount, tokenCount: files?.tokenCount || 0 }
             : existingState?.kbStats || { fileCount: 0, tokenCount: 0 },
-          wizardComplete: status?.workflowStage === 'patient_summary' || existingState?.wizardComplete || false
+          // Derive wizard completion from data presence: has meds + summary + files = complete
+          wizardComplete: !!(
+            ((status?.currentMedications && status.currentMedications.trim()) || existingState?.currentMedications) &&
+            ((summary?.summary && summary.summary.trim()) || existingState?.patientSummary)
+          )
         };
         await writeStateFile(localFolderHandle.value, state);
 
@@ -1804,18 +1905,14 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
         } catch { /* extraction not critical */ }
 
         // Always update webloc shortcut at sign-out
-        clog(`stateFile written OK. Now writing webloc. userId=${user.value?.userId}`);
         if (user.value?.userId) {
           try {
             const folderUtils = await import('./utils/localFolder');
-            clog(`webloc: patientName=${extractedPatientName || 'none'}, calling writeWeblocFile`);
             await folderUtils.writeWeblocFile(localFolderHandle.value, window.location.origin, {
               patientName: extractedPatientName || undefined,
               userId: user.value.userId
             });
-            clog(`webloc: WRITTEN SUCCESSFULLY`);
           } catch (e: any) {
-            clog(`webloc: WRITE FAILED: ${e?.message || e}`);
           }
         }
 
@@ -1828,10 +1925,8 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
           lastActive: new Date().toISOString()
         });
       } catch (e: any) {
-        clog(`OUTER CATCH: folder save failed: ${e?.message || e}`);
       }
     } else {
-      clog(`SKIPPED folder save: folderHandle=${!!localFolderHandle.value}, userId=${user.value?.userId}`);
     }
 
     // Update known-user registry (fallback when no folder handle)
@@ -1864,8 +1959,23 @@ const handleConnectFolderFromDialog = async () => {
       if (user.value?.userId) {
         await storeDirectoryHandle(user.value.userId, handle);
       }
-      // Read/create identity file
+      // Read/create identity file — reject if folder belongs to a different known user
       const existing = await readIdentityFile(handle);
+      if (existing && existing.userId && user.value?.userId && existing.userId !== user.value.userId) {
+        const otherKnown = getKnownUsers().find(u => u.userId === existing.userId);
+        if (otherKnown) {
+          if ($q && typeof $q.notify === 'function') {
+            $q.notify({
+              type: 'warning',
+              message: `This folder belongs to ${existing.displayName || existing.userId}. Please choose a different folder.`,
+              timeout: 7000
+            });
+          }
+          localFolderHandle.value = null;
+          localFolderName.value = '';
+          return;
+        }
+      }
       if (!existing && user.value?.userId) {
         await writeIdentityFile(handle, {
           userId: user.value.userId,
@@ -1874,7 +1984,6 @@ const handleConnectFolderFromDialog = async () => {
           lastSync: new Date().toISOString()
         });
       }
-      console.log(`[AUTH] Folder "${folderName}" connected after passkey sign-in`);
     } catch (e: any) {
       if (e?.name !== 'AbortError') {
         console.warn('[AUTH] Folder picker failed:', e);
@@ -1892,11 +2001,22 @@ const handleLocalFolderConnected = async (payload: { handle: FileSystemDirectory
   try {
     const existing = await readIdentityFile(payload.handle);
     if (existing) {
-      // Folder already belongs to a user
-      if (user.value?.userId && existing.userId !== user.value.userId) {
-        // Identity mismatch — this folder belongs to a different user.
-        // For now, log a warning; Phase 3 will add a conflict dialog.
-        console.warn(`[IDENTITY] Folder "${payload.folderName}" belongs to ${existing.userId}, but current user is ${user.value.userId}`);
+      // Folder already belongs to a user — reject if it's a different known user
+      if (user.value?.userId && existing.userId && existing.userId !== user.value.userId) {
+        const otherKnown = getKnownUsers().find(u => u.userId === existing.userId);
+        if (otherKnown) {
+          console.warn(`[IDENTITY] Folder "${payload.folderName}" belongs to ${existing.userId}, rejecting for ${user.value.userId}`);
+          if ($q && typeof $q.notify === 'function') {
+            $q.notify({
+              type: 'warning',
+              message: `This folder belongs to ${existing.displayName || existing.userId}. Please choose a different folder.`,
+              timeout: 7000
+            });
+          }
+          localFolderHandle.value = null;
+          localFolderName.value = '';
+          return;
+        }
       }
     } else if (user.value?.userId) {
       // New folder — stamp it with the current user's identity
@@ -1927,10 +2047,8 @@ const handleLocalFolderConnected = async (payload: { handle: FileSystemDirectory
 
 /** [WIZARD] Save state to local folder when wizard completes (so maia-state.json is current). */
 const handleWizardComplete = async () => {
-  console.log('[WIZARD-COMPLETE] Wizard finished, saving local state snapshot...');
   try {
     await saveLocalSnapshot(null);
-    console.log('[WIZARD-COMPLETE] Local state saved successfully');
     // Also update the webloc NOW (don't wait for sign-out) since the patient summary is fresh
     if (localFolderHandle.value && user.value?.userId) {
       try {
@@ -1942,7 +2060,6 @@ const handleWizardComplete = async () => {
           patientName: patientName || undefined,
           userId: user.value.userId
         });
-        console.log(`[WIZARD-COMPLETE] Webloc written: patientName=${patientName || 'none'}, userId=${user.value.userId}`);
       } catch (e) {
         console.warn('[WIZARD-COMPLETE] Webloc update failed:', e);
       }
@@ -1998,15 +2115,18 @@ const handleSharedWarningOk = () => {
 };
 
 const handleGetStartedNoPassword = () => {
-  if (typeof console !== 'undefined' && console.log) {
-    console.log('[AUTH] Get Started (No Password): newClient=', isNewClient.value, 'deviceResolved=', deviceChoiceResolved.value, 'userType=', welcomeUserType.value);
-  }
   // Cloud user (has passkey) → challenge passkey directly
   if (welcomeUserType.value === 'cloud') {
     const userId = welcomeDisplayUserId.value;
     passkeyPrefillUserId.value = userId || null;
     passkeyPrefillAction.value = 'signin';
     showAuth.value = true;
+    return;
+  }
+  // If there are known users needing restore, ask the user what they want to do
+  // instead of silently creating a new account
+  if (restorableUsers.value.length > 0) {
+    showGetStartedChoiceDialog.value = true;
     return;
   }
   if (isNewClient.value) {
@@ -2068,7 +2188,6 @@ const handleDormantSignOut = async () => {
       const result = await readStateFileByUserId(user.value.userId, { requestWrite: true });
       if (result) {
         localFolderHandle.value = result.handle;
-        console.log(`[SIGN-OUT] Reconnected folder handle for ${user.value.userId}`);
       }
     } catch { /* not available */ }
   }
@@ -2199,7 +2318,6 @@ const handleDeleteLocalUser = (userIdOrEvent?: string | Event) => {
 const confirmDeleteLocalUser = async () => {
   const localId = welcomeLocalUserId.value;
   if (!localId) return;
-  console.log(`[WELCOME] DELETE requested for ${localId}`);
   deleteLocalUserLoading.value = true;
   try {
     // Best-effort server-side delete (user may have no cloud account)
@@ -2221,6 +2339,25 @@ const confirmDeleteLocalUser = async () => {
     if (getActiveUserId() === localId) {
       setActiveUserId(null);
     }
+    // Clean up MAIA files from local folder before releasing handle
+    const handleToClean = localFolderHandle.value;
+    if (handleToClean) {
+      try {
+        // Remove maia-state.json so a new user won't inherit old data
+        await handleToClean.removeEntry('maia-state.json').catch(() => {});
+        await handleToClean.removeEntry('maia-identity.json').catch(() => {});
+        // Remove webloc files (maia.webloc, maia-for-*.webloc)
+        for await (const [name] of (handleToClean as any).entries()) {
+          if (name.endsWith('.webloc')) {
+            await handleToClean.removeEntry(name).catch(() => {});
+          }
+        }
+      } catch (cleanErr) {
+        console.warn(`[WELCOME] Could not clean local folder files (may need manual cleanup):`, cleanErr);
+      }
+      localFolderHandle.value = null;
+      localFolderName.value = '';
+    }
     try {
       await clearDirectoryHandle(localId);
     } catch { /* non-fatal */ }
@@ -2240,7 +2377,6 @@ const confirmDeleteLocalUser = async () => {
     welcomeSavedFileCount.value = null;
     welcomeStatus.value = {};
     showDeleteLocalUserDialog.value = false;
-    console.log(`[WELCOME] DELETE complete for ${localId}: knownUsers=${JSON.stringify(knownUsers.value.map(u => u.userId))}, activeUser=${getActiveUserId()}`);
     // Reload welcome status to reflect the deletion
     void loadWelcomeStatus();
     if ($q && typeof $q.notify === 'function') {
@@ -2371,11 +2507,35 @@ const handleRestoreWizardComplete = async () => {
         hasPasskey: !!user.value.hasPasskey,
         lastActive: new Date().toISOString()
       });
-      console.log(`[RESTORE] Re-stamped identity and handle for ${user.value.userId}`);
     } catch (e) {
       console.warn('[RESTORE] Failed to re-stamp identity:', e);
     }
+    // Write personalized webloc (same as handleWizardComplete)
+    try {
+      const { readStateFile, writeWeblocFile, extractPatientName } = await import('./utils/localFolder');
+      const currentState = await readStateFile(localFolderHandle.value);
+      const patientName = extractPatientName(currentState?.patientSummary);
+      await writeWeblocFile(localFolderHandle.value, window.location.origin, {
+        patientName: patientName || undefined,
+        userId: user.value.userId
+      });
+    } catch (e) {
+      console.warn('[RESTORE] Webloc update failed:', e);
+    }
+    // Save local state snapshot so maia-state.json reflects restored data
+    try {
+      await saveLocalSnapshot(null);
+    } catch (e) {
+      console.warn('[RESTORE] Local state snapshot failed:', e);
+    }
   }
+  // Re-sync agent status so the app recognizes the deployed agent
+  if (user.value?.userId) {
+    try {
+      await fetch('/api/agent-setup-status', { credentials: 'include' });
+    } catch { /* non-critical */ }
+  }
+  suppressWizard.value = false; // Allow normal ChatInterface operation now
   if ($q && typeof $q.notify === 'function') {
     $q.notify({ type: 'positive', message: 'Account restored successfully!', timeout: 3000 });
   }
@@ -2399,6 +2559,7 @@ const handleDestroyedRestore = async () => {
       throw new Error(recreateData.error || 'Failed to recreate account');
     }
     // Sign in with the recreated user
+    restoreWizardKbName.value = recreateData.kbName || null;
     setAuthenticatedUser(recreateData.user, null);
     showDestroyedRestoreDialog.value = false;
 
@@ -2516,6 +2677,12 @@ const restoreSavedChats = async (snapshot: any) => {
 };
 
 const createTemporarySession = async () => {
+  // Clear stale wizard flags from any previous session (e.g. destroyed user)
+  try {
+    sessionStorage.removeItem('autoProcessInitialFile');
+    sessionStorage.removeItem('wizardMyListsAuto');
+  } catch { /* ignore */ }
+
   const response = await fetch('/api/temporary/start', {
     method: 'POST',
     credentials: 'include'
@@ -2548,10 +2715,6 @@ const createTemporarySession = async () => {
 const handleRestoreSnapshot = async () => {
   if (!restoreSnapshot.value || !user.value?.userId) return;
   restoreLoading.value = true;
-  console.log('[SAVE-RESTORE] Starting restore snapshot', {
-    userId: user.value.userId,
-    snapshotUserId: restoreSnapshot.value?.user?.userId || null
-  });
   try {
     const snapshot = restoreSnapshot.value;
     const snapshotFiles = Array.isArray(snapshot?.files?.files) ? snapshot.files.files : [];
@@ -2580,10 +2743,6 @@ const handleRestoreSnapshot = async () => {
         kbName: snapshotKbName
       }));
     }
-    console.log('[SAVE-RESTORE] Rehydration files prepared', {
-      count: rehydrationFiles.value.length,
-      initialFile: initialFromSnapshot?.fileName || initialFromSnapshot?.bucketKey || null
-    });
     if (initialFromSnapshot && (initialFromSnapshot.bucketKey || initialFromSnapshot.fileName)) {
       const existing = rehydrationFiles.value.find(item =>
         (initialFromSnapshot.bucketKey && item.bucketKey === initialFromSnapshot.bucketKey) ||
@@ -2607,10 +2766,6 @@ const handleRestoreSnapshot = async () => {
     }
     rehydrationActive.value = rehydrationFiles.value.length > 0;
     suppressWizard.value = false;
-    console.log('[SAVE-RESTORE] Rehydration state set', {
-      active: rehydrationActive.value,
-      count: rehydrationFiles.value.length
-    });
     if (rehydrationActive.value) {
       if ($q && typeof $q.notify === 'function') {
         $q.notify({
@@ -2622,9 +2777,6 @@ const handleRestoreSnapshot = async () => {
     }
     restoredChatState.value = restoreSnapshot.value.currentChat || null;
     await restoreSavedChats(restoreSnapshot.value);
-    console.log('[SAVE-RESTORE] Saved chats restored', {
-      userId: user.value.userId
-    });
     if (restoreSnapshot.value.currentMedications) {
       try {
         await fetch('/api/user-current-medications', {
@@ -2637,9 +2789,6 @@ const handleRestoreSnapshot = async () => {
             userId: user.value.userId,
             currentMedications: restoreSnapshot.value.currentMedications
           })
-        });
-        console.log('[SAVE-RESTORE] Current medications restored', {
-          userId: user.value.userId
         });
       } catch (medsError) {
         console.warn('Failed to restore current medications:', medsError);
@@ -2657,9 +2806,6 @@ const handleRestoreSnapshot = async () => {
             userId: user.value.userId,
             summary: restoreSnapshot.value.patientSummary
           })
-        });
-        console.log('[SAVE-RESTORE] Patient summary restored', {
-          userId: user.value.userId
         });
       } catch (summaryError) {
         console.warn('Failed to restore patient summary:', summaryError);
@@ -2684,11 +2830,6 @@ const handleRestoreSnapshot = async () => {
   } finally {
     restoreLoading.value = false;
     showRestoreDialog.value = false;
-    console.log('[SAVE-RESTORE] Restore flow finished', {
-      userId: user.value?.userId || null,
-      rehydrationActive: rehydrationActive.value,
-      rehydrationCount: rehydrationFiles.value.length
-    });
   }
 };
 
@@ -2701,9 +2842,6 @@ const handleSkipRestore = () => {
 const handleRehydrationComplete = (_payload: { hasInitialFile: boolean }) => {
   rehydrationActive.value = false;
   suppressWizard.value = false;
-  console.log('[SAVE-RESTORE] Rehydration complete', {
-    userId: user.value?.userId || null
-  });
 };
 
 const handleRehydrationFileRemoved = (payload: { bucketKey?: string; fileName?: string }) => {
@@ -2718,12 +2856,6 @@ const handleRehydrationFileRemoved = (payload: { bucketKey?: string; fileName?: 
     entry.restored = true;
     rehydrationFiles.value = [...rehydrationFiles.value];
   }
-  console.log('[SAVE-RESTORE] Rehydration file marked restored', {
-    userId: user.value?.userId || null,
-    fileName: name,
-    restoredCount: rehydrationFiles.value.filter(e => e.restored).length,
-    total: rehydrationFiles.value.length
-  });
 };
 
 const checkDeepLinkSession = async (shareId: string) => {
@@ -2813,30 +2945,35 @@ const startTemporarySession = async () => {
         // If check fails, continue with restore flow
       }
 
-      const agentResponse = await fetch(`/api/agent-exists?userId=${encodeURIComponent(activeUserId)}`);
-      const agentData = agentResponse.ok ? await agentResponse.json() : null;
-      if (agentData && agentData.exists) {
-        const restoreResponse = await fetch('/api/temporary/restore', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          credentials: 'include',
-          body: JSON.stringify({ userId: activeUserId })
-        });
+      // Try to restore temporary session for the known userId.
+      // If restore fails (404 = user destroyed), fall through to create a new account.
+      const restoreResponse = await fetch('/api/temporary/restore', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        credentials: 'include',
+        body: JSON.stringify({ userId: activeUserId })
+      });
+      if (restoreResponse.ok) {
         const restoreData = await restoreResponse.json();
-        if (restoreResponse.ok && restoreData.authenticated && restoreData.user) {
+        if (restoreData.authenticated && restoreData.user) {
           setAuthenticatedUser(restoreData.user, null);
         } else {
           throw new Error(restoreData.error || 'Unable to restore temporary account');
         }
-      } else if (agentResponse.ok) {
-        // Agent missing — update cloud status to show RESTORE card on Welcome page
-        const statusMap = { ...welcomeUserCloudStatus.value };
-        statusMap[activeUserId] = 'restore';
-        welcomeUserCloudStatus.value = statusMap;
-        tempStartLoading.value = false;
-        return;
+      } else {
+        // User was destroyed or doesn't exist in cloud — delegate to restore wizard
+        // which can re-request folder permission (user gesture) and recover local data
+        const ku = knownUsers.value.find(u => u.userId === activeUserId);
+        if (ku) {
+          tempStartLoading.value = false;
+          await handleUserCardRestore(ku);
+          return;
+        }
+        // No known user entry — fall through to create new account
+        const newUser = await createTemporarySession();
+        if (!newUser) return;
       }
     } else {
       // Phase 4: If known users exist, confirm before creating a new account
@@ -2873,7 +3010,6 @@ const startTemporarySession = async () => {
           console.warn('Unable to read local backup:', restoreError);
         }
       } else {
-        console.log('[AUTH] Cloud valid – skipping restore dialog for', effectiveUserId);
       }
     }
 
@@ -2889,7 +3025,6 @@ const startTemporarySession = async () => {
 
 const openDestroyDialog = () => {
   showTempSignOutDialog.value = false;
-  destroyConfirm.value = '';
   showDestroyDialog.value = true;
 };
 
@@ -2915,12 +3050,18 @@ const startPasskeyRegistration = async () => {
 };
 
 const destroyTemporaryAccount = async () => {
-  if (!user.value?.userId || destroyConfirm.value !== user.value.userId) {
+  if (!user.value?.userId) {
     return;
   }
   destroyLoading.value = true;
   const userIdToDelete = user.value.userId;
   try {
+    // Save local state snapshot BEFORE deleting cloud data (preserves chats, meds, summary)
+    try {
+      await saveLocalSnapshot(null);
+    } catch (snapErr) {
+      console.warn(`[DESTROY] Local state save failed (non-fatal):`, snapErr);
+    }
     const response = await fetch('/api/self/delete', {
       method: 'POST',
       headers: {
@@ -2929,17 +3070,20 @@ const destroyTemporaryAccount = async () => {
       credentials: 'include',
       body: JSON.stringify({ userId: userIdToDelete })
     });
+    const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      const data = await response.json().catch(() => ({}));
+      console.error(`[DESTROY] Server returned ${response.status}:`, data);
       throw new Error(data.error || 'Failed to delete temporary account');
     }
+    // Keep the user in knownUsers and keep the local folder handle so the
+    // Welcome page can offer RESTORE from local data.  Only clear the IndexedDB
+    // snapshot (cloud state is gone, but folder-based state remains).
     await clearUserSnapshot(userIdToDelete);
-    removeKnownUser(userIdToDelete);
-    knownUsers.value = knownUsers.value.filter(u => u.userId !== userIdToDelete);
+    refreshKnownUsers();
     resetAuthState();
     showDestroyDialog.value = false;
   } catch (error) {
-    console.error('Temporary account deletion error:', error);
+    console.error('[DESTROY] Temporary account deletion error:', error);
   } finally {
     destroyLoading.value = false;
   }

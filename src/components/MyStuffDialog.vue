@@ -1221,15 +1221,15 @@ interface Props {
   rehydrationFiles?: Array<{ fileName?: string; bucketKey?: string; fileSize?: number; uploadedAt?: string }>;
   rehydrationActive?: boolean;
   wizardActive?: boolean;
-  /** When true and dialog opens on summary tab, trigger one requestNewSummary() then clear (avoids duplicate with wizard). */
-  requestSummaryOnOpen?: boolean;
+  /** Action for the wizard controller to request. MyStuffDialog executes and emits 'request-action-done'. */
+  requestAction?: 'generate-summary' | null;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   initialTab: 'files',
   messages: () => [],
   originalMessages: () => [],
-  requestSummaryOnOpen: false
+  requestAction: null
 });
 
 const emit = defineEmits<{
@@ -1248,20 +1248,18 @@ const emit = defineEmits<{
   'patient-summary-verified': [data: { userId: string }];
   'rehydration-complete': [payload: { hasInitialFile: boolean }];
   'rehydration-file-removed': [payload: { bucketKey?: string; fileName?: string }];
-  'request-summary-done': [];
+  'request-action-done': [];
+  'show-patient-summary': [];
   'file-added-to-kb': [data: { fileName: string; bucketKey: string }];
 }>();
 
-// Handle show patient summary from Lists component
-const handleShowPatientSummary = async () => {
-  // Switch to Patient Summary tab
-  currentTab.value = 'summary';
-  
-  // Wait a bit for tab to switch, then trigger new summary generation
-  await nextTick();
-  setTimeout(() => {
-    requestNewSummary();
-  }, 300);
+// Handle show patient summary from Lists component — regenerate summary with updated medications
+const handleShowPatientSummary = () => {
+  loadingSummary.value = true;          // show spinner immediately
+  currentTab.value = 'summary';         // switch tab (watcher will call loadPatientSummary, but we override below)
+  pendingSummaryRegeneration.value = true; // flag so the tab watcher skips its loadPatientSummary
+  requestNewSummary();                  // regenerate with latest medications
+  emit('show-patient-summary');
 };
 
 const handleCurrentMedicationsSaved = (payload: { value: string; edited: boolean }) => {
@@ -1317,6 +1315,7 @@ const patientSummaries = ref<Array<{ text: string; createdAt: string; updatedAt:
 const verifiedCurrentMedications = ref<string | null>(null);
 const showMedsMismatchDialog = ref(false);
 const medsMismatchAcknowledged = ref(false);
+const pendingSummaryRegeneration = ref(false);
 
 // Local folder reminder after file deletion
 const showLocalFolderDeleteReminder = ref(false);
@@ -1394,10 +1393,6 @@ watch(
       rehydrationQueue.value = files;
       rehydrationCompleted.value = new Set();
       rehydrationStep.value = 0;
-      console.log('[SAVE-RESTORE] Rehydration queue set', {
-        userId: props.userId,
-        count: files.length
-      });
     } else {
       rehydrationQueue.value = [];
       rehydrationCompleted.value = new Set();
@@ -1420,12 +1415,6 @@ const handleRehydrationFileSelected = async (event: Event) => {
   const currentEntry = rehydrationCurrent.value || null;
   const expected = currentEntry ? normalizeRehydrationName(currentEntry) : null;
   if (!expected) return;
-
-  console.log('[SAVE-RESTORE] Rehydration file selected', {
-    userId: props.userId,
-    expected,
-    selected: file.name
-  });
 
   if (file.name !== expected) {
     if ($q && typeof $q.notify === 'function') {
@@ -1477,12 +1466,6 @@ const handleRehydrationFileSelected = async (event: Event) => {
             updateInitialFile: !!currentEntry?.isInitial
           })
         });
-        console.log('[SAVE-RESTORE] Rehydration metadata saved', {
-          userId: props.userId,
-          fileName: uploadResult.fileInfo.fileName,
-          chipStatus: currentEntry?.chipStatus || 'not_in_kb',
-          kbName: currentEntry?.kbName || null
-        });
       } catch (metadataError) {
         console.warn('Rehydration metadata update failed:', metadataError);
       }
@@ -1490,11 +1473,6 @@ const handleRehydrationFileSelected = async (event: Event) => {
     rehydrationCompleted.value.add(expected);
     rehydrationStep.value += 1;
     await loadFiles();
-    console.log('[SAVE-RESTORE] Rehydration file restored', {
-      userId: props.userId,
-      fileName: expected,
-      remaining: rehydrationRemaining.value.length
-    });
     emit('rehydration-file-removed', {
       fileName: expected,
       bucketKey: currentEntry?.bucketKey
@@ -1514,10 +1492,6 @@ const handleRehydrationFileSelected = async (event: Event) => {
 
   if (rehydrationRemaining.value.length === 0) {
     const hasInitialFile = rehydrationQueue.value.some(entry => !!entry.isInitial);
-    console.log('[SAVE-RESTORE] Rehydration complete', {
-      userId: props.userId,
-      hasInitialFile
-    });
     emit('rehydration-complete', { hasInitialFile });
   }
 };
@@ -2283,11 +2257,6 @@ const deleteFile = async (file: UserFile) => {
       const removedName = normalizeRehydrationName(file);
       rehydrationQueue.value = rehydrationQueue.value.filter(entry => normalizeRehydrationName(entry) !== removedName);
       rehydrationCompleted.value.delete(removedName);
-      console.log('[SAVE-RESTORE] Rehydration file deleted in Saved Files', {
-        userId: props.userId,
-        fileName: removedName,
-        remaining: rehydrationQueue.value.length
-      });
       emit('rehydration-file-removed', { bucketKey: file.bucketKey, fileName: file.fileName });
       if (rehydrationQueue.value.length === 0) {
         emit('rehydration-complete', { hasInitialFile: false });
@@ -5012,8 +4981,24 @@ const loadPatientSummary = async () => {
 };
 
 const requestNewSummary = async () => {
-  // Always proceed directly - no pre-generation confirmation
-  // If slots are full, the replace dialog will show after generation
+  // Guard: verify session is ready before calling agent endpoint
+  if (!props.userId) {
+    console.warn('[MyStuff] requestNewSummary skipped — no userId');
+    return;
+  }
+  try {
+    const sessionCheck = await fetch(`/api/user-status?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
+    if (!sessionCheck.ok) {
+      console.warn(`[MyStuff] Session not ready (${sessionCheck.status}), falling back to loading existing summary`);
+      await loadPatientSummary();
+      return;
+    }
+  } catch {
+    console.warn('[MyStuff] Session check failed, falling back to loading existing summary');
+    await loadPatientSummary();
+    return;
+  }
+
   loadingSummary.value = true;
   summaryError.value = '';
 
@@ -5146,7 +5131,6 @@ const checkMedicationsConsistency = async () => {
     const normalizedSummary = normalizeMedsText(medsFromSummary);
 
     if (normalizedList !== normalizedSummary) {
-      console.log('[MyStuff] Current Medications mismatch detected between list and Patient Summary');
       showMedsMismatchDialog.value = true;
     }
   } catch (err) {
@@ -5519,22 +5503,6 @@ watch(() => props.modelValue, async (newValue) => {
           listsComponentRef.value.attemptAutoProcessInitialFile();
         }
       });
-    } else if (currentTab.value === 'summary' && props.requestSummaryOnOpen) {
-      // Wizard asked for one summary generation on open (avoids duplicate API call)
-      if (summaryDismissedThisSession.value && !props.wizardActive) {
-        // User already dismissed summary this session — skip auto-generation (not during wizard)
-        emit('request-summary-done');
-        loadPatientSummary();
-      } else {
-        // Set loadingSummary immediately to prevent flash of empty state
-        loadingSummary.value = true;
-        nextTick(() => {
-          setTimeout(() => {
-            requestNewSummary();
-            emit('request-summary-done');
-          }, 300);
-        });
-      }
     }
 
   }
@@ -5542,8 +5510,24 @@ watch(() => props.modelValue, async (newValue) => {
 
 watch(() => props.initialTab, (newTab) => {
   if (newTab && isOpen.value) {
+    // If switching to summary with a pending requestAction, set loading immediately to prevent flash
+    if (newTab === 'summary' && props.requestAction === 'generate-summary') {
+      loadingSummary.value = true;
+    }
     currentTab.value = newTab;
   }
+});
+
+// Wizard action controller: parent sets requestAction prop, we execute and acknowledge.
+// Default flush so loadingSummary is set BEFORE the tab renders (avoids flash of empty state).
+watch(() => props.requestAction, (action) => {
+  if (!action || !isOpen.value) return;
+  if (action === 'generate-summary') {
+    loadingSummary.value = true;
+    currentTab.value = 'summary';
+    requestNewSummary();
+  }
+  emit('request-action-done');
 });
 
 watch(isOpen, (newValue) => {
@@ -5594,7 +5578,12 @@ watch(currentTab, async (newTab) => {
     } else if (newTab === 'chats') {
       loadSharedChats();
     } else if (newTab === 'summary') {
-      loadPatientSummary();
+      // Skip load if regeneration is already in progress (e.g. after meds edit)
+      if (pendingSummaryRegeneration.value) {
+        pendingSummaryRegeneration.value = false;
+      } else {
+        loadPatientSummary();
+      }
     } else if (newTab === 'lists') {
       if (listsComponentRef.value) {
         listsComponentRef.value.reloadCategories();

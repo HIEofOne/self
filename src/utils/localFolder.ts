@@ -76,6 +76,7 @@ export interface MaiaState {
   savedChats?: any;
   currentChat?: any;
   agentInstructions?: string | null;
+  listsMarkdown?: string | null;
   kbStats?: { fileCount: number; tokenCount: number } | null;
   wizardComplete?: boolean;
   settings?: Record<string, any>;
@@ -117,6 +118,19 @@ export async function storeDirectoryHandle(
     tx.oncomplete = () => { db.close(); resolve(); };
     tx.onerror = () => { db.close(); reject(tx.error); };
   });
+}
+
+/**
+ * Check if a stored folder handle exists for this userId (no permission needed).
+ */
+export async function hasStoredHandle(userId: string): Promise<boolean> {
+  if (!isFileSystemAccessSupported()) return false;
+  try {
+    const handle = await getStoredHandle(userId);
+    return handle != null;
+  } catch {
+    return false;
+  }
 }
 
 async function getStoredHandle(
@@ -442,10 +456,8 @@ export async function writeWeblocFile(
       filename = `maia-for-${opts.userId}.webloc`;
     }
   }
-  console.log(`[writeWeblocFile] Writing ${filename}`);
   // Write the new file FIRST (most important step)
   await writeFileToFolder(handle, filename, plist);
-  console.log(`[writeWeblocFile] Written successfully: ${filename}`);
   // Then clean up old webloc files
   if (filename !== 'maia.webloc') {
     try { await handle.removeEntry('maia.webloc'); } catch { /* doesn't exist */ }
@@ -633,7 +645,6 @@ export async function reconcileKnownUsers(): Promise<void> {
         lastActive: new Date().toISOString()
       });
       existingIds.add(fu.userId);
-      console.log(`[reconcile] Recovered user "${fu.userId}" from local folder handle`);
     } else {
       // Update folderName if we didn't have it
       const ku = existing.find(u => u.userId === fu.userId);

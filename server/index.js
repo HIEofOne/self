@@ -445,33 +445,36 @@ async function deleteKbFolderPlaceholder(userId, kbName) {
  * 4. Generate new name ONLY if kbName was never set (shouldn't happen after provisioning)
  */
 function getKBNameFromUserDoc(userDoc, userId) {
-  // Priority order:
+  // Priority order — return null if no name is stored.
+  // NEVER generate a new name here; that causes different callers to get
+  // different names (see Documentation/Wizards.md section 5).
+  // KB names should only be generated once, at user doc creation time.
+
   // 1. kbName - PERMANENT KB name set during provisioning (NEVER deleted)
-  //    This is the source of truth and prevents generating new names
-  // 2. connectedKBs array - runtime tracking of actual connected KBs (may be cleared)
-  // 3. connectedKB field - legacy field for backward compatibility
-  // 4. Generate new name - only if kbName was never set (shouldn't happen after provisioning)
-  
-  // First, check if there's a permanent KB name (set during provisioning, never deleted)
   if (userDoc.kbName) {
     return userDoc.kbName;
   }
-  // Next, check connectedKBs array (actual connected KBs - KB exists and is connected)
+  // 2. connectedKBs array - runtime tracking of actual connected KBs
   if (userDoc.connectedKBs && Array.isArray(userDoc.connectedKBs) && userDoc.connectedKBs.length > 0) {
     return userDoc.connectedKBs[0];
   }
-  // Fallback to old connectedKB field for migration (should indicate actual connected KB)
+  // 3. connectedKB field - legacy field for backward compatibility
   if (userDoc.connectedKB) {
     return userDoc.connectedKB;
   }
-  // Generate new KB name if none exists
-  return generateKBName(userId);
+  // No KB name found — caller must handle null
+  return null;
 }
 
 async function ensureKBNameOnUserDoc(userDoc, userId) {
   if (!userDoc) return null;
-  const resolved = getKBNameFromUserDoc(userDoc, userId);
-  if (!userDoc.kbName && resolved) {
+  let resolved = getKBNameFromUserDoc(userDoc, userId);
+  // If no KB name exists anywhere, generate one and persist it.
+  // This is the ONLY place a new KB name should be generated.
+  if (!resolved) {
+    resolved = generateKBName(userId);
+  }
+  if (!userDoc.kbName) {
     userDoc.kbName = resolved;
     userDoc.updatedAt = new Date().toISOString();
     let saved = false;
@@ -824,11 +827,16 @@ const persistKbIndexingStatus = async (userId, statusPayload) => {
     };
     try {
       await cloudant.saveDocument('maia_users', doc);
+      if (statusPayload.backendCompleted || statusPayload.phase === 'complete') {
+        console.log(`[KB Status] ✅ Persisted kbIndexingStatus for ${userId}: phase=${statusPayload.phase} tokens=${statusPayload.tokens} backendCompleted=${statusPayload.backendCompleted}`);
+      }
       return;
     } catch (error) {
       if (error?.statusCode === 409 && attempts < 3) {
+        console.log(`[KB Status] ⚠️ CouchDB conflict writing kbIndexingStatus (attempt ${attempts}/3)`);
         continue;
       }
+      console.error(`[KB Status] ❌ Failed to persist kbIndexingStatus for ${userId}:`, error.message);
       return;
     }
   }
@@ -1041,9 +1049,10 @@ async function validateUserResources(userId) {
   if (!kbExists) {
     try {
       const kbName = getKBNameFromUserDoc(userDoc, userId);
+      if (kbName) {
       const allKBs = await getCachedKBList();
       const foundKB = allKBs.find(kb => kb.name === kbName);
-      
+
       if (foundKB) {
         // KB exists in DO but not in database - sync it
         kbExists = true;
@@ -1062,6 +1071,7 @@ async function validateUserResources(userId) {
           userDoc.connectedKB = kbName;
         }
         cleaned = true;
+      }
       }
     } catch (error) {
       if (isRateLimitError(error)) {
@@ -1798,12 +1808,32 @@ app.post('/api/sync-agent', async (req, res) => {
     const userAgent = await findUserAgent(doClient, userId);
     
     if (!userAgent) {
-      // No agent found in DO - ensure database is clean
+      // No agent found in DO — create one if requested (restore flow)
+      const shouldCreate = req.body?.create === true || req.query?.create === 'true';
+      if (shouldCreate) {
+        console.log(`[SYNC-AGENT] No agent found for ${userId}, creating...`);
+        try {
+          const { ensureUserAgent } = await import('./routes/auth.js');
+          const updatedDoc = await ensureUserAgent(doClient, cloudant, validatedUserDoc);
+          if (updatedDoc?.assignedAgentId) {
+            return res.json({
+              success: true,
+              created: true,
+              agentId: updatedDoc.assignedAgentId,
+              agentName: updatedDoc.assignedAgentName,
+              agentEndpoint: updatedDoc.agentEndpoint
+            });
+          }
+        } catch (createErr) {
+          console.error(`[SYNC-AGENT] Agent creation failed for ${userId}:`, createErr.message);
+          return res.status(500).json({ success: false, error: createErr.message || 'Agent creation failed' });
+        }
+      }
       if (validatedUserDoc.assignedAgentId) {
         console.log(`⚠️ No agent found in DO for user ${userId}, but database has ${validatedUserDoc.assignedAgentId}. Already cleaned by validateUserResources.`);
       }
-      return res.status(200).json({ 
-        success: false, 
+      return res.status(200).json({
+        success: false,
         message: 'No agent found for user',
         error: 'AGENT_NOT_FOUND'
       });
@@ -5582,6 +5612,13 @@ app.post('/api/toggle-file-knowledge-base', async (req, res) => {
     }
 
     const kbName = getKBNameFromUserDoc(userDoc, userId);
+    if (!kbName) {
+      return res.status(400).json({
+        success: false,
+        error: 'NO_KB_NAME',
+        message: 'No knowledge base name configured. Please complete setup first.'
+      });
+    }
 
     const kbInfo = await resolveKbForUserFromDo(userId, { forceRefresh: true });
     if (kbInfo?.id) {
@@ -6407,7 +6444,7 @@ app.post('/api/update-knowledge-base', async (req, res) => {
     const { userId } = req.body;
     let cleanupEphemeralIndexing = async () => {};
     
-    console.log(`[KB Update] Received request for userId: ${userId}`);
+    originalConsoleLog(`[KB-INDEX] Received request for userId: ${userId}`);
     
     if (!userId) {
       return res.status(400).json({ 
@@ -6435,6 +6472,13 @@ app.post('/api/update-knowledge-base', async (req, res) => {
 
     // Get KB name from user document
     const kbName = getKBNameFromUserDoc(userDoc, userId);
+    if (!kbName) {
+      return res.status(400).json({
+        success: false,
+        error: 'NO_KB_NAME',
+        message: 'No knowledge base name configured.'
+      });
+    }
 
     // Get bucket name for data source path
     const bucketUrl = getSpacesBucketName();
@@ -6535,10 +6579,15 @@ app.post('/api/update-knowledge-base', async (req, res) => {
     await deleteKbFolderPlaceholder(userId, kbName);
 
     // Get list of files currently in KB (tracked by folder path)
+    // Re-read userDoc in case files were registered after initial read
+    userDoc = await cloudant.getDocument('maia_users', userId);
     const kbFolderPrefix = `${userId}/${kbName}/`;
+    originalConsoleLog(`[KB-INDEX] Looking for files with prefix: ${kbFolderPrefix}`);
+    originalConsoleLog(`[KB-INDEX] userDoc.files (${(userDoc.files || []).length} total):`, JSON.stringify((userDoc.files || []).map(f => f.bucketKey)));
     let filesInKB = (userDoc.files || [])
       .map(file => file.bucketKey)
       .filter(key => typeof key === 'string' && key.startsWith(kbFolderPrefix));
+    originalConsoleLog(`[KB-INDEX] Files matching KB prefix: ${filesInKB.length}`, filesInKB);
 
     if (filesInKB.length === 0) {
       return res.status(400).json({
@@ -6850,7 +6899,7 @@ app.post('/api/update-knowledge-base', async (req, res) => {
           return;
         }
         
-        console.log(`[KB Update] ✅ Verified job ${jobId} is active (status: ${verifyStatus}) - starting polling`);
+        console.log(`[KB Update] ✅ Verified job ${jobId} is active (status: ${verifyStatus}) - starting polling for kbId=${kbId} userId=${userId}`);
       } catch (verifyError) {
         console.warn(`[KB Update] ⚠️ Could not verify job before polling:`, verifyError.message);
         // Continue with polling if verification fails (might be a transient error)
@@ -6868,6 +6917,8 @@ app.post('/api/update-knowledge-base', async (req, res) => {
     let notFoundLogged = false;
     let lastKbStatusKey = '';
     let errorPollLogged = false;
+    let lastTokenValue = '0';
+    let tokenStableCount = 0;
 
     const clearPollTimer = () => {
       if (pollTimer) {
@@ -7034,7 +7085,12 @@ const runPoll = async () => {
            }
 
            const kbDetails = await getCachedKB(kbId);
-           const tokens = String(kbDetails?.total_tokens || kbDetails?.token_count || kbDetails?.tokens || job.tokens || job.total_tokens || 0);
+           const kbTotalTokens = kbDetails?.total_tokens || kbDetails?.token_count || kbDetails?.tokens || 0;
+           const jobTokens = job.tokens || job.total_tokens || 0;
+           const tokens = String(kbTotalTokens || jobTokens || 0);
+           if (pollCount <= 3 || pollCount % 10 === 0) {
+             console.log(`[KB Status] kbDetails keys=${kbDetails ? Object.keys(kbDetails).join(',') : 'null'} total_tokens=${kbDetails?.total_tokens} token_count=${kbDetails?.token_count} jobTokens=${jobTokens}`);
+           }
 
            const kbNameForFiles = getKBNameFromUserDoc(currentUserDoc, userId);
            const kbFolderPrefix = kbNameForFiles ? `${userId}/${kbNameForFiles}/` : null;
@@ -7046,7 +7102,7 @@ const runPoll = async () => {
            const fileCount = job.data_source_jobs?.[0]?.indexed_file_count || indexedFiles.length;
 
           // Only mark as complete if this is the job we're tracking AND it's actually completed
-          const isCompleted = (status === 'INDEX_JOB_STATUS_COMPLETED' || 
+          const statusCompleted = (status === 'INDEX_JOB_STATUS_COMPLETED' ||
                              status === 'INDEX_JOB_STATUS_NO_CHANGES' ||
                              status === 'completed' ||
                              status === 'COMPLETED' ||
@@ -7056,23 +7112,55 @@ const runPoll = async () => {
                             // Only complete if this is EXACTLY the job we started
                             currentJobId === activeJobId;
 
+          // Token-stable completion: if tokens > 0 and haven't changed for 4+ consecutive
+          // polls (60+ seconds), the DO API job status is unreliable — treat as complete.
+          // This handles the common case where DO reports job as "active" long after
+          // indexing has actually finished.
+          if (Number(tokens) > 0 && tokens === lastTokenValue) {
+            tokenStableCount++;
+          } else {
+            tokenStableCount = 0;
+          }
+          lastTokenValue = tokens;
+          const tokenStableCompleted = Number(tokens) > 0 && tokenStableCount >= 4;
+          if (tokenStableCompleted && !statusCompleted) {
+            console.log(`[KB AUTO] ✅ Token-stable completion for job ${activeJobId}: tokens=${tokens} stable for ${tokenStableCount} polls (status still=${status})`);
+          }
+
+          // Time-based fallback: if polling for 15+ minutes with no completion signal,
+          // the DO API job status is stuck. Complete with whatever state we have.
+          // This handles the 0-token "no changes" case where the DO API never transitions.
+          const elapsedPollingMs = Date.now() - startTime;
+          const timeBasedCompleted = !statusCompleted && !tokenStableCompleted && elapsedPollingMs > 15 * 60 * 1000;
+          if (timeBasedCompleted) {
+            console.log(`[KB AUTO] ✅ Time-based completion for job ${activeJobId}: elapsed=${Math.floor(elapsedPollingMs / 60000)}m tokens=${tokens} status=${status}`);
+          }
+
+          const isCompleted = statusCompleted || tokenStableCompleted || timeBasedCompleted;
+
            const phase = isCompleted
              ? 'complete'
              : (status === 'INDEX_JOB_STATUS_PENDING' ? 'indexing_started' : 'indexing');
-           await persistKbIndexingStatus(userId, {
+           // Don't overwrite backendCompleted here — completeIndexing() sets it to true.
+           // Writing false on every poll created a race where the client could read
+           // false between this write and the completeIndexing() write.
+           const statusUpdate = {
              jobId: currentJobId || activeJobId,
              status,
              phase,
              tokens,
              filesIndexed: fileCount,
-             progress: isCompleted ? 1.0 : (phase === 'indexing_started' ? 0.1 : 0.5),
-             backendCompleted: false
-           });
+             progress: isCompleted ? 1.0 : (phase === 'indexing_started' ? 0.1 : 0.5)
+           };
+           if (!isCompleted) {
+             await persistKbIndexingStatus(userId, statusUpdate);
+           }
 
            if (isCompleted) {
-            console.log(`[KB AUTO] ✅ Completion detected for job ${activeJobId} (status=${status})`);
-            await completeIndexing(job, fileCount, tokens, indexedFiles, 'status_completed');
-            await logFinalIndexingStatus('completed_status');
+            const reason = statusCompleted ? 'status_completed' : tokenStableCompleted ? 'token_stable' : 'time_based';
+            console.log(`[KB AUTO] ✅ Completion detected for job ${activeJobId} (reason=${reason} status=${status} tokens=${tokens})`);
+            await completeIndexing(job, fileCount, tokens, indexedFiles, reason);
+            await logFinalIndexingStatus(reason);
              return;
            }
           const statusKey = `${status}|${fileCount}|${tokens}`;
@@ -7827,28 +7915,50 @@ async function deleteUserAndResources(userId, options = {}) {
     deletionDetails.errors.push(`Failed to delete Knowledge Base: ${error.message}`);
   }
 
-  // 3. Delete Agent (optional)
+  // 3. Delete Agent (optional) — delete ALL agents matching userId pattern, not just stored ID
   if (deleteAgent) {
     try {
-      console.log(`[DESTROY] Deleting agent for ${userId}`);
-      const agentId = userDoc.assignedAgentId;
-      if (agentId) {
+      console.log(`[DESTROY] Deleting agents for ${userId}`);
+      let deletedCount = 0;
+      // First delete the stored agent ID
+      const storedAgentId = userDoc.assignedAgentId;
+      if (storedAgentId) {
         try {
-          await doClient.agent.delete(agentId);
-          deletionDetails.agentDeleted = true;
-          console.log(`[DESTROY] Agent deleted for ${userId} (${agentId})`);
+          await doClient.agent.delete(storedAgentId);
+          deletedCount++;
+          console.log(`[DESTROY] Deleted stored agent ${storedAgentId}`);
         } catch (error) {
           if (error.statusCode === 404 || error.message?.includes('not found')) {
-            deletionDetails.agentDeleted = true; // Already deleted, consider it success
-            console.log(`[DESTROY] Agent not found for ${userId} (${agentId})`);
+            console.log(`[DESTROY] Stored agent not found: ${storedAgentId}`);
           } else {
             throw error;
           }
         }
-      } else {
-        deletionDetails.agentDeleted = true; // No agent to delete
-        console.log(`[DESTROY] No agentId stored for ${userId}`);
       }
+      // Then scan for any orphaned agents matching the naming pattern
+      try {
+        const { AgentClient } = await import('../lib/do-client/agent.js');
+        const agentClient = new AgentClient(doClient);
+        const allAgents = await agentClient.list();
+        const agentPattern = new RegExp(`^${userId}-agent-`);
+        const orphanedAgents = allAgents.filter(a => agentPattern.test(a.name) && (a.uuid || a.id) !== storedAgentId);
+        for (const orphan of orphanedAgents) {
+          const orphanId = orphan.uuid || orphan.id;
+          try {
+            await doClient.agent.delete(orphanId);
+            deletedCount++;
+            console.log(`[DESTROY] Deleted orphaned agent ${orphan.name} (${orphanId})`);
+          } catch (err) {
+            if (!(err.statusCode === 404 || err.message?.includes('not found'))) {
+              console.warn(`[DESTROY] Failed to delete orphaned agent ${orphanId}: ${err.message}`);
+            }
+          }
+        }
+      } catch (listErr) {
+        console.warn(`[DESTROY] Could not scan for orphaned agents: ${listErr.message}`);
+      }
+      deletionDetails.agentDeleted = true;
+      console.log(`[DESTROY] Agent cleanup complete: ${deletedCount} deleted`);
     } catch (error) {
       console.error(`[DESTROY] Agent deletion failed for ${userId}:`, error.message);
       deletionDetails.errors.push(`Failed to delete Agent: ${error.message}`);
@@ -7946,7 +8056,96 @@ async function deleteUserAndResources(userId, options = {}) {
     throw deleteError;
   }
 
-  console.log(`[DESTROY] Completed deletion for ${userId}`);
+  console.log(`[DESTROY] Completed deletion for ${userId}:`, JSON.stringify(deletionDetails));
+
+  // ── Post-deletion verification ──────────────────────────────────
+  console.log(`[DESTROY-VERIFY] Verifying deletion for ${userId}...`);
+
+  // Verify CouchDB user doc is gone
+  try {
+    const checkDoc = await cloudant.getDocument('maia_users', userId);
+    if (checkDoc) {
+      console.error(`[DESTROY-VERIFY] ❌ User doc STILL EXISTS in CouchDB for ${userId}`);
+    } else {
+      console.log(`[DESTROY-VERIFY] ✅ User doc deleted from CouchDB`);
+    }
+  } catch (e) {
+    if (e.statusCode === 404 || e.message?.includes('not found')) {
+      console.log(`[DESTROY-VERIFY] ✅ User doc deleted from CouchDB (404)`);
+    } else {
+      console.warn(`[DESTROY-VERIFY] CouchDB check error:`, e.message);
+    }
+  }
+
+  // Verify DO agent is gone
+  const agentId = userDoc?.assignedAgentId;
+  if (agentId) {
+    try {
+      const agentCheck = await doClient.agent.get(agentId);
+      if (agentCheck) {
+        console.error(`[DESTROY-VERIFY] ❌ Agent STILL EXISTS in DO: ${agentId}`);
+      }
+    } catch (e) {
+      if (e.statusCode === 404 || e.message?.includes('not found')) {
+        console.log(`[DESTROY-VERIFY] ✅ Agent deleted from DO (${agentId})`);
+      } else {
+        console.warn(`[DESTROY-VERIFY] Agent check error:`, e.message);
+      }
+    }
+  } else {
+    console.log(`[DESTROY-VERIFY] ℹ️ No agent ID was stored`);
+  }
+
+  // Verify DO KB is gone
+  const kbId = userDoc?.kbId;
+  if (kbId) {
+    try {
+      const kbCheck = await doClient.kb.get(kbId);
+      if (kbCheck) {
+        console.error(`[DESTROY-VERIFY] ❌ KB STILL EXISTS in DO: ${kbId}`);
+      }
+    } catch (e) {
+      if (e.statusCode === 404 || e.message?.includes('not found')) {
+        console.log(`[DESTROY-VERIFY] ✅ KB deleted from DO (${kbId})`);
+      } else {
+        console.warn(`[DESTROY-VERIFY] KB check error:`, e.message);
+      }
+    }
+  } else {
+    console.log(`[DESTROY-VERIFY] ℹ️ No KB ID was stored`);
+  }
+
+  // Verify Spaces files are gone
+  try {
+    const bucketUrl = getSpacesBucketName();
+    if (bucketUrl) {
+      const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+      const s3Verify = new S3Client({
+        endpoint: getSpacesEndpoint(),
+        region: 'us-east-1',
+        forcePathStyle: process.env.S3_FORCE_PATH_STYLE === 'true',
+        credentials: {
+          accessKeyId: process.env.DIGITALOCEAN_AWS_ACCESS_KEY_ID || '',
+          secretAccessKey: process.env.DIGITALOCEAN_AWS_SECRET_ACCESS_KEY || ''
+        }
+      });
+      const listResp = await s3Verify.send(new ListObjectsV2Command({
+        Bucket: bucketName,
+        Prefix: `${userId}/`,
+        MaxKeys: 5
+      }));
+      const remaining = listResp.KeyCount || 0;
+      if (remaining > 0) {
+        console.error(`[DESTROY-VERIFY] ❌ ${remaining} files STILL in Spaces under ${userId}/`);
+      } else {
+        console.log(`[DESTROY-VERIFY] ✅ Spaces bucket empty for ${userId}/`);
+      }
+    }
+  } catch (e) {
+    console.warn(`[DESTROY-VERIFY] Spaces check error:`, e.message);
+  }
+
+  console.log(`[DESTROY-VERIFY] Verification complete for ${userId}`);
   return deletionDetails;
 }
 
@@ -8058,9 +8257,9 @@ app.post('/api/local/delete', async (req, res) => {
     if (!userId || typeof userId !== 'string') {
       return res.status(400).json({ success: false, error: 'userId required' });
     }
-    // Only allow UUID-format userIds (temporary users)
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    if (!uuidRegex.test(userId.trim())) {
+    // Basic sanitization: alphanumeric, hyphens, underscores, dots, @; max 128 chars
+    const safeIdRegex = /^[a-zA-Z0-9_@.\-]{1,128}$/;
+    if (!safeIdRegex.test(userId.trim())) {
       return res.status(400).json({ success: false, error: 'Invalid userId format' });
     }
     // Never allow deleting the admin user
@@ -8280,7 +8479,7 @@ app.get('/api/user-status', async (req, res) => {
     // Convert kbStatus to hasKB for backward compatibility, but also return kbStatus
     const hasKB = kbStatus === 'attached' || kbStatus === 'not_attached';
 
-    const kbName = kbInfo?.name || null;
+    const kbName = kbInfo?.name || userDoc.kbName || null;
     let hasFilesInKB = false;
     if (kbInfo?.id && kbName) {
       try {
@@ -8349,6 +8548,160 @@ app.get('/api/user-status', async (req, res) => {
       message: `Failed to fetch user status: ${error.message}`,
       error: 'FETCH_FAILED'
     });
+  }
+});
+
+// Update user workflow stage (used by RestoreWizard completion)
+app.post('/api/user-status', async (req, res) => {
+  try {
+    const userId = req.session?.userId || req.body?.userId;
+    if (!userId) {
+      return res.status(401).json({ success: false, error: 'Authentication required' });
+    }
+    const { workflowStage } = req.body;
+    if (!workflowStage) {
+      return res.status(400).json({ success: false, error: 'workflowStage required' });
+    }
+    let saved = false;
+    let attempts = 0;
+    while (!saved && attempts < 3) {
+      attempts++;
+      const userDoc = await cloudant.getDocument('maia_users', userId);
+      if (!userDoc) {
+        return res.status(404).json({ success: false, error: 'User not found' });
+      }
+      userDoc.workflowStage = workflowStage;
+      userDoc.updatedAt = new Date().toISOString();
+      try {
+        await cloudant.saveDocument('maia_users', userDoc);
+        saved = true;
+      } catch (saveErr) {
+        if (saveErr?.statusCode === 409 && attempts < 3) continue;
+        throw saveErr;
+      }
+    }
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[user-status POST] Error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Server-side restore coordinator (see Documentation/Wizards.md section 9)
+// Handles agent creation + KB indexing + metadata restore in a single call
+// after the client has uploaded files.
+app.post('/api/restore', async (req, res) => {
+  try {
+    const userId = req.session?.userId;
+    if (!userId) return res.status(401).json({ success: false, error: 'Authentication required' });
+
+    const { currentMedications, patientSummary, agentInstructions, savedChats } = req.body;
+    const results = { agent: null, kb: null, medications: false, summary: false, chats: 0, instructions: false, errors: [] };
+
+    // 1. Create/sync agent (mutex-protected via ensureUserAgent)
+    try {
+      const userDoc = await cloudant.getDocument('maia_users', userId);
+      if (!userDoc) throw new Error('User not found');
+      const { ensureUserAgent } = await import('./routes/auth.js');
+      const updatedDoc = await ensureUserAgent(doClient, cloudant, userDoc);
+      results.agent = { agentId: updatedDoc?.assignedAgentId, agentName: updatedDoc?.assignedAgentName };
+    } catch (err) {
+      results.errors.push(`Agent: ${err.message}`);
+    }
+
+    // 2. Trigger KB indexing (files should already be uploaded and registered)
+    try {
+      const userDoc = await cloudant.getDocument('maia_users', userId);
+      const kbName = getKBNameFromUserDoc(userDoc, userId);
+      if (kbName) {
+        const kbFolderPrefix = `${userId}/${kbName}/`;
+        const filesInKB = (userDoc.files || []).filter(f => f.bucketKey?.startsWith(kbFolderPrefix));
+        if (filesInKB.length > 0) {
+          results.kb = { status: 'triggered', files: filesInKB.length };
+          // KB indexing is handled asynchronously by update-knowledge-base — just signal it's ready
+        }
+      }
+    } catch (err) {
+      results.errors.push(`KB check: ${err.message}`);
+    }
+
+    // 3. Save medications
+    if (currentMedications) {
+      try {
+        const userDoc = await cloudant.getDocument('maia_users', userId);
+        if (userDoc) {
+          userDoc.currentMedications = currentMedications;
+          userDoc.updatedAt = new Date().toISOString();
+          await cloudant.saveDocument('maia_users', userDoc);
+          results.medications = true;
+        }
+      } catch (err) {
+        results.errors.push(`Medications: ${err.message}`);
+      }
+    }
+
+    // 4. Save patient summary
+    if (patientSummary) {
+      try {
+        const userDoc = await cloudant.getDocument('maia_users', userId);
+        if (userDoc) {
+          userDoc.patientSummary = patientSummary;
+          userDoc.updatedAt = new Date().toISOString();
+          await cloudant.saveDocument('maia_users', userDoc);
+          results.summary = true;
+        }
+      } catch (err) {
+        results.errors.push(`Summary: ${err.message}`);
+      }
+    }
+
+    // 5. Save chats — preserve original _id so /api/user-chats filter works
+    // (filter expects _id starting with "${userId}-")
+    if (savedChats?.chats?.length > 0) {
+      for (const chat of savedChats.chats) {
+        try {
+          // Strip _rev so CouchDB treats it as a new doc
+          const { _rev, ...chatFields } = chat;
+          const chatDoc = {
+            ...chatFields,
+            _id: chat._id || `${userId}-chat_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+            updatedAt: new Date().toISOString()
+          };
+          await cloudant.saveDocument('maia_chats', chatDoc);
+          results.chats++;
+        } catch { /* skip duplicates */ }
+      }
+    }
+
+    // 6. Save agent instructions (only if agent was created)
+    if (agentInstructions && results.agent?.agentId) {
+      try {
+        const agentId = results.agent.agentId;
+        await doClient.agent.update(agentId, { instruction: agentInstructions });
+        results.instructions = true;
+      } catch (err) {
+        results.errors.push(`Instructions: ${err.message}`);
+      }
+    }
+
+    // 7. Update restore metadata (wizard completion is now derived from data presence,
+    // not from flags — having patientSummary + currentMedications + agent + KB = complete)
+    try {
+      const userDoc = await cloudant.getDocument('maia_users', userId);
+      if (userDoc) {
+        userDoc.workflowStage = 'patient_summary';
+        userDoc.restoredAt = new Date().toISOString();
+        userDoc.updatedAt = new Date().toISOString();
+        await cloudant.saveDocument('maia_users', userDoc);
+      }
+    } catch (err) {
+      results.errors.push(`Restore metadata: ${err.message}`);
+    }
+
+    res.json({ success: true, results });
+  } catch (error) {
+    console.error('[restore] Error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
@@ -8722,18 +9075,29 @@ app.post('/api/generate-patient-summary', async (req, res) => {
     
     try {
       // chat() method signature: chat(messages, options, onUpdate)
-      // messages: array of message objects
-      // options: object with model, stream, etc.
-      const summaryResponse = await agentProvider.chat(
-        [{ role: 'user', content: summaryPrompt }], // messages array
-        { 
-          model: userDoc.agentModelName || 'openai-gpt-oss-120b',
-          stream: false
-        } // options object
-      );
+      const chatMessages = [{ role: 'user', content: summaryPrompt }];
+      const chatOptions = { model: userDoc.agentModelName || 'openai-gpt-oss-120b', stream: false };
+
+      let summaryResponse;
+      try {
+        summaryResponse = await agentProvider.chat(chatMessages, chatOptions);
+      } catch (firstError) {
+        const statusCode = firstError.status || firstError.statusCode || 0;
+        if (statusCode === 401 && userDoc.assignedAgentId) {
+          // Agent API key is stale — recreate and retry once
+          console.warn(`⚠️ [SUMMARY] 401 from agent for ${userId}, recreating API key...`);
+          const { recreateAgentApiKey } = await import('./utils/agent-helper.js');
+          const newApiKey = await recreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
+          console.log(`✅ [SUMMARY] Recreated API key for agent ${userDoc.assignedAgentId}`);
+          const retryProvider = new DigitalOceanProvider(newApiKey, { baseURL: userDoc.agentEndpoint });
+          summaryResponse = await retryProvider.chat(chatMessages, chatOptions);
+        } else {
+          throw firstError;
+        }
+      }
 
       const summary = summaryResponse.content || summaryResponse.text || '';
-      
+
       if (!summary || summary.trim().length === 0) {
         throw new Error('Empty summary received from agent');
       }

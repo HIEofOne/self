@@ -258,10 +258,27 @@ function formatTempUserId(name, suffix) {
   return `${base}${suffix}`;
 }
 
+// Per-user mutex to prevent concurrent agent creation (see Documentation/Wizards.md section 6)
+const agentCreationLocks = new Map();
+
 export async function ensureUserAgent(doClient, cloudant, userDoc) {
   if (!userDoc) return userDoc;
   const userId = userDoc.userId;
   if (!userId) return userDoc;
+
+  // Acquire per-user lock — if another call is already creating an agent,
+  // wait for it to finish then re-read the user doc to get the result.
+  if (agentCreationLocks.has(userId)) {
+    try {
+      await agentCreationLocks.get(userId);
+    } catch { /* ignore — we'll re-read below */ }
+    // Re-read user doc to pick up the agent created by the other call
+    const freshDoc = await cloudant.getDocument('maia_users', userId);
+    if (freshDoc?.assignedAgentId) {
+      Object.assign(userDoc, freshDoc);
+      return userDoc;
+    }
+  }
 
   let agent = null;
   if (userDoc.assignedAgentId) {
@@ -272,26 +289,39 @@ export async function ensureUserAgent(doClient, cloudant, userDoc) {
     }
   }
 
-  if (!agent) {
-    const { modelId, projectId } = await resolveModelAndProject(doClient);
-    if (!isValidUUID(modelId) || !isValidUUID(projectId)) {
-      throw new Error('Unable to resolve model or project ID for agent creation');
-    }
+  // If no agent exists, create one while holding a per-user lock
+  let needsCreation = !agent;
+  let lockResolve = null;
+  if (needsCreation) {
+    let lockReject;
+    const lockPromise = new Promise((resolve, reject) => { lockResolve = resolve; lockReject = reject; });
+    agentCreationLocks.set(userId, lockPromise);
 
-    const instruction = getMaiaInstructionText();
-    const agentName = buildAgentName(userId);
-    agent = await doClient.agent.create({
-      name: agentName,
-      instruction,
-      modelId: modelId.trim(),
-      projectId: projectId.trim(),
-      region: getDoRegion(),
-      maxTokens: 16384,
-      topP: 1,
-      temperature: 0.1,
-      k: 10,
-      retrievalMethod: 'RETRIEVAL_METHOD_NONE'
-    });
+    try {
+      const { modelId, projectId } = await resolveModelAndProject(doClient);
+      if (!isValidUUID(modelId) || !isValidUUID(projectId)) {
+        throw new Error('Unable to resolve model or project ID for agent creation');
+      }
+
+      const instruction = getMaiaInstructionText();
+      const agentName = buildAgentName(userId);
+      agent = await doClient.agent.create({
+        name: agentName,
+        instruction,
+        modelId: modelId.trim(),
+        projectId: projectId.trim(),
+        region: getDoRegion(),
+        maxTokens: 16384,
+        topP: 1,
+        temperature: 0.1,
+        k: 10,
+        retrievalMethod: 'RETRIEVAL_METHOD_NONE'
+      });
+    } catch (err) {
+      agentCreationLocks.delete(userId);
+      lockReject(err);
+      throw err;
+    }
   }
 
   const resolvedAgent = await doClient.agent.get(agent.uuid || agent.id);
@@ -326,6 +356,12 @@ export async function ensureUserAgent(doClient, cloudant, userDoc) {
         throw error;
       }
     }
+  }
+
+  // Release lock so waiting callers pick up the saved agent
+  if (needsCreation && lockResolve) {
+    agentCreationLocks.delete(userId);
+    lockResolve();
   }
   return userDoc;
 }
@@ -766,9 +802,12 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       // Agent linked to KB: agent exists AND kbId is set AND agent has an endpoint
       const agentLinkedToKb = agentExists && kbExists && !!userDoc?.agentEndpoint;
 
-      // Wizard complete: workflowStage reached patient_summary AND patientSummary text exists
-      const wizardComplete = userDoc?.workflowStage === 'patient_summary'
-        && !!(userDoc?.patientSummary && String(userDoc.patientSummary).trim());
+      // Wizard complete: derived from data presence — does the user have everything the wizard produces?
+      const wizardComplete = agentExists
+        && kbExists
+        && !!userDoc?.agentEndpoint
+        && !!(userDoc?.patientSummary && String(userDoc.patientSummary).trim())
+        && !!(userDoc?.currentMedications && String(userDoc.currentMedications).trim());
 
       console.log(`[WELCOME] agent-exists for ${userId}: agent=${agentExists}, savedFiles=${savedFileCount}/${allFiles.length}, kb=${kbExists}, linked=${agentLinkedToKb}, wizardDone=${wizardComplete}, stage=${userDoc?.workflowStage || 'none'}`);
 
@@ -876,6 +915,7 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
   app.post('/api/account/recreate', async (req, res) => {
     try {
       const { userId, displayName } = req.body || {};
+      console.log(`[RECREATE] /api/account/recreate called for userId=${userId}`);
       if (!userId || typeof userId !== 'string') {
         return res.status(400).json({ success: false, error: 'userId required' });
       }
@@ -911,6 +951,10 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       }
 
       // Recreate the user doc with the same userId
+      // Generate kbName up front so RestoreWizard and update-knowledge-base
+      // use the same name (see Documentation/Wizards.md section 5)
+      const dateStr = new Date().toISOString().replace(/[-:]/g, '').split('T')[0];
+      const kbName = `${userId}-kb-${dateStr}${Date.now().toString().slice(-6)}`;
       const userDoc = {
         _id: userId,
         userId,
@@ -920,12 +964,13 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
         type: 'user',
         workflowStage: 'active',
         temporaryAccount: true,
+        kbName,
         restoredAt: new Date().toISOString(),
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       };
       await cloudant.saveDocument('maia_users', userDoc);
-      console.log(`[RECREATE] User doc recreated for ${userId}`);
+      console.log(`[RECREATE] User doc recreated for ${userId} with kbName=${kbName}`);
 
       // Sign them in
       req.session.userId = userId;
@@ -944,6 +989,7 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
         success: true,
         authenticated: true,
         recreated: true,
+        kbName,
         user: {
           userId,
           displayName: userDoc.displayName,
@@ -1020,6 +1066,8 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
         const suffix = String(Math.floor(Math.random() * 100)).padStart(2, '0');
         const candidateId = formatTempUserId(name, suffix);
         const candidateDisplayName = `${name}${suffix}`;
+        const dateStr = new Date().toISOString().replace(/[-:]/g, '').split('T')[0];
+        const candidateKbName = `${candidateId}-kb-${dateStr}${Date.now().toString().slice(-6)}`;
         const candidateDoc = {
           _id: candidateId,
           userId: candidateId,
@@ -1029,6 +1077,7 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
           type: 'user',
           workflowStage: 'active',
           temporaryAccount: true,
+          kbName: candidateKbName,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString()
         };
@@ -1091,10 +1140,12 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       }
       console.log('[SAVE-RESTORE] Temporary restore requested', { userId: restoreUserId });
 
-      const agent = await findUserAgent(doClient, restoreUserId);
-      if (!agent) {
-        console.log('[SAVE-RESTORE] Temporary restore failed: agent not found', { userId: restoreUserId });
-        return res.status(404).json({ success: false, error: 'Agent not found' });
+      // Agent lookup is optional — user may not have a cloud agent yet (wizard will create one)
+      let agent = null;
+      try {
+        agent = await findUserAgent(doClient, restoreUserId);
+      } catch (agentErr) {
+        console.warn('[SAVE-RESTORE] Agent lookup failed (non-fatal):', agentErr.message);
       }
 
       let userDoc = null;
@@ -1105,21 +1156,11 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       }
 
       if (!userDoc) {
-        userDoc = {
-          _id: restoreUserId,
-          userId: restoreUserId,
-          displayName: restoreUserId,
-          email: null,
-          domain: passkeyService.rpID,
-          type: 'user',
-          workflowStage: 'active',
-          temporaryAccount: true,
-          assignedAgentId: agent.uuid || agent.id || null,
-          assignedAgentName: agent.name || null,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString()
-        };
-        await cloudant.saveDocument('maia_users', userDoc);
+        // User doc was destroyed — don't auto-create a bare doc here.
+        // Return 404 so the client triggers the full restore wizard which
+        // uses /api/account/recreate and restores local state (meds, summary, chats).
+        console.log('[SAVE-RESTORE] No user doc found (destroyed?) — returning 404 for restore wizard');
+        return res.status(404).json({ success: false, error: 'User not found — account may have been destroyed' });
       }
 
       req.session.userId = userDoc.userId;
