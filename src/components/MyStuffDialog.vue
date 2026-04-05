@@ -232,8 +232,9 @@
                         color="amber"
                         text-color="white"
                         size="sm"
-                        clickable
-                        @click="file.inKnowledgeBase = true; onCheckboxChange(file)"
+                        :clickable="!cancellingIndexing"
+                        :disable="cancellingIndexing"
+                        @click="!cancellingIndexing && (file.inKnowledgeBase = true, onCheckboxChange(file))"
                       >
                         Add to Knowledge Base
                       </q-chip>
@@ -253,8 +254,9 @@
                         color="orange"
                         text-color="white"
                         size="sm"
-                        clickable
-                        @click="file.inKnowledgeBase = false; onCheckboxChange(file)"
+                        :clickable="!cancellingIndexing"
+                        :disable="cancellingIndexing"
+                        @click="!cancellingIndexing && (file.inKnowledgeBase = false, onCheckboxChange(file))"
                       >
                         To be added and indexed
                       </q-chip>
@@ -264,8 +266,9 @@
                         color="primary"
                         text-color="white"
                         size="sm"
-                        clickable
-                        @click="file.inKnowledgeBase = false; onCheckboxChange(file)"
+                        :clickable="!cancellingIndexing"
+                        :disable="cancellingIndexing"
+                        @click="!cancellingIndexing && (file.inKnowledgeBase = false, onCheckboxChange(file))"
                       >
                         Indexed in Knowledge Base
                       </q-chip>
@@ -275,6 +278,7 @@
                         dense
                         icon="delete"
                         color="negative"
+                        :disable="cancellingIndexing"
                         @click="confirmDeleteFile(file)"
                         title="Delete file"
                       />
@@ -306,7 +310,7 @@
                   label="Update and Index KB"
                   color="primary"
                   @click="updateAndIndexKB"
-                    :disable="indexingKB"
+                    :disable="indexingKB || cancellingIndexing"
                   :loading="indexingKB"
                 />
                 </div>
@@ -386,9 +390,16 @@
               <!-- Phase 6: Error -->
               <div v-if="indexingKB && indexingStatus.phase === 'error'" class="q-mt-md q-pa-md" style="background-color: #ffebee; border-radius: 4px; border: 1px solid #f44336;">
                 <div class="text-body2 text-negative">
-                  ❌ {{ indexingStatus.error || 'Indexing failed' }}
+                  {{ indexingStatus.error || 'Indexing failed' }}
                 </div>
                 <div v-if="indexingStatus.kb" class="text-caption text-grey-7 q-mt-xs">KB: {{ indexingStatus.kb }}</div>
+              </div>
+
+              <!-- Cancelling state -->
+              <div v-if="cancellingIndexing" class="q-mt-md q-pa-md" style="background-color: #fff3e0; border-radius: 4px; border: 1px solid #ff9800;">
+                <q-linear-progress indeterminate color="orange" class="q-mb-sm" />
+                <div class="text-body2">Cancelling indexing and restoring files to archived folder...</div>
+                <div class="text-caption text-grey-7 q-mt-xs">Please wait. File changes are disabled until cancel completes.</div>
               </div>
             </div>
           </q-tab-panel>
@@ -1566,6 +1577,7 @@ const isFileIndexed = computed(() => {
 });
 
 const indexingKB = ref(false);
+const cancellingIndexing = ref(false);
 const indexingStatus = ref({
   phase: 'moving', // 'moving' | 'kb_setup' | 'indexing_started' | 'indexing' | 'complete' | 'error'
   message: '',
@@ -2487,6 +2499,7 @@ const cancelIndexingAndRestore = async () => {
   }
 
   const jobId = currentIndexingJobId.value;
+  cancellingIndexing.value = true;
 
   try {
     // Stop polling
@@ -2535,7 +2548,9 @@ const cancelIndexingAndRestore = async () => {
       
       // Reload files to get current state
       await loadFiles();
-      
+
+      cancellingIndexing.value = false;
+
       if ($q && typeof $q.notify === 'function') {
         $q.notify({
           type: 'info',
@@ -2571,22 +2586,25 @@ const cancelIndexingAndRestore = async () => {
 
     // Reload files to get restored state (this updates bucketKeys)
     await loadFiles();
-    
+
     // Force a small delay to ensure file list is fully updated before any PDF access
     await new Promise(resolve => setTimeout(resolve, 100));
-    
+
     // Emit event to refresh any open PDF viewers with updated bucketKeys
     emit('files-archived', []); // Empty array signals a refresh without specific files
+
+    cancellingIndexing.value = false;
 
     // Show notification
     if ($q && typeof $q.notify === 'function') {
       $q.notify({
         type: 'positive',
-        message: 'Indexing cancelled and files restored to original state',
+        message: 'Indexing cancelled and files restored to archived folder',
         timeout: 3000
       });
     }
   } catch (err) {
+    cancellingIndexing.value = false;
     if ($q && typeof $q.notify === 'function') {
       $q.notify({
         type: 'negative',

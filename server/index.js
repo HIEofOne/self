@@ -5609,20 +5609,25 @@ app.post('/api/toggle-file-knowledge-base', async (req, res) => {
       });
     }
 
+    // Block file moves while indexing is truly active (not cancelled)
     const kbInfo = await resolveKbForUserFromDo(userId, { forceRefresh: true });
     if (kbInfo?.id) {
-      const indexingStatus = await getKbIndexingStatusFromDo(kbInfo.id);
-      if (indexingStatus?.isActive) {
-        return res.status(409).json({
-          success: false,
-          message: 'Indexing in progress. Try again when indexing completes.',
-          error: 'INDEXING_IN_PROGRESS'
-        });
+      // If user cancelled indexing, allow file moves even if DO job hasn't stopped yet
+      const persistedPhase = userDoc.kbIndexingStatus?.phase;
+      if (persistedPhase !== 'cancelled') {
+        const indexingStatus = await getKbIndexingStatusFromDo(kbInfo.id);
+        if (indexingStatus?.isActive) {
+          return res.status(409).json({
+            success: false,
+            message: 'Indexing in progress. Try again when indexing completes.',
+            error: 'INDEXING_IN_PROGRESS'
+          });
+        }
       }
     }
 
     userDoc.files[fileIndex].updatedAt = new Date().toISOString();
-    
+
     // Import S3 client operations for file moves
     const { S3Client } = await import('@aws-sdk/client-s3');
 
@@ -7013,6 +7018,14 @@ const runPoll = async () => {
           console.log(`[KB AUTO] ⚠️ User doc not found while polling. Stopping polling for job ${activeJobId}.`);
           console.log(`[KB AUTO] ⚠️ Polling stopped for job ${activeJobId} (reason=user_doc_missing)`);
           await logFinalIndexingStatus('user_doc_missing');
+          finished = true;
+          clearPollTimer();
+          return;
+        }
+
+        // Check if cancel was requested — stop polling immediately
+        if (currentUserDoc.kbIndexingStatus?.phase === 'cancelled') {
+          console.log(`[KB AUTO] ⚠️ Indexing cancelled for job ${activeJobId} — stopping polling`);
           finished = true;
           clearPollTimer();
           return;
