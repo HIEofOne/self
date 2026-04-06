@@ -3867,39 +3867,15 @@ const filterCurrentChat = () => {
   // Track which names were pseudonymized
   const pseudonymizedNames: Array<{ original: string; pseudonym: string }> = [];
   
-  // Filter only Private AI messages and user messages (skip other AI providers)
-  // Private AI is identified by providerKey === 'digitalocean'
-  const messagesToFilterPrivateAI = messagesToFilter.filter(msg => {
-    // Include user messages (they may contain names that need filtering)
-    if (msg.role === 'user') {
-      return true;
-    }
-    // Include only Private AI assistant messages
-    if (msg.role === 'assistant') {
-      // Check providerKey if available, otherwise check authorLabel or name
-      const isPrivateAI = (msg as any).providerKey === 'digitalocean' || 
-                          (msg as any).authorLabel === 'Private AI' ||
-                          (msg as any).name === 'Private AI';
-      return isPrivateAI;
-    }
-    return false;
-  });
-  
-  // Create filtered messages by replacing names with pseudonyms
-  // Only filter Private AI messages, keep others unchanged
+  // Filter ALL messages in the current chat — user messages, Private AI, and public AI responses.
+  // The chat may be loaded from a saved chat, and real names can appear in any message
+  // (introduced by the user, deep link context, or any AI provider).
+  // NOTE: In the future, public AIs may gain direct KB or tool-call access to MAIA,
+  // making it even more important that filtering covers all provider responses.
+  const filteredMessageCount = messagesToFilter.length;
+
+  // Create filtered messages by replacing names with pseudonyms in every message
   const filteredMessages: Message[] = messagesToFilter.map(msg => {
-    // Skip filtering for non-Private AI messages
-    const isUserMessage = msg.role === 'user';
-    const isPrivateAI = msg.role === 'assistant' && 
-                       ((msg as any).providerKey === 'digitalocean' || 
-                        (msg as any).authorLabel === 'Private AI' ||
-                        (msg as any).name === 'Private AI');
-    
-    if (!isUserMessage && !isPrivateAI) {
-      // Return message unchanged for non-Private AI responses
-      return msg;
-    }
-    
     let filteredContent = msg.content;
     
     // Build enhanced mappings that include variations with titles
@@ -4370,7 +4346,7 @@ const filterCurrentChat = () => {
   if ($q && typeof $q.notify === 'function') {
     $q.notify({
       type: 'positive',
-      message: `Filtered ${messagesToFilterPrivateAI.length} Private AI message(s). Replaced: ${namesList || 'names'}`,
+      message: `Filtered ${filteredMessageCount} message(s). Replaced: ${namesList || 'names'}`,
       timeout: 3000
     });
   }
