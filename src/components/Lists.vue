@@ -33,13 +33,19 @@
           </div>
           <div class="text-body2 text-center text-grey-7">
             <div v-if="currentMedicationsStatus === 'reviewing'">
-              Reviewing your Medications List...
+              Private AI is reviewing your Medication Records to identify current prescriptions...
+              <div class="text-caption q-mt-sm">This could take up to 30 seconds.</div>
             </div>
             <div v-else-if="currentMedicationsStatus === 'consulting'">
-              Consulting Private AI to identify current medications...
+              Private AI is analyzing your records to identify current medications...
+              <div class="text-caption q-mt-sm">This could take up to 30 seconds.</div>
+            </div>
+            <div v-else-if="currentMedicationsStatus === 'waiting_summary'">
+              Extracting Current Medications from your Patient Summary...
             </div>
             <div v-else-if="currentMedicationsStatus === 'waiting'">
               Waiting for Private AI agent to finish setup...
+              <div class="text-caption q-mt-sm">This could take up to 30 seconds.</div>
             </div>
             <div v-else>
               Processing your medications...
@@ -991,6 +997,7 @@ const clearWizardAutoFlow = () => {
 const attemptAutoProcessInitialFile = async () => {
   if (isProcessing.value) return;
   if (hasSavedResults.value) return; // Already processed — don't redo
+  if (currentMedications.value || isCurrentMedicationsEdited.value) return; // Medications already loaded
   const autoProcess = sessionStorage.getItem('autoProcessInitialFile');
   const shouldAutoProcess = autoProcess === 'true' || wizardAutoFlow.value;
   if (!shouldAutoProcess) return;
@@ -1027,6 +1034,9 @@ const attemptAutoProcessInitialFile = async () => {
   } else {
     sessionStorage.removeItem('autoProcessInitialFile');
     logWizardEvent('lists_auto_start_failed', { hasInitialFile: false });
+    console.log('[Lists] No Apple Health file found after retries — falling back to loadCurrentMedications');
+    // No Apple Health file — still try to load/generate Current Medications
+    loadCurrentMedications();
   }
 };
 
@@ -2091,23 +2101,22 @@ const reloadCategories = async () => {
 
 onMounted(async () => {
   loadWizardAutoFlow();
-  // Start loading current medications in parallel with file/category loading
-  // so the user doesn't see a multi-second spinner waiting for serial fetches.
-  const medsPromise = (wizardAutoFlow.value)
+
+  // In wizard mode, medications are loaded via attemptAutoProcessInitialFile → loadCurrentMedications.
+  // In non-wizard mode, load medications directly in parallel with file loading.
+  const medsPromise = wizardAutoFlow.value
     ? Promise.resolve().then(() => { isInitialMedsLoading.value = false; })
     : loadCurrentMedications();
 
-  // Load initial file info first (needed for PDF viewing)
   await checkInitialFile();
-  await loadSavedResults(); // Check for saved results first
-  // If wizard mode and no saved results, defer to processInitialFile flow
+  await loadSavedResults();
+
   if (wizardAutoFlow.value && !hasSavedResults.value) {
     isInitialMedsLoading.value = false;
   } else if (wizardAutoFlow.value && hasSavedResults.value) {
-    // Wizard was active but we have saved results — load meds now
-    loadCurrentMedications();
+    // Wizard was active but we have saved results — load meds once
+    await loadCurrentMedications();
   }
-  // Wait for parallel meds load to finish before continuing
   await medsPromise;
 
   if (!hasSavedResults.value) {
@@ -2168,111 +2177,189 @@ onDeactivated(() => {
   }
 });
 
-// Load current medications from user document or Medication Records
+/**
+ * Extract the "Current Medications" section from a Patient Summary text.
+ * Mirrors the logic in MyStuffDialog.vue's extractMedicationsFromSummary.
+ */
+const extractMedicationsFromSummary = (summaryText: string): string | null => {
+  const lines = summaryText.split('\n');
+  let startIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim().toLowerCase();
+    if (
+      line.match(/^#{1,3}\s*current\s+medications/) ||
+      line.match(/^\*{1,2}current\s+medications\*{1,2}/) ||
+      line === 'current medications' ||
+      line === 'current medications:'
+    ) {
+      startIdx = i + 1;
+      break;
+    }
+  }
+  if (startIdx < 0) return null;
+  let endIdx = lines.length;
+  for (let i = startIdx; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (line.match(/^#{1,3}\s+/) || (line.match(/^\*{2}.+\*{2}$/) && !line.toLowerCase().includes('medication'))) {
+      endIdx = i;
+      break;
+    }
+  }
+  const medsText = lines.slice(startIdx, endIdx).join('\n').trim();
+  return medsText.length > 0 ? medsText : null;
+};
+
+// Mutex to prevent concurrent calls to loadCurrentMedications
+let loadCurrentMedicationsRunning = false;
+
+// Load current medications from user document, Patient Summary, or Medication Records
 const loadCurrentMedications = async (forceRefresh = false) => {
-  // If already edited and not forcing refresh, don't overwrite
+  // Guard: already edited — never recalculate
   if (isCurrentMedicationsEdited.value && !forceRefresh) {
+    console.log('[Lists] Current Medications already verified/edited — skipping');
     isInitialMedsLoading.value = false;
     return;
   }
 
+  // Mutex: prevent duplicate concurrent calls
+  if (loadCurrentMedicationsRunning) {
+    console.log('[Lists] loadCurrentMedications already running — skipping duplicate call');
+    return;
+  }
+  loadCurrentMedicationsRunning = true;
+
+  console.log('[Lists] Loading Current Medications (forceRefresh=%s)', forceRefresh);
   logWizardEvent('current_meds_load_start', { forceRefresh });
-  // First try to load from user document
-  if (!forceRefresh) {
-    try {
-      const statusResponse = await fetch(`/api/user-status?userId=${encodeURIComponent(props.userId)}`, {
-        credentials: 'include'
-      });
-      if (statusResponse.ok) {
-        const statusResult = await statusResponse.json();
-        if (statusResult.currentMedications) {
-          currentMedications.value = statusResult.currentMedications;
-          isCurrentMedicationsEdited.value = true; // Mark as edited since it came from user doc
-          isInitialMedsLoading.value = false;
-          logWizardEvent('current_meds_loaded_from_user_doc', { length: statusResult.currentMedications.length });
-          return;
+
+  try {
+    // Path 1: Check user document for previously saved medications
+    if (!forceRefresh) {
+      try {
+        const statusResponse = await fetch(`/api/user-status?userId=${encodeURIComponent(props.userId)}`, {
+          credentials: 'include'
+        });
+        if (statusResponse.ok) {
+          const statusResult = await statusResponse.json();
+          if (statusResult.currentMedications) {
+            currentMedications.value = statusResult.currentMedications;
+            isCurrentMedicationsEdited.value = true;
+            isInitialMedsLoading.value = false;
+            console.log('[Lists] Current Medications loaded from saved user document (%d chars)', statusResult.currentMedications.length);
+            logWizardEvent('current_meds_loaded_from_user_doc', { length: statusResult.currentMedications.length });
+            return;
+          }
+        }
+      } catch (err) {
+        console.warn('[Lists] Error checking user document for medications:', err);
+      }
+    }
+
+    // Path 2: Check for Medication Records from Apple Health categories
+    const medicationCategory = categoriesList.value.find(cat =>
+      cat.name.toLowerCase().includes('medication')
+    );
+
+    if (medicationCategory?.observations?.length > 0) {
+      // Apple Health has medication records — use AI to extract current medications
+      console.log('[Lists] Medication Records found in Apple Health categories — extracting with AI');
+      isInitialMedsLoading.value = false;
+      currentMedicationsStatus.value = 'waiting';
+      const agentReady = await waitForAgentReady();
+      if (!agentReady) {
+        currentMedications.value = null;
+        logWizardEvent('current_meds_agent_not_ready');
+        currentMedicationsStatus.value = '';
+        return;
+      }
+      isLoadingCurrentMedications.value = true;
+      currentMedicationsStatus.value = 'reviewing';
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      try {
+        currentMedicationsStatus.value = 'consulting';
+        const response = await fetch('/api/files/lists/current-medications', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ medicationRecords: medicationCategory.observations })
+        });
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+          throw new Error(errorData.error || 'Failed to get current medications');
+        }
+        const result = await response.json();
+        if (result.success && result.currentMedications) {
+          const cleaned = removeHeadingsFromResponse(result.currentMedications);
+          currentMedications.value = cleaned;
+          isCurrentMedicationsEdited.value = false;
+          isEditingCurrentMedications.value = false;
+          currentMedicationsBlockTitle.value = 'Current Medications';
+          console.log('[Lists] Current Medications generated from Apple Health records (%d chars)', cleaned.length);
+          logWizardEvent('current_meds_generated', { length: cleaned.length });
+        } else {
+          currentMedications.value = null;
+          logWizardEvent('current_meds_empty_response');
+        }
+      } catch (err) {
+        console.error('[Lists] Error generating Current Medications from records:', err);
+        currentMedications.value = null;
+        logWizardEvent('current_meds_error', { error: err instanceof Error ? err.message : 'Unknown error' });
+      } finally {
+        isLoadingCurrentMedications.value = false;
+        currentMedicationsStatus.value = '';
+        if (wizardAutoFlow.value && !currentMedications.value) {
+          clearWizardAutoFlow();
         }
       }
-    } catch (err) {
-      console.warn('Error loading current medications from user document:', err);
-      isInitialMedsLoading.value = false;
-    }
-  }
-
-  // Find Medication Records category
-  const medicationCategory = categoriesList.value.find(cat => 
-    cat.name.toLowerCase().includes('medication')
-  );
-
-  if (!medicationCategory || !medicationCategory.observations || medicationCategory.observations.length === 0) {
-    isLoadingCurrentMedications.value = false;
-    isInitialMedsLoading.value = false;
-    currentMedicationsStatus.value = '';
-    currentMedicationsBlockTitle.value = 'Current Medications as reported by the user';
-    startEditingCurrentMedications();
-    logWizardEvent('current_meds_no_records');
-    return;
-  }
-
-  isInitialMedsLoading.value = false; // Initial loading done — switch to the AI progress spinner
-  currentMedicationsStatus.value = 'waiting';
-  const agentReady = await waitForAgentReady();
-  if (!agentReady) {
-    currentMedications.value = null;
-    logWizardEvent('current_meds_agent_not_ready');
-    currentMedicationsStatus.value = '';
-    return;
-  }
-
-  isLoadingCurrentMedications.value = true;
-  currentMedicationsStatus.value = 'reviewing';
-  
-  // Simulate delay to show "reviewing" message
-  await new Promise(resolve => setTimeout(resolve, 1000));
-  
-  try {
-    currentMedicationsStatus.value = 'consulting';
-    
-    const response = await fetch('/api/files/lists/current-medications', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      credentials: 'include',
-      body: JSON.stringify({
-        medicationRecords: medicationCategory.observations
-      })
-    });
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
-      throw new Error(errorData.error || 'Failed to get current medications');
-    }
-
-    const result = await response.json();
-    if (result.success && result.currentMedications) {
-      // Remove headings from AI response (lines starting with ** that look like headings)
-      const cleaned = removeHeadingsFromResponse(result.currentMedications);
-      currentMedications.value = cleaned;
-      isCurrentMedicationsEdited.value = false; // Reset edited flag when loading from AI
-      // Exit edit mode so the display view shows the AI-generated medications
-      isEditingCurrentMedications.value = false;
-      currentMedicationsBlockTitle.value = 'Current Medications';
-      logWizardEvent('current_meds_generated', { length: cleaned.length });
+      return;
     } else {
-      currentMedications.value = null;
-      logWizardEvent('current_meds_empty_response');
+      // Path 3: No Apple Health meds — try to extract from saved Patient Summary (one fetch, no polling)
+      console.log('[Lists] No Apple Health medication records — checking saved Patient Summary');
+      isInitialMedsLoading.value = false;
+      currentMedicationsStatus.value = 'waiting_summary';
+      isLoadingCurrentMedications.value = true;
+
+      let medsFromSummary: string | null = null;
+      try {
+        const summaryRes = await fetch(`/api/patient-summary?userId=${encodeURIComponent(props.userId)}`, {
+          credentials: 'include'
+        });
+        if (summaryRes.ok) {
+          const summaryData = await summaryRes.json();
+          const summaryText = summaryData.summary || summaryData.summaries?.[0] || '';
+          if (summaryText) {
+            console.log('[Lists] Patient Summary found (%d chars) — extracting Current Medications section', summaryText.length);
+            medsFromSummary = extractMedicationsFromSummary(summaryText);
+            if (medsFromSummary) {
+              console.log('[Lists] Current Medications extracted from Patient Summary (%d chars)', medsFromSummary.length);
+            } else {
+              console.log('[Lists] Patient Summary has no "Current Medications" section');
+            }
+          } else {
+            console.log('[Lists] No Patient Summary saved yet');
+          }
+        }
+      } catch (err) {
+        console.warn('[Lists] Error fetching Patient Summary:', err);
+      }
+
+      isLoadingCurrentMedications.value = false;
+      currentMedicationsStatus.value = '';
+
+      if (medsFromSummary) {
+        currentMedications.value = medsFromSummary;
+        isCurrentMedicationsEdited.value = true;
+        currentMedicationsBlockTitle.value = 'Current Medications';
+        logWizardEvent('current_meds_from_summary', { medsLength: medsFromSummary.length });
+      } else {
+        console.log('[Lists] No medications available — opening for manual entry');
+        currentMedicationsBlockTitle.value = 'Current Medications as reported by the user';
+        logWizardEvent('current_meds_no_records_no_summary');
+      }
+      startEditingCurrentMedications();
+      return;
     }
-  } catch (err) {
-    console.error('Error loading current medications:', err);
-    currentMedications.value = null;
-    logWizardEvent('current_meds_error', { error: err instanceof Error ? err.message : 'Unknown error' });
   } finally {
-    isLoadingCurrentMedications.value = false;
-    currentMedicationsStatus.value = '';
-    if (wizardAutoFlow.value && !currentMedications.value) {
-      clearWizardAutoFlow();
-    }
+    loadCurrentMedicationsRunning = false;
   }
 };
 
