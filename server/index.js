@@ -11,6 +11,7 @@ import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { readFileSync, existsSync, readdirSync } from 'fs';
+import { createHmac } from 'crypto';
 
 import { CloudantClient, CloudantSessionStore, AuditLogService } from '../lib/cloudant/index.js';
 import { DigitalOceanClient } from '../lib/do-client/index.js';
@@ -42,6 +43,77 @@ import {
 
 dotenv.config();
 const storageConfig = normalizeStorageEnv();
+
+/**
+ * Get or create a DO Inference Model Access Key.
+ * Creates key via DO API and caches it in CouchDB for persistence across restarts.
+ * Returns the secret key string, or null if unavailable.
+ */
+async function getOrCreateModelAccessKey(cloudant) {
+  const token = process.env.DIGITALOCEAN_TOKEN;
+  if (!token) return null;
+
+  const configDb = 'maia_config';
+  const docId = 'do_inference_key';
+
+  // Ensure the config database exists
+  try { await cloudant.createDatabase(configDb); } catch (_) { /* already exists */ }
+
+  // Try to read cached key from CouchDB
+  try {
+    const doc = await cloudant.getDocument(configDb, docId);
+    if (doc.secret_key) {
+      originalConsoleLog('[DO Inference] Using cached Model Access Key');
+      return doc.secret_key;
+    }
+  } catch (_) { /* doc doesn't exist — create below */ }
+
+  // Create a new key via DO API
+  try {
+    const resp = await fetch('https://api.digitalocean.com/v2/gen-ai/models/api_keys', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ name: `maia-inference-${Date.now()}` })
+    });
+    if (!resp.ok) {
+      originalConsoleLog(`[DO Inference] Failed to create Model Access Key: ${resp.status}`);
+      return null;
+    }
+    const data = await resp.json();
+    const secretKey = data.api_key_info?.secret_key;
+    if (!secretKey) return null;
+
+    // Cache in CouchDB for persistence across restarts
+    try {
+      await cloudant.saveDocument(configDb, {
+        _id: docId,
+        secret_key: secretKey,
+        uuid: data.api_key_info.uuid,
+        created_at: data.api_key_info.created_at
+      });
+    } catch (e) {
+      originalConsoleLog('[DO Inference] Could not cache key in CouchDB:', e.message);
+    }
+
+    originalConsoleLog('[DO Inference] Created new Model Access Key');
+    return secretKey;
+  } catch (e) {
+    originalConsoleLog('[DO Inference] Error creating key:', e.message);
+    return null;
+  }
+}
+
+/** Derive a stable session secret from the DO token (same approach as CouchDB password). */
+function deriveSessionSecret() {
+  const token = process.env.DIGITALOCEAN_TOKEN;
+  if (token) {
+    return createHmac('sha256', token).update('maia-session-secret').digest('base64url').slice(0, 32);
+  }
+  return 'change-this-secret';
+}
 
 const SUPPRESSED_LOG_PATTERN = /\[(NEW FLOW 2|STARTUP|STORAGE|WELCOME|WIZARD|LOCAL|KB UPDATE|KB AUTO|KB|WIZ|CATCH-ALL)\]/i;
 const shouldSuppressLog = (args) =>
@@ -596,17 +668,19 @@ app.post('/api/client-log', express.json(), (req, res) => {
 app.get('/health', (req, res) => res.json({ status: 'ok', app: 'maia-cloud-user-app' }));
 app.listen(PORT, () => console.log(`User app server listening on port ${PORT} (startup in progress)`));
 
-// Ensure CouchDB droplet if requested (sets CLOUDANT_URL, CLOUDANT_USERNAME, CLOUDANT_PASSWORD)
-if (process.env.USE_COUCHDB_DROPLET === 'true') {
+// Auto-provision CouchDB droplet for cloud deployments (any non-localhost URL = cloud)
+const appUrl = process.env.PUBLIC_APP_URL || '';
+const isCloudDeployment = appUrl && !appUrl.includes('localhost') && !appUrl.includes('127.0.0.1');
+if (isCloudDeployment || process.env.USE_COUCHDB_DROPLET === 'true') {
   const { ensureCouchDBDroplet } = await import('./utils/couchdb-droplet.js');
   await ensureCouchDBDroplet();
 }
 
 // Initialize clients
 const cloudant = new CloudantClient({
-  url: process.env.CLOUDANT_URL,
-  username: process.env.CLOUDANT_USERNAME,
-  password: process.env.CLOUDANT_PASSWORD
+  url: process.env.CLOUDANT_URL || 'http://localhost:5984',
+  username: process.env.CLOUDANT_USERNAME || 'admin',
+  password: process.env.CLOUDANT_PASSWORD || 'adminpass'
 });
 
 logStorageConfig(storageConfig);
@@ -614,7 +688,7 @@ ensureBucketExists();
 
 // Initialize databases (retry Cloudant connection when CouchDB droplet is still warming)
 (async () => {
-  const useDroplet = process.env.USE_COUCHDB_DROPLET === 'true';
+  const useDroplet = isCloudDeployment || process.env.USE_COUCHDB_DROPLET === 'true';
   const cloudantUrl = process.env.CLOUDANT_URL || '';
   const targetHost = cloudantUrl.replace(/^https?:\/\//, '').replace(/^[^@]+@/, '').split('/')[0] || 'not set';
   console.log(`[Cloudant] Target: ${targetHost} (USE_COUCHDB_DROPLET=${useDroplet})`);
@@ -1235,20 +1309,13 @@ const passkeyService = new PasskeyService({
     : appUrlConfig.allowedOrigins
 });
 
+// Initialize ChatClient — DO Inference key will be resolved async and upgrade providers
 const chatClient = new ChatClient({
   digitalocean: {},
-  anthropic: {
-    apiKey: process.env.ANTHROPIC_API_KEY
-  },
-  openai: {
-    apiKey: process.env.OPENAI_API_KEY || process.env.CHATGPT_API_KEY
-  },
-  gemini: {
-    apiKey: process.env.GEMINI_API_KEY
-  },
-  deepseek: {
-    apiKey: process.env.DEEPSEEK_API_KEY
-  }
+  anthropic: { apiKey: process.env.ANTHROPIC_API_KEY },
+  openai: { apiKey: process.env.OPENAI_API_KEY || process.env.CHATGPT_API_KEY },
+  gemini: { apiKey: process.env.GEMINI_API_KEY },
+  deepseek: { apiKey: process.env.DEEPSEEK_API_KEY }
 });
 
 // Middleware
@@ -1296,16 +1363,21 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
 
+// Trust the reverse proxy (DO App Platform) so secure cookies work behind HTTPS load balancers
+if ((process.env.PUBLIC_APP_URL || '').startsWith('https://')) {
+  app.set('trust proxy', 1);
+}
+
 app.use(cookieParser());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 app.use(session({
-  secret: process.env.SESSION_SECRET || 'change-this-secret',
+  secret: process.env.SESSION_SECRET || deriveSessionSecret(),
   resave: false,
   saveUninitialized: false,
   cookie: {
-    secure: process.env.NODE_ENV === 'production',
+    secure: (process.env.PUBLIC_APP_URL || '').startsWith('https://'),
     httpOnly: true,
     maxAge: 24 * 60 * 60 * 1000 // 24 hours
   },
@@ -7489,7 +7561,7 @@ app.get('/api/admin/users', async (req, res) => {
     // If not localhost, require authentication and check for ADMIN_USERNAME
     if (!isLocalhost) {
       const sessionUserId = req.session?.userId;
-      const adminUsername = process.env.ADMIN_USERNAME;
+      const adminUsername = (process.env.ADMIN_USERNAME || 'admin');
       
       if (!sessionUserId) {
         return res.status(401).json({
@@ -7687,7 +7759,7 @@ app.post('/api/admin/users/:userId/recover', async (req, res) => {
     // If not localhost, require authentication and check for ADMIN_USERNAME
     if (!isLocalhost) {
       const sessionUserId = req.session?.userId;
-      const adminUsername = process.env.ADMIN_USERNAME;
+      const adminUsername = (process.env.ADMIN_USERNAME || 'admin');
       
       if (!sessionUserId) {
         return res.status(401).json({
@@ -8244,7 +8316,7 @@ app.delete('/api/admin/users/:userId', async (req, res) => {
     // If not localhost, require authentication and check for ADMIN_USERNAME
     if (!isLocalhost) {
       const sessionUserId = req.session?.userId;
-      const adminUsername = process.env.ADMIN_USERNAME;
+      const adminUsername = (process.env.ADMIN_USERNAME || 'admin');
       
       if (!sessionUserId) {
         return res.status(401).json({
@@ -8349,7 +8421,7 @@ app.post('/api/local/delete', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Invalid userId format' });
     }
     // Never allow deleting the admin user
-    const adminUsername = process.env.ADMIN_USERNAME?.trim();
+    const adminUsername = (process.env.ADMIN_USERNAME || 'admin')?.trim();
     if (adminUsername && userId.trim().toLowerCase() === adminUsername.toLowerCase()) {
       return res.status(403).json({ success: false, error: 'Forbidden' });
     }
@@ -9958,6 +10030,14 @@ if (isProduction) {
     }
   });
 
+}
+
+// Resolve DO Inference Model Access Key (upgrades providers that lack direct API keys)
+if (process.env.DIGITALOCEAN_TOKEN) {
+  const inferenceKey = await getOrCreateModelAccessKey(cloudant);
+  if (inferenceKey) {
+    chatClient.enableDOInference(inferenceKey);
+  }
 }
 
 // Startup complete (server already listening for readiness probes)

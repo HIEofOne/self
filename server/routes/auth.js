@@ -130,12 +130,12 @@ function getMaiaInstructionText() {
 }
 
 function requireAdminSecretForUser(userId, adminSecret) {
-  const adminUsername = process.env.ADMIN_USERNAME?.trim();
+  const adminUsername = (process.env.ADMIN_USERNAME || 'admin').trim();
   const uid = (userId && typeof userId === 'string') ? userId.trim().toLowerCase() : '';
   if (!adminUsername || uid !== adminUsername.toLowerCase()) {
     return { required: false, ok: true };
   }
-  const configuredSecret = process.env.ADMIN_SECRET;
+  const configuredSecret = process.env.ADMIN_SECRET || process.env.DIGITALOCEAN_TOKEN;
   if (!configuredSecret) {
     return { required: true, ok: false, error: 'ADMIN_SECRET_NOT_CONFIGURED' };
   }
@@ -376,7 +376,7 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
         return res.status(400).json({ error: 'User ID required' });
       }
 
-      const adminUsername = process.env.ADMIN_USERNAME?.trim();
+      const adminUsername = (process.env.ADMIN_USERNAME || 'admin').trim();
       const uid = (userId && typeof userId === 'string') ? userId.trim().toLowerCase() : '';
       const isAdminUser = !!adminUsername && uid === adminUsername.toLowerCase();
 
@@ -416,7 +416,7 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
         console.warn(`[Passkey] Admin registration 403 for userId=${userId}: ${code}`);
         const message =
           code === 'ADMIN_SECRET_NOT_CONFIGURED'
-            ? 'Admin passkey is not configured. Set ADMIN_SECRET (and ADMIN_USERNAME) on the server.'
+            ? 'Admin passkey is not configured. Set ADMIN_SECRET or DIGITALOCEAN_TOKEN on the server.'
             : code === 'ADMIN_SECRET_REQUIRED'
               ? 'Admin secret required to create or update the admin passkey.'
               : 'Invalid admin secret.';
@@ -480,7 +480,7 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
         console.warn(`[Passkey] Admin verify 403 for userId=${userId}: ${code}`);
         return res.status(403).json({
           error: code === 'ADMIN_SECRET_NOT_CONFIGURED'
-            ? 'Admin passkey is not configured. Set ADMIN_SECRET on the server.'
+            ? 'Admin passkey is not configured. Set ADMIN_SECRET or DIGITALOCEAN_TOKEN on the server.'
             : code === 'ADMIN_SECRET_REQUIRED'
               ? 'Admin secret required to verify the admin passkey.'
               : 'Invalid admin secret.',
@@ -550,7 +550,7 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
 
       // Return success with flag indicating file import dialog should be shown
       // The frontend will handle showing the dialog and uploading files
-      const isAdminUser = agentReadyUser.userId?.toLowerCase() === process.env.ADMIN_USERNAME?.trim()?.toLowerCase();
+      const isAdminUser = agentReadyUser.userId?.toLowerCase() === (process.env.ADMIN_USERNAME || 'admin').trim()?.toLowerCase();
       res.json({
         success: true,
         user: {
@@ -590,7 +590,7 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       await cloudant.saveDocument('maia_users', userDoc);
       console.log(`[NEW FLOW 2] User document updated - no admin provisioning`);
 
-      const isAdminUser = userDoc.userId?.toLowerCase() === process.env.ADMIN_USERNAME?.trim()?.toLowerCase();
+      const isAdminUser = userDoc.userId?.toLowerCase() === (process.env.ADMIN_USERNAME || 'admin').trim()?.toLowerCase();
       res.json({ 
         success: true, 
         user: {
@@ -705,7 +705,7 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       // Clear temp cookie — passkey users no longer need it
       res.clearCookie(TEMP_USER_COOKIE);
 
-      const isAdminUser = agentReadyUser.userId?.toLowerCase() === process.env.ADMIN_USERNAME?.trim()?.toLowerCase();
+      const isAdminUser = agentReadyUser.userId?.toLowerCase() === (process.env.ADMIN_USERNAME || 'admin').trim()?.toLowerCase();
       res.json({
         success: true,
         user: {
@@ -1228,7 +1228,7 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
 
   // Return configured admin username (for admin passkey pre-fill on /admin page)
   app.get('/api/admin-username', (req, res) => {
-    res.json({ adminUsername: process.env.ADMIN_USERNAME || null });
+    res.json({ adminUsername: process.env.ADMIN_USERNAME || 'admin' });
   });
 
   // Current user
@@ -1237,7 +1237,7 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       return res.json({ authenticated: false });
     }
 
-    const isAdminUser = req.session.userId?.toLowerCase() === process.env.ADMIN_USERNAME?.trim()?.toLowerCase();
+    const isAdminUser = req.session.userId?.toLowerCase() === (process.env.ADMIN_USERNAME || 'admin').trim()?.toLowerCase();
     res.json({
       authenticated: true,
       user: {
