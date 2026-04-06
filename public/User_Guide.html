@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MAIA User Guide</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      line-height: 1.6;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 2rem 1.5rem;
+      color: #333;
+      background: #fff;
+    }
+    h1 {
+      color: #1976d2;
+      border-bottom: 2px solid #1976d2;
+      padding-bottom: 0.5rem;
+    }
+    h2 {
+      color: #1976d2;
+      margin-top: 2rem;
+    }
+    h3 {
+      color: #444;
+      margin-top: 1.5rem;
+    }
+    a { color: #1976d2; }
+    #toc {
+      background: #f5f7fa;
+      border: 1px solid #e0e0e0;
+      border-radius: 6px;
+      padding: 1rem 1.5rem;
+      margin-bottom: 2rem;
+    }
+    #toc ul {
+      list-style: none;
+      padding-left: 0;
+      margin: 0.5rem 0 0 0;
+    }
+    #toc ul ul {
+      padding-left: 1.2rem;
+    }
+    #toc li { margin: 0.3rem 0; }
+    .note {
+      background: #e3f2fd;
+      border-left: 4px solid #1976d2;
+      padding: 0.75rem 1rem;
+      margin: 1rem 0;
+      border-radius: 0 4px 4px 0;
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 1rem 0;
+    }
+    th, td {
+      border: 1px solid #ddd;
+      padding: 0.5rem 0.75rem;
+      text-align: left;
+    }
+    th { background: #f5f7fa; }
+    code {
+      background: #f5f5f5;
+      padding: 0.15rem 0.4rem;
+      border-radius: 3px;
+      font-size: 0.9em;
+    }
+  </style>
+</head>
+<body>
+
+<h1>MAIA User Guide</h1>
+
+<nav id="toc">
+  <strong>Table of Contents</strong>
+  <ul>
+    <li><a href="#files">1. How MAIA Manages Your Files</a>
+      <ul>
+        <li><a href="#temporary">Temporary Files</a></li>
+        <li><a href="#archived">Archived Files</a></li>
+        <li><a href="#indexed">Indexed Files (Knowledge Base)</a></li>
+      </ul>
+    </li>
+    <li><a href="#ai-access">2. Which AI Sees What</a></li>
+    <li><a href="#deep-links">3. Deep Links and Invited Users</a></li>
+    <li><a href="#my-stuff">4. My Stuff Tabs</a>
+      <ul>
+        <li><a href="#tab-saved-files">Saved Files</a></li>
+        <li><a href="#tab-agent">My AI Agent</a></li>
+        <li><a href="#tab-chats">Saved Chats</a></li>
+        <li><a href="#tab-summary">Patient Summary</a></li>
+        <li><a href="#tab-lists">My Lists</a></li>
+        <li><a href="#tab-privacy">Privacy Filter</a></li>
+        <li><a href="#tab-diary">Patient Diary</a></li>
+        <li><a href="#tab-references">References</a></li>
+      </ul>
+    </li>
+    <li><a href="#backup-restore">5. Backup and Restore</a>
+      <ul>
+        <li><a href="#local-folder">Local Folder Contents</a></li>
+      </ul>
+    </li>
+  </ul>
+</nav>
+
+<!-- ============================================================ -->
+<h2 id="files">1. How MAIA Manages Your Files</h2>
+
+<p>MAIA organizes your files into three tiers: <strong>temporary</strong>, <strong>archived</strong>, and <strong>indexed</strong>. Each tier determines how long a file is kept and which AI models can access it.</p>
+
+<h3 id="temporary">Temporary Files</h3>
+<p>When you upload a file using the paperclip icon in the chat, it behaves like uploading a file to ChatGPT: your Private AI can read it for the current conversation. When you reload the page you get a fresh chat and the uploaded file is gone from the cloud. (It is still on your computer, of course.)</p>
+
+<h3 id="archived">Archived Files</h3>
+<p>When you open the <strong>Saved Files</strong> tab in <strong>My Stuff</strong>, any temporary files are automatically copied to your archived folder. Archived files are preserved across sessions and allow you to add them to the knowledge base whenever you choose.</p>
+<p>Your Private AI does <em>not</em> see archived files. They are simply stored, waiting for you to decide whether to index them.</p>
+
+<h3 id="indexed">Indexed Files (Knowledge Base)</h3>
+<p>Indexed files live in your knowledge base. Your Private AI has full access to them in every conversation. To index a file:</p>
+<ol>
+  <li>Open <strong>My Stuff &gt; Saved Files</strong>.</li>
+  <li>Click the amber <strong>Add to Knowledge Base</strong> badge on the file.</li>
+  <li>Click <strong>Update and Index KB</strong>. Indexing can take a few seconds to several minutes depending on file size.</li>
+</ol>
+<p>You can remove a file from the knowledge base at any time by clicking its badge again. The file moves back to archived.</p>
+
+<div class="note">
+  <strong>Design principle:</strong> Files are never placed in the knowledge base without your explicit action. Even during a restore, only files that were previously indexed are re-indexed.
+</div>
+
+<!-- ============================================================ -->
+<h2 id="ai-access">2. Which AI Sees What</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>File Type</th>
+      <th>Your Private AI</th>
+      <th>Public AI (Claude, etc.)</th>
+      <th>Invited Users (Deep Links)</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Temporary (uploaded in chat)</td>
+      <td>Yes</td>
+      <td>Yes (in current chat only)</td>
+      <td>No</td>
+    </tr>
+    <tr>
+      <td>Archived</td>
+      <td>No</td>
+      <td>No</td>
+      <td>No</td>
+    </tr>
+    <tr>
+      <td>Indexed (Knowledge Base)</td>
+      <td>Yes</td>
+      <td>No</td>
+      <td>Yes (by default)</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>Future versions of MAIA could allow a public AI in your chat to request information from your Private AI on your behalf, bridging the gap without exposing your indexed files directly.</p>
+
+<!-- ============================================================ -->
+<h2 id="deep-links">3. Deep Links and Invited Users</h2>
+
+<p>You can invite other people, such as your physicians, to chat with your Private AI using a deep link. By default, deep-link users can query your knowledge base through your Private AI. You can disable this permission at the top of the <strong>My Stuff &gt; My Agent</strong> tab.</p>
+
+<!-- ============================================================ -->
+<h2 id="my-stuff">4. My Stuff Tabs</h2>
+
+<p>The <strong>My Stuff</strong> dialog is your central dashboard. It contains eight tabs:</p>
+
+<h3 id="tab-saved-files">Saved Files</h3>
+<p>Manage your archived and indexed files. When you open this tab, any temporary files are automatically archived. Each file shows a color-coded badge:</p>
+<ul>
+  <li><strong>Amber "Add to Knowledge Base"</strong> — file is archived; click to mark it for indexing.</li>
+  <li><strong>Orange "To be added and indexed"</strong> — file is marked for KB but not yet indexed. Click <strong>Update and Index KB</strong> to start.</li>
+  <li><strong>Blue "Indexing in progress"</strong> — indexing is running.</li>
+  <li><strong>Blue "Indexed in Knowledge Base"</strong> — file is indexed and available to your Private AI. Click to remove it from KB.</li>
+</ul>
+<p>You can delete any file with the trash icon. You can cancel an active indexing job; cancelled files return to archived.</p>
+
+<h3 id="tab-agent">My AI Agent</h3>
+<p>View and edit the system instructions for your Private AI agent. These instructions guide how your agent responds to you and to invited users.</p>
+<p>At the top of this tab is a toggle: <strong>Deep link users can chat with your Private AI</strong>. Turn this off to prevent invited users from querying your knowledge base.</p>
+<p>Below the instructions, the <strong>Agent Knowledge Base</strong> section shows which knowledge base is connected, its last indexing time, and the list of indexed files.</p>
+
+<h3 id="tab-chats">Saved Chats</h3>
+<p>Browse your saved group chats. Each entry shows the date, last query, and participants. You can copy a deep link to share a chat or delete it. Click a chat to reopen it in the main chat window.</p>
+
+<h3 id="tab-summary">Patient Summary</h3>
+<p>View, edit, and verify your AI-generated patient summary. The summary is created from your indexed files and can be edited directly. If MAIA detects changes to your records, a <strong>Verify</strong> button appears prompting you to review. Previous versions of the summary are available as buttons so you can compare or restore an earlier version.</p>
+
+<h3 id="tab-lists">My Lists</h3>
+<p>Manage structured lists extracted from your records, such as your current medications. Lists are editable and are included in your local backup.</p>
+
+<h3 id="tab-privacy">Privacy Filter</h3>
+<p>Replace real names in your chat with pseudonyms before sharing. MAIA scans your chat for names and builds a mapping table (e.g., "Adrian Gropper" becomes "Alex Rivers"). Click <strong>Filter Current Chat</strong> to apply the pseudonyms. The mapping is shown as a table you can review.</p>
+
+<h3 id="tab-diary">Patient Diary</h3>
+<p>A private journal for health notes, symptoms, or observations. Entries are grouped into bubbles by time. You can post a diary bubble into the chat to discuss it with your AI. Entries are stored in your cloud database.</p>
+
+<h3 id="tab-references">References</h3>
+<p>Upload and manage reference files (PDFs, text, markdown) that you want available in chats without indexing them into your knowledge base. Click a reference to add it to the current chat. References are stored separately from your archived and indexed files.</p>
+
+<!-- ============================================================ -->
+<h2 id="backup-restore">5. Backup and Restore</h2>
+
+<p>MAIA automatically backs up your account data to a local folder on your computer whenever you are signed in and have connected a local folder. If your cloud account is ever lost or reset, MAIA can restore everything from this local backup.</p>
+
+<h3>What gets backed up</h3>
+<ul>
+  <li>File metadata and indexing status</li>
+  <li>Patient summary and current medications</li>
+  <li>Agent instructions</li>
+  <li>Saved chats</li>
+  <li>My Lists</li>
+</ul>
+
+<p class="note"><strong>Important:</strong> The actual file contents (PDFs, etc.) are stored in your local folder alongside the backup. During a restore, MAIA re-uploads them from your local folder. Files that were only archived (not indexed) are restored to archived status &mdash; they are not automatically indexed.</p>
+
+<h3 id="local-folder">Local Folder Contents</h3>
+
+<table>
+  <thead>
+    <tr>
+      <th>File</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>maia-identity.json</code></td>
+      <td>Your user ID, display name, and last sync timestamp. Identifies which account this folder belongs to.</td>
+    </tr>
+    <tr>
+      <td><code>maia-state.json</code></td>
+      <td>Full account snapshot: file list with indexing status, medications, patient summary, agent instructions, saved chats, and lists.</td>
+    </tr>
+    <tr>
+      <td><code>maia-setup-log.json</code></td>
+      <td>Setup and provisioning log in JSON format. Records the steps taken during account creation.</td>
+    </tr>
+    <tr>
+      <td><code>maia-setup-log.pdf</code></td>
+      <td>Printable PDF version of the setup log, including version and API model info.</td>
+    </tr>
+    <tr>
+      <td><code>maia-for-&lt;name&gt;.webloc</code></td>
+      <td>A bookmark to your MAIA instance. Double-click to open MAIA in your browser.</td>
+    </tr>
+    <tr>
+      <td><code>*.PDF</code> / <code>*.pdf</code></td>
+      <td>Your uploaded documents. These are re-uploaded from this folder during a restore.</td>
+    </tr>
+  </tbody>
+</table>
+
+</body>
+</html>
