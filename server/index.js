@@ -44,6 +44,68 @@ import {
 dotenv.config();
 const storageConfig = normalizeStorageEnv();
 
+/**
+ * Get or create a DO Inference Model Access Key.
+ * Creates key via DO API and caches it in CouchDB for persistence across restarts.
+ * Returns the secret key string, or null if unavailable.
+ */
+async function getOrCreateModelAccessKey(cloudant) {
+  const token = process.env.DIGITALOCEAN_TOKEN;
+  if (!token) return null;
+
+  const configDb = 'maia_config';
+  const docId = 'do_inference_key';
+
+  // Ensure the config database exists
+  try { await cloudant.createDatabase(configDb); } catch (_) { /* already exists */ }
+
+  // Try to read cached key from CouchDB
+  try {
+    const doc = await cloudant.getDocument(configDb, docId);
+    if (doc.secret_key) {
+      originalConsoleLog('[DO Inference] Using cached Model Access Key');
+      return doc.secret_key;
+    }
+  } catch (_) { /* doc doesn't exist — create below */ }
+
+  // Create a new key via DO API
+  try {
+    const resp = await fetch('https://api.digitalocean.com/v2/gen-ai/models/api_keys', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ name: `maia-inference-${Date.now()}` })
+    });
+    if (!resp.ok) {
+      originalConsoleLog(`[DO Inference] Failed to create Model Access Key: ${resp.status}`);
+      return null;
+    }
+    const data = await resp.json();
+    const secretKey = data.api_key_info?.secret_key;
+    if (!secretKey) return null;
+
+    // Cache in CouchDB for persistence across restarts
+    try {
+      await cloudant.saveDocument(configDb, {
+        _id: docId,
+        secret_key: secretKey,
+        uuid: data.api_key_info.uuid,
+        created_at: data.api_key_info.created_at
+      });
+    } catch (e) {
+      originalConsoleLog('[DO Inference] Could not cache key in CouchDB:', e.message);
+    }
+
+    originalConsoleLog('[DO Inference] Created new Model Access Key');
+    return secretKey;
+  } catch (e) {
+    originalConsoleLog('[DO Inference] Error creating key:', e.message);
+    return null;
+  }
+}
+
 /** Derive a stable session secret from the DO token (same approach as CouchDB password). */
 function deriveSessionSecret() {
   const token = process.env.DIGITALOCEAN_TOKEN;
@@ -1245,20 +1307,13 @@ const passkeyService = new PasskeyService({
     : appUrlConfig.allowedOrigins
 });
 
+// Initialize ChatClient — DO Inference key will be resolved async and upgrade providers
 const chatClient = new ChatClient({
   digitalocean: {},
-  anthropic: {
-    apiKey: process.env.ANTHROPIC_API_KEY
-  },
-  openai: {
-    apiKey: process.env.OPENAI_API_KEY || process.env.CHATGPT_API_KEY
-  },
-  gemini: {
-    apiKey: process.env.GEMINI_API_KEY
-  },
-  deepseek: {
-    apiKey: process.env.DEEPSEEK_API_KEY
-  }
+  anthropic: { apiKey: process.env.ANTHROPIC_API_KEY },
+  openai: { apiKey: process.env.OPENAI_API_KEY || process.env.CHATGPT_API_KEY },
+  gemini: { apiKey: process.env.GEMINI_API_KEY },
+  deepseek: { apiKey: process.env.DEEPSEEK_API_KEY }
 });
 
 // Middleware
@@ -9973,6 +10028,14 @@ if (isProduction) {
     }
   });
 
+}
+
+// Resolve DO Inference Model Access Key (upgrades providers that lack direct API keys)
+if (process.env.DIGITALOCEAN_TOKEN) {
+  const inferenceKey = await getOrCreateModelAccessKey(cloudant);
+  if (inferenceKey) {
+    chatClient.enableDOInference(inferenceKey);
+  }
 }
 
 // Startup complete (server already listening for readiness probes)
