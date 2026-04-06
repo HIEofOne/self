@@ -135,9 +135,11 @@
                     </div>
                   </div>
 
-                  <!-- Footer: Privacy | FAQ | About + copyright -->
+                  <!-- Footer: Privacy | User Guide | FAQ | About + copyright -->
                   <div class="text-center q-mt-lg q-mb-md">
                     <a href="#" @click.prevent="welcomeDialogSection = 'privacy'; showWelcomeContentDialog = true" class="welcome-footer-link">Privacy</a>
+                    <span class="text-grey-5 q-mx-sm">|</span>
+                    <a href="/User_Guide.html" target="_blank" class="welcome-footer-link">User Guide</a>
                     <span class="text-grey-5 q-mx-sm">|</span>
                     <a href="#" @click.prevent="welcomeDialogSection = 'faq'; showWelcomeContentDialog = true" class="welcome-footer-link">FAQ</a>
                     <span class="text-grey-5 q-mx-sm">|</span>
