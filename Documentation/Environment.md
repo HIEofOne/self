@@ -37,7 +37,7 @@ The application runs as a single **DigitalOcean App Platform** web service:
 
 ### Cloud (DO Droplet)
 
-When `USE_COUCHDB_DROPLET=true`, the server provisions a DigitalOcean Droplet running CouchDB 3 in Docker:
+When `PUBLIC_APP_URL` starts with `https://` (i.e., a cloud deployment), the server automatically provisions a DigitalOcean Droplet running CouchDB 3 in Docker:
 
 - **Droplet:** `s-1vcpu-1gb` Ubuntu 22.04 in `tor1` region
 - **Container:** `couchdb:3` with persistent volumes
