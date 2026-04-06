@@ -1306,6 +1306,11 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
 
+// Trust the reverse proxy (DO App Platform) so secure cookies work behind HTTPS load balancers
+if ((process.env.PUBLIC_APP_URL || '').startsWith('https://')) {
+  app.set('trust proxy', 1);
+}
+
 app.use(cookieParser());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
