@@ -496,7 +496,7 @@ const currentMedicationsBlockTitle = ref('Current Medications');
 const editingOriginalCurrentMedications = ref('');
 const isSavingCurrentMedications = ref(false);
 const isCurrentMedicationsEdited = ref(false);
-const currentMedicationsStatus = ref<'reviewing' | 'consulting' | 'waiting' | ''>('');
+const currentMedicationsStatus = ref<'reviewing' | 'consulting' | 'waiting' | 'waiting_summary' | ''>('');
 const wizardAutoFlow = ref(false);
 const wizardAutoFlowStorageKey = 'wizardMyListsAuto';
 const wizardAutoStartPending = ref(false);
@@ -2259,7 +2259,7 @@ const loadCurrentMedications = async (forceRefresh = false) => {
       cat.name.toLowerCase().includes('medication')
     );
 
-    if (medicationCategory?.observations?.length > 0) {
+    if (medicationCategory && medicationCategory.observations && medicationCategory.observations.length > 0) {
       // Apple Health has medication records — use AI to extract current medications
       console.log('[Lists] Medication Records found in Apple Health categories — extracting with AI');
       isInitialMedsLoading.value = false;
