@@ -668,8 +668,10 @@ app.post('/api/client-log', express.json(), (req, res) => {
 app.get('/health', (req, res) => res.json({ status: 'ok', app: 'maia-cloud-user-app' }));
 app.listen(PORT, () => console.log(`User app server listening on port ${PORT} (startup in progress)`));
 
-// Ensure CouchDB droplet if requested (sets CLOUDANT_URL, CLOUDANT_USERNAME, CLOUDANT_PASSWORD)
-if (process.env.USE_COUCHDB_DROPLET === 'true') {
+// Auto-provision CouchDB droplet for cloud deployments (any non-localhost URL = cloud)
+const appUrl = process.env.PUBLIC_APP_URL || '';
+const isCloudDeployment = appUrl && !appUrl.includes('localhost') && !appUrl.includes('127.0.0.1');
+if (isCloudDeployment || process.env.USE_COUCHDB_DROPLET === 'true') {
   const { ensureCouchDBDroplet } = await import('./utils/couchdb-droplet.js');
   await ensureCouchDBDroplet();
 }
@@ -686,7 +688,7 @@ ensureBucketExists();
 
 // Initialize databases (retry Cloudant connection when CouchDB droplet is still warming)
 (async () => {
-  const useDroplet = process.env.USE_COUCHDB_DROPLET === 'true';
+  const useDroplet = isCloudDeployment || process.env.USE_COUCHDB_DROPLET === 'true';
   const cloudantUrl = process.env.CLOUDANT_URL || '';
   const targetHost = cloudantUrl.replace(/^https?:\/\//, '').replace(/^[^@]+@/, '').split('/')[0] || 'not set';
   console.log(`[Cloudant] Target: ${targetHost} (USE_COUCHDB_DROPLET=${useDroplet})`);
