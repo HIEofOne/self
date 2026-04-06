@@ -1259,7 +1259,7 @@ interface Props {
   rehydrationActive?: boolean;
   wizardActive?: boolean;
   /** Action for the wizard controller to request. MyStuffDialog executes and emits 'request-action-done'. */
-  requestAction?: 'generate-summary' | null;
+  requestAction?: 'generate-summary' | 'update-summary-meds' | null;
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -1288,6 +1288,7 @@ const emit = defineEmits<{
   'request-action-done': [];
   'show-patient-summary': [];
   'file-added-to-kb': [data: { fileName: string; bucketKey: string }];
+  'tab-opened': [tab: string];
 }>();
 
 // Handle show patient summary from Lists component — regenerate summary with updated medications
@@ -5294,6 +5295,90 @@ const handleMedsMismatchUpdate = async () => {
 };
 
 /**
+ * Update the pre-generated Patient Summary with the verified Current Medications.
+ * Called from the wizard when a summary was generated in the background and the user
+ * has since verified/edited their medications.
+ */
+const updateSummaryWithVerifiedMeds = async () => {
+  // Set verify flag immediately — prevents flash of "verified" state before prompt appears
+  summaryNeedsVerify.value = true;
+  try {
+    // Fetch the verified medications from the user document
+    const res = await fetch(`/api/user-status?userId=${encodeURIComponent(props.userId)}`, {
+      credentials: 'include'
+    });
+    if (!res.ok) {
+      // Can't fetch meds — fall back to regenerating the summary
+      await requestNewSummary();
+      return;
+    }
+    const status = await res.json();
+    const meds = status.currentMedications;
+    if (!meds || !String(meds).trim()) {
+      // No meds saved — fall back to regenerating
+      await requestNewSummary();
+      return;
+    }
+
+    // Reload the latest summary
+    await loadPatientSummary();
+    if (!patientSummary.value) {
+      // No summary found — generate a new one
+      await requestNewSummary();
+      return;
+    }
+
+    // Splice the verified medications into the summary
+    const updated = replaceMedicationsInSummary(patientSummary.value, meds);
+    if (!updated) {
+      // Couldn't find the section — regenerate
+      await requestNewSummary();
+      return;
+    }
+
+    // Check if the medications actually differ
+    const existingMeds = extractMedicationsFromSummary(patientSummary.value);
+    if (existingMeds && normalizeMedsText(existingMeds) === normalizeMedsText(meds)) {
+      // Already identical — just show the summary
+      loadingSummary.value = false;
+      return;
+    }
+
+    // Save the patched summary
+    const response = await fetch('/api/patient-summary', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        userId: props.userId,
+        summary: updated,
+        replaceStrategy: 'newest'
+      })
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.message || 'Failed to save updated summary');
+    }
+    summaryNeedsVerify.value = true; // Set before load so UI doesn't flash without verify prompt
+    await loadPatientSummary();
+    emit('patient-summary-saved', { userId: props.userId });
+    if ($q && typeof $q.notify === 'function') {
+      $q.notify({
+        type: 'positive',
+        message: 'Patient Summary updated with verified Current Medications.',
+        timeout: 3000
+      });
+    }
+  } catch (error) {
+    console.error('Error updating summary with verified medications:', error);
+    // Fall back to regenerating
+    await requestNewSummary();
+  } finally {
+    loadingSummary.value = false;
+  }
+};
+
+/**
  * Handle I UNDERSTAND from the mismatch dialog: user accepts the difference.
  */
 const handleMedsMismatchAcknowledge = () => {
@@ -5573,7 +5658,7 @@ watch(() => props.modelValue, async (newValue) => {
 watch(() => props.initialTab, (newTab) => {
   if (newTab && isOpen.value) {
     // If switching to summary with a pending requestAction, set loading immediately to prevent flash
-    if (newTab === 'summary' && props.requestAction === 'generate-summary') {
+    if (newTab === 'summary' && (props.requestAction === 'generate-summary' || props.requestAction === 'update-summary-meds')) {
       loadingSummary.value = true;
     }
     currentTab.value = newTab;
@@ -5588,6 +5673,11 @@ watch(() => props.requestAction, (action) => {
     loadingSummary.value = true;
     currentTab.value = 'summary';
     requestNewSummary();
+  } else if (action === 'update-summary-meds') {
+    // Update the pre-generated summary with the verified Current Medications
+    loadingSummary.value = true;
+    currentTab.value = 'summary';
+    updateSummaryWithVerifiedMeds();
   }
   emit('request-action-done');
 });
@@ -5609,6 +5699,9 @@ watch(isOpen, (newValue) => {
 const listsComponentRef = ref<InstanceType<typeof Lists> | null>(null);
 
 watch(currentTab, async (newTab) => {
+  if (isOpen.value) {
+    emit('tab-opened', newTab);
+  }
   if (newTab === 'privacy') {
     if (privacyFilterMapping.value.length > 0) {
       const current = privacyFilterMapping.value;

@@ -598,6 +598,7 @@
       @rehydration-file-removed="handleRehydrationFileRemoved"
       @rehydration-complete="handleRehydrationComplete"
       @file-added-to-kb="handleFileAddedToKb"
+      @tab-opened="handleMyStuffTabOpened"
       v-if="canAccessMyStuff"
     />
 
@@ -869,7 +870,7 @@ const showSavedChatsModal = ref(false);
 const savedChatCount = ref(0);
 const showMyStuffDialog = ref(false);
 const myStuffInitialTab = ref<string>('files');
-const wizardRequestAction = ref<'generate-summary' | null>(null);
+const wizardRequestAction = ref<'generate-summary' | 'update-summary-meds' | null>(null);
 const contextualTip = ref('Loading...');
 const editingMessageIdx = ref<number[]>([]);
 const editingOriginalContent = ref<Record<number, string>>({});
@@ -906,6 +907,9 @@ const wizardIntroLines = ref<string[]>([]);
 const wizardIntroContainer = ref<HTMLElement | null>(null);
 const wizardInlineDots = ref<HTMLElement | null>(null);
 const wizardDismissed = ref(false);
+/** Counts how many times the user has dismissed (closed) MyStuff during a guided flow phase.
+ *  After 2 dismissals in the same phase, the phase is skipped and the wizard advances. */
+const guidedFlowDismissCount = ref(0);
 const appleExportFooterSnippet = 'This summary displays certain health information made available to you by your healthcare provider and may not completely';
 const appleExportFooterNormalized = appleExportFooterSnippet.toLowerCase().replace(/\s+/g, ' ').trim();
 const stage3Checked = computed(() =>
@@ -973,6 +977,9 @@ let wizardTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
 /** Guided wizard flow phase. Starts 'done' to avoid re-entering guided flow on reload;
  *  set to 'running' only when the wizard is actively running for the first time. */
 const wizardFlowPhase = ref<'running' | 'medications' | 'summary' | 'done'>('done');
+/** Pre-generated Patient Summary text created at the start of the guided flow.
+ *  Generated in the background so it's available if Lists needs Current Medications. */
+const preGeneratedSummary = ref<string | null>(null);
 
 // ── Safari / basic fallback folder state ────────────────────────
 /** Files collected via webkitdirectory input (Safari) or single-file input (basic). */
@@ -5530,7 +5537,7 @@ watch(
 // Guided flow: when indexing completes AND agent is ready, close wizard and start medications flow
 watch(
   [() => indexingStatus.value?.phase, () => wizardStage1Complete.value],
-  ([phase, agentReady]) => {
+  async ([phase, agentReady]) => {
     if (
       phase === 'complete' &&
       agentReady &&
@@ -5546,7 +5553,51 @@ watch(
         wizardTimeoutTimer = null;
       }
       wizardFlowPhase.value = 'medications';
-      // Open MyStuff on lists tab (same as handleWizardMedsAction)
+      guidedFlowDismissCount.value = 0;
+
+      // Step 1: Generate and save Patient Summary BEFORE opening My Lists.
+      // This ensures the summary is available when Lists.vue needs to extract medications.
+      preGeneratedSummary.value = null;
+      if (props.user?.userId) {
+        console.log('[Wizard] Generating Patient Summary before opening My Lists...');
+        addSetupLogLine('Wizard Flow', 'Generating Patient Summary...', true);
+        try {
+          const genRes = await fetch('/api/generate-patient-summary', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ userId: props.user.userId })
+          });
+          if (!genRes.ok) throw new Error(`HTTP ${genRes.status}`);
+          const genResult = await genRes.json();
+          const text = (genResult.summary || '').trim();
+          if (text) {
+            preGeneratedSummary.value = text;
+            // Save to server so Lists.vue and Patient Summary tab can load it
+            await fetch('/api/patient-summary', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              credentials: 'include',
+              body: JSON.stringify({
+                userId: props.user?.userId,
+                summary: text,
+                replaceStrategy: 'newest'
+              })
+            });
+            console.log('[Wizard] Patient Summary generated and saved (%d chars)', text.length);
+            addSetupLogLine('Wizard Flow', `Patient Summary generated and saved (${text.length} chars)`, true);
+          } else {
+            console.warn('[Wizard] Patient Summary generation returned empty text');
+            addSetupLogLine('Wizard Flow', '[WARNING] Patient Summary generation returned empty', false);
+          }
+        } catch (err) {
+          console.warn('[Wizard] Patient Summary generation failed:', err);
+          addSetupLogLine('Wizard Flow', '[WARNING] Patient Summary generation failed — continuing without it', false);
+        }
+      }
+
+      // Step 2: Open My Lists tab now that the summary is saved
+      console.log('[Wizard] Opening My Lists tab');
       try {
         sessionStorage.setItem('autoProcessInitialFile', 'true');
         sessionStorage.setItem('wizardMyListsAuto', 'true');
@@ -5805,17 +5856,52 @@ const handleCurrentMedicationsSaved = async () => {
   // Guided flow: advance from medications → summary
   if (wizardFlowPhase.value === 'medications') {
     wizardFlowPhase.value = 'summary';
+    guidedFlowDismissCount.value = 0;
+    console.log('[Wizard] Current Medications saved — opening Patient Summary tab');
     addSetupLogLine('Wizard Flow', 'Current Medications saved — opening Patient Summary', true);
     void generateSetupLogPdf();
-    // Switch tab and trigger summary generation in-place via requestAction
+    // Switch to Patient Summary tab. Summary was generated before My Lists opened,
+    // so update it with the verified medications.
     myStuffInitialTab.value = 'summary';
-    wizardRequestAction.value = 'generate-summary';
+    wizardRequestAction.value = preGeneratedSummary.value ? 'update-summary-meds' : 'generate-summary';
   }
 };
 
 const handleMyStuffShowSummary = () => {
   myStuffInitialTab.value = 'summary';
   wizardRequestAction.value = 'generate-summary';
+};
+
+/** Track My Stuff tab opens. Skip brief Saved Files opens (< 1 second). */
+let lastTabOpenTime = 0;
+let lastTabName = '';
+const handleMyStuffTabOpened = (tab: string) => {
+  const now = Date.now();
+  // Log the previous tab if it wasn't 'files' opened for < 1 second
+  if (lastTabName && lastTabName !== tab) {
+    if (lastTabName !== 'files' || (now - lastTabOpenTime) >= 1000) {
+      // Previous tab was meaningful — already logged when it opened
+    }
+  }
+  lastTabOpenTime = now;
+  lastTabName = tab;
+
+  // Don't log 'files' tab — it's the default and gets logged only if kept open > 1s
+  // (handled on close). Log all other tabs immediately.
+  const tabLabels: Record<string, string> = {
+    files: 'Saved Files',
+    agent: 'My AI Agent',
+    chats: 'Saved Chats',
+    summary: 'Patient Summary',
+    privacy: 'Privacy Filter',
+    diary: 'Patient Diary',
+    lists: 'My Lists',
+    references: 'References'
+  };
+
+  if (tab !== 'files') {
+    addSetupLogLine('My Stuff', `Opened ${tabLabels[tab] || tab} tab`, true);
+  }
 };
 
 const handlePatientSummarySaved = async () => {
@@ -6014,20 +6100,52 @@ onMounted(async () => {
 
     watch(() => showMyStuffDialog.value, (isOpen, wasOpen) => {
       if (wasOpen && !isOpen) {
-        // During guided flow, prevent closing — reopen on the appropriate tab
+        // During guided flow, track dismiss count. After 2 dismissals, skip the phase.
         if (wizardFlowPhase.value === 'medications') {
-          void nextTick(() => {
-            myStuffInitialTab.value = 'lists';
-            showMyStuffDialog.value = true;
-          });
+          guidedFlowDismissCount.value += 1;
+          if (guidedFlowDismissCount.value >= 2) {
+            // User dismissed My Lists twice — skip to Patient Summary
+            addSetupLogLine('Wizard Flow', '[WARNING] User dismissed My Lists tab twice during medications phase — skipping to Patient Summary', false);
+            guidedFlowDismissCount.value = 0;
+            wizardFlowPhase.value = 'summary';
+            void generateSetupLogPdf();
+            void nextTick(() => {
+              myStuffInitialTab.value = 'summary';
+              if (preGeneratedSummary.value) {
+                wizardRequestAction.value = 'update-summary-meds';
+              } else {
+                wizardRequestAction.value = 'generate-summary';
+              }
+              showMyStuffDialog.value = true;
+            });
+          } else {
+            // First dismiss — reopen on the same tab
+            void nextTick(() => {
+              myStuffInitialTab.value = 'lists';
+              showMyStuffDialog.value = true;
+            });
+          }
           return;
         }
         if (wizardFlowPhase.value === 'summary') {
-          void nextTick(() => {
-            myStuffInitialTab.value = 'summary';
-            wizardRequestAction.value = 'generate-summary';
-            showMyStuffDialog.value = true;
-          });
+          guidedFlowDismissCount.value += 1;
+          if (guidedFlowDismissCount.value >= 2) {
+            // User dismissed Patient Summary twice — complete wizard
+            addSetupLogLine('Wizard Flow', '[WARNING] User dismissed Patient Summary tab twice — completing wizard without summary', false);
+            guidedFlowDismissCount.value = 0;
+            wizardFlowPhase.value = 'done';
+            void generateSetupLogPdf();
+            persistWizardCompletion();
+            emit('wizard-complete');
+            // Don't reopen — wizard is done
+          } else {
+            // First dismiss — reopen on the same tab
+            void nextTick(() => {
+              myStuffInitialTab.value = 'summary';
+              wizardRequestAction.value = 'generate-summary';
+              showMyStuffDialog.value = true;
+            });
+          }
           return;
         }
         if (wizardStage2Pending.value) {
