@@ -6,102 +6,68 @@ MAIA introduces a patient-controlled Private AI agent that sits between a patien
 
 ### Trust Model
 
-MAIA reduces the number of parties that must be trusted with private information. The host running the service (DigitalOcean in this implementation) must be trusted to run the code without modification. The publisher of the open source code and any verifier also need to be trusted for the integrity of the code they release or audit.
+Unlike Public AI agents, MAIA's trust model does not bundle the AI model policies with the AI hosting policies. The host running the service (DigitalOcean in this implementation) is to be trusted to run this open source code and open source Private AI without modification. The publisher of the open source code and any verifier also needs to be trusted for the integrity of the code they release. Independent verification of code and host is facilitated by the open source design of MAIA.
 
-The design goal is that the author does not need access to anyone's private data. A verifier, even an excellent coding AI, can help confirm the code has no back doors, but they cannot attest to the operational access of whoever provisions a patient's account. This is why MAIA supports user-driven provisioning without third-party assistance.
+A key design goal is that the MAIA software author does not need access to anyone's private data. A verifier, even an excellent coding AI, can help confirm the code has no back doors, but they cannot attest to the operational access of whoever provisions a patient's account. This is why MAIA supports user-driven provisioning without third-party access.
 
-When running MAIA, use your own credit card to pay for hosting. If someone else pays for the service, they control the billing account and can likely control access to your data even if the code has been verified.
+When running MAIA, use your own credit card to pay for hosting. If someone else pays for the service, they control the billing account and can likely control access to your data even if the MAIA code has been verified free of back doors.
 
 ---
 
-## Top 20 User Features
+## Top 19 User Features
 
 1. **Get Started** simple, passwordless entry for new users with self-provisioning wizard.
 2. **Passkey registration** optional to create web-accessible account.
-3. **Local only/no‑passkey or password mode** for private devices.
+3. **Local-only mode** (no passkey or password required) for private devices.
 4. **Sign Out** with optional local snapshot for deleted account restoration.
 5. **Setup Wizard** with multi‑page guidance and feature review.
 6. **My Stuff** dialog for private AI agent instruction, document and privacy management.
-7. **Saved Files** list with KB inclusion checkboxes.
-8. **Saved Files** indexing status and KB summary.
-9. **Upload file** from paperclip / file picker.
-10. **PDF Viewer** modal with paging.
-11. **Text/Markdown Viewer** with page links for source confirmation.
-12. **My Lists** linked to PDF source pages.
-13. **Create Categorized Lists** from Apple Health file.
-14. **AI-assisted Current Medications** patient-reconciled and verified.
-15. **Generate Patient Summary** with editing and verification.
-16. **Switch AI provider** dropdown (Private AI + public models).
-17. **Saved Chats** to local computer and as deep links.
-18. **Open deep link** as guest (isolated view).
-19. **Privacy Filtering** substitutes all names in a chat for pseudonymity.
-20. **Admin Account** and user management page.
+7. **Saved Files** list with KB inclusion checkboxes and indexing status.
+8. **Upload file** from paperclip / file picker.
+9. **PDF Viewer** modal with paging.
+10. **Text/Markdown Viewer** with page links for source confirmation.
+11. **My Lists** linked to PDF source pages.
+12. **Create Categorized Lists** from Apple Health file.
+13. **AI-assisted Current Medications** patient-reconciled and verified.
+14. **Generate Patient Summary** with editing and verification.
+15. **Switch AI provider** dropdown (Private AI + public models).
+16. **Saved Chats** to local computer and as deep links.
+17. **Open deep link** as guest (isolated view).
+18. **Privacy Filtering** substitutes all names in a chat for pseudonymity.
+19. **Admin Account** and user management page.
 ---
 
 ## Key User Account Provisioning Steps
 
-1. **Passkey registration** creates the user document and session.
+1. **Local folder registration** creates the user document and session.
 2. **Agent provisioning** (admin-triggered or auto in some flows):
    - Creates agent, waits for deployment, stores endpoint + API key.
-3. **File import**:
-   - Uploads land in root, metadata stored in Cloudant.
-4. **KB build and indexing**:
-   - Files are moved into `userId/<kbName>/`.
-   - Indexing starts on the folder datasource.
-   - Polling persists status to `userDoc.kbIndexingStatus`.
+3. **File(s) upload**:
+   - Records are prepared for access by the knowledge base (KB)
+4. **KB indexing**:
+   - Uploaded files are indexed into the knowledge base for Private AI retrieval.
 5. **KB attachment**:
-   - Automatically attaches when agent is ready and indexing is complete.
+   - Knowledge base is automatically attached to the agent when ready.
 6. **Current Medications / Patient Summary**:
    - Generated and verified through My Lists and Patient Summary flows.
 
 ---
 
-## Hosting Configuration Notes (Key Env Vars)
+## Documentation
 
-### Passkeys / WebAuthn (single env)
-- `PUBLIC_APP_URL`  
-  **Single source:** passkey origin and allowed origins are derived from this; RPID is derived as the apex domain (e.g. `https://maia.adriang.xyz` → origin `https://maia.adriang.xyz`, RPID `adriang.xyz`). Used for deep links and app URL.
-- `PASSKEY_RPID` (optional)  
-  Override RPID if you need a different domain scope (e.g. full hostname instead of apex).
-- `PASSKEY_ORIGINS` (optional)  
-  Comma-separated allowlist if you need more than the single derived origin.
-
-### Cloudant (users, sessions, audit log)
-- `CLOUDANT_URL`, `CLOUDANT_USERNAME`, `CLOUDANT_PASSWORD`  
-  Required for user docs, sessions, and audit logs.
-
-### CouchDB Droplet (optional, self-hosted database)
-When `USE_COUCHDB_DROPLET=true`, the server auto-creates a DigitalOcean droplet (`ubuntu-s-1vcpu-1gb-tor1-01`) with Dockerized CouchDB and sets `CLOUDANT_*` from it. Credentials are stored in Spaces at `couchdb/credentials.json` so they survive redeploys. Requires `DIGITALOCEAN_TOKEN`, `DIGITALOCEAN_AWS_ACCESS_KEY_ID`, `DIGITALOCEAN_AWS_SECRET_ACCESS_KEY` (bucket name is from NEW-AGENT.txt).
-
-### DigitalOcean GenAI (agents, KBs, indexing)
-- `DIGITALOCEAN_TOKEN`  
-  Auth for DO GenAI REST API.
-- `DO_REGION`, `DO_PROJECT_ID`  
-  Required to create agents and KBs.
-- `DO_EMBEDDING_MODEL_ID` (optional)  
-  Overrides default embedding model. OpenSearch database UUID is parsed from env `OPENSEARCH_URL` (DO dashboard URL).
-
-### DigitalOcean Spaces (file storage)
-- Bucket name is fixed in code (see NEW-AGENT.txt; `getSpacesBucketName()`).
-- `DIGITALOCEAN_AWS_ACCESS_KEY_ID`, `DIGITALOCEAN_AWS_SECRET_ACCESS_KEY`  
-  S3-compatible access to Spaces (endpoint derived from `DO_REGION`).
-
-### OpenSearch (KB creation only)
-- Set **`OPENSEARCH_URL`** in .env to your DO database dashboard URL; the app parses the database UUID from the path (e.g. `https://cloud.digitalocean.com/databases/<uuid>?i=...`).
-
-### App + Email
-- **`PUBLIC_APP_URL`** — Canonical app URL (also drives passkey config; see Passkeys above).
-- `PORT` — Server listen port.
+- [User Guide](public/User_Guide.html) — end-user guide to MAIA features
+- [Environment & Hosting](Documentation/Environment.md) — configuration, secrets, DO token derivation
+- [Account Lifecycle & Wizards](Documentation/Wizards.md) — welcome, setup, sign-out, destroy, and restore flows
 
 ---
 
 ## Hosting Environment
 
 - **App Platform**: Runs the frontend + Node server.
-- **Droplet with Dockerized CouchDB**: Cloudant-compatible data store for users, chats, sessions, and audit log. Can be auto-provisioned via `USE_COUCHDB_DROPLET=true` (see CouchDB Droplet env vars).
+- **Droplet with Dockerized CouchDB**: Cloudant-compatible data store for users, chats, sessions, and audit log. Auto-provisioned when `PUBLIC_APP_URL` uses HTTPS (see [Environment.md](Documentation/Environment.md)).
 - **GenAI Agent**: DigitalOcean Private AI agent per user.
 - **Knowledge Base**: DigitalOcean KB per user, indexed from the Spaces folder datasource.
-- **OpenSearch 2 Database**: Clinical notes indexing/search store.
+- **OpenSearch 2 Database**: Clinical notes indexing/search store with embeddings.
 - **Spaces File Store**: S3-compatible storage for all user files and lists.
 
 ---
@@ -110,7 +76,7 @@ When `USE_COUCHDB_DROPLET=true`, the server auto-creates a DigitalOcean droplet 
 
 ```bash
 npm install
-cp .env.example .env
+# Create .env with required variables — see Documentation/Environment.md
 npm run dev       # Vite (frontend)
 npm run start     # Node (backend)
 ```
