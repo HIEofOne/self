@@ -47,8 +47,10 @@ passkey or create a new account.
   disambiguation dialog first (see below).
 - **Introduction** — loaded from `public/welcome.md`, rendered via
   vue-markdown.
-- **Footer links**: Privacy | FAQ | About — each opens
-  `WelcomeContentDialog` with the corresponding markdown section.
+- **Footer links**: Privacy | User Guide | FAQ | About — each opens a static HTML
+  page (`/privacy.html`, `/User_Guide.html`, `/faq.html`, `/about.html`) in a new
+  tab. Privacy/FAQ/About are generated from `public/welcome.md` by
+  `scripts/build-welcome-pages.js` (run as part of `npm run build`).
 
 ### Get Started Disambiguation
 

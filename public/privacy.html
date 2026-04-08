@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Privacy — MAIA</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      line-height: 1.6;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 2rem 1.5rem;
+      color: #333;
+      background: #fff;
+    }
+    h1 {
+      color: #1976d2;
+      border-bottom: 2px solid #1976d2;
+      padding-bottom: 0.5rem;
+    }
+    h2 {
+      color: #1976d2;
+      margin-top: 2rem;
+    }
+    a { color: #1976d2; }
+    p { margin: 0.8rem 0; }
+    ul, ol { margin: 0.8rem 0 0.8rem 1.5rem; }
+    li { margin: 0.3rem 0; }
+    strong { font-weight: 600; }
+    .faq-item {
+      border-bottom: 1px solid #e0e0e0;
+      padding: 0.75rem 0;
+    }
+    .faq-item:last-child { border-bottom: none; }
+    .faq-item summary {
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 1.05rem;
+      padding: 0.25rem 0;
+      list-style: none;
+    }
+    .faq-item summary::-webkit-details-marker { display: none; }
+    .faq-item summary::before {
+      content: '▶';
+      display: inline-block;
+      margin-right: 0.5rem;
+      transition: transform 0.15s ease;
+      color: #1976d2;
+    }
+    .faq-item[open] summary::before { transform: rotate(90deg); }
+    .faq-answer {
+      padding: 0.5rem 0 0.5rem 1.5rem;
+      color: #555;
+    }
+    .footer {
+      margin-top: 3rem;
+      padding-top: 1rem;
+      border-top: 1px solid #e0e0e0;
+      text-align: center;
+      font-size: 0.85rem;
+      color: #888;
+    }
+  </style>
+</head>
+<body>
+
+<h1>Privacy</h1>
+
+<p><strong>Privacy Note:</strong> This demo will not share your health records or chats with anyone unless you choose to share a chat with a public AI like ChatGPT or via a deep link. The demo host (agropper.xyz, me) could access your records and chats but you will be registered under a pseudonym and I have no reason to fish through anybody's records without a written request. For privacy from me as open source code and cloud hosting administrator, you should get your own copy of the open source code and a Digital Ocean account. Since I don't want to see your records, MAIA creates a maia-setup-log.pdf log file that you can email or post for help. The file has no personal information other than possibly in the file names themselves — if concerned, edit the file names of your records files.</p>
+<p><strong>No Password</strong> (Default) If you are on your own private computer, you can try MAIA without a password or passkey as long as you use the same browser each time. When you &quot;Sign Out&quot; of MAIA, your private records will be backed up locally and can be removed from the cloud. When you return to this MAIA welcome page, we check if your cloud records are still available. If they are not, you may restore MAIA from the local MAIA folder.</p>
+<p><strong>Passkeys</strong> (Optional) Setting a Passkey when you sign-out of a No Password account allows you to access MAIA from another computer, browser, or mobile device.</p>
+<p><strong>The Wizard</strong> Greets you when you start a new MAIA to upload and process your health records into an AI-enhanced knowledge base accessible your Private AI agent. Prepare for the wizard by collecting all the records <strong>for one patient</strong> in a folder on your computer. All health records can be added to start and more can be added or removed at any time. If you have an iPhone or iPad, Apple Health makes it particularly convenient to collect records from most of the patient portals that you have a password for. In the Apple Health app, use &quot;Export PDF&quot; to save the file to your MAIA folder. Your records will be collected in minutes instead of days and MAIA will use them to create a detailed index and will suggest a Current Medications list for you to edit and verify. The Apple Health export PDF records are convenient and well organized, but they don't have the details you get by asking for records from each patient portal and adding them to the folder.</p>
+<p>With MAIA, public AIs like Claude or ChatGPT will not have access to your records except as part of a chat that you see and control. Doctors and other users you invite by sharing a deep link will have access to your records by asking your Private AI questions in the chat. You can disable this option in your My Agent settings.</p>
+<p><strong>AI IS NOT PERFECT</strong> MAIA gives you the opportunity to edit and verify whatever you or others might see in the chats. The Wizard requires verification for Current Medications and the Patient Summary. It is your responsibility to check the responses from Private AI as well as public AIs you choose. MAIA helps you verify by offering direct links to information in the PDF files you imported from your health care providers.</p>
+
+
+<div class="footer">
+  CC-BY MAIA by Adrian Gropper, MD &middot; <a href="/">Back to MAIA</a>
+</div>
+
+</body>
+</html>

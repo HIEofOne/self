@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FAQ — MAIA</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      line-height: 1.6;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 2rem 1.5rem;
+      color: #333;
+      background: #fff;
+    }
+    h1 {
+      color: #1976d2;
+      border-bottom: 2px solid #1976d2;
+      padding-bottom: 0.5rem;
+    }
+    h2 {
+      color: #1976d2;
+      margin-top: 2rem;
+    }
+    a { color: #1976d2; }
+    p { margin: 0.8rem 0; }
+    ul, ol { margin: 0.8rem 0 0.8rem 1.5rem; }
+    li { margin: 0.3rem 0; }
+    strong { font-weight: 600; }
+    .faq-item {
+      border-bottom: 1px solid #e0e0e0;
+      padding: 0.75rem 0;
+    }
+    .faq-item:last-child { border-bottom: none; }
+    .faq-item summary {
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 1.05rem;
+      padding: 0.25rem 0;
+      list-style: none;
+    }
+    .faq-item summary::-webkit-details-marker { display: none; }
+    .faq-item summary::before {
+      content: '▶';
+      display: inline-block;
+      margin-right: 0.5rem;
+      transition: transform 0.15s ease;
+      color: #1976d2;
+    }
+    .faq-item[open] summary::before { transform: rotate(90deg); }
+    .faq-answer {
+      padding: 0.5rem 0 0.5rem 1.5rem;
+      color: #555;
+    }
+    .footer {
+      margin-top: 3rem;
+      padding-top: 1rem;
+      border-top: 1px solid #e0e0e0;
+      text-align: center;
+      font-size: 0.85rem;
+      color: #888;
+    }
+  </style>
+</head>
+<body>
+
+<h1>Frequently Asked Questions</h1>
+
+<details class="faq-item">
+  <summary>How is MAIA different from ChatGPT Health, Claude Health, Microsoft Copilot Health, Amazon Health or Perplexity Health?</summary>
+  <div class="faq-answer">
+<ul>
+<li>MAIA does not ask you to share private information with some AI you don't choose or control.</li>
+<li>MAIA is open source and available for security and privacy analysis at the GitHub. You can ask any frontier AI like Claude Code to review the MAIA code or social media before you use it.</li>
+<li>MAIA, and your private records are hosted separately from the MAIA code. This demo runs at Digital Ocean on my credit card. If you pay for your own hosting at Digital Ocean or an equivalent data center, I will have no access to your data.</li>
+</ul>
+
+  </div>
+</details>
+<details class="faq-item">
+  <summary>Why is an open web and open source important?</summary>
+  <div class="faq-answer">
+<ul>
+<li>As AI agents become more powerful, it's important to keep them under your control.</li>
+</ul>
+
+  </div>
+</details>
+<details class="faq-item">
+  <summary>What are all the files MAIA adds to my health records folder?</summary>
+  <div class="faq-answer">
+<ul>
+<li>These files back up your MAIA so you can avoid keeping private files in the cloud any longer than necessary. This also saves money.</li>
+<li>The log files are useful if you need support. If you make sure your name is not in the filenames, the logs will not disclose any private information.</li>
+<li>If you want more info about these files, point Claude Code to the MAIA GitHub repository (see About) and ask.</li>
+</ul>
+
+  </div>
+</details>
+<details class="faq-item">
+  <summary>Is MAIA regulated by FDA or anyone else?</summary>
+  <div class="faq-answer">
+<ul>
+<li>MAIA is decision support software which is explicitly outside FDA regulation.</li>
+<li>21st Century Cures Act, Pub. L. No. 114-255, §3060(a), 130 Stat. 1033 (2016) (codified at 21 U.S.C. §360j(o)).</li>
+<li>U.S. Food and Drug Administration. Clinical Decision Support Software: Guidance for Industry and Food and Drug Administration Staff. January 6, 2026.</li>
+</ul>
+
+  </div>
+</details>
+<details class="faq-item">
+  <summary>Can my doctor use MAIA?</summary>
+  <div class="faq-answer">
+<ul>
+<li>Yes. When you share a deep link to a chat, your doctor is using MAIA under your consent and there is no FDA or other regulatory restriction.</li>
+<li>Your doctor can also suggest MAIA to you or run a MAIA for you. Medical practice is not federally regulated. A doctor's employer could restrict the use of unapproved software and might require Institutional Review Board approval for MAIA similar AIs.</li>
+</ul>
+
+  </div>
+</details>
+
+<div class="footer">
+  CC-BY MAIA by Adrian Gropper, MD &middot; <a href="/">Back to MAIA</a>
+</div>
+
+</body>
+</html>

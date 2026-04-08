@@ -137,13 +137,13 @@
 
                   <!-- Footer: Privacy | User Guide | FAQ | About + copyright -->
                   <div class="text-center q-mt-lg q-mb-md">
-                    <a href="#" @click.prevent="welcomeDialogSection = 'privacy'; showWelcomeContentDialog = true" class="welcome-footer-link">Privacy</a>
+                    <a href="/privacy.html" target="_blank" class="welcome-footer-link">Privacy</a>
                     <span class="text-grey-5 q-mx-sm">|</span>
                     <a href="/User_Guide.html" target="_blank" class="welcome-footer-link">User Guide</a>
                     <span class="text-grey-5 q-mx-sm">|</span>
-                    <a href="#" @click.prevent="welcomeDialogSection = 'faq'; showWelcomeContentDialog = true" class="welcome-footer-link">FAQ</a>
+                    <a href="/faq.html" target="_blank" class="welcome-footer-link">FAQ</a>
                     <span class="text-grey-5 q-mx-sm">|</span>
-                    <a href="#" @click.prevent="welcomeDialogSection = 'about'; showWelcomeContentDialog = true" class="welcome-footer-link">About</a>
+                    <a href="/about.html" target="_blank" class="welcome-footer-link">About</a>
                     <div class="text-caption text-grey-6 q-mt-sm">CC-BY MAIA v{{ appVersion }} by Adrian Gropper, MD</div>
                   </div>
                 </div>
@@ -285,9 +285,6 @@
         </q-card-actions>
       </q-card>
     </q-dialog>
-
-    <!-- Welcome Content Dialog (Privacy / FAQ / About) -->
-    <WelcomeContentDialog v-model="showWelcomeContentDialog" :section="welcomeDialogSection" />
 
     <!-- Device privacy choice -->
     <q-dialog v-model="showDevicePrivacyDialog" persistent>
@@ -814,7 +811,6 @@ import PasskeyAuth from './components/PasskeyAuth.vue';
 import RestoreWizard from './components/RestoreWizard.vue';
 import ChatInterface from './components/ChatInterface.vue';
 import DeepLinkAccess from './components/DeepLinkAccess.vue';
-import WelcomeContentDialog from './components/WelcomeContentDialog.vue';
 import AdminUsers from './components/AdminUsers.vue';
 import { useQuasar } from 'quasar';
 import { saveUserSnapshot, getUserSnapshot, clearUserSnapshot } from './utils/localDb';
@@ -868,8 +864,6 @@ const deepLinkShareId = ref<string | null>(null);
 const showDeepLinkAccess = ref(false);
 const deepLinkLoading = ref(false);
 const deepLinkError = ref('');
-const showWelcomeContentDialog = ref(false);
-const welcomeDialogSection = ref<'privacy' | 'faq' | 'about'>('privacy');
 const showAdminPage = ref(false);
 const welcomeIntro = ref<string>('');
 const tempStartLoading = ref(false);
