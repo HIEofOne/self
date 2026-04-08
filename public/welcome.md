@@ -43,6 +43,15 @@ With MAIA, public AIs like Claude or ChatGPT will not have access to your record
 * **Can my doctor use MAIA?**
   * Yes. When you share a deep link to a chat, your doctor is using MAIA under your consent and there is no FDA or other regulatory restriction.
   * Your doctor can also suggest MAIA to you or run a MAIA for you. Medical practice is not federally regulated. A doctor's employer could restrict the use of unapproved software and might require Institutional Review Board approval for MAIA similar AIs.
+* **What is the sustainability model for MAIA?**
+  * MAIA is the work of volunteers and voluntarily supported by the community that uses it.
+  * The more people use MAIA, the better and stronger it gets, and then more people use it so the cycle is sustainable.
+  * MAIA offers a referral link for DigitalOcean. If a user clicks the link instead of going to DigitalOcean directly then MAIA gets up to $25 in credit to support our hosting costs. The code is [here](https://m.do.co/c/6837d806e656) and we hope you use it.
+* **How much will MAIA hosting cost at DigitalOcean?**
+  * MAIA hosting costs about $35/month. That would cover up to a dozen family and friends as long as they are not concerned about the account owner invading their privacy.
+  * A single user or small family can run MAIA as needed for about $1/day by destroying the cloud resources when the chats and deep-links are inactive. The records, chats, and deep links are backed up on the user's computer and can be restored to their cloud account or a new cloud account in less than 15 minutes for 1,000 pages of records.
+* **Can I host MAIA on my own computer instead of the cloud?**
+  * Maybe, but it's not practical. Even with a computer costing $thousnds, performace would be abysmal and technical knowledge for privacy and security would be extreme.
 
 <!-- SECTION:about -->
 
