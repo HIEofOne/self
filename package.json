@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "git lfs install && (git lfs pull || true) && vue-tsc && vite build",
+    "build": "git lfs install && (git lfs pull || true) && node scripts/build-welcome-pages.js && vue-tsc && vite build",
     "preview": "vite preview",
     "start": "node server/index.js",
     "dev:server": "nodemon server/index.js",
