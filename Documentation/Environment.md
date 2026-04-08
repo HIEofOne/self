@@ -66,7 +66,7 @@ docker run -d --name couchdb -p 5984:5984 \
 | `maia_users` | User documents (profile, agent info, KB status, indexing state) |
 | `maia_audit_log` | Audit trail |
 | `maia_chats` | Saved chat conversations |
-| `maia_config` | Server configuration (cached DO Inference key) |
+| `maia_config` | Server configuration (cached DO Inference key, OpenSearch database ID) |
 
 ---
 
@@ -74,9 +74,10 @@ docker run -d --name couchdb -p 5984:5984 \
 
 A managed **DigitalOcean OpenSearch** cluster provides vector search for knowledge base queries:
 
-- **Provisioning:** Created once per account via the DO control panel
-- **Access:** The `OPENSEARCH_URL` environment variable contains the DO dashboard URL; the server extracts the database UUID from it to make API calls via the DO GenAI endpoints
+- **Provisioning:** Automatically discovered or created via the DO API at first KB creation. One cluster per account — the server enforces this by checking existing clusters before creating.
+- **Access:** The database UUID is resolved via the DO API (`GET /v2/databases?engine=opensearch`), cached in CouchDB (`maia_config/opensearch_database_id`), and used for KB creation via the DO GenAI endpoints.
 - **Usage:** Agents query the OpenSearch-backed knowledge base when answering user questions
+- **Legacy:** The `OPENSEARCH_URL` env var is still supported as a fallback but is no longer required.
 
 ---
 
@@ -159,10 +160,9 @@ Only these variables are needed in production:
 | Variable | Purpose |
 |---|---|
 | `PUBLIC_APP_URL` | The public URL (e.g., `https://test.agropper.xyz`). Determines secure cookies, trust proxy, and passkey origin. |
-| `DIGITALOCEAN_TOKEN` | Master secret for all DO API calls and derived credentials. |
+| `DIGITALOCEAN_TOKEN` | Master secret for all DO API calls and derived credentials. Also used to auto-discover/create the OpenSearch cluster. |
 | `SPACES_AWS_ACCESS_KEY_ID` | S3-compatible access key for DO Spaces. |
 | `SPACES_AWS_SECRET_ACCESS_KEY` | S3-compatible secret key for DO Spaces. |
-| `OPENSEARCH_URL` | OpenSearch dashboard URL (database UUID is extracted from it). |
 
 ### Local Development
 
@@ -173,7 +173,6 @@ Only these variables are needed in production:
 | `DIGITALOCEAN_TOKEN` | `dop_v1_...` | Required for DO API calls (agents, spaces, inference) |
 | `SPACES_AWS_ACCESS_KEY_ID` | `DO00...` | Same as production |
 | `SPACES_AWS_SECRET_ACCESS_KEY` | `f1Ru...` | Same as production |
-| `OPENSEARCH_URL` | `https://cloud.digitalocean.com/...` | Same as production |
 
 ### Why the Variables Differ Between Local and Cloud
 

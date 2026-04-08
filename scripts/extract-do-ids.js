@@ -1,7 +1,7 @@
 /**
  * Script to extract DigitalOcean IDs from existing agents/KBs
- * This helps capture DO_PROJECT_ID, DO_EMBEDDING_MODEL_ID, and the database UUID
- * for OPENSEARCH_URL (add to .env).
+ * This helps capture DO_PROJECT_ID and DO_EMBEDDING_MODEL_ID.
+ * OpenSearch database UUID is now auto-discovered by the server.
  */
 
 import { config } from 'dotenv';
@@ -49,8 +49,7 @@ async function extractDOIds() {
         const firstKB = await doClient.kb.get(kbs[0].uuid);
         
         if (firstKB.database_id) {
-          console.log(`✅ Found database UUID: ${firstKB.database_id}`);
-          console.log(`   Add to .env: OPENSEARCH_URL=https://cloud.digitalocean.com/databases/${firstKB.database_id} (copy full URL from DO dashboard)\n`);
+          console.log(`✅ Found database UUID: ${firstKB.database_id} (auto-discovered by server, no env var needed)\n`);
         } else {
           console.log('⚠️  KB found but no database_id field\n');
         }
@@ -91,7 +90,7 @@ async function extractDOIds() {
       if (kbs.length > 0) {
         const firstKB = await doClient.kb.get(kbs[0].uuid);
         if (firstKB.database_id) {
-          console.log(`OPENSEARCH_URL=https://cloud.digitalocean.com/databases/${firstKB.database_id}`);
+          console.log(`# OpenSearch database UUID: ${firstKB.database_id} (auto-discovered, no env var needed)`);
         }
         const embeddingModelId = firstKB.embedding_model_uuid || 
                                  firstKB.embedding_model?.uuid;

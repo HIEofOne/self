@@ -79,7 +79,7 @@ When `USE_COUCHDB_DROPLET=true`, the server auto-creates a DigitalOcean droplet 
 - `DO_REGION`, `DO_PROJECT_ID`  
   Required to create agents and KBs.
 - `DO_EMBEDDING_MODEL_ID` (optional)  
-  Overrides default embedding model. OpenSearch database UUID is parsed from env `OPENSEARCH_URL` (DO dashboard URL).
+  Overrides default embedding model. OpenSearch database UUID is auto-discovered via the DO API and cached in CouchDB.
 
 ### DigitalOcean Spaces (file storage)
 - Bucket name is fixed in code (see NEW-AGENT.txt; `getSpacesBucketName()`).
@@ -87,7 +87,7 @@ When `USE_COUCHDB_DROPLET=true`, the server auto-creates a DigitalOcean droplet 
   S3-compatible access to Spaces (endpoint derived from `DO_REGION`).
 
 ### OpenSearch (KB creation only)
-- Set **`OPENSEARCH_URL`** in .env to your DO database dashboard URL; the app parses the database UUID from the path (e.g. `https://cloud.digitalocean.com/databases/<uuid>?i=...`).
+- The OpenSearch cluster is auto-discovered via the DO API and created if needed at first KB creation. One cluster per account is enforced. No env var required.
 
 ### App + Email
 - **`PUBLIC_APP_URL`** — Canonical app URL (also drives passkey config; see Passkeys above).

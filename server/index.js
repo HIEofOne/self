@@ -23,7 +23,7 @@ import { ChatClient } from '../lib/chat-client/index.js';
 import { findUserAgent, getOrCreateAgentApiKey } from './utils/agent-helper.js';
 import { normalizeStorageEnv, getSpacesEndpoint, getSpacesBucketName, getSpacesRegion } from './utils/storage-config.js';
 import { getDoRegion, getPort } from './utils/new-agent-config.js';
-import { getOpenSearchDatabaseId } from './utils/opensearch-config.js';
+import { getOrCreateOpenSearchDatabaseId } from './utils/opensearch-config.js';
 import { getEmbeddingModelIdForKb } from './utils/embedding-model-config.js';
 import { getProjectIdForGenAI } from './utils/project-config.js';
 import setupAuthRoutes from './routes/auth.js';
@@ -797,8 +797,10 @@ const doClient = new DigitalOceanClient(doToken, {
   region: getDoRegion()
 });
 
-// Log OpenSearch database_id resolution at startup (for KB creation)
-getOpenSearchDatabaseId();
+// Resolve OpenSearch database_id at startup (for KB creation) — async, warms the cache
+getOrCreateOpenSearchDatabaseId(doClient, cloudant).catch(err =>
+  console.warn(`[OpenSearch] Startup resolution failed: ${err.message}`)
+);
 
 // Simple in-memory caches to reduce repeated DO API calls
 const RESOURCE_CACHE_TTL = 30 * 1000; // 30 seconds
@@ -6417,9 +6419,9 @@ async function setupKnowledgeBase(userId, kbName, filesInKB, bucketName, existin
       };
     }
 
-    // Get required values: projectId from env or DO API; databaseId from opensearch-config; embedding from NEW-AGENT.txt (resolved via DO API) or DO_EMBEDDING_MODEL_ID
+    // Get required values: projectId from env or DO API; databaseId via DO API/CouchDB cache; embedding from NEW-AGENT.txt (resolved via DO API) or DO_EMBEDDING_MODEL_ID
     const projectId = await getProjectIdForGenAI(doClient);
-    const databaseId = getOpenSearchDatabaseId();
+    const databaseId = await getOrCreateOpenSearchDatabaseId(doClient, cloudant);
     const embeddingModelId = await getEmbeddingModelIdForKb(doClient) || null;
     
     // Validate UUID format helper
@@ -6438,9 +6440,9 @@ async function setupKnowledgeBase(userId, kbName, filesInKB, bucketName, existin
     }
     
     if (!isValidUUID(databaseId)) {
-      return { 
-        error: 'DATABASE_ID_NOT_CONFIGURED', 
-        message: 'OpenSearch database_id is required. Set OPENSEARCH_URL in .env to your DO database dashboard URL (e.g. https://cloud.digitalocean.com/databases/<uuid>?i=...).' 
+      return {
+        error: 'DATABASE_ID_NOT_CONFIGURED',
+        message: 'OpenSearch database_id is required. Ensure DIGITALOCEAN_TOKEN is set — the database is auto-discovered or created via the DO API.'
       };
     }
     

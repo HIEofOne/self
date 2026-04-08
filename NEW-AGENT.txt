@@ -375,7 +375,7 @@ DigitalOcean uses an S3-compatible Spaces bucket to pass files to the OpenSearch
 We call this bucket "maia" and the subfolders are named by userId.
 
 ## OpenSearch (DO-managed)
-OpenSearch is created as part of provisioning; one cluster per account, shared by all knowledge bases. The app uses only the database UUID (for KB creation). Set env OPENSEARCH_URL (DO dashboard URL for the cluster; the UUID is parsed from the path).
+OpenSearch is created as part of provisioning; one cluster per account, shared by all knowledge bases. The app uses only the database UUID (for KB creation). The database UUID is auto-discovered via the DO API and cached in CouchDB. No env var required.
 
 ## Embedding model (Knowledge base)
 embedding_model: GTE Large EN v1.5

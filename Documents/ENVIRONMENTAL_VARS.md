@@ -81,4 +81,8 @@ Spaces secret key (S3-compatible). Used with the access key and endpoint for all
 
 ## OpenSearch (DO-managed, KB creation only)
 
-OpenSearch is provided by DigitalOcean; one cluster per account, shared by all knowledge bases. The app uses only the **database UUID** (for KB creation so new KBs attach to the existing cluster). No direct OpenSearch access or credentials. **Set env `OPENSEARCH_URL`** to your DO database dashboard URL; the app parses the UUID from the path (e.g. `https://cloud.digitalocean.com/databases/95abbf7a-d15c-4048-a47c-8e20ee31fef5?i=...`).
+OpenSearch is provided by DigitalOcean; one cluster per account, shared by all knowledge bases. The app uses only the **database UUID** (for KB creation so new KBs attach to the existing cluster). No direct OpenSearch access or credentials.
+
+The database UUID is **auto-discovered** from the DO API (`GET /v2/databases?engine=opensearch`) and cached in CouchDB (`maia_config/opensearch_database_id`). If no cluster exists, one is created automatically at first KB creation. The server enforces a maximum of one OpenSearch cluster per account.
+
+**Legacy:** `OPENSEARCH_URL` is still accepted as a fallback (the UUID is parsed from the dashboard URL path) but is no longer required.
