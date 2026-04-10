@@ -55,40 +55,9 @@ When running MAIA, use your own credit card to pay for hosting. If someone else 
 
 ## Documentation
 
-### Passkeys / WebAuthn (single env)
-- `PUBLIC_APP_URL`  
-  **Single source:** passkey origin and allowed origins are derived from this; RPID is derived as the apex domain (e.g. `https://maia.adriang.xyz` → origin `https://maia.adriang.xyz`, RPID `adriang.xyz`). Used for deep links and app URL.
-- `PASSKEY_RPID` (optional)  
-  Override RPID if you need a different domain scope (e.g. full hostname instead of apex).
-- `PASSKEY_ORIGINS` (optional)  
-  Comma-separated allowlist if you need more than the single derived origin.
-
-### Cloudant (users, sessions, audit log)
-- `CLOUDANT_URL`, `CLOUDANT_USERNAME`, `CLOUDANT_PASSWORD`  
-  Required for user docs, sessions, and audit logs.
-
-### CouchDB Droplet (optional, self-hosted database)
-When `USE_COUCHDB_DROPLET=true`, the server auto-creates a DigitalOcean droplet (`ubuntu-s-1vcpu-1gb-tor1-01`) with Dockerized CouchDB and sets `CLOUDANT_*` from it. Credentials are stored in Spaces at `couchdb/credentials.json` so they survive redeploys. Requires `DIGITALOCEAN_TOKEN`, `DIGITALOCEAN_AWS_ACCESS_KEY_ID`, `DIGITALOCEAN_AWS_SECRET_ACCESS_KEY` (bucket name is from NEW-AGENT.txt).
-
-### DigitalOcean GenAI (agents, KBs, indexing)
-- `DIGITALOCEAN_TOKEN`  
-  Auth for DO GenAI REST API.
-- `DO_REGION`, `DO_PROJECT_ID`  
-  Required to create agents and KBs.
-- `DO_EMBEDDING_MODEL_ID` (optional)  
-  Overrides default embedding model. OpenSearch database UUID is auto-discovered via the DO API and cached in CouchDB.
-
-### DigitalOcean Spaces (file storage)
-- Bucket name is fixed in code (see NEW-AGENT.txt; `getSpacesBucketName()`).
-- `DIGITALOCEAN_AWS_ACCESS_KEY_ID`, `DIGITALOCEAN_AWS_SECRET_ACCESS_KEY`  
-  S3-compatible access to Spaces (endpoint derived from `DO_REGION`).
-
-### OpenSearch (KB creation only)
-- The OpenSearch cluster is auto-discovered via the DO API and created if needed at first KB creation. One cluster per account is enforced. No env var required.
-
-### App + Email
-- **`PUBLIC_APP_URL`** — Canonical app URL (also drives passkey config; see Passkeys above).
-- `PORT` — Server listen port.
+- [User Guide](public/User_Guide.html) — end-user guide to MAIA features
+- [Environment & Hosting](Documentation/Environment.md) — configuration, secrets, DO token derivation
+- [Account Lifecycle & Wizards](Documentation/Wizards.md) — welcome, setup, sign-out, destroy, and restore flows
 
 ---
 
