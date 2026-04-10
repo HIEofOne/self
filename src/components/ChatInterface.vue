@@ -324,7 +324,7 @@
                 Creating account for <strong>{{ props.user?.userId || 'Guest' }}</strong>. This can take 5 to 60 minutes.
               </div>
             </div>
-            <q-btn flat round dense icon="close" color="grey-7" @click="dismissWizard" />
+            <q-btn v-if="!wizardPreparingRecords" flat round dense icon="close" color="grey-7" @click="dismissWizard" />
           </div>
         </q-card-section>
 
@@ -433,15 +433,17 @@
             </q-item>
 
             <!-- Current Medications -->
-            <q-item v-if="stage2StatusDisplay.show || wizardCurrentMedications" dense class="q-py-xs">
+            <q-item v-if="stage2StatusDisplay.show || wizardCurrentMedications || wizardPreparingRecords" dense class="q-py-xs">
               <q-item-section avatar style="min-width: 28px">
                 <q-icon v-if="wizardCurrentMedications" name="check_circle" color="green" size="sm" />
+                <q-spinner v-else-if="wizardPreparingRecords" size="sm" color="primary" />
                 <q-icon v-else name="radio_button_unchecked" color="grey-4" size="sm" />
               </q-item-section>
               <q-item-section>
-                <q-item-label :class="{ 'text-grey-5': !wizardCurrentMedications && !stage2StatusDisplay.completed }">
+                <q-item-label :class="{ 'text-grey-5': !wizardCurrentMedications && !stage2StatusDisplay.completed && !wizardPreparingRecords }">
                   Current Medications
                   <span v-if="wizardCurrentMedications" class="text-green text-caption q-ml-sm">Verified</span>
+                  <span v-else-if="wizardPreparingRecords" class="text-primary text-caption q-ml-sm">Preparing...</span>
                   <q-btn
                     v-else-if="stage2StatusDisplay.completed && wizardStage1Complete"
                     flat dense size="sm" color="orange-8" label="Verify"
@@ -453,15 +455,17 @@
             </q-item>
 
             <!-- Patient Summary -->
-            <q-item v-if="stage2StatusDisplay.show || wizardPatientSummary" dense class="q-py-xs">
+            <q-item v-if="stage2StatusDisplay.show || wizardPatientSummary || wizardPreparingRecords" dense class="q-py-xs">
               <q-item-section avatar style="min-width: 28px">
                 <q-icon v-if="wizardPatientSummary" name="check_circle" color="green" size="sm" />
+                <q-spinner v-else-if="wizardPreparingRecords" size="sm" color="primary" />
                 <q-icon v-else name="radio_button_unchecked" color="grey-4" size="sm" />
               </q-item-section>
               <q-item-section>
-                <q-item-label :class="{ 'text-grey-5': !wizardPatientSummary && !stage2StatusDisplay.completed }">
+                <q-item-label :class="{ 'text-grey-5': !wizardPatientSummary && !stage2StatusDisplay.completed && !wizardPreparingRecords }">
                   Patient Summary
                   <span v-if="wizardPatientSummary" class="text-green text-caption q-ml-sm">Verified</span>
+                  <span v-else-if="wizardPreparingRecords" class="text-primary text-caption q-ml-sm">Preparing...</span>
                   <q-btn
                     v-else-if="stage2StatusDisplay.completed && wizardStage1Complete && (!wizardHasAppleHealthFile || wizardCurrentMedications)"
                     flat dense size="sm" color="orange-8" label="Verify"
@@ -482,7 +486,7 @@
 
         <q-card-actions align="right">
           <q-btn
-            v-if="wizardStage1Complete && (indexingStatus?.phase === 'complete' || !stage3HasFiles)"
+            v-if="wizardStage1Complete && (indexingStatus?.phase === 'complete' || !stage3HasFiles) && !wizardPreparingRecords"
             unelevated label="Continue" color="primary"
             @click="dismissWizard"
           />
@@ -980,6 +984,9 @@ const wizardFlowPhase = ref<'running' | 'medications' | 'summary' | 'done'>('don
 /** Pre-generated Patient Summary text created at the start of the guided flow.
  *  Generated in the background so it's available if Lists needs Current Medications. */
 const preGeneratedSummary = ref<string | null>(null);
+/** True while the wizard is generating Patient Summary and preparing to open My Lists.
+ *  Keeps the wizard dialog visible so the user doesn't see a zombie chat. */
+const wizardPreparingRecords = ref(false);
 
 // ── Safari / basic fallback folder state ────────────────────────
 /** Files collected via webkitdirectory input (Safari) or single-file input (basic). */
@@ -5544,10 +5551,11 @@ watch(
       (localFolderHandle.value || safariFolderName.value) &&
       wizardFlowPhase.value === 'running'
     ) {
-      // Both indexing and agent are done — transition to medications phase
+      // Both indexing and agent are done — transition to medications phase.
+      // Keep the wizard dialog OPEN with spinners so the user doesn't see a zombie chat.
       addSetupLogLine('Wizard Flow', 'Indexing and agent both complete — starting guided review', true);
       void generateSetupLogPdf();
-      showAgentSetupDialog.value = false;
+      wizardPreparingRecords.value = true;
       if (wizardTimeoutTimer) {
         clearTimeout(wizardTimeoutTimer);
         wizardTimeoutTimer = null;
@@ -5557,6 +5565,7 @@ watch(
 
       // Step 1: Generate and save Patient Summary BEFORE opening My Lists.
       // This ensures the summary is available when Lists.vue needs to extract medications.
+      // The wizard dialog stays visible with "Preparing..." spinners during this.
       preGeneratedSummary.value = null;
       if (props.user?.userId) {
         console.log('[Wizard] Generating Patient Summary before opening My Lists...');
@@ -5596,7 +5605,10 @@ watch(
         }
       }
 
-      // Step 2: Open My Lists tab now that the summary is saved
+      // Step 2: Close wizard dialog and open My Lists tab now that the summary is saved.
+      // My Lists has its own spinner for file processing and medication extraction.
+      wizardPreparingRecords.value = false;
+      showAgentSetupDialog.value = false;
       console.log('[Wizard] Opening My Lists tab');
       try {
         sessionStorage.setItem('autoProcessInitialFile', 'true');
