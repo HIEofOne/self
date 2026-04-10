@@ -5078,6 +5078,10 @@ const requestNewSummary = async () => {
       await handleReplaceSummary('newest', (result.summary || '').trim());
     } else {
       // All slots full - show dialog to choose which summary to replace
+      // Sync local summaries from server so Replace buttons render correctly
+      if (result.summaries) {
+        patientSummaries.value = result.summaries;
+      }
       savedCurrentSummaryForUndo.value = result.savedCurrentSummary || null;
       newSummaryToReplace.value = (result.summary || '').trim();
       showReplaceSummaryDialog.value = true;
@@ -5439,20 +5443,27 @@ const saveSummaryFromTab = async () => {
     isEditingSummaryTab.value = false;
     emit('patient-summary-saved', { userId: props.userId });
 
-    // Extract Current Medications from Patient Summary and save automatically
+    // Extract Current Medications from Patient Summary and save — but only if
+    // the user hasn't already verified medications (their verified list is authoritative).
     try {
-      const medsText = extractMedicationsFromSummary(summaryToSave);
-      if (medsText) {
-        await fetch('/api/user-current-medications', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify({
-            userId: props.userId,
-            currentMedications: medsText
-          })
-        });
-        emit('current-medications-saved', { value: medsText, edited: false });
+      const statusRes = await fetch(`/api/user-status?userId=${encodeURIComponent(props.userId)}`, {
+        credentials: 'include'
+      });
+      const hasVerifiedMeds = statusRes.ok && (await statusRes.json()).currentMedications;
+      if (!hasVerifiedMeds) {
+        const medsText = extractMedicationsFromSummary(summaryToSave);
+        if (medsText) {
+          await fetch('/api/user-current-medications', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({
+              userId: props.userId,
+              currentMedications: medsText
+            })
+          });
+          emit('current-medications-saved', { value: medsText, edited: false });
+        }
       }
     } catch (medsError) {
       console.warn('Failed to auto-save medications from summary:', medsError);
@@ -5741,6 +5752,8 @@ watch(currentTab, async (newTab) => {
       }
     } else if (newTab === 'lists') {
       if (listsComponentRef.value) {
+        // Re-check for new Apple Health files (may have been added since last visit)
+        await listsComponentRef.value.checkInitialFile();
         listsComponentRef.value.reloadCategories();
         listsComponentRef.value.loadWizardAutoFlow();
         listsComponentRef.value.attemptAutoProcessInitialFile();
