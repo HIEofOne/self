@@ -2538,7 +2538,8 @@ watch(markdownContent, (newMarkdown) => {
 defineExpose({
   reloadCategories,
   loadWizardAutoFlow,
-  attemptAutoProcessInitialFile
+  attemptAutoProcessInitialFile,
+  checkInitialFile
 });
 </script>
 
