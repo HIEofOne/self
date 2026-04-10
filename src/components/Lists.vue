@@ -1034,9 +1034,11 @@ const attemptAutoProcessInitialFile = async () => {
   } else {
     sessionStorage.removeItem('autoProcessInitialFile');
     logWizardEvent('lists_auto_start_failed', { hasInitialFile: false });
-    console.log('[Lists] No Apple Health file found after retries — falling back to loadCurrentMedications');
-    // No Apple Health file — still try to load/generate Current Medications
-    loadCurrentMedications();
+    // No Apple Health file — try to load/generate Current Medications (if not already loaded)
+    if (!currentMedications.value && !isCurrentMedicationsEdited.value) {
+      console.log('[Lists] No Apple Health file found after retries — falling back to loadCurrentMedications');
+      loadCurrentMedications();
+    }
   }
 };
 
@@ -2103,24 +2105,17 @@ const reloadCategories = async () => {
 onMounted(async () => {
   loadWizardAutoFlow();
 
-  // In wizard mode, medications are loaded via attemptAutoProcessInitialFile → loadCurrentMedications.
-  // In non-wizard mode, load medications directly in parallel with file loading.
-  const medsPromise = wizardAutoFlow.value
-    ? Promise.resolve().then(() => { isInitialMedsLoading.value = false; })
-    : loadCurrentMedications();
+  // Always try to load saved medications from the user document first.
+  // This returns instantly if medications are saved, avoiding the 10-second
+  // retry chain in attemptAutoProcessInitialFile.
+  await loadCurrentMedications();
+  isInitialMedsLoading.value = false;
 
   await checkInitialFile();
   await loadSavedResults();
 
-  if (wizardAutoFlow.value && !hasSavedResults.value) {
-    isInitialMedsLoading.value = false;
-  } else if (wizardAutoFlow.value && hasSavedResults.value) {
-    // Wizard was active but we have saved results — load meds once
-    await loadCurrentMedications();
-  }
-  await medsPromise;
-
-  if (!hasSavedResults.value) {
+  // Only start auto-processing if no medications were loaded AND no saved results
+  if (!hasSavedResults.value && !currentMedications.value) {
     await nextTick();
     attemptAutoProcessInitialFile();
   }
@@ -2510,7 +2505,7 @@ const hasMedicationRecords = computed(() => {
 // Reload categories when component is activated (if using KeepAlive)
 onActivated(() => {
   reloadCategories();
-  if (!hasSavedResults.value) {
+  if (!hasSavedResults.value && !currentMedications.value) {
     attemptAutoProcessInitialFile();
   }
 });
@@ -2519,7 +2514,7 @@ watch(hasInitialFile, (value) => {
   if (!value) return;
   const autoProcess = sessionStorage.getItem('autoProcessInitialFile');
   const shouldAutoProcess = autoProcess === 'true' || wizardAutoFlow.value;
-  if (shouldAutoProcess && !isProcessing.value && !hasSavedResults.value) {
+  if (shouldAutoProcess && !isProcessing.value && !hasSavedResults.value && !currentMedications.value) {
     attemptAutoProcessInitialFile();
   }
 });
