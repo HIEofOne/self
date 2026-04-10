@@ -5181,7 +5181,7 @@ const checkMedicationsConsistency = async () => {
     if (normalizedList !== normalizedSummary) {
       showMedsMismatchDialog.value = true;
       // Log to setup log
-      fetch('/api/wizard-event', {
+      fetch('/api/wizard-log', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -5239,7 +5239,7 @@ const replaceMedicationsInSummary = (summaryText: string, newMedsText: string): 
 const handleMedsMismatchUpdate = async () => {
   showMedsMismatchDialog.value = false;
   medsMismatchAcknowledged.value = true;
-  fetch('/api/wizard-event', {
+  fetch('/api/wizard-log', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
     body: JSON.stringify({ userId: props.userId, event: 'Dialog: Medications Mismatch — user chose UPDATE', details: {} })
   }).catch(() => {});
@@ -5384,7 +5384,7 @@ const updateSummaryWithVerifiedMeds = async () => {
 const handleMedsMismatchAcknowledge = () => {
   showMedsMismatchDialog.value = false;
   medsMismatchAcknowledged.value = true;
-  fetch('/api/wizard-event', {
+  fetch('/api/wizard-log', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
     body: JSON.stringify({ userId: props.userId, event: 'Dialog: Medications Mismatch — user chose I UNDERSTAND', details: {} })
   }).catch(() => {});

@@ -1879,8 +1879,8 @@ const countObservationsByPageRange = (markedMarkdown: string): void => {
   });
   
   // After processing categories: if Medication Records exist, load current medications from file; otherwise open block for editing with user-reported title
-  // Guard: skip if medications are already loaded/edited, currently being loaded, or already present
-  if (!isCurrentMedicationsEdited.value && !currentMedications.value && !loadCurrentMedicationsRunning) {
+  // Guard: skip if medications are already loaded/edited, currently being loaded, already present, or mount still initializing
+  if (!isCurrentMedicationsEdited.value && !currentMedications.value && !loadCurrentMedicationsRunning && !mountInitializing) {
     const medicationCategory = categoriesList.value.find(cat =>
       cat.name.toLowerCase().includes('medication')
     );
@@ -2119,7 +2119,10 @@ onMounted(async () => {
     await nextTick();
     attemptAutoProcessInitialFile();
   }
-  
+
+  // Mount complete — allow onActivated/watchers to proceed
+  mountInitializing = false;
+
   // Check if we should auto-edit medications (from deep link)
   const autoEdit = sessionStorage.getItem('autoEditMedications');
   if (autoEdit === 'true' && currentMedications.value) {
@@ -2207,6 +2210,8 @@ const extractMedicationsFromSummary = (summaryText: string): string | null => {
 
 // Mutex to prevent concurrent calls to loadCurrentMedications
 let loadCurrentMedicationsRunning = false;
+// Guard: onMounted is still initializing — suppress duplicate loads from onActivated/watchers
+let mountInitializing = true;
 
 // Load current medications from user document, Patient Summary, or Medication Records
 const loadCurrentMedications = async (forceRefresh = false) => {
@@ -2504,6 +2509,7 @@ const hasMedicationRecords = computed(() => {
 
 // Reload categories when component is activated (if using KeepAlive)
 onActivated(() => {
+  if (mountInitializing) return; // onMounted still running — skip
   reloadCategories();
   if (!hasSavedResults.value && !currentMedications.value) {
     attemptAutoProcessInitialFile();
