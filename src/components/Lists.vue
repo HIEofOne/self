@@ -818,6 +818,11 @@ const copyItemToClipboard = async (item: any, categoryName: string) => {
 };
 
 const processInitialFile = async (overrideFile?: { bucketKey: string; fileName?: string }) => {
+  // Prevent duplicate concurrent calls (race between onMounted and watchers)
+  if (isProcessing.value) {
+    console.log('[Lists] processInitialFile skipped — already processing');
+    return;
+  }
   logWizardEvent('lists_processing_start');
   wizardAutoStartPending.value = false;
   isProcessing.value = true;
@@ -2517,6 +2522,8 @@ onActivated(() => {
 
 watch(hasInitialFile, (value) => {
   if (!value) return;
+  // Skip during onMounted — it will call attemptAutoProcessInitialFile itself
+  if (mountInitializing) return;
   const autoProcess = sessionStorage.getItem('autoProcessInitialFile');
   const shouldAutoProcess = autoProcess === 'true' || wizardAutoFlow.value;
   if (shouldAutoProcess && !isProcessing.value && !hasSavedResults.value) {

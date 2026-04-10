@@ -321,7 +321,12 @@
             <div class="col">
               <div class="text-h6">Setting Up Your MAIA</div>
               <div class="text-caption text-grey-7 q-mt-xs">
-                Creating account for <strong>{{ props.user?.userId || 'Guest' }}</strong>. This can take 5 to 60 minutes.
+                <template v-if="wizardPreparingRecords">
+                  Preparing health records for <strong>{{ props.user?.userId || 'Guest' }}</strong>. Almost done...
+                </template>
+                <template v-else>
+                  Creating account for <strong>{{ props.user?.userId || 'Guest' }}</strong>. This can take 5 to 60 minutes.
+                </template>
               </div>
             </div>
             <q-btn v-if="!wizardPreparingRecords" flat round dense icon="close" color="grey-7" @click="dismissWizard" />
