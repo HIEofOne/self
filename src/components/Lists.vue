@@ -1877,7 +1877,8 @@ const countObservationsByPageRange = (markedMarkdown: string): void => {
   });
   
   // After processing categories: if Medication Records exist, load current medications from file; otherwise open block for editing with user-reported title
-  if (!isCurrentMedicationsEdited.value) {
+  // Guard: skip if medications are already loaded/edited, currently being loaded, or already present
+  if (!isCurrentMedicationsEdited.value && !currentMedications.value && !loadCurrentMedicationsRunning) {
     const medicationCategory = categoriesList.value.find(cat =>
       cat.name.toLowerCase().includes('medication')
     );
