@@ -2941,8 +2941,15 @@ const generateSetupLogPdf = async () => {
       doc.setFontSize(9);
       continue;
     }
-    // Bold entries — milestone events (wizard start/complete, welcome page, tab actions)
-    if (line.bold) {
+    // Bold entries — milestone events detected by step name OR explicit bold flag.
+    // Step-name detection ensures old entries (logged before bold flag existed) also render bold.
+    const isBoldStep = line.bold ||
+      line.step === 'Wizard' || line.step === 'Wizard Dialog' ||
+      (line.step === 'Wizard Flow' && (line.detail.includes('wizard complete') || line.detail.includes('guided review') || line.detail.includes('skipping to'))) ||
+      (line.step === 'My Stuff') ||
+      (line.step === 'Dialog' && line.detail.includes('My Stuff')) ||
+      (line.step === 'Current Medications' && line.detail.includes('verified'));
+    if (isBoldStep) {
       y += 2;
       doc.setFontSize(10);
       doc.setFont('helvetica', 'bold');
