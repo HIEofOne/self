@@ -979,7 +979,7 @@ const localFolderFiles = ref<MaiaFileEntry[]>([]);
 const localFolderAutoRunActive = ref(false);
 const localFolderAutoRunPhase = ref<string>('');
 /** Setup log lines accumulated during the auto-run wizard. */
-const setupLogLines = ref<Array<{ time: string; step: string; detail: string; ok: boolean }>>([]);
+const setupLogLines = ref<Array<{ time: string; step: string; detail: string; ok: boolean; bold?: boolean }>>([]);
 /** 60-minute timeout — show failure modal asking user to email setup log to tech support. */
 const wizardTimeoutModalVisible = ref(false);
 let wizardTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1189,7 +1189,7 @@ watch(
   () => showAgentSetupDialog.value,
   (isOpen, wasOpen) => {
     if (isOpen) {
-      addSetupLogLine('Wizard Dialog', 'Setup wizard opened', true);
+      addSetupLogLine('Wizard', 'Setup wizard started', true, true);
       wizardSlideIndex.value = 0;
       void loadWizardMessages();
       void positionWizardInlineDots();
@@ -1211,7 +1211,7 @@ watch(
         }, 1000);
       }
     } else if (wasOpen) {
-      addSetupLogLine('Wizard Dialog', 'Setup wizard closed', true);
+      addSetupLogLine('Wizard', 'Setup wizard closed', true, true);
       nextTick(() => void checkAndShowNeedsIndexingPrompt());
     }
   }
@@ -1237,10 +1237,10 @@ watch(() => showPrivateUnavailableDialog.value, (open) => {
   if (open) addSetupLogLine('Dialog', 'Private AI Unavailable dialog shown', false);
 });
 watch(() => showRestoreCompleteDialog.value, (open) => {
-  if (open) addSetupLogLine('Dialog', 'Restore complete dialog shown', true);
+  if (open) addSetupLogLine('Wizard', 'Restore wizard complete', true, true);
 });
 watch(() => showMyStuffDialog.value, (open, was) => {
-  if (open && !was) addSetupLogLine('Dialog', 'My Stuff dialog opened', true);
+  if (open && !was) addSetupLogLine('My Stuff', 'My Stuff dialog opened', true, true);
 });
 
 // Deferred-indexing watcher removed — indexing now starts immediately in runAutoWizard.
@@ -2453,7 +2453,7 @@ const parseUserAgent = (): string => {
 // Steps that should only appear once per session (watcher-driven, can re-fire on remount)
 const oneTimeLogSteps = new Set(['Indexing Complete', 'Current Medications', 'Wizard Flow']);
 
-const addSetupLogLine = (step: string, detail: string, ok: boolean) => {
+const addSetupLogLine = (step: string, detail: string, ok: boolean, bold = false) => {
   // Deduplicate within current session
   const lastSessionIdx = setupLogLines.value.map(l => l.step).lastIndexOf('Session Start');
   const sessionLines = lastSessionIdx >= 0 ? setupLogLines.value.slice(lastSessionIdx) : setupLogLines.value;
@@ -2466,7 +2466,8 @@ const addSetupLogLine = (step: string, detail: string, ok: boolean) => {
     time: new Date().toISOString(),
     step,
     detail,
-    ok
+    ok,
+    ...(bold ? { bold: true } : {})
   });
 };
 
@@ -2932,10 +2933,34 @@ const generateSetupLogPdf = async () => {
       doc.line(margin, y, pageWidth - margin, y);
       y += 6;
       doc.setFontSize(10);
+      doc.setFont('helvetica', 'bold');
       const timestamp = new Date(line.time).toLocaleTimeString();
       doc.text(`[${timestamp}] ${line.detail}`, margin, y);
       y += 8;
+      doc.setFont('helvetica', 'normal');
       doc.setFontSize(9);
+      continue;
+    }
+    // Bold entries — milestone events (wizard start/complete, welcome page, tab actions)
+    if (line.bold) {
+      y += 2;
+      doc.setFontSize(10);
+      doc.setFont('helvetica', 'bold');
+      const statusIcon = line.ok ? '[OK]' : '[FAIL]';
+      const timestamp = new Date(line.time).toLocaleTimeString();
+      const text = `${statusIcon} [${timestamp}] ${line.step}: ${line.detail}`;
+      const splitLines = doc.splitTextToSize(text, maxWidth);
+      for (const sl of splitLines) {
+        if (y > 270) {
+          doc.addPage();
+          y = 20;
+        }
+        doc.text(sl, margin, y);
+        y += 6;
+      }
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9);
+      y += 2;
       continue;
     }
     const statusIcon = line.ok ? '[OK]' : '[FAIL]';
@@ -5558,7 +5583,7 @@ watch(
     ) {
       // Both indexing and agent are done — transition to medications phase.
       // Keep the wizard dialog OPEN with spinners so the user doesn't see a zombie chat.
-      addSetupLogLine('Wizard Flow', 'Indexing and agent both complete — starting guided review', true);
+      addSetupLogLine('Wizard', 'Indexing and agent both complete — starting guided review', true, true);
       void generateSetupLogPdf();
       wizardPreparingRecords.value = true;
       if (wizardTimeoutTimer) {
@@ -5610,10 +5635,9 @@ watch(
         }
       }
 
-      // Step 2: Close wizard dialog and open My Lists tab now that the summary is saved.
-      // My Lists has its own spinner for file processing and medication extraction.
+      // Step 2: Open My Lists tab FIRST, then close wizard dialog.
+      // Opening My Stuff before closing the wizard prevents a flash of the empty chat.
       wizardPreparingRecords.value = false;
-      showAgentSetupDialog.value = false;
       console.log('[Wizard] Opening My Lists tab');
       try {
         sessionStorage.setItem('autoProcessInitialFile', 'true');
@@ -5621,6 +5645,8 @@ watch(
       } catch { /* ignore */ }
       myStuffInitialTab.value = 'lists';
       showMyStuffDialog.value = true;
+      // Close wizard dialog after My Stuff is open (My Stuff dialog covers the screen)
+      showAgentSetupDialog.value = false;
     }
   }
 );
@@ -5865,6 +5891,7 @@ const handleReferenceFileAdded = async (file: { fileName: string; bucketKey: str
 };
 
 const handleCurrentMedicationsSaved = async () => {
+  addSetupLogLine('My Stuff', 'Current Medications saved/verified on My Lists tab', true, true);
   wizardCurrentMedications.value = true;
   wizardStage2Complete.value = true;
   wizardStage2Pending.value = false;
@@ -5917,11 +5944,12 @@ const handleMyStuffTabOpened = (tab: string) => {
   };
 
   if (tab !== 'files') {
-    addSetupLogLine('My Stuff', `Opened ${tabLabels[tab] || tab} tab`, true);
+    addSetupLogLine('My Stuff', `Opened ${tabLabels[tab] || tab} tab`, true, true);
   }
 };
 
 const handlePatientSummarySaved = async () => {
+  addSetupLogLine('My Stuff', 'Patient Summary saved on Patient Summary tab', true, true);
   // Saving a new summary does not mean it was verified
   wizardPatientSummary.value = false;
   showAgentSetupDialog.value = false;
@@ -5930,7 +5958,7 @@ const handlePatientSummarySaved = async () => {
   // Guided flow: saving summary also completes the flow
   if (wizardFlowPhase.value === 'summary') {
     wizardFlowPhase.value = 'done';
-    addSetupLogLine('Wizard Flow', 'Patient Summary saved — wizard complete', true);
+    addSetupLogLine('Wizard', 'Setup wizard complete — Patient Summary saved', true, true);
     persistWizardCompletion();
     void generateSetupLogPdf();
     emit('wizard-complete');
@@ -5939,6 +5967,7 @@ const handlePatientSummarySaved = async () => {
 };
 
 const handlePatientSummaryVerified = async () => {
+  addSetupLogLine('My Stuff', 'Patient Summary verified on Patient Summary tab', true, true);
   wizardPatientSummary.value = true;
   persistWizardCompletion();
   showAgentSetupDialog.value = false;
@@ -5947,7 +5976,7 @@ const handlePatientSummaryVerified = async () => {
   // Guided flow: verifying summary completes the flow
   if (wizardFlowPhase.value === 'summary') {
     wizardFlowPhase.value = 'done';
-    addSetupLogLine('Wizard Flow', 'Patient Summary verified — wizard complete', true);
+    addSetupLogLine('Wizard', 'Setup wizard complete — Patient Summary verified', true, true);
     void generateSetupLogPdf();
     emit('wizard-complete');
     // Leave MyStuff open — user can close when ready
@@ -6148,7 +6177,7 @@ onMounted(async () => {
           guidedFlowDismissCount.value += 1;
           if (guidedFlowDismissCount.value >= 2) {
             // User dismissed Patient Summary twice — complete wizard
-            addSetupLogLine('Wizard Flow', '[WARNING] User dismissed Patient Summary tab twice — completing wizard without summary', false);
+            addSetupLogLine('Wizard', 'Setup wizard complete — Patient Summary skipped (dismissed twice)', false, true);
             guidedFlowDismissCount.value = 0;
             wizardFlowPhase.value = 'done';
             void generateSetupLogPdf();

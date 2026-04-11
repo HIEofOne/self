@@ -304,8 +304,8 @@
         </q-card-section>
       </q-card>
 
-      <!-- LISTS SOURCE FILE (moved to bottom) -->
-      <q-card v-if="pdfData || markdownBucketKey" class="q-mb-md">
+      <!-- LISTS SOURCE FILE (moved to bottom) — hidden during wizard auto-flow -->
+      <q-card v-if="(pdfData || markdownBucketKey) && !wizardAutoFlow" class="q-mb-md">
         <q-card-section>
           <div class="row items-center">
             <div class="col">
