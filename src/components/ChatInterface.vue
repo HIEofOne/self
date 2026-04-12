@@ -5900,7 +5900,7 @@ const handleReferenceFileAdded = async (file: { fileName: string; bucketKey: str
   }
 };
 
-const handleCurrentMedicationsSaved = async () => {
+const handleCurrentMedicationsSaved = async (payload?: { value?: string; edited?: boolean; changed?: boolean }) => {
   addSetupLogLine('My Stuff', 'Current Medications saved/verified on My Lists tab', true, true);
   wizardCurrentMedications.value = true;
   wizardStage2Complete.value = true;
@@ -5914,10 +5914,14 @@ const handleCurrentMedicationsSaved = async () => {
     console.log('[Wizard] Current Medications saved — opening Patient Summary tab');
     addSetupLogLine('Wizard Flow', 'Current Medications saved — opening Patient Summary', true);
     void generateSetupLogPdf();
-    // Switch to Patient Summary tab immediately. Summary was generated before My Lists opened,
-    // so update it with the verified medications.
+    // Switch to Patient Summary tab immediately.
     myStuffInitialTab.value = 'summary';
-    wizardRequestAction.value = preGeneratedSummary.value ? 'update-summary-meds' : 'generate-summary';
+    // Only trigger summary update if the medications text actually changed.
+    // VERIFY without editing doesn't change the text, so skip the update to avoid
+    // a loading-spinner flash on the Patient Summary tab.
+    if (payload?.changed) {
+      wizardRequestAction.value = preGeneratedSummary.value ? 'update-summary-meds' : 'generate-summary';
+    }
   }
   // Refresh wizard state in background (non-blocking)
   void refreshWizardState();

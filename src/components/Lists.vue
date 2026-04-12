@@ -949,11 +949,12 @@ const handleVerifyCurrentMedications = async () => {
   await saveCurrentMedicationsValue(currentMedications.value, true, true);
 };
 
-/** User dismisses the verify prompt without verifying — don't show again until page reload. */
+/** User dismisses the verify prompt without verifying — don't show the dialog again this session,
+ *  but keep the red borders on EDIT/VERIFY until the user acts. */
 const handleVerifyDismissed = () => {
   medsDismissedThisSession.value = true;
   showVerifyPrompt.value = false;
-  clearVerifyRequirement();
+  // Keep needsVerifyAction true — red borders stay until user clicks EDIT or VERIFY
 };
 
 const logWizardEvent = async (event: string, details?: Record<string, unknown>) => {
@@ -2113,7 +2114,11 @@ onMounted(async () => {
   // This returns instantly if medications are saved, avoiding the 10-second
   // retry chain in attemptAutoProcessInitialFile.
   await loadCurrentMedications();
-  isInitialMedsLoading.value = false;
+  // During wizard flow, keep the loading spinner if medications weren't found yet —
+  // processInitialFile will generate them from Apple Health records.
+  if (currentMedications.value || !wizardAutoFlow.value) {
+    isInitialMedsLoading.value = false;
+  }
 
   await checkInitialFile();
   await loadSavedResults();
@@ -2158,7 +2163,13 @@ watch([currentMedications, hasSavedResults, isProcessing], ([meds, saved, proces
     return;
   }
   if (!prevMeds) {
-    markVerifyRequired();
+    // During wizard flow, just set red borders without the interrupting dialog
+    if (wizardAutoFlow.value) {
+      needsVerifyAction.value = true;
+      persistVerifyState();
+    } else {
+      markVerifyRequired();
+    }
   }
   if (meds && wizardAutoFlow.value) {
     clearWizardAutoFlow();
@@ -2352,15 +2363,24 @@ const loadCurrentMedications = async (forceRefresh = false) => {
 
       if (medsFromSummary) {
         currentMedications.value = medsFromSummary;
-        isCurrentMedicationsEdited.value = true;
+        isCurrentMedicationsEdited.value = false;
         currentMedicationsBlockTitle.value = 'Current Medications';
         logWizardEvent('current_meds_from_summary', { medsLength: medsFromSummary.length });
+        // Show in display mode with verify-highlight so user can EDIT or VERIFY
+        // Set needsVerifyAction directly (without dialog) so red borders appear immediately
+        needsVerifyAction.value = true;
+        persistVerifyState();
+      } else if (wizardAutoFlow.value) {
+        // During wizard flow, don't show manual entry — processInitialFile will
+        // generate medications from Apple Health records.  Keep the loading spinner.
+        console.log('[Lists] Wizard flow — deferring medications to file processing');
+        logWizardEvent('current_meds_deferred_to_processing');
       } else {
         console.log('[Lists] No medications available — opening for manual entry');
         currentMedicationsBlockTitle.value = 'Current Medications as reported by the user';
         logWizardEvent('current_meds_no_records_no_summary');
+        startEditingCurrentMedications();
       }
-      startEditingCurrentMedications();
       return;
     }
   } finally {
@@ -2455,7 +2475,7 @@ const saveCurrentMedicationsValue = async (value: string, markEdited: boolean, c
       clearVerifyRequirement();
     }
 
-    emit('current-medications-saved', { value, edited: markEdited });
+    emit('current-medications-saved', { value, edited: markEdited, changed: value !== previousMedications });
 
     // Only offer to update Patient Summary if the medications text actually changed
     if (value !== previousMedications) {

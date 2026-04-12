@@ -5668,8 +5668,10 @@ watch(() => props.modelValue, async (newValue) => {
 
 watch(() => props.initialTab, (newTab) => {
   if (newTab && isOpen.value) {
-    // If switching to summary with a pending requestAction, set loading immediately to prevent flash
-    if (newTab === 'summary' && (props.requestAction === 'generate-summary' || props.requestAction === 'update-summary-meds')) {
+    // Always show loading spinner when programmatically switching to summary tab.
+    // This prevents a flash of stale/old summary content in the render gap between
+    // the initialTab watcher and the currentTab watcher (which calls loadPatientSummary).
+    if (newTab === 'summary') {
       loadingSummary.value = true;
     }
     currentTab.value = newTab;
