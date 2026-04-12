@@ -76,6 +76,20 @@
                       </div>
                       <div class="row no-wrap q-gutter-xs">
                         <q-btn
+                          v-if="welcomeUserCloudStatus[du.userId] === 'ready'"
+                          flat dense size="xs" color="green-8" label="GET STARTED"
+                          @click="handleGetStartedForUser(du)"
+                        >
+                          <q-tooltip>Sign in and continue</q-tooltip>
+                        </q-btn>
+                        <q-btn
+                          v-else-if="welcomeUserCloudStatus[du.userId] === 'restore'"
+                          flat dense size="xs" color="orange-9" label="RESTORE"
+                          @click="handleUserCardRestore(du)"
+                        >
+                          <q-tooltip>Restore cloud account from local backup</q-tooltip>
+                        </q-btn>
+                        <q-btn
                           flat dense round size="xs" icon="close" color="grey-5"
                           @click="handleDeleteUser(du.userId)"
                         >
@@ -704,6 +718,7 @@
       :local-folder-handle="localFolderHandle"
       :kb-name="restoreWizardKbName"
       @restore-complete="handleRestoreWizardComplete"
+      @restore-log="handleRestoreLog"
     />
 
     <!-- Destroyed account restore dialog -->
@@ -776,7 +791,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import VueMarkdown from 'vue-markdown-render';
 
 // Store route check interval and event listener for cleanup (must be at top level)
@@ -1035,7 +1050,7 @@ const handleUserCardRestore = async (du: DiscoveredUser) => {
   try {
     sessionStorage.removeItem('autoProcessInitialFile');
     sessionStorage.removeItem('wizardMyListsAuto');
-    sessionStorage.removeItem(`wizard_agent_setup_started_${ku.userId}`);
+    sessionStorage.removeItem(`wizard_agent_setup_started_${du.userId}`);
   } catch { /* ignore */ }
   try {
     // Step 1: Read local state FIRST — must happen while we're still in the user
@@ -1047,7 +1062,7 @@ const handleUserCardRestore = async (du: DiscoveredUser) => {
       const { readStateFile } = await import('./utils/localFolder');
       localState = await readStateFile(localFolderHandle.value);
     }
-    if (!localState && ku.userId) {
+    if (!localState && du.userId) {
       try {
         // requestWrite: true — we're inside the user gesture (RESTORE click)
         const result = await readStateFileByUserId(du.userId, { requestWrite: true });
@@ -2029,6 +2044,14 @@ const handleGetStartedNoPassword = () => {
   startTemporarySession();
 };
 
+/** GET STARTED on a specific discovered-user card (green badge) — set context and delegate to main handler */
+const handleGetStartedForUser = (du: DiscoveredUser) => {
+  selectedWelcomeUserId.value = du.userId;
+  setActiveUserId(du.userId);
+  welcomeLocalUserId.value = du.userId;
+  handleGetStartedNoPassword();
+};
+
 /** "sign-in with a passkey" link on Welcome page for new users */
 const handlePasskeySignInLink = () => {
   passkeyPrefillUserId.value = null;
@@ -2353,8 +2376,39 @@ const handleCloudStartFresh = async () => {
   }
 };
 
+/** Phase 7: Handle log events from RestoreWizard — forward to ChatInterface's setup log.
+ *  Buffer entries until ChatInterface is mounted (it may not exist yet when restore starts). */
+const restoreLogBuffer = ref<{ step: string; detail: string; ok: boolean; bold: boolean }[]>([]);
+
+const flushRestoreLogBuffer = () => {
+  if (chatInterfaceRef.value && restoreLogBuffer.value.length > 0) {
+    for (const entry of restoreLogBuffer.value) {
+      chatInterfaceRef.value.addSetupLogLine(entry.step, entry.detail, entry.ok, entry.bold);
+    }
+    restoreLogBuffer.value = [];
+  }
+};
+
+const handleRestoreLog = (payload: { step: string; detail: string; ok: boolean; bold?: boolean }) => {
+  const entry = { step: payload.step, detail: payload.detail, ok: payload.ok, bold: payload.bold || false };
+  if (chatInterfaceRef.value) {
+    // Flush any buffered entries first, then add this one
+    flushRestoreLogBuffer();
+    chatInterfaceRef.value.addSetupLogLine(entry.step, entry.detail, entry.ok, entry.bold);
+  } else {
+    // ChatInterface not mounted yet — buffer for later
+    restoreLogBuffer.value.push(entry);
+  }
+};
+
+// Flush buffered restore log entries once ChatInterface is available
+watch(chatInterfaceRef, (ref) => {
+  if (ref) flushRestoreLogBuffer();
+});
+
 /** Phase 7: Restore Wizard completed — close dialog, clear health state, notify user. */
 const handleRestoreWizardComplete = async () => {
+  flushRestoreLogBuffer(); // Ensure all buffered entries are written before generating PDF
   showRestoreWizard.value = false;
   restoreWizardLocalState.value = null;
   cloudHealthDetails.value = null;
@@ -2403,7 +2457,20 @@ const handleRestoreWizardComplete = async () => {
       await fetch('/api/agent-setup-status', { credentials: 'include' });
     } catch { /* non-critical */ }
   }
+  // Mark indexing as already completed so refreshWizardState doesn't
+  // re-create indexingStatus and log a duplicate "Indexing Complete" entry
+  if (chatInterfaceRef.value) {
+    chatInterfaceRef.value.markIndexingAlreadyCompleted();
+  }
   suppressWizard.value = false; // Allow normal ChatInterface operation now
+  // Regenerate maia-log.pdf with all restore entries
+  try {
+    if (chatInterfaceRef.value) {
+      await chatInterfaceRef.value.generateSetupLogPdf();
+    }
+  } catch (e) {
+    console.warn('[RESTORE] Log PDF generation failed:', e);
+  }
   if ($q && typeof $q.notify === 'function') {
     $q.notify({ type: 'positive', message: 'Account restored successfully!', timeout: 3000 });
   }
@@ -2935,10 +3002,11 @@ const destroyTemporaryAccount = async () => {
       console.warn(`[DESTROY] Local state save failed (non-fatal):`, snapErr);
     }
 
-    // Add "Cloud account deleted" entry to the setup log and regenerate maia-log.pdf
+    // Add detailed log entries and regenerate maia-log.pdf
     try {
       if (chatInterfaceRef.value) {
-        chatInterfaceRef.value.addSetupLogLine('Account', 'Cloud account deleted by user (DELETE CLOUD ACCOUNT)', true, true);
+        chatInterfaceRef.value.addSetupLogLine('Account', `Cloud account deleted by user (DELETE CLOUD ACCOUNT) for ${userIdToDelete}`, true, true);
+        chatInterfaceRef.value.addSetupLogLine('Account', 'Local backup preserved in folder for restore. Orange badge will appear on Welcome page.', true);
         await chatInterfaceRef.value.generateSetupLogPdf();
       }
     } catch (logErr) {

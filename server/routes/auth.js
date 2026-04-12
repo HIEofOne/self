@@ -366,7 +366,7 @@ export async function ensureUserAgent(doClient, cloudant, userDoc) {
   return userDoc;
 }
 
-export default function setupAuthRoutes(app, passkeyService, cloudant, doClient, auditLog) {
+export default function setupAuthRoutes(app, passkeyService, cloudant, doClient, auditLog, { invalidateResourceCache } = {}) {
   // Check if user exists and has passkey
   app.get('/api/passkey/check-user', async (req, res) => {
     try {
@@ -970,6 +970,8 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
         updatedAt: new Date().toISOString()
       };
       await cloudant.saveDocument('maia_users', userDoc);
+      // Invalidate the resource cache so /api/sync-agent sees the new doc immediately
+      if (invalidateResourceCache) invalidateResourceCache(userId);
       console.log(`[RECREATE] User doc recreated for ${userId} with kbName=${kbName}`);
 
       // Sign them in

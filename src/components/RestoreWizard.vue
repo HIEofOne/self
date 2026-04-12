@@ -1,9 +1,14 @@
 <template>
-  <q-dialog :model-value="modelValue" persistent @update:model-value="$emit('update:modelValue', $event)">
+  <q-dialog :model-value="modelValue" persistent @update:model-value="emit('update:modelValue', $event)">
     <q-card style="min-width: 560px; max-width: 680px">
       <q-card-section>
-        <div class="text-h6">
-          {{ phase === 'complete' ? 'Restore Complete' : 'Restoring Your MAIA' }}
+        <div class="row items-center no-wrap">
+          <div class="text-h6 col">
+            {{ phase === 'complete' ? 'Restore Complete' : 'Restoring Your MAIA' }}
+          </div>
+          <q-btn flat round dense icon="close" color="grey-6" @click="handleClose">
+            <q-tooltip>Close restore wizard</q-tooltip>
+          </q-btn>
         </div>
         <div v-if="phase !== 'complete'" class="text-caption text-grey-7 q-mt-xs">
           Rebuilding cloud account for <strong>{{ userId }}</strong> from local backup. This can take 5 to 60 minutes.
@@ -44,7 +49,7 @@
       </q-card-section>
 
       <q-card-actions align="right">
-        <q-btn v-if="phase === 'complete'" unelevated label="Continue" color="primary" @click="$emit('restore-complete')" />
+        <q-btn v-if="phase === 'complete'" unelevated label="Continue" color="primary" @click="emit('restore-complete')" />
       </q-card-actions>
     </q-card>
   </q-dialog>
@@ -81,10 +86,25 @@ const props = defineProps<{
   kbName?: string | null;
 }>();
 
-defineEmits<{
+const emit = defineEmits<{
   'update:modelValue': [value: boolean];
   'restore-complete': [];
+  'restore-log': [payload: { step: string; detail: string; ok: boolean; bold?: boolean }];
 }>();
+
+const logStep = (step: string, detail: string, ok: boolean, bold = false) => {
+  emit('restore-log', { step, detail, ok, bold });
+};
+
+const handleClose = () => {
+  if (phase.value === 'complete') {
+    emit('restore-complete');
+  } else {
+    // Allow closing mid-restore — it continues in the background
+    emit('update:modelValue', false);
+    logStep('Restore', 'Restore wizard closed by user (restore continues in background)', true);
+  }
+};
 
 const phase = ref<'execute' | 'complete'>('execute');
 const restoreItems = ref<RestoreItem[]>([]);
@@ -179,6 +199,9 @@ const executeRestore = async () => {
   let filesUploaded = 0;
   let filesUploadedToKB = 0;
 
+  // Bold start entry
+  logStep('Restore', `Restore started for ${uid} — ${files.length} file(s), medications: ${state?.currentMedications ? 'yes' : 'no'}, summary: ${state?.patientSummary ? 'yes' : 'no'}`, true, true);
+
   try {
     // Resolve KB name for file uploads
     const kbName = await resolveKbName(uid);
@@ -236,9 +259,11 @@ const executeRestore = async () => {
           filesUploaded++;
           if (shouldGoToKB) filesUploadedToKB++;
           updateItem(key, { status: 'done', progress: shouldGoToKB ? 'Uploaded to KB' : 'Uploaded to archive' });
+          logStep('Restore', `File uploaded: ${fileInfo.fileName}${shouldGoToKB ? ' (to KB)' : ' (archive)'}`, true);
         } catch (e: any) {
           console.error(`[RestoreWizard] File upload failed: ${fileInfo.fileName}:`, e?.message);
           updateItem(key, { status: 'error', errorMsg: e?.message || 'Upload failed' });
+          logStep('Restore', `File upload failed: ${fileInfo.fileName} — ${e?.message || 'unknown error'}`, false);
         }
       }
     } else if (files.length > 0 && props.safariFolderFiles) {
@@ -256,8 +281,10 @@ const executeRestore = async () => {
           filesUploaded++;
           if (shouldGoToKB) filesUploadedToKB++;
           updateItem(key, { status: 'done', progress: shouldGoToKB ? 'Uploaded to KB' : 'Uploaded to archive' });
+          logStep('Restore', `File uploaded: ${fileInfo.fileName}${shouldGoToKB ? ' (to KB)' : ' (archive)'}`, true);
         } catch (e: any) {
           updateItem(key, { status: 'error', errorMsg: e?.message || 'Upload failed' });
+          logStep('Restore', `File upload failed: ${fileInfo.fileName} — ${e?.message || 'unknown error'}`, false);
         }
       }
     } else if (files.length > 0) {
@@ -277,6 +304,7 @@ const executeRestore = async () => {
         return;
       }
       updateItem('kb', { status: 'running', progress: 'Creating...' });
+      logStep('Restore', 'Knowledge Base indexing started', true);
       try {
         const indexResp = await fetch('/api/update-knowledge-base', {
           method: 'POST',
@@ -313,6 +341,7 @@ const executeRestore = async () => {
                   if (f) parts.push(`${f} file${f === 1 ? '' : 's'}`);
                   if (t) parts.push(`${Number(t).toLocaleString()} tokens`);
                   updateItem('kb', { status: 'done', progress: parts.join(', ') || 'Indexed' });
+                  logStep('Restore', `Knowledge Base indexed: ${parts.join(', ') || 'complete'}`, true);
                 } else if (statusData.status === 'INDEX_JOB_STATUS_FAILED') {
                   throw new Error(statusData.error || 'Indexing failed');
                 } else {
@@ -343,6 +372,7 @@ const executeRestore = async () => {
         }
       } catch (e: any) {
         updateItem('kb', { status: 'error', errorMsg: e?.message || 'Failed' });
+        logStep('Restore', `Knowledge Base indexing failed: ${e?.message || 'unknown error'}`, false);
       }
     })();
 
@@ -350,6 +380,7 @@ const executeRestore = async () => {
     let agentDeployed = false;
     const agentPromise = (async () => {
       updateItem('agent', { status: 'running' });
+      logStep('Restore', 'AI Agent deployment started', true);
       try {
         const syncResp = await fetch('/api/sync-agent', {
           method: 'POST',
@@ -387,12 +418,14 @@ const executeRestore = async () => {
           }
           agentDeployed = true;
           updateItem('agent', { status: 'done', progress: endpointReady ? 'Ready' : 'Deploying in background' });
+          logStep('Restore', `AI Agent ${endpointReady ? 'deployed and ready' : 'deploying in background'}`, true);
         } else {
           throw new Error(syncData.error || 'Agent not available');
         }
       } catch (e: any) {
         console.error(`[RestoreWizard] Agent deploy failed:`, e?.message);
         updateItem('agent', { status: 'error', errorMsg: e?.message || 'Failed' });
+        logStep('Restore', `AI Agent deployment failed: ${e?.message || 'unknown error'}`, false);
       }
     })();
 
@@ -430,18 +463,23 @@ const executeRestore = async () => {
         const r = restoreData.results || {};
         if (restoreItems.value.find(i => i.key === 'medications' && i.needed)) {
           updateItem('medications', r.medications ? { status: 'done', progress: 'Restored' } : { status: 'error', errorMsg: 'Not saved' });
+          logStep('Restore', r.medications ? 'Current Medications restored' : 'Current Medications restore failed', !!r.medications);
         }
         if (restoreItems.value.find(i => i.key === 'summary' && i.needed)) {
           updateItem('summary', r.summary ? { status: 'done', progress: 'Restored' } : { status: 'error', errorMsg: 'Not saved' });
+          logStep('Restore', r.summary ? 'Patient Summary restored' : 'Patient Summary restore failed', !!r.summary);
         }
         if (restoreItems.value.find(i => i.key === 'chats' && i.needed)) {
           updateItem('chats', { status: 'done', progress: r.chats > 0 ? `${r.chats} restored` : 'None' });
+          if (r.chats > 0) logStep('Restore', `${r.chats} saved chat(s) restored`, true);
         }
         if (restoreItems.value.find(i => i.key === 'instructions' && i.needed)) {
           if (!agentDeployed) {
             updateItem('instructions', { status: 'error', errorMsg: 'Agent not deployed' });
+            logStep('Restore', 'Agent Instructions not restored (agent not deployed)', false);
           } else {
             updateItem('instructions', r.instructions ? { status: 'done', progress: 'Applied' } : { status: 'error', errorMsg: 'Not saved' });
+            logStep('Restore', r.instructions ? 'Agent Instructions restored' : 'Agent Instructions restore failed', !!r.instructions);
           }
         }
       } catch (e: any) {
@@ -469,9 +507,11 @@ const executeRestore = async () => {
           throw new Error(errData.error || `Lists restore failed: ${listsResp.status}`);
         }
         updateItem('lists', { status: 'done', progress: 'Restored' });
+        logStep('Restore', 'My Lists restored', true);
       } catch (e: any) {
         console.error(`[RestoreWizard] Lists restore failed:`, e?.message);
         updateItem('lists', { status: 'error', errorMsg: e?.message || 'Failed' });
+        logStep('Restore', `My Lists restore failed: ${e?.message || 'unknown error'}`, false);
       }
     }
 
@@ -488,11 +528,13 @@ const executeRestore = async () => {
     if (doneItems.some(i => i.key === 'chats')) parts.push('chats restored');
     if (errorItems.length > 0) parts.push(`${errorItems.length} failed`);
     restoreSummary.value = parts.join(', ') + '.';
+    logStep('Restore', `Restore complete: ${restoreSummary.value}`, errorItems.length === 0, true);
 
     phase.value = 'complete';
   } catch (e) {
     console.error('[RestoreWizard] Unexpected error:', e);
     restoreSummary.value = 'Restore completed with errors.';
+    logStep('Restore', `Restore finished with errors: ${(e as Error)?.message || 'unknown'}`, false, true);
     phase.value = 'complete';
   }
 };

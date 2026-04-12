@@ -5684,11 +5684,13 @@ watch(() => props.requestAction, (action) => {
   if (!action || !isOpen.value) return;
   if (action === 'generate-summary') {
     loadingSummary.value = true;
+    pendingSummaryRegeneration.value = true; // prevent tab watcher from also calling loadPatientSummary
     currentTab.value = 'summary';
     requestNewSummary();
   } else if (action === 'update-summary-meds') {
     // Update the pre-generated summary with the verified Current Medications
     loadingSummary.value = true;
+    pendingSummaryRegeneration.value = true; // prevent tab watcher from also calling loadPatientSummary
     currentTab.value = 'summary';
     updateSummaryWithVerifiedMeds();
   }

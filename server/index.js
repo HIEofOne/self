@@ -1390,7 +1390,7 @@ app.use(session({
 }));
 
 // Passkey routes
-setupAuthRoutes(app, passkeyService, cloudant, doClient, auditLog);
+setupAuthRoutes(app, passkeyService, cloudant, doClient, auditLog, { invalidateResourceCache });
 
 // Chat routes
 setupChatRoutes(app, chatClient, cloudant, doClient);

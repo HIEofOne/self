@@ -14,7 +14,7 @@ Account state lives in three systems:
 |--------|---------------|
 | **CouchDB** (`maia_users`) | User doc: `assignedAgentId`, `kbId`, `kbName`, `files[]`, `workflowStage`, `currentMedications`, `patientSummary` |
 | **DigitalOcean** | Agent (GenAI platform), Knowledge Base, Spaces (S3) files |
-| **Browser** | IndexedDB folder handle, localStorage (`knownUsers[]`, snapshot data), sessionStorage flags, `maia-state.json` in local folder |
+| **Browser** | IndexedDB folder handles (per-user), PouchDB snapshots, sessionStorage flags, `maia-state.json` in local folder |
 
 ---
 
@@ -22,10 +22,10 @@ Account state lives in three systems:
 
 Every session begins here when the user is not authenticated.
 
-### Known User Cards
+### Discovered User Cards
 
-If `knownUsers` (from localStorage) contains entries, each is displayed as
-a status card with color-coded border and icon:
+If `discoverUsers()` finds entries (from IndexedDB directory handles),
+each is displayed as a status card with color-coded border and icon:
 
 | Cloud status | Border color | Icon | Action button |
 |-------------|-------------|------|---------------|
@@ -33,12 +33,14 @@ a status card with color-coded border and icon:
 | `loading` | Grey | hourglass_empty | (spinner) |
 | `restore` | Orange | warning | RESTORE |
 
-Each card shows the user's display name, userId, folder name, and an X
-button to remove from this device. Below the cards, an "Add family member"
-button starts a fresh new-user flow.
+Each card shows the user's display name, userId, folder name, and action
+buttons:
+- **RESTORE** button (orange, shown when `cloudStatus === 'restore'`)
+- **X** button to remove from this device
 
-If no known users exist, a simple text line offers to sign in with a
-passkey or create a new account.
+Below the cards, an "Add family member" button starts a fresh new-user
+flow. If no discovered users exist, a simple text line offers to sign in
+with a passkey or create a new account.
 
 ### Welcome Page Controls
 
@@ -56,7 +58,7 @@ passkey or create a new account.
 **Modal: `showGetStartedChoiceDialog`**
 
 When a user clicks GET STARTED and there are restorable (destroyed) users
-in knownUsers, this dialog appears to prevent accidentally creating a new
+among discovered users, this dialog appears to prevent accidentally creating a new
 account when the user intended to restore:
 
 - One **Restore {name}** button per restorable user
@@ -81,8 +83,8 @@ When a truly new user clicks GET STARTED (no knownUsers at all):
 
 `startTemporarySession()` calls `POST /api/temporary-session`, which
 creates a CouchDB user doc and returns a session cookie. The user is now
-authenticated and the main ChatInterface loads. The new userId is added
-to `knownUsers` in localStorage.
+authenticated and the main ChatInterface loads. The directory handle is
+stored in IndexedDB for the new userId.
 
 If `sharedComputerMode` is true, passkey registration is started
 immediately after authentication.
@@ -273,17 +275,20 @@ Temporary users can reach Destroy via the sign-out dialog's
 
 `destroyTemporaryAccount()`:
 1. Saves a local state snapshot (for potential restore)
-2. Calls `POST /api/self/delete`, which runs
+2. Adds log entries: "Cloud account deleted by user" (bold) and
+   "Local backup preserved in folder for restore"
+3. Regenerates `maia-log.pdf` with the deletion entries
+4. Calls `POST /api/self/delete`, which runs
    `deleteUserAndResources(userId)`:
    - Deletes Spaces files under `{userId}/`
    - Deletes Knowledge Base by stored `kbId`
    - Deletes Agent by `assignedAgentId` + scans for orphan agents
    - Deletes session documents
    - Deletes the user document from CouchDB
-3. Clears IndexedDB snapshot
-4. Resets auth state (back to Welcome page)
-5. The `knownUsers` entry is preserved with `cloudStatus: 'restore'`
-   so the Welcome page shows the user card with a RESTORE button.
+5. Clears IndexedDB snapshot with `keepDirectoryHandle: true` — this
+   preserves the folder handle so `discoverUsers()` can find the user
+   and show an orange-bordered card with RESTORE button
+6. Resets auth state (back to Welcome page)
 
 ---
 
@@ -307,19 +312,29 @@ When a destroyed user's card shows on the Welcome page with status
 
 ### RestoreWizard
 
-**Modal: RestoreWizard component** (full-screen dialog)
+**Modal: RestoreWizard component** (persistent dialog with X close button)
 
-Runs automatically on mount — no user interaction required:
+Runs automatically on mount — no user interaction required. The user can
+close the dialog mid-restore via the X button; the restore continues in
+the background.
+
+Emits `restore-log` events at each step, which App.vue forwards to
+ChatInterface's `addSetupLogLine()`. The log starts with a bold
+"Restore started" entry listing file count, medications, and summary
+availability.
 
 - **Step 1**: Upload files from local state → `POST /api/files/upload`
-  and register metadata
-- **Step 2**: Deploy agent → `POST /api/sync-agent?create=true`
-- **Step 3**: Index KB → `POST /api/update-knowledge-base`
+  and register metadata (each file logged individually)
+- **Step 2** (parallel): Deploy agent → `POST /api/sync-agent?create=true`
+- **Step 3** (parallel): Index KB → `POST /api/update-knowledge-base`
 - **Steps 4-7**: Restore medications, patient summary, saved chats,
-  and agent instructions from the local state snapshot
+  and agent instructions from the local state snapshot via
+  `POST /api/restore` (each item logged)
+- **Step 8**: Restore My Lists markdown via
+  `POST /api/files/lists/restore-markdown`
 
-After RestoreWizard completes, the setup wizard reopens if there are
-rehydration files (files that need re-uploading from the user's device).
+After RestoreWizard completes, a bold "Restore complete" log entry is
+added with a summary, and `maia-log.pdf` is regenerated.
 
 ### Post-Restore Verification
 
@@ -328,6 +343,9 @@ After the RestoreWizard completes:
 - A personalized `.webloc` shortcut is written
 - Local state snapshot is updated
 - Agent status is checked to confirm endpoint is ready
+- ChatInterface's `loadProviders()` is triggered (via `restoreActive`
+  watcher) so the AI dropdown switches from "Anthropic" to "Private AI"
+- `maia-log.pdf` is regenerated with all restore log entries
 
 ---
 
@@ -369,16 +387,21 @@ For local-only users:
 
 MAIA supports multiple family members using the same device.
 
-### The knownUsers Registry
+### The Discovered Users System
 
-`knownUsers` is an array in localStorage. Each entry contains:
+User discovery has been refactored from a localStorage-based
+`knownUsers[]` array to a dynamic **`discoverUsers()`** function that
+scans IndexedDB for stored `FileSystemDirectoryHandle` entries.
+
+Each discovered user is represented by a `DiscoveredUser` interface:
 - `userId` — unique identifier (e.g. "chloe73")
-- `displayName` — patient name for display
-- `folderName` — local folder associated with this user
-- `hasPasskey` — whether the user has registered a passkey
+- `displayName` — patient name extracted from `.webloc` or state file
+- `folderName` — local folder name
+- `handle` — `FileSystemDirectoryHandle` (if permission granted)
+- `cloudStatus` — `'ready'` | `'loading'` | `'restore'`
 
-The Welcome page displays a card for each known user with their current
-cloud status.
+The Welcome page displays a card for each discovered user with their
+current cloud status, determined by checking server-side existence.
 
 ### Cloud Isolation
 - Each user has their own CouchDB document, DO agent, KB, and Spaces
@@ -429,18 +452,82 @@ needed.
 
 ---
 
-## 10. Known Issues and Improvement Suggestions
+## 10. Recently Fixed Issues
 
-### Issue: Lists Source File footer shown during wizard
+The following issues were identified and fixed:
 
-The "LISTS SOURCE FILE" section at the bottom of My Lists (showing
-total pages, file name, REPLACE/SHOW/DOWNLOAD buttons) appears whenever
-`pdfData` or `markdownBucketKey` exists. It has no wizard-mode guard, so
-it displays during the guided flow when the user should be focused on
-verifying medications.
+- **Patient Summary "I'm sorry" blocking wizard flow**: When the AI
+  returned a refusal like "I'm sorry..." as the summary (due to KB not
+  yet indexed), the medications→summary transition would display this
+  text and stop, requiring manual user action. **Fixed** by always
+  triggering `'generate-summary'` or `'update-summary-meds'` when
+  transitioning from medications to summary phase, instead of skipping
+  the action when medications didn't change.
 
-**Suggestion**: Hide the footer when `wizardAutoFlow` is active. The
-footer is only useful during manual My Stuff updates.
+- **Verify dialog interrupting wizard**: During the wizard medications
+  phase, the verify prompt dialog appeared immediately, removing the red
+  EDIT/VERIFY button borders. **Fixed** by suppressing the dialog during
+  `wizardAutoFlow` and keeping `needsVerifyAction` true when dismissed.
+
+- **Edit mode flash during wizard**: Medications briefly showed in edit
+  mode (blank textarea) before data loaded. **Fixed** by deferring to
+  file processing during wizard flow instead of opening manual entry.
+
+- **Patient Summary tab flash**: Stale or loading content briefly
+  appeared when switching to the summary tab. **Fixed** by always
+  setting `loadingSummary = true` on tab switch.
+
+- **Orange badge missing after DELETE CLOUD ACCOUNT**: The
+  `clearUserSnapshot` function was removing the directory handle from
+  IndexedDB, making the user invisible to `discoverUsers()`. **Fixed**
+  by adding `keepDirectoryHandle: true` option.
+
+- **RESTORE button missing from orange badge**: Dropped during the
+  Welcome page refactor from `knownUsers` to `DiscoveredUser`.
+  **Fixed** by re-adding a conditional RESTORE button.
+
+- **`ku.userId` reference error**: Lines in `handleUserCardRestore`
+  referenced old parameter name `ku` instead of `du` after refactor.
+  **Fixed** by updating to `du.userId`.
+
+- **maia-log not updated during DELETE CLOUD ACCOUNT**: No logging
+  mechanism existed for App.vue to write to the setup log. **Fixed**
+  by exposing `addSetupLogLine` and `generateSetupLogPdf` via
+  `defineExpose` on ChatInterface.
+
+- **RestoreWizard had no close button**: Unlike the Setup Wizard, the
+  restore dialog was persistent with no X button. **Fixed** by adding
+  an X close button that allows the restore to continue in the
+  background.
+
+- **RestoreWizard was a logging black hole**: Zero `addSetupLogLine`
+  calls throughout the entire restore process. **Fixed** by adding
+  `restore-log` emit events at each step, forwarded through App.vue
+  to ChatInterface's setup log.
+
+- **Provider selection not updating after restore**: The AI dropdown
+  showed "Anthropic" instead of "Private AI" after restore because
+  `loadProviders()` wasn't triggered. **Fixed** by adding a watcher
+  on `restoreActive` that calls `loadProviders()` when restore
+  completes.
+
+- **Lists Source File footer shown during wizard**: The "LISTS SOURCE
+  FILE" section appeared during the guided flow. **Fixed** — template
+  already has `&& !wizardAutoFlow` guard.
+
+- **Dialog-to-dialog transition flash**: The wizard closing before
+  My Stuff opened could cause a single-frame flash. **Fixed** — code
+  now opens My Stuff before closing the wizard (same tick, Vue batches).
+
+- **Setup wizard logging gaps**: Several transitions were not logged:
+  initial 'running' phase entry, reload-triggered phase resumption,
+  and first guided-flow dismissals. **Fixed** by adding
+  `addSetupLogLine` calls at all six locations (Chrome/Safari running
+  entry, two reload resume paths, two first-dismiss paths).
+
+---
+
+## 11. Remaining Known Issues and Improvement Suggestions
 
 ### Issue: Lists component not wrapped in KeepAlive
 
@@ -454,77 +541,41 @@ flow, this can cause redundant API calls and brief UI flashes.
 state across tab switches, or add guards in `onMounted` to detect that
 the component was previously initialized for this session.
 
-### Issue: Dialog-to-dialog transition flash
-
-When the wizard dialog closes (`showAgentSetupDialog = false`) and My
-Stuff opens (`showMyStuffDialog = true`) on the next line, there can be
-a single frame where neither dialog is visible — the user briefly sees
-the empty chat behind.
-
-**Suggestion**: Open My Stuff BEFORE closing the wizard dialog, or use
-a single transition that swaps one for the other atomically.
-
-### Issue: Tab switch flash during guided flow
-
-When medications are saved and `myStuffInitialTab` changes from 'lists'
-to 'summary' while the dialog is open, the tab panel may briefly show
-the default 'files' tab or an intermediate state before settling on
-'summary'.
-
-**Suggestion**: Set `loadingSummary = true` in MyStuffDialog before
-the tab switch (this is partially done but could be more robust), or
-use a loading overlay that covers the entire dialog during transitions.
-
 ### Issue: Two separate onActivated hooks in Lists.vue
 
-Lists.vue has two `onActivated()` hooks at different locations. Both
-fire independently when the component is re-activated. The first handles
-wizard/verify state; the second handles category reloading and
-auto-processing. This separation makes the activation flow harder to
-reason about and increases the risk of competing triggers.
+Lists.vue has two `onActivated()` hooks at different locations (lines
+2179 and 2535). Both fire independently when the component is
+re-activated. The first handles wizard/verify state; the second handles
+category reloading and auto-processing. This separation makes the
+activation flow harder to reason about and increases the risk of
+competing triggers.
 
 **Suggestion**: Merge into a single `onActivated` hook with clear
 sequential logic.
 
-### Issue: Reload handling is fragile
+### Issue: Reload handling is fragile for both wizards
 
-`wizardFlowPhase` resets to `'done'` on every page reload. A resume
-watcher tries to detect mid-flow state by checking server-side flags,
-but this has gaps:
+**Setup Wizard**: `wizardFlowPhase` resets to `'done'` on every page
+reload. A resume watcher tries to detect mid-flow state by checking
+server-side flags. This mostly works but:
 - If the user reloads during the 'running' phase (indexing in progress),
   the wizard dialog disappears. When indexing later completes, the
   wizard dialog suddenly reappears — potentially confusing.
-- The resume logic does not log its transitions, making debugging harder.
-- There is no indication to the user that a resume happened.
 
-**Suggestion**: Either persist `wizardFlowPhase` to sessionStorage, or
-make the resume watcher's behavior more visible (log it, show a brief
-"Resuming setup..." message).
+**Restore Wizard**: If the user reloads during a restore, the wizard
+state is completely lost. The restore processes continue on the server
+but the UI has no way to resume or show progress. The user sees a
+normal chat interface with no indication that restore is still running.
 
-### Issue: Logging gaps
-
-The following transitions are not logged to the setup log:
-- Wizard initially entering 'running' phase (only the completion of
-  running → medications is logged).
-- Reload-triggered phase resumption.
-- First guided-flow dismissal (only the second dismiss is logged as a
-  warning).
-- User manually switching tabs during guided flow.
-- Medication verify/edit/save actions within Lists.vue (only generation
-  and loading are logged, not user verification).
-
-**Suggestion**: Add logging for all of the above. The setup log should
-be a complete narrative of what happened during account creation.
-
-### Issue: Rapid status changes in medication loading
-
-The `loadCurrentMedications()` function cycles through multiple status
-values (`waiting` → `reviewing` → `consulting` → `''`) with only a
-1-second gap. Template sections render conditionally on each status.
-On slower devices, this can cause visible UI flickering.
-
-**Suggestion**: Use a single "loading" state with a progress message
-rather than cycling through multiple distinct UI states.
+**Suggestion**: For both wizards:
+1. Persist wizard state to sessionStorage (`wizardFlowPhase`,
+   `restoreActive`, current step).
+2. On reload, detect active wizard state and show an appropriate
+   "Resuming..." indicator.
+3. For RestoreWizard, poll server-side status to determine what has
+   already completed and resume the checklist accordingly.
+4. Add a `workflowStage: 'restoring'` value to CouchDB that blocks
+   the setup wizard from launching during an active restore.
 
 ### Issue: No guard rails on user tab switching during guided flow
 
@@ -534,6 +585,4 @@ warnings, no prevention, and no easy way back.
 
 **Suggestion**: Either disable non-relevant tabs during the guided
 flow, or show a "Return to {current step}" banner when the user
-navigates away. An even simpler approach: let the guided flow work
-regardless of tab switches by not relying on the user being on a
-specific tab.
+navigates away.

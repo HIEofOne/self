@@ -1709,6 +1709,17 @@ watch(
   }
 );
 
+// When restore completes (restoreActive goes false), refetch providers so Private AI appears
+watch(
+  () => props.restoreActive,
+  (active, wasActive) => {
+    if (!active && wasActive) {
+      // Restore just completed — reload providers to pick up newly deployed agent
+      loadProviders();
+    }
+  }
+);
+
 // Send message (streaming)
 const sendMessage = async () => {
   if (!inputMessage.value || isStreaming.value || isRequestSent.value) return;
@@ -2267,7 +2278,11 @@ const refreshWizardState = async () => {
         }
       } else if (stage3CompleteFromFiles !== null) {
         wizardStage3Complete.value = stage3CompleteFromFiles;
-        if (stage3CompleteFromFiles && !indexingStatus.value) {
+        // Only re-create indexingStatus if it was never completed before.
+        // Without this guard, every refreshWizardState() call after indexing
+        // re-creates the status (null → complete), triggering the watcher
+        // to log a duplicate "Indexing Complete" entry.
+        if (stage3CompleteFromFiles && !indexingStatus.value && !stage3IndexingCompletedAt.value) {
           indexingStatus.value = {
             active: false,
             phase: 'complete',
@@ -2542,6 +2557,7 @@ const handlePickLocalFolder = async () => {
 
   // Start auto-run wizard — set guided flow phase to 'running'
   wizardFlowPhase.value = 'running';
+  addSetupLogLine('Wizard Flow', 'Guided flow started (phase: running)', true);
   await runAutoWizard();
 };
 
@@ -2595,6 +2611,7 @@ const handleSafariFolderSelected = async (event: Event) => {
   }, 60 * 60 * 1000);
 
   wizardFlowPhase.value = 'running';
+  addSetupLogLine('Wizard Flow', 'Guided flow started — Safari mode (phase: running)', true);
   await runSafariFolderWizard(pdfs);
 };
 
@@ -2897,12 +2914,14 @@ const generateSetupLogPdf = async () => {
   // Count files only from the LAST session (after the last "Session Start" marker)
   const lastSessionIdx = setupLogLines.value.map(l => l.step).lastIndexOf('Session Start');
   const currentSessionLines = lastSessionIdx >= 0 ? setupLogLines.value.slice(lastSessionIdx) : setupLogLines.value;
-  const totalFiles = currentSessionLines.filter(l => l.step === 'File Uploaded').length;
+  const totalFiles = currentSessionLines.filter(l => l.step === 'File Uploaded').length
+    || currentSessionLines.filter(l => l.step === 'Restore' && l.detail?.startsWith('File uploaded:')).length;
   const failedUploads = currentSessionLines.filter(l => l.step === 'Upload Failed' || l.step === 'Upload Error').length;
-  const hasIndexing = setupLogLines.value.some(l => l.step === 'Indexing Complete');
+  const hasIndexing = setupLogLines.value.some(l => l.step === 'Indexing Complete')
+    || setupLogLines.value.some(l => l.step === 'Restore' && l.detail?.includes('Knowledge Base indexed'));
   const indexTokens = indexingStatus.value?.tokens || '0';
-  const hasMeds = wizardCurrentMedications.value;
-  const hasSummary = wizardPatientSummary.value;
+  const hasMeds = wizardCurrentMedications.value || setupLogLines.value.some(l => l.detail?.includes('Current Medications restored'));
+  const hasSummary = wizardPatientSummary.value || setupLogLines.value.some(l => l.detail?.includes('Patient Summary restored'));
   const summaryItems = [
     `Files uploaded: ${totalFiles}${failedUploads > 0 ? ` (${failedUploads} failed)` : ''}`,
     `Agent ready: ${wizardStage1Complete.value ? 'Yes' : 'No'}`,
@@ -5390,12 +5409,14 @@ const startSetupWizardPolling = () => {
         if (!wizardPatientSummary.value && wizardCurrentMedications.value) {
           // Meds done, summary pending → resume at summary phase
           wizardFlowPhase.value = 'summary';
+          addSetupLogLine('Wizard Flow', 'Resumed after reload — medications verified, resuming at Patient Summary', true);
           myStuffInitialTab.value = 'summary';
           wizardRequestAction.value = 'generate-summary';
           showMyStuffDialog.value = true;
         } else if (!wizardCurrentMedications.value) {
           // Meds still pending → resume at medications phase
           wizardFlowPhase.value = 'medications';
+          addSetupLogLine('Wizard Flow', 'Resumed after reload — resuming at Current Medications', true);
           try {
             sessionStorage.setItem('autoProcessInitialFile', 'true');
             sessionStorage.setItem('wizardMyListsAuto', 'true');
@@ -5914,13 +5935,17 @@ const handleCurrentMedicationsSaved = async (payload?: { value?: string; edited?
     console.log('[Wizard] Current Medications saved — opening Patient Summary tab');
     addSetupLogLine('Wizard Flow', 'Current Medications saved — opening Patient Summary', true);
     void generateSetupLogPdf();
-    // Switch to Patient Summary tab immediately.
+    // Switch to Patient Summary tab and always trigger summary generation.
+    // Even if medications didn't change, we need to ensure the summary tab
+    // shows valid content (the pre-generated summary may be an AI refusal
+    // like "I'm sorry" if the KB wasn't fully indexed yet).
     myStuffInitialTab.value = 'summary';
-    // Only trigger summary update if the medications text actually changed.
-    // VERIFY without editing doesn't change the text, so skip the update to avoid
-    // a loading-spinner flash on the Patient Summary tab.
-    if (payload?.changed) {
-      wizardRequestAction.value = preGeneratedSummary.value ? 'update-summary-meds' : 'generate-summary';
+    if (payload?.changed && preGeneratedSummary.value) {
+      // Medications changed and we have a pre-generated summary — do a cheap update
+      wizardRequestAction.value = 'update-summary-meds';
+    } else {
+      // Either no change or no pre-generated summary — generate fresh
+      wizardRequestAction.value = 'generate-summary';
     }
   }
   // Refresh wizard state in background (non-blocking)
@@ -6182,6 +6207,7 @@ onMounted(async () => {
             });
           } else {
             // First dismiss — reopen on the same tab
+            addSetupLogLine('Wizard Flow', 'User closed My Stuff during medications phase — reopening (dismiss 1 of 2)', true);
             void nextTick(() => {
               myStuffInitialTab.value = 'lists';
               showMyStuffDialog.value = true;
@@ -6202,6 +6228,7 @@ onMounted(async () => {
             // Don't reopen — wizard is done
           } else {
             // First dismiss — reopen on the same tab
+            addSetupLogLine('Wizard Flow', 'User closed My Stuff during summary phase — reopening (dismiss 1 of 2)', true);
             void nextTick(() => {
               myStuffInitialTab.value = 'summary';
               wizardRequestAction.value = 'generate-summary';
@@ -6337,9 +6364,16 @@ onUnmounted(() => {
   stopStage3ElapsedTimer();
 });
 
+/** Mark indexing as already completed (e.g. after restore) so refreshWizardState
+ *  doesn't re-create indexingStatus and trigger a duplicate "Indexing Complete" log entry. */
+const markIndexingAlreadyCompleted = () => {
+  stage3IndexingCompletedAt.value = Date.now();
+};
+
 defineExpose({
   addSetupLogLine,
-  generateSetupLogPdf
+  generateSetupLogPdf,
+  markIndexingAlreadyCompleted
 });
 </script>
 
