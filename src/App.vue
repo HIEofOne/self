@@ -79,7 +79,7 @@
                           flat dense round size="xs" icon="close" color="grey-5"
                           @click="handleDeleteUser(du.userId)"
                         >
-                          <q-tooltip>Delete cloud account</q-tooltip>
+                          <q-tooltip>Delete account completely</q-tooltip>
                         </q-btn>
                       </div>
                     </div>
@@ -564,12 +564,12 @@
         </q-card-section>
         <q-card-section class="text-body2">
           <p>
-            This will delete the cloud account for <strong>{{ welcomeDisplayUserId }}</strong>
-            (files, knowledge base, agent). Your local folder and health record PDFs are kept so
-            you can restore the account later.
+            This will permanently delete all data for <strong>{{ welcomeDisplayUserId }}</strong>:
+            cloud account (files, knowledge base, agent) and local MAIA files.
+            Your health record PDFs in the local folder will not be deleted.
           </p>
           <p class="q-mt-md">
-            Click GET STARTED to restore or create a new account.
+            This cannot be undone. Click GET STARTED to create a new account.
           </p>
         </q-card-section>
         <q-card-actions align="right">
@@ -748,11 +748,11 @@
         </q-card-section>
         <q-card-section class="text-body2">
           <p>
-            This deletes the cloud account for <strong>{{ user?.userId }}</strong>.
-            Deep links and passkey access will not work until you restore the account.
+            This frees up cloud resources for <strong>{{ user?.userId }}</strong>
+            (agent, knowledge base, files). Deep links and passkey access will not work until you restore.
           </p>
           <p class="q-mt-sm">
-            Your local folder and health record PDFs are kept so you can restore the account later.
+            Your local folder and user data are kept so you can restore the account later.
           </p>
         </q-card-section>
         <q-card-actions align="right">
@@ -2203,7 +2203,7 @@ const handleDeleteUser = (userIdOrEvent?: string | Event) => {
   showDeleteLocalUserDialog.value = true;
 };
 
-/** [AUTH] Confirmed delete: delete cloud account, keep local folder data for restore. */
+/** [AUTH] Confirmed full delete: cloud account + local MAIA files + IndexedDB handle. Nothing to restore. */
 const confirmDeleteLocalUser = async () => {
   const localId = welcomeLocalUserId.value;
   if (!localId) return;
@@ -2217,11 +2217,34 @@ const confirmDeleteLocalUser = async () => {
         body: JSON.stringify({ userId: localId })
       });
     } catch {
-      // Non-fatal
+      // Non-fatal – clear local data regardless
     }
-    // Clear IndexedDB snapshot (but keep folder handle + local files for restore)
     await clearUserSnapshot(localId);
     clearWizardPendingKey(localId);
+    if (getActiveUserId() === localId) {
+      setActiveUserId(null);
+    }
+    // Remove MAIA files from local folder (keep health record PDFs)
+    const handleToClean = localFolderHandle.value;
+    if (handleToClean) {
+      try {
+        await handleToClean.removeEntry('maia-state.json').catch(() => {});
+        await handleToClean.removeEntry('maia-log.pdf').catch(() => {});
+        await handleToClean.removeEntry('maia-setup-log.pdf').catch(() => {}); // legacy name
+        for await (const [name] of (handleToClean as any).entries()) {
+          if (name.endsWith('.webloc') && name.startsWith('maia')) {
+            await handleToClean.removeEntry(name).catch(() => {});
+          }
+        }
+      } catch (cleanErr) {
+        console.warn(`[WELCOME] Could not clean local folder files:`, cleanErr);
+      }
+      localFolderHandle.value = null;
+      localFolderName.value = '';
+    }
+    try {
+      await clearDirectoryHandle(localId);
+    } catch { /* non-fatal */ }
     // Clear the httpOnly temp-user cookie so /api/welcome-status doesn't re-surface this user
     await fetch('/api/auth/clear-temp-cookie', { method: 'POST', credentials: 'include' }).catch(() => {});
     await refreshDiscoveredUsers();

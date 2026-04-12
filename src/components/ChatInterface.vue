@@ -524,7 +524,7 @@
         </q-card-section>
         <q-card-section class="text-body2">
           <p>Your MAIA setup has been running for over 60 minutes. This may indicate an issue that needs attention.</p>
-          <p>A detailed setup log (<strong>maia-setup-log.pdf</strong>) has been saved to your MAIA folder. Please email it to <a href="mailto:info@trustee.ai">info@trustee.ai</a> for tech support.</p>
+          <p>A detailed setup log (<strong>maia-log.pdf</strong>) has been saved to your MAIA folder. Please email it to <a href="mailto:info@trustee.ai">info@trustee.ai</a> for tech support.</p>
         </q-card-section>
         <q-card-actions align="right">
           <q-btn flat label="OK" color="primary" @click="wizardTimeoutModalVisible = false" />
@@ -2608,7 +2608,7 @@ const runSafariFolderWizard = async (files: File[]) => {
   try {
     // Phase 1: Upload PDFs
     localFolderAutoRunPhase.value = 'Uploading files...';
-    const MAIA_GENERATED_FILES = ['maia-setup-log.pdf'];
+    const MAIA_GENERATED_FILES = ['maia-log.pdf'];
     const filesToUpload = files.filter(f => !MAIA_GENERATED_FILES.includes(f.name.toLowerCase()));
     addSetupLogLine('Upload Phase', `Starting upload of ${filesToUpload.length} PDF file(s)`, true);
 
@@ -2737,7 +2737,7 @@ const runAutoWizard = async () => {
   try {
     // Phase 1: Upload PDFs from folder to Spaces
     localFolderAutoRunPhase.value = 'Uploading files...';
-    const MAIA_GENERATED_FILES = ['maia-setup-log.pdf'];
+    const MAIA_GENERATED_FILES = ['maia-log.pdf'];
     const filesToUpload = localFolderFiles.value.filter(f => {
       const name = f.name.toLowerCase();
       return name.endsWith('.pdf') && !MAIA_GENERATED_FILES.includes(name);
@@ -2852,7 +2852,7 @@ const runAutoWizard = async () => {
   }
 };
 
-/** Generate maia-setup-log.pdf from setupLogLines and write to local folder. */
+/** Generate maia-log.pdf from setupLogLines and write to local folder. */
 const generateSetupLogPdf = async () => {
   if (!localFolderHandle.value) return;
   const doc = new jsPDF();
@@ -2986,7 +2986,9 @@ const generateSetupLogPdf = async () => {
   }
 
   const pdfBlob = doc.output('blob');
-  await writeFileToFolder(localFolderHandle.value, 'maia-setup-log.pdf', pdfBlob);
+  await writeFileToFolder(localFolderHandle.value, 'maia-log.pdf', pdfBlob);
+  // Clean up legacy filename
+  try { await localFolderHandle.value.removeEntry('maia-setup-log.pdf'); } catch { /* doesn't exist */ }
   // Persist setup log in maia-state.json (no separate JSON file)
   await saveStateToLocalFolder();
 };
@@ -5526,7 +5528,7 @@ const setupChecklistFiles = computed(() => {
 
   // Files from local folder scan (not yet uploaded)
   for (const f of localFolderFiles.value) {
-    if (f.name.toLowerCase() === 'maia-setup-log.pdf') continue;
+    if (f.name.toLowerCase() === 'maia-log.pdf') continue;
     if (seen.has(f.name)) continue;
     seen.add(f.name);
     const isApple = stage3DisplayFiles.value.some(df => df.name === f.name && df.isAppleHealth);
