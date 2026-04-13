@@ -96,6 +96,19 @@ const logStep = (step: string, detail: string, ok: boolean, bold = false) => {
   emit('restore-log', { step, detail, ok, bold });
 };
 
+const logProvisioningEvent = async (eventData: Record<string, any>) => {
+  try {
+    await fetch('/api/provisioning-log', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ userId: props.userId, ...eventData })
+    });
+  } catch (err) {
+    console.warn('Failed to log provisioning event:', eventData.event, err);
+  }
+};
+
 const handleClose = () => {
   if (phase.value === 'complete') {
     emit('restore-complete');
@@ -182,8 +195,10 @@ const buildRestoreItems = () => {
     items.push({ key: 'lists', label: 'Restore My Lists', needed: true, status: 'pending' });
   }
 
-  // Saved Chats
-  const chatCount = Array.isArray(state?.savedChats?.chats) ? state.savedChats.chats.length : 0;
+  // Saved Chats — handle both formats: { chats: [...] } or bare array
+  const chatsArray = Array.isArray(state?.savedChats?.chats) ? state.savedChats.chats
+    : Array.isArray(state?.savedChats) ? state.savedChats : [];
+  const chatCount = chatsArray.length;
   if (chatCount > 0) {
     items.push({ key: 'chats', label: `Restore ${chatCount} saved chat${chatCount === 1 ? '' : 's'}`, needed: true, status: 'pending' });
   }
@@ -201,6 +216,16 @@ const executeRestore = async () => {
 
   // Bold start entry
   logStep('Restore', `Restore started for ${uid} — ${files.length} file(s), medications: ${state?.currentMedications ? 'yes' : 'no'}, summary: ${state?.patientSummary ? 'yes' : 'no'}`, true, true);
+  await logProvisioningEvent({
+    event: 'restore-started',
+    method: 'restore',
+    client: {
+      browser: navigator.userAgent,
+      appUrl: window.location.origin,
+      folder: 'restore',
+      version: ''
+    }
+  });
 
   try {
     // Resolve KB name for file uploads
@@ -245,6 +270,10 @@ const executeRestore = async () => {
       return data;
     };
 
+    let totalUploadedBytes = 0;
+    const uploadedFileNames: string[] = [];
+    let appleHealthCount = 0;
+
     if (files.length > 0 && props.localFolderHandle) {
       for (const fileInfo of files) {
         const key = `file:${fileInfo.fileName}`;
@@ -258,6 +287,9 @@ const executeRestore = async () => {
           await uploadFile(file, fileInfo.fileName, shouldGoToKB);
           filesUploaded++;
           if (shouldGoToKB) filesUploadedToKB++;
+          totalUploadedBytes += file.size;
+          uploadedFileNames.push(fileInfo.fileName);
+          if (/^apple/i.test(fileInfo.fileName) && /\.pdf$/i.test(fileInfo.fileName)) appleHealthCount++;
           updateItem(key, { status: 'done', progress: shouldGoToKB ? 'Uploaded to KB' : 'Uploaded to archive' });
           logStep('Restore', `File uploaded: ${fileInfo.fileName}${shouldGoToKB ? ' (to KB)' : ' (archive)'}`, true);
         } catch (e: any) {
@@ -280,6 +312,9 @@ const executeRestore = async () => {
           await uploadFile(safariFile, fileInfo.fileName, shouldGoToKB);
           filesUploaded++;
           if (shouldGoToKB) filesUploadedToKB++;
+          totalUploadedBytes += safariFile.size;
+          uploadedFileNames.push(fileInfo.fileName);
+          if (/^apple/i.test(fileInfo.fileName) && /\.pdf$/i.test(fileInfo.fileName)) appleHealthCount++;
           updateItem(key, { status: 'done', progress: shouldGoToKB ? 'Uploaded to KB' : 'Uploaded to archive' });
           logStep('Restore', `File uploaded: ${fileInfo.fileName}${shouldGoToKB ? ' (to KB)' : ' (archive)'}`, true);
         } catch (e: any) {
@@ -293,6 +328,16 @@ const executeRestore = async () => {
       }
     }
 
+    if (filesUploaded > 0) {
+      logProvisioningEvent({
+        event: 'files-uploaded',
+        count: filesUploaded,
+        totalKB: Math.round(totalUploadedBytes / 1024),
+        files: uploadedFileNames,
+        appleHealthCount
+      });
+    }
+
     // 2. Start KB indexing AND agent deployment IN PARALLEL
     // KB indexing only needs files in Spaces — it does NOT need the agent.
     // Agent deployment takes ~60-90s. KB creation + indexing is independent.
@@ -304,6 +349,7 @@ const executeRestore = async () => {
         return;
       }
       updateItem('kb', { status: 'running', progress: 'Creating...' });
+      const kbStartTime = Date.now();
       logStep('Restore', 'Knowledge Base indexing started', true);
       try {
         const indexResp = await fetch('/api/update-knowledge-base', {
@@ -342,6 +388,12 @@ const executeRestore = async () => {
                   if (t) parts.push(`${Number(t).toLocaleString()} tokens`);
                   updateItem('kb', { status: 'done', progress: parts.join(', ') || 'Indexed' });
                   logStep('Restore', `Knowledge Base indexed: ${parts.join(', ') || 'complete'}`, true);
+                  logProvisioningEvent({
+                    event: 'kb-indexed',
+                    tokens: t || 0,
+                    fileCount: f || 0,
+                    elapsedMs: Date.now() - kbStartTime
+                  });
                 } else if (statusData.status === 'INDEX_JOB_STATUS_FAILED') {
                   throw new Error(statusData.error || 'Indexing failed');
                 } else {
@@ -380,6 +432,7 @@ const executeRestore = async () => {
     let agentDeployed = false;
     const agentPromise = (async () => {
       updateItem('agent', { status: 'running' });
+      const agentStartTime = Date.now();
       logStep('Restore', 'AI Agent deployment started', true);
       try {
         const syncResp = await fetch('/api/sync-agent', {
@@ -419,6 +472,11 @@ const executeRestore = async () => {
           agentDeployed = true;
           updateItem('agent', { status: 'done', progress: endpointReady ? 'Ready' : 'Deploying in background' });
           logStep('Restore', `AI Agent ${endpointReady ? 'deployed and ready' : 'deploying in background'}`, true);
+          logProvisioningEvent({
+            event: 'agent-deployed',
+            agentId: syncData.agentId || null,
+            elapsedMs: Date.now() - agentStartTime
+          });
         } else {
           throw new Error(syncData.error || 'Agent not available');
         }
@@ -434,7 +492,9 @@ const executeRestore = async () => {
 
     // 3. Restore metadata via single server-side coordinator
     // This batches medications, summary, chats, and instructions into one call
-    const hasMetadata = state?.currentMedications || state?.patientSummary || state?.savedChats?.chats?.length || state?.agentInstructions;
+    const savedChatsArr = Array.isArray(state?.savedChats?.chats) ? state.savedChats.chats
+      : Array.isArray(state?.savedChats) ? state.savedChats : [];
+    const hasMetadata = state?.currentMedications || state?.patientSummary || savedChatsArr.length > 0 || state?.agentInstructions;
     if (hasMetadata) {
       for (const key of ['medications', 'summary', 'chats', 'instructions']) {
         const item = restoreItems.value.find(i => i.key === key && i.needed);
@@ -449,7 +509,12 @@ const executeRestore = async () => {
           body: JSON.stringify({
             currentMedications: state?.currentMedications || null,
             patientSummary: state?.patientSummary || null,
-            savedChats: state?.savedChats || null,
+            // Normalize savedChats to always be { chats: [...] } for the server
+            savedChats: (() => {
+              const arr = Array.isArray(state?.savedChats?.chats) ? state.savedChats.chats
+                : Array.isArray(state?.savedChats) ? state.savedChats : [];
+              return arr.length > 0 ? { chats: arr } : null;
+            })(),
             agentInstructions: agentDeployed ? (state?.agentInstructions || null) : null
           })
         });
@@ -464,14 +529,35 @@ const executeRestore = async () => {
         if (restoreItems.value.find(i => i.key === 'medications' && i.needed)) {
           updateItem('medications', r.medications ? { status: 'done', progress: 'Restored' } : { status: 'error', errorMsg: 'Not saved' });
           logStep('Restore', r.medications ? 'Current Medications restored' : 'Current Medications restore failed', !!r.medications);
+          if (r.medications) {
+            const medsText = state?.currentMedications || '';
+            logProvisioningEvent({
+              event: 'medications-restored',
+              lines: medsText.split('\n').filter((l: string) => l.trim()).length
+            });
+          }
         }
         if (restoreItems.value.find(i => i.key === 'summary' && i.needed)) {
           updateItem('summary', r.summary ? { status: 'done', progress: 'Restored' } : { status: 'error', errorMsg: 'Not saved' });
           logStep('Restore', r.summary ? 'Patient Summary restored' : 'Patient Summary restore failed', !!r.summary);
+          if (r.summary) {
+            const summaryText = state?.patientSummary || '';
+            logProvisioningEvent({
+              event: 'summary-restored',
+              lines: summaryText.split('\n').filter((l: string) => l.trim()).length,
+              chars: summaryText.length
+            });
+          }
         }
         if (restoreItems.value.find(i => i.key === 'chats' && i.needed)) {
           updateItem('chats', { status: 'done', progress: r.chats > 0 ? `${r.chats} restored` : 'None' });
-          if (r.chats > 0) logStep('Restore', `${r.chats} saved chat(s) restored`, true);
+          if (r.chats > 0) {
+            logStep('Restore', `${r.chats} saved chat(s) restored`, true);
+            logProvisioningEvent({
+              event: 'chats-restored',
+              count: r.chats || 0
+            });
+          }
         }
         if (restoreItems.value.find(i => i.key === 'instructions' && i.needed)) {
           if (!agentDeployed) {
@@ -480,6 +566,9 @@ const executeRestore = async () => {
           } else {
             updateItem('instructions', r.instructions ? { status: 'done', progress: 'Applied' } : { status: 'error', errorMsg: 'Not saved' });
             logStep('Restore', r.instructions ? 'Agent Instructions restored' : 'Agent Instructions restore failed', !!r.instructions);
+            if (r.instructions) {
+              logProvisioningEvent({ event: 'instructions-restored' });
+            }
           }
         }
       } catch (e: any) {
@@ -508,6 +597,7 @@ const executeRestore = async () => {
         }
         updateItem('lists', { status: 'done', progress: 'Restored' });
         logStep('Restore', 'My Lists restored', true);
+        logProvisioningEvent({ event: 'lists-restored' });
       } catch (e: any) {
         console.error(`[RestoreWizard] Lists restore failed:`, e?.message);
         updateItem('lists', { status: 'error', errorMsg: e?.message || 'Failed' });
@@ -529,6 +619,7 @@ const executeRestore = async () => {
     if (errorItems.length > 0) parts.push(`${errorItems.length} failed`);
     restoreSummary.value = parts.join(', ') + '.';
     logStep('Restore', `Restore complete: ${restoreSummary.value}`, errorItems.length === 0, true);
+    await logProvisioningEvent({ event: 'restore-complete' });
 
     phase.value = 'complete';
   } catch (e) {

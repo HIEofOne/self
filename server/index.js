@@ -8816,19 +8816,31 @@ app.post('/api/restore', async (req, res) => {
     // 5. Save chats — preserve original _id so /api/user-chats filter works
     // (filter expects _id starting with "${userId}-")
     if (savedChats?.chats?.length > 0) {
+      console.log(`[RESTORE] Restoring ${savedChats.chats.length} saved chat(s) for ${userId}`);
       for (const chat of savedChats.chats) {
         try {
           // Strip _rev so CouchDB treats it as a new doc
           const { _rev, ...chatFields } = chat;
+          // Ensure _id starts with userId prefix for user-chats filter
+          let chatId = chat._id;
+          if (!chatId || !chatId.startsWith(`${userId}-`)) {
+            chatId = `${userId}-chat_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+          }
           const chatDoc = {
             ...chatFields,
-            _id: chat._id || `${userId}-chat_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+            _id: chatId,
             updatedAt: new Date().toISOString()
           };
           await cloudant.saveDocument('maia_chats', chatDoc);
           results.chats++;
-        } catch { /* skip duplicates */ }
+          console.log(`[RESTORE] Chat saved: ${chatId}`);
+        } catch (chatErr) {
+          console.warn(`[RESTORE] Chat save failed for ${chat._id || 'unknown'}:`, chatErr.message);
+          results.errors.push(`Chat ${chat._id || 'unknown'}: ${chatErr.message}`);
+        }
       }
+    } else {
+      console.log(`[RESTORE] No saved chats to restore (savedChats=${JSON.stringify(savedChats ? { hasChats: !!savedChats.chats, length: savedChats.chats?.length } : null)})`);
     }
 
     // 6. Save agent instructions (only if agent was created)
@@ -8914,6 +8926,197 @@ app.post('/api/wizard-log', (req, res) => {
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Provisioning log — append an event to the user's provisioningLog array
+app.post('/api/provisioning-log', async (req, res) => {
+  try {
+    const userId = resolveUserId(req, res);
+    if (!userId) return; // 403 already sent on mismatch
+
+    const { event, ...extraFields } = req.body;
+    if (!event) {
+      return res.status(400).json({
+        success: false,
+        message: 'event is required',
+        error: 'MISSING_REQUIRED_FIELDS'
+      });
+    }
+
+    let userDoc = await cloudant.getDocument('maia_users', userId);
+
+    if (!userDoc) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found',
+        error: 'USER_NOT_FOUND'
+      });
+    }
+
+    // Build the log entry
+    if (!Array.isArray(userDoc.provisioningLog)) {
+      userDoc.provisioningLog = [];
+    }
+    const maxId = userDoc.provisioningLog.reduce((m, e) => Math.max(m, e.id || 0), 0);
+    const entry = { ...extraFields, event, id: maxId + 1, time: new Date().toISOString() };
+    userDoc.provisioningLog.push(entry);
+    userDoc.updatedAt = new Date().toISOString();
+
+    // Save with retry logic for conflicts
+    let retries = 3;
+    let saved = false;
+
+    while (retries > 0 && !saved) {
+      try {
+        await cloudant.saveDocument('maia_users', userDoc);
+        saved = true;
+      } catch (error) {
+        if (error.statusCode === 409 && retries > 1) {
+          // Conflict - re-read and retry
+          userDoc = await cloudant.getDocument('maia_users', userId);
+          if (!Array.isArray(userDoc.provisioningLog)) {
+            userDoc.provisioningLog = [];
+          }
+          const retryMaxId = userDoc.provisioningLog.reduce((m, e) => Math.max(m, e.id || 0), 0);
+          entry.id = retryMaxId + 1;
+          entry.time = new Date().toISOString();
+          userDoc.provisioningLog.push(entry);
+          userDoc.updatedAt = new Date().toISOString();
+          retries--;
+          await new Promise(resolve => setTimeout(resolve, 100));
+        } else {
+          throw error;
+        }
+      }
+    }
+
+    res.json({ success: true, id: entry.id });
+  } catch (error) {
+    console.error('❌ Error saving provisioning log entry:', error);
+    res.status(500).json({
+      success: false,
+      message: `Failed to save provisioning log entry: ${error.message}`,
+      error: 'SAVE_FAILED'
+    });
+  }
+});
+
+// Provisioning log — return the full log plus a derived currentState summary
+app.get('/api/provisioning-log', async (req, res) => {
+  try {
+    const userId = req.query?.userId;
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        message: 'userId query parameter is required',
+        error: 'MISSING_USER_ID'
+      });
+    }
+
+    let userDoc;
+    try {
+      userDoc = await cloudant.getDocument('maia_users', userId);
+    } catch (err) {
+      if (err.statusCode === 404) {
+        return res.status(404).json({
+          success: false,
+          message: 'User not found',
+          error: 'USER_NOT_FOUND'
+        });
+      }
+      throw err;
+    }
+
+    if (!userDoc) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found',
+        error: 'USER_NOT_FOUND'
+      });
+    }
+
+    const log = Array.isArray(userDoc.provisioningLog) ? userDoc.provisioningLog : [];
+
+    // Find the last setup-started or restore-started event
+    let startIdx = -1;
+    for (let i = log.length - 1; i >= 0; i--) {
+      if (log[i].event === 'setup-started' || log[i].event === 'restore-started') {
+        startIdx = i;
+        break;
+      }
+    }
+
+    // Derive currentState from events after (and including) the start event
+    const currentState = {
+      method: null,
+      inProgress: false,
+      filesUploaded: 0,
+      agentReady: false,
+      kbIndexed: false,
+      kbTokens: 0,
+      medicationsDone: false,
+      medicationsLines: 0,
+      summaryDone: false,
+      summaryLines: 0,
+      chatCount: 0,
+      instructionsDone: false,
+      listsDone: false
+    };
+
+    if (startIdx >= 0) {
+      const startEvent = log[startIdx];
+      currentState.method = startEvent.event === 'setup-started' ? 'setup' : 'restore';
+      currentState.inProgress = true; // assume in-progress until we find a complete event
+
+      const slice = log.slice(startIdx);
+      for (const entry of slice) {
+        switch (entry.event) {
+          case 'setup-complete':
+          case 'restore-complete':
+            currentState.inProgress = false;
+            break;
+          case 'files-uploaded':
+            currentState.filesUploaded = entry.count || 0;
+            break;
+          case 'agent-deployed':
+            currentState.agentReady = true;
+            break;
+          case 'kb-indexed':
+            currentState.kbIndexed = true;
+            currentState.kbTokens = entry.tokens || 0;
+            break;
+          case 'medications-saved':
+          case 'medications-restored':
+            currentState.medicationsDone = true;
+            currentState.medicationsLines = entry.lines || 0;
+            break;
+          case 'summary-saved':
+          case 'summary-restored':
+            currentState.summaryDone = true;
+            currentState.summaryLines = entry.lines || 0;
+            break;
+          case 'chats-restored':
+            currentState.chatCount = entry.count || 0;
+            break;
+          case 'instructions-restored':
+            currentState.instructionsDone = true;
+            break;
+          case 'lists-restored':
+            currentState.listsDone = true;
+            break;
+        }
+      }
+    }
+
+    res.json({ success: true, log, currentState });
+  } catch (error) {
+    console.error('❌ Error reading provisioning log:', error);
+    res.status(500).json({
+      success: false,
+      message: `Failed to read provisioning log: ${error.message}`,
+      error: 'READ_FAILED'
+    });
   }
 });
 

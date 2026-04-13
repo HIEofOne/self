@@ -357,6 +357,17 @@
               :disable="localFolderAutoRunActive"
               @click="handlePickLocalFolder"
             />
+            <!-- TEST button (localhost only, Chrome only) -->
+            <q-btn
+              v-if="localFolderSupported && isLocalhost"
+              flat
+              color="deep-orange"
+              label="TEST"
+              icon="science"
+              class="q-ml-sm"
+              :disable="localFolderAutoRunActive || testMode"
+              @click="handleTestButton"
+            />
             <!-- Safari: one-time folder read -->
             <q-btn
               v-else-if="props.folderAccessTier === 'safari'"
@@ -486,6 +497,20 @@
           <div v-if="localFolderAutoRunActive" class="text-caption text-primary q-mt-md">
             <q-spinner size="14px" class="q-mr-xs" />
             {{ localFolderAutoRunPhase }}
+          </div>
+        </q-card-section>
+
+        <!-- Test results panel (localhost only, shown below wizard progress) -->
+        <q-card-section v-if="testMode && testLogLines.length > 0" class="q-pt-none">
+          <div class="q-pa-sm" style="border: 1px solid #ef6c00; border-radius: 6px; background: #fff8e1;">
+            <div class="text-subtitle2 q-mb-xs" style="color: #ef6c00;">
+              <q-icon name="science" size="sm" class="q-mr-xs" />
+              TEST Mode — Auto-Verify
+            </div>
+            <div v-for="(line, i) in testLogLines" :key="i" class="text-caption" :style="{ color: line.ok ? '#2e7d32' : '#c62828' }">
+              {{ line.ok ? '\u2713' : '\u2717' }} {{ line.text }}
+            </div>
+            <pre v-if="testFinalOutput" class="q-mt-sm text-caption" style="white-space: pre-wrap; max-height: 300px; overflow-y: auto; background: #fff; padding: 6px; border-radius: 4px; font-family: monospace; font-size: 11px;">{{ testFinalOutput }}</pre>
           </div>
         </q-card-section>
 
@@ -857,6 +882,7 @@ const emit = defineEmits<{
   'local-folder-connected': [payload: { handle: FileSystemDirectoryHandle; folderName: string }];
   'session-dirty': [];
   'wizard-complete': [];
+  'test-setup-complete': [payload: { verification: any; folderHandle: FileSystemDirectoryHandle }];
 }>();
 
 const $q = useQuasar();
@@ -971,6 +997,26 @@ const restoreIndexingQueued = ref(false);
 const wizardRestoreTargetName = ref<string | null>(null);
 const wizardStage2NoDevice = ref(false);
 
+// ── Localhost detection ───────────────────────────────────────────
+const isLocalhost = ref(typeof window !== 'undefined' && window.location.hostname === 'localhost');
+
+// ── Setup-Restore Test state (auto-pilot mode) ──────────────────
+/** When true, wizard auto-verifies at every choice point and emits test events to App.vue. */
+const testMode = ref(false);
+const testLogLines = ref<Array<{ text: string; ok: boolean }>>([]);
+const testFinalOutput = ref('');
+const testSetupVerification = ref<any>(null); // TabVerification from after setup
+
+const addTestLog = (text: string, ok: boolean = true) => {
+  testLogLines.value.push({ text, ok });
+  // Also write to setupLogLines so it appears in maia-log.pdf
+  addSetupLogLine('TEST', text, ok);
+};
+
+const setTestFinalOutput = (text: string) => {
+  testFinalOutput.value = text;
+};
+
 // ── Local Folder state (File System Access API) ─────────────────
 const localFolderSupported = ref(false);
 const localFolderHandle = ref<FileSystemDirectoryHandle | null>(null);
@@ -992,6 +1038,21 @@ const preGeneratedSummary = ref<string | null>(null);
 /** True while the wizard is generating Patient Summary and preparing to open My Lists.
  *  Keeps the wizard dialog visible so the user doesn't see a zombie chat. */
 const wizardPreparingRecords = ref(false);
+
+// ── Provisioning log (dual-write alongside addSetupLogLine) ────
+const logProvisioningEvent = async (eventData: Record<string, any>) => {
+  if (!props.user?.userId) return;
+  try {
+    await fetch('/api/provisioning-log', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ userId: props.user.userId, ...eventData })
+    });
+  } catch (err) {
+    console.warn('Failed to log provisioning event:', eventData.event, err);
+  }
+};
 
 // ── Safari / basic fallback folder state ────────────────────────
 /** Files collected via webkitdirectory input (Safari) or single-file input (basic). */
@@ -1190,6 +1251,16 @@ watch(
   (isOpen, wasOpen) => {
     if (isOpen) {
       addSetupLogLine('Wizard', 'Setup wizard started', true, true);
+      logProvisioningEvent({
+        event: 'setup-started',
+        method: 'setup',
+        client: {
+          browser: parseUserAgent(),
+          appUrl: window.location.origin,
+          folder: localFolderName.value || 'unknown',
+          version: packageJson.version
+        }
+      });
       wizardSlideIndex.value = 0;
       void loadWizardMessages();
       void positionWizardInlineDots();
@@ -2503,6 +2574,17 @@ const restoreSetupLogFromState = async () => {
   } catch { /* ignore */ }
 };
 
+/** TEST button — sets auto-pilot mode and triggers the normal folder picker flow. */
+const handleTestButton = () => {
+  testMode.value = true;
+  testLogLines.value = [];
+  testFinalOutput.value = '';
+  testSetupVerification.value = null;
+  addTestLog('TEST mode activated — wizard will auto-verify');
+  // Trigger the normal folder picker; the wizard flow runs as usual
+  handlePickLocalFolder();
+};
+
 /** User clicks "Select your MAIA folder" — opens directory picker, scans files, starts auto-run. */
 const handlePickLocalFolder = async () => {
   if (!props.user?.userId) return;
@@ -2631,6 +2713,9 @@ const runSafariFolderWizard = async (files: File[]) => {
 
     let uploadedCount = 0;
     let appleHealthCount = 0;
+    const uploadedFileNames: string[] = [];
+    let totalUploadedBytes = 0;
+    let appleHealthFileName: string | null = null;
     for (const file of filesToUpload) {
       try {
         const maxSize = 50 * 1024 * 1024;
@@ -2657,7 +2742,10 @@ const runSafariFolderWizard = async (files: File[]) => {
         let isAppleHealth = false;
         try {
           isAppleHealth = await detectAppleHealthFromBucket(uploadResult.fileInfo.bucketKey);
-          if (isAppleHealth) appleHealthCount++;
+          if (isAppleHealth) {
+            appleHealthCount++;
+            appleHealthFileName = file.name;
+          }
         } catch { /* ignore detection errors */ }
 
         // Save file metadata
@@ -2681,12 +2769,24 @@ const runSafariFolderWizard = async (files: File[]) => {
         });
 
         uploadedCount++;
+        uploadedFileNames.push(file.name);
+        totalUploadedBytes += file.size;
         addSetupLogLine('File Uploaded', `${file.name} (${(file.size / 1024).toFixed(0)} KB)${isAppleHealth ? ' [Apple Health]' : ''}`, true);
       } catch (e) {
         addSetupLogLine('Upload Error', `${file.name}: ${e instanceof Error ? e.message : 'Unknown'}`, false);
       }
     }
     addSetupLogLine('Upload Complete', `${uploadedCount} of ${filesToUpload.length} file(s) uploaded${appleHealthCount > 0 ? `, ${appleHealthCount} Apple Health` : ''}`, uploadedCount > 0);
+    logProvisioningEvent({
+      event: 'files-uploaded',
+      count: uploadedCount,
+      totalKB: Math.round(totalUploadedBytes / 1024),
+      files: uploadedFileNames,
+      appleHealthCount
+    });
+    if (appleHealthFileName) {
+      logProvisioningEvent({ event: 'apple-health-detected', fileName: appleHealthFileName });
+    }
 
     // Refresh wizard state and proceed with indexing (same as Chrome path)
     await refreshWizardState();
@@ -2762,6 +2862,9 @@ const runAutoWizard = async () => {
     addSetupLogLine('Upload Phase', `Starting upload of ${filesToUpload.length} PDF file(s)`, true);
     let uploadedCount = 0;
     let appleHealthCount = 0;
+    const uploadedFileNames: string[] = [];
+    let totalUploadedBytes = 0;
+    let appleHealthFileName: string | null = null;
     for (const fileEntry of filesToUpload) {
       try {
         const file = await fileEntry.fileHandle.getFile();
@@ -2791,7 +2894,10 @@ const runAutoWizard = async () => {
         let isAppleHealth = false;
         try {
           isAppleHealth = await detectAppleHealthFromBucket(uploadResult.fileInfo.bucketKey);
-          if (isAppleHealth) appleHealthCount++;
+          if (isAppleHealth) {
+            appleHealthCount++;
+            appleHealthFileName = file.name;
+          }
         } catch { /* ignore detection errors */ }
 
         // Save file metadata
@@ -2815,12 +2921,24 @@ const runAutoWizard = async () => {
         });
 
         uploadedCount++;
+        uploadedFileNames.push(file.name);
+        totalUploadedBytes += file.size;
         addSetupLogLine('File Uploaded', `${file.name} (${(file.size / 1024).toFixed(0)} KB)${isAppleHealth ? ' [Apple Health]' : ''}`, true);
       } catch (e) {
         addSetupLogLine('Upload Error', `${fileEntry.name}: ${e instanceof Error ? e.message : 'Unknown'}`, false);
       }
     }
     addSetupLogLine('Upload Complete', `${uploadedCount} of ${filesToUpload.length} file(s) uploaded${appleHealthCount > 0 ? `, ${appleHealthCount} Apple Health` : ''}`, uploadedCount > 0);
+    logProvisioningEvent({
+      event: 'files-uploaded',
+      count: uploadedCount,
+      totalKB: Math.round(totalUploadedBytes / 1024),
+      files: uploadedFileNames,
+      appleHealthCount
+    });
+    if (appleHealthFileName) {
+      logProvisioningEvent({ event: 'apple-health-detected', fileName: appleHealthFileName });
+    }
 
     // Refresh wizard state to pick up new files
     await refreshWizardState();
@@ -2940,11 +3058,30 @@ const generateSetupLogPdf = async () => {
   doc.text('Detailed Log', margin, y);
   y += 6;
   doc.setFontSize(9);
+
+  // Color helper: determines RGB color for a log line
+  // Red (200,0,0) = errors/failures
+  // Green (0,120,0) = user-initiated actions (My Stuff interactions, verifications)
+  // Orange (200,100,0) = TEST mode entries
+  // Black (0,0,0) = wizard/system entries
+  const getLineColor = (line: { step: string; detail: string; ok: boolean }): [number, number, number] => {
+    if (!line.ok) return [200, 0, 0]; // Red for errors
+    if (line.step === 'TEST') return [200, 100, 0]; // Orange for TEST
+    if (line.step === 'Account') return [200, 0, 0]; // Red for account deletion
+    // Green for user-initiated actions
+    if (line.step === 'My Stuff' || line.step === 'Current Medications' ||
+        (line.step === 'Dialog' && line.detail.includes('My Stuff'))) {
+      return [0, 120, 0];
+    }
+    return [0, 0, 0]; // Black for wizard/system
+  };
+
   for (const line of setupLogLines.value) {
     if (y > 270) {
       doc.addPage();
       y = 20;
     }
+    const [r, g, b] = getLineColor(line);
     // Session Change divider — draw a horizontal rule and bold heading
     if (line.step === 'Session Change') {
       y += 3;
@@ -2953,10 +3090,12 @@ const generateSetupLogPdf = async () => {
       y += 6;
       doc.setFontSize(10);
       doc.setFont('helvetica', 'bold');
+      doc.setTextColor(r, g, b);
       const timestamp = new Date(line.time).toLocaleTimeString();
       doc.text(`[${timestamp}] ${line.detail}`, margin, y);
       y += 8;
       doc.setFont('helvetica', 'normal');
+      doc.setTextColor(0, 0, 0);
       doc.setFontSize(9);
       continue;
     }
@@ -2972,6 +3111,7 @@ const generateSetupLogPdf = async () => {
       y += 2;
       doc.setFontSize(10);
       doc.setFont('helvetica', 'bold');
+      doc.setTextColor(r, g, b);
       const prefix = line.ok ? '' : '[FAIL] ';
       const timestamp = new Date(line.time).toLocaleTimeString();
       const text = `${prefix}[${timestamp}] ${line.step}: ${line.detail}`;
@@ -2985,10 +3125,12 @@ const generateSetupLogPdf = async () => {
         y += 6;
       }
       doc.setFont('helvetica', 'normal');
+      doc.setTextColor(0, 0, 0);
       doc.setFontSize(9);
       y += 2;
       continue;
     }
+    doc.setTextColor(r, g, b);
     const prefix = line.ok ? '' : '[FAIL] ';
     const timestamp = new Date(line.time).toLocaleTimeString();
     const text = `${prefix}[${timestamp}] ${line.step}: ${line.detail}`;
@@ -3001,6 +3143,7 @@ const generateSetupLogPdf = async () => {
       doc.text(sl, margin, y);
       y += 5;
     }
+    doc.setTextColor(0, 0, 0);
     y += 2;
   }
 
@@ -3015,9 +3158,68 @@ const generateSetupLogPdf = async () => {
 /** Save current app state to maia-state.json in the local folder. */
 const saveStateToLocalFolder = async () => {
   if (!localFolderHandle.value || !props.user?.userId) return;
+  const userId = props.user.userId;
+
+  // Fetch actual content from server for each field, defaulting to null on error
+  let medicationsText: string | null = null;
+  let summaryText: string | null = null;
+  let savedChatsData: any = undefined;
+  let agentInstructionsText: string | null = null;
+  let listsMarkdownText: string | null = null;
+
+  const fetchOpts = { credentials: 'include' as RequestCredentials };
+
+  await Promise.allSettled([
+    (async () => {
+      try {
+        const res = await fetch(`/api/user-status?userId=${encodeURIComponent(userId)}`, fetchOpts);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.currentMedications) medicationsText = data.currentMedications;
+        }
+      } catch { /* default to null */ }
+    })(),
+    (async () => {
+      try {
+        const res = await fetch(`/api/patient-summary?userId=${encodeURIComponent(userId)}`, fetchOpts);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.summary) summaryText = data.summary;
+        }
+      } catch { /* default to null */ }
+    })(),
+    (async () => {
+      try {
+        const res = await fetch(`/api/shared-group-chats?userId=${encodeURIComponent(userId)}`, fetchOpts);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.chats) savedChatsData = data.chats;
+        }
+      } catch { /* default to undefined */ }
+    })(),
+    (async () => {
+      try {
+        const res = await fetch(`/api/agent-instructions?userId=${encodeURIComponent(userId)}`, fetchOpts);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.instructions) agentInstructionsText = data.instructions;
+        }
+      } catch { /* default to null */ }
+    })(),
+    (async () => {
+      try {
+        const res = await fetch(`/api/files/lists/markdown?userId=${encodeURIComponent(userId)}`, fetchOpts);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.markdown) listsMarkdownText = data.markdown;
+        }
+      } catch { /* default to null */ }
+    })()
+  ]);
+
   const state: MaiaState = {
     version: 1,
-    userId: props.user.userId,
+    userId: userId,
     displayName: props.user.displayName,
     updatedAt: new Date().toISOString(),
     files: wizardStage3Files.value.map(f => ({
@@ -3025,10 +3227,12 @@ const saveStateToLocalFolder = async () => {
       cloudStatus: f.inKnowledgeBase ? 'indexed' as const : 'pending' as const,
       bucketKey: f.bucketKey
     })),
-    currentMedications: wizardCurrentMedications.value ? 'verified' : null,
-    patientSummary: wizardPatientSummary.value ? 'verified' : null,
-    savedChats: undefined,
+    currentMedications: medicationsText,
+    patientSummary: summaryText,
+    savedChats: savedChatsData ? { chats: savedChatsData } : undefined,
     currentChat: undefined,
+    agentInstructions: agentInstructionsText,
+    listsMarkdown: listsMarkdownText,
     setupLog: setupLogLines.value.length > 0 ? setupLogLines.value : undefined
   };
   await writeStateFile(localFolderHandle.value, state);
@@ -3261,6 +3465,12 @@ const handleStage3Index = async (overrideNames?: string[], fromRestore = false) 
           if (isCompleted) {
             console.log(`[KB-POLL] ✅ Indexing complete: tokens=${tokens} files=${kbStatus.filesIndexed || 0} reason=${completionReason} elapsed=${elapsedPollMin}m${elapsedPollSec}s`);
             addSetupLogLine('Indexing Complete', `${kbStatus.filesIndexed || 0} file(s) indexed, ${tokens} tokens (${completionReason})`, true);
+            logProvisioningEvent({
+              event: 'kb-indexed',
+              tokens: parseInt(tokens) || 0,
+              fileCount: parseInt(String(kbStatus.filesIndexed)) || 0,
+              elapsedMs: elapsedPollMs || null
+            });
             if (stage3IndexingPoll.value) {
               clearInterval(stage3IndexingPoll.value);
               stage3IndexingPoll.value = null;
@@ -5469,6 +5679,11 @@ const startSetupWizardPolling = () => {
         agentSetupPollingActive.value = false;
         stopAgentSetupTimer();
         addSetupLogLine('Agent Status', `Agent deployed and ready (${agentSetupElapsed.value}s)`, true);
+        logProvisioningEvent({
+          event: 'agent-deployed',
+          agentId: null,
+          elapsedMs: agentSetupElapsed.value ? agentSetupElapsed.value * 1000 : null
+        });
         try {
           if (agentSetupKey) sessionStorage.removeItem(agentSetupKey);
         } catch { /* ignore */ }
@@ -5586,6 +5801,12 @@ watch(
         ? Math.round((Date.now() - stage3IndexingStartedAt.value) / 1000)
         : 0;
       addSetupLogLine('Indexing Complete', `${filesIndexed} file(s) indexed, ${tokens} tokens, ${elapsed}s elapsed`, true);
+      logProvisioningEvent({
+        event: 'kb-indexed',
+        tokens: parseInt(String(tokens)) || 0,
+        fileCount: parseInt(String(filesIndexed)) || 0,
+        elapsedMs: elapsed ? elapsed * 1000 : null
+      });
       void generateSetupLogPdf();
     }
   }
@@ -5623,6 +5844,7 @@ watch(
       }
       wizardFlowPhase.value = 'medications';
       guidedFlowDismissCount.value = 0;
+      logProvisioningEvent({ event: 'medications-offered' });
 
       // Step 1: Generate and save Patient Summary BEFORE opening My Lists.
       // This ensures the summary is available when Lists.vue needs to extract medications.
@@ -5656,6 +5878,12 @@ watch(
             });
             console.log('[Wizard] Patient Summary generated and saved (%d chars)', text.length);
             addSetupLogLine('Wizard Flow', `Patient Summary generated and saved (${text.length} chars)`, true);
+            const summaryLines = text.split('\n').filter((l: string) => l.trim()).length;
+            logProvisioningEvent({
+              event: 'summary-generated',
+              lines: summaryLines,
+              chars: text.length
+            });
           } else {
             console.warn('[Wizard] Patient Summary generation returned empty text');
             addSetupLogLine('Wizard Flow', '[WARNING] Patient Summary generation returned empty', false);
@@ -5678,6 +5906,125 @@ watch(
       showMyStuffDialog.value = true;
       // Close wizard dialog after My Stuff is open (My Stuff dialog covers the screen)
       showAgentSetupDialog.value = false;
+    }
+  }
+);
+
+// ── TEST MODE: Auto-verify watchers ──────────────────────────────
+// In testMode, automatically verify medications and summary when the wizard
+// opens MyStuff to those tabs. Also auto-dismiss the wizard CONTINUE button.
+
+// Auto-click CONTINUE when KB + Agent are ready in testMode
+watch(
+  () => testMode.value && wizardStage1Complete.value && (indexingStatus.value?.phase === 'complete') && !wizardPreparingRecords.value && showAgentSetupDialog.value,
+  (ready) => {
+    if (ready && testMode.value) {
+      addTestLog('Agent + KB ready — auto-continuing');
+      // Small delay to let UI render the checkmarks
+      setTimeout(() => dismissWizard(), 500);
+    }
+  }
+);
+
+// Auto-verify medications: when MyStuff opens to lists tab during medications phase in testMode
+watch(
+  () => testMode.value && wizardFlowPhase.value === 'medications' && showMyStuffDialog.value,
+  async (shouldAutoVerify) => {
+    if (!shouldAutoVerify || !testMode.value) return;
+    addTestLog('Medications tab opened — waiting for auto-process...');
+    // Poll until wizardCurrentMedications becomes true or 10s timeout
+    // (Lists.vue displays medications but doesn't auto-save; we'll handle the save ourselves)
+    const start = Date.now();
+    await new Promise<void>((resolve) => {
+      const check = setInterval(() => {
+        if (wizardCurrentMedications.value || Date.now() - start > 10000) {
+          clearInterval(check);
+          resolve();
+        }
+      }, 1000);
+    });
+    if (wizardCurrentMedications.value) {
+      addTestLog('Medications auto-verified');
+    } else {
+      // Lists.vue populated the UI but didn't auto-save. Check the server for medications,
+      // then fall back to extracting from the pre-generated patient summary.
+      let medsText = '';
+      try {
+        const res = await fetch(`/api/user-status?userId=${encodeURIComponent(props.user!.userId)}`, { credentials: 'include' });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.currentMedications && data.currentMedications.trim()) {
+            medsText = data.currentMedications;
+          }
+        }
+      } catch { /* ignore */ }
+      // If not on server, extract from the pre-generated patient summary
+      if (!medsText && preGeneratedSummary.value) {
+        const lines = preGeneratedSummary.value.split('\n');
+        let inMeds = false;
+        const medsLines: string[] = [];
+        for (const line of lines) {
+          if (/current\s+medications/i.test(line)) { inMeds = true; continue; }
+          if (inMeds && /^#{1,3}\s|^\*\*[A-Z]/.test(line) && !/medication/i.test(line)) break;
+          if (inMeds && line.trim()) medsLines.push(line);
+        }
+        medsText = medsLines.join('\n').trim();
+      }
+      if (medsText) {
+        // Save to server so it persists in maia-state.json and can be restored
+        try {
+          await fetch('/api/user-current-medications', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ userId: props.user!.userId, currentMedications: medsText })
+          });
+        } catch { /* non-fatal */ }
+        addTestLog(`Medications extracted from summary (${medsText.split('\\n').filter(l => l.trim()).length} lines) — auto-verified`);
+        handleCurrentMedicationsSaved({ value: medsText, edited: false, changed: true });
+      } else {
+        addTestLog('Medications not available — proceeding without', false);
+        handleCurrentMedicationsSaved({ value: '', edited: false, changed: false });
+      }
+    }
+  }
+);
+
+// Auto-verify summary: when summary phase starts in testMode
+watch(
+  () => testMode.value && wizardFlowPhase.value === 'summary',
+  async (shouldAutoVerify) => {
+    if (!shouldAutoVerify || !testMode.value) return;
+    addTestLog('Summary tab opened — auto-verifying...');
+    // Wait for summary to be loaded/generated (poll for a few seconds)
+    await new Promise(r => setTimeout(r, 3000));
+    // Call the verify handler directly
+    addTestLog('Summary auto-verified');
+    handlePatientSummaryVerified();
+  }
+);
+
+// After wizard completes in testMode, verify setup and emit to App.vue for Delete → Restore
+// Watch the phase directly so we can check the PREVIOUS value — only trigger on summary→done transition
+watch(
+  () => wizardFlowPhase.value,
+  async (phase, oldPhase) => {
+    if (phase !== 'done' || oldPhase !== 'summary' || !testMode.value || testSetupVerification.value) return;
+    addTestLog('Setup complete — verifying all tabs...');
+    try {
+      const { verifyAllTabs, formatVerification } = await import('../utils/setupRestoreTest');
+      const verification = await verifyAllTabs(props.user!.userId);
+      testSetupVerification.value = verification;
+      addTestLog(`Files: ${verification.files.count}`, verification.files.count > 0);
+      addTestLog(`Agent: ${verification.agentReady ? 'ready' : 'not ready'}`, verification.agentReady);
+      addTestLog(`KB: ${verification.kbIndexed ? `indexed (${verification.kbTokens} tokens)` : 'not indexed'}`, verification.kbIndexed);
+      addTestLog(`Medications: ${verification.medications.lines} lines`, verification.medications.lines > 0);
+      addTestLog(`Summary: ${verification.summary.lines} lines, ${verification.summary.chars} chars`, verification.summary.lines > 0);
+      addTestLog('Setup verification complete — requesting Delete + Restore cycle...');
+      // Emit to App.vue to handle Delete → Restore → Verify
+      emit('test-setup-complete', { verification, folderHandle: localFolderHandle.value! });
+    } catch (err: any) {
+      addTestLog(`Setup verification failed: ${err.message}`, false);
     }
   }
 );
@@ -5923,6 +6270,11 @@ const handleReferenceFileAdded = async (file: { fileName: string; bucketKey: str
 
 const handleCurrentMedicationsSaved = async (payload?: { value?: string; edited?: boolean; changed?: boolean }) => {
   addSetupLogLine('My Stuff', 'Current Medications saved/verified on My Lists tab', true, true);
+  const medsLineCount = payload?.value ? payload.value.split('\n').filter(l => l.trim()).length : 0;
+  logProvisioningEvent({
+    event: 'medications-saved',
+    lines: medsLineCount
+  });
   wizardCurrentMedications.value = true;
   wizardStage2Complete.value = true;
   wizardStage2Pending.value = false;
@@ -5991,6 +6343,14 @@ const handleMyStuffTabOpened = (tab: string) => {
 
 const handlePatientSummarySaved = async () => {
   addSetupLogLine('My Stuff', 'Patient Summary saved on Patient Summary tab', true, true);
+  {
+    const summaryText = preGeneratedSummary.value || '';
+    logProvisioningEvent({
+      event: 'summary-saved',
+      lines: summaryText ? summaryText.split('\n').filter((l: string) => l.trim()).length : 0,
+      chars: summaryText.length
+    });
+  }
   // Saving a new summary does not mean it was verified
   wizardPatientSummary.value = false;
   showAgentSetupDialog.value = false;
@@ -6000,6 +6360,7 @@ const handlePatientSummarySaved = async () => {
   if (wizardFlowPhase.value === 'summary') {
     wizardFlowPhase.value = 'done';
     addSetupLogLine('Wizard', 'Setup wizard complete — Patient Summary saved', true, true);
+    logProvisioningEvent({ event: 'setup-complete' });
     persistWizardCompletion();
     void generateSetupLogPdf();
     emit('wizard-complete');
@@ -6009,6 +6370,14 @@ const handlePatientSummarySaved = async () => {
 
 const handlePatientSummaryVerified = async () => {
   addSetupLogLine('My Stuff', 'Patient Summary verified on Patient Summary tab', true, true);
+  {
+    const summaryText = preGeneratedSummary.value || '';
+    logProvisioningEvent({
+      event: 'summary-saved',
+      lines: summaryText ? summaryText.split('\n').filter((l: string) => l.trim()).length : 0,
+      chars: summaryText.length
+    });
+  }
   wizardPatientSummary.value = true;
   persistWizardCompletion();
   showAgentSetupDialog.value = false;
@@ -6018,6 +6387,7 @@ const handlePatientSummaryVerified = async () => {
   if (wizardFlowPhase.value === 'summary') {
     wizardFlowPhase.value = 'done';
     addSetupLogLine('Wizard', 'Setup wizard complete — Patient Summary verified', true, true);
+    logProvisioningEvent({ event: 'setup-complete' });
     void generateSetupLogPdf();
     emit('wizard-complete');
     // Leave MyStuff open — user can close when ready
@@ -6220,6 +6590,7 @@ onMounted(async () => {
           if (guidedFlowDismissCount.value >= 2) {
             // User dismissed Patient Summary twice — complete wizard
             addSetupLogLine('Wizard', 'Setup wizard complete — Patient Summary skipped (dismissed twice)', false, true);
+            logProvisioningEvent({ event: 'setup-complete' });
             guidedFlowDismissCount.value = 0;
             wizardFlowPhase.value = 'done';
             void generateSetupLogPdf();
@@ -6370,10 +6741,18 @@ const markIndexingAlreadyCompleted = () => {
   stage3IndexingCompletedAt.value = Date.now();
 };
 
+const closeMyStuff = () => {
+  showMyStuffDialog.value = false;
+};
+
 defineExpose({
   addSetupLogLine,
   generateSetupLogPdf,
-  markIndexingAlreadyCompleted
+  markIndexingAlreadyCompleted,
+  testMode,
+  addTestLog,
+  setTestFinalOutput,
+  closeMyStuff
 });
 </script>
 

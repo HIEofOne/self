@@ -187,6 +187,7 @@
             @local-folder-connected="handleLocalFolderConnected"
             @session-dirty="sessionDirty = true"
             @wizard-complete="handleWizardComplete"
+            @test-setup-complete="handleTestSetupComplete"
           />
         </div>
       </q-page>
@@ -1973,6 +1974,121 @@ const handleWizardComplete = async () => {
   }
 };
 
+/** Handle TEST mode: setup is complete — orchestrate Delete → Restore → Verify cycle. */
+const testModeActive = ref(false);
+const testSetupVerification = ref<any>(null);
+
+const handleTestSetupComplete = async (payload: { verification: any; folderHandle: FileSystemDirectoryHandle }) => {
+  const ci = chatInterfaceRef.value as any;
+  if (!ci) return;
+  const log = (text: string, ok = true) => ci.addTestLog(text, ok);
+
+  testModeActive.value = true;
+  testSetupVerification.value = payload.verification;
+
+  try {
+    // Step 1: Validate maia-state.json from local folder
+    log('Reading maia-state.json from local folder...');
+    let localState: MaiaState | null = null;
+    try {
+      const { readStateFile } = await import('./utils/localFolder');
+      localState = await readStateFile(payload.folderHandle);
+    } catch (e: any) {
+      log(`Failed to read maia-state.json: ${e.message}`, false);
+      testModeActive.value = false;
+      return;
+    }
+
+    if (localState) {
+      const { validateBackupState } = await import('./utils/setupRestoreTest');
+      const validation = validateBackupState(localState);
+      if (validation.valid) {
+        log('maia-state.json validated ✓');
+      } else {
+        for (const err of validation.errors) {
+          log(`Backup: ${err}`, false);
+        }
+        log('maia-state.json has issues — continuing anyway');
+      }
+    } else {
+      log('maia-state.json not found or empty', false);
+      testModeActive.value = false;
+      return;
+    }
+
+    // Step 2: Delete cloud account
+    log('Deleting cloud account...');
+    const userId = user.value?.userId;
+    if (!userId) {
+      log('No userId — cannot delete', false);
+      testModeActive.value = false;
+      return;
+    }
+
+    // Log to provisioning log before delete
+    try {
+      await fetch('/api/provisioning-log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ userId, event: 'account-deleted' })
+      });
+    } catch { /* non-fatal */ }
+
+    const deleteResp = await fetch('/api/self/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ userId })
+    });
+    if (!deleteResp.ok) {
+      const errData = await deleteResp.json().catch(() => ({}));
+      log(`Delete failed: ${errData.error || deleteResp.status}`, false);
+      testModeActive.value = false;
+      return;
+    }
+    log('Cloud account deleted');
+
+    // Step 3: Recreate account
+    log('Recreating account...');
+    const recreateResp = await fetch('/api/account/recreate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ userId })
+    });
+    const recreateData = await recreateResp.json();
+    if (!recreateResp.ok || !recreateData.authenticated) {
+      log(`Recreate failed: ${recreateData.error || 'unknown'}`, false);
+      testModeActive.value = false;
+      return;
+    }
+    restoreWizardKbName.value = recreateData.kbName || null;
+    setAuthenticatedUser(recreateData.user, null);
+    log('Account recreated');
+
+    // Step 4: Check cloud health
+    const healthResp = await fetch(
+      `/api/cloud-health?userId=${encodeURIComponent(userId)}`,
+      { credentials: 'include' }
+    );
+    if (healthResp.ok) {
+      cloudHealthDetails.value = (await healthResp.json()).details || null;
+    }
+
+    // Step 5: Launch RestoreWizard — it will call handleRestoreWizardComplete when done
+    log('Launching Restore Wizard...');
+    restoreWizardLocalState.value = localState;
+    showRestoreWizard.value = true;
+
+    // The rest happens in handleRestoreWizardComplete which checks testModeActive
+
+  } catch (err: any) {
+    log(`Test error: ${err.message}`, false);
+    testModeActive.value = false;
+  }
+};
+
 /** Detect whether the browser is Chrome (not Edge, not Opera). */
 const isChromeBrowser = (): boolean => {
   if (typeof navigator === 'undefined') return false;
@@ -2473,6 +2589,70 @@ const handleRestoreWizardComplete = async () => {
   }
   if ($q && typeof $q.notify === 'function') {
     $q.notify({ type: 'positive', message: 'Account restored successfully!', timeout: 3000 });
+  }
+
+  // If TEST mode is active, run post-restore verification and comparison
+  if (testModeActive.value && chatInterfaceRef.value) {
+    const ci = chatInterfaceRef.value as any;
+    const log = (text: string, ok = true) => ci.addTestLog(text, ok);
+    try {
+      log('Restore complete — verifying all tabs...');
+      // Small delay to let server settle
+      await new Promise(r => setTimeout(r, 2000));
+
+      const { verifyAllTabs, compareResults, formatVerification, formatComparison } =
+        await import('./utils/setupRestoreTest');
+
+      const restoreVerification = await verifyAllTabs(user.value!.userId);
+      log(`Files: ${restoreVerification.files.count}`, restoreVerification.files.count > 0);
+      log(`Agent: ${restoreVerification.agentReady ? 'ready' : 'not ready'}`, restoreVerification.agentReady);
+      log(`KB: ${restoreVerification.kbIndexed ? `indexed (${restoreVerification.kbTokens} tokens)` : 'not indexed'}`, restoreVerification.kbIndexed);
+      log(`Medications: ${restoreVerification.medications.lines} lines`, restoreVerification.medications.lines > 0);
+      log(`Summary: ${restoreVerification.summary.lines} lines, ${restoreVerification.summary.chars} chars`, restoreVerification.summary.lines > 0);
+      log(`Chats: ${restoreVerification.chats.count}`, true);
+
+      // Compare setup vs restore
+      const comparison = compareResults(testSetupVerification.value, restoreVerification);
+      log('');
+      log(comparison.passed ? '=== ALL CHECKS PASSED ===' : '=== SOME CHECKS FAILED ===', comparison.passed);
+      for (const check of comparison.checks) {
+        if (check.passed) {
+          log(`  ${check.name}: match`);
+        } else {
+          const exp = check.expected.length > 50 ? check.expected.slice(0, 50) + '...' : check.expected;
+          const act = check.actual.length > 50 ? check.actual.slice(0, 50) + '...' : check.actual;
+          log(`  ${check.name}: "${exp}" != "${act}"`, false);
+        }
+      }
+
+      // Set the full output for the pre block
+      ci.setTestFinalOutput([
+        formatVerification('SETUP', testSetupVerification.value),
+        '',
+        formatVerification('RESTORE', restoreVerification),
+        '',
+        formatComparison(comparison)
+      ].join('\n'));
+
+      // Close MyStuff dialog so the test results panel in ChatInterface is visible
+      try { ci.closeMyStuff(); } catch { /* non-fatal */ }
+
+      // Save updated local snapshot so the account shows as healthy (no orange badge)
+      try {
+        await saveLocalSnapshot(null);
+      } catch { /* non-fatal */ }
+
+      // Regenerate maia-log.pdf with all test entries
+      try {
+        await ci.generateSetupLogPdf();
+      } catch { /* non-fatal */ }
+
+    } catch (err: any) {
+      log(`Post-restore verification failed: ${err.message}`, false);
+    } finally {
+      testModeActive.value = false;
+      testSetupVerification.value = null;
+    }
   }
 };
 
@@ -3011,6 +3191,18 @@ const destroyTemporaryAccount = async () => {
       }
     } catch (logErr) {
       console.warn(`[DESTROY] Setup log update failed (non-fatal):`, logErr);
+    }
+
+    // Log account-deleted to provisioning log BEFORE deleting the account
+    try {
+      await fetch('/api/provisioning-log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ userId: userIdToDelete, event: 'account-deleted' })
+      });
+    } catch (err) {
+      console.warn('[DESTROY] Provisioning log account-deleted failed (non-fatal):', err);
     }
 
     const response = await fetch('/api/self/delete', {
