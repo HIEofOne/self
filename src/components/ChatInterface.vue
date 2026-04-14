@@ -1048,27 +1048,53 @@ const wizardPreparingRecords = ref(false);
 // milestone within a few seconds — e.g. kb-indexed, summary-saved, restore-complete).
 const lastLoggedEventAt: Record<string, number> = {};
 const COALESCE_WINDOW_MS: Record<string, number> = {
-  'kb-indexed': 5000,
+  // kb-indexed fires from two code paths (poll + phase watcher) and the
+  // phase watcher can re-fire long after indexing actually finished if
+  // indexingStatus.phase is re-set to 'complete' by a status refresh.
+  // 15-min window is too long (Setup + Restore both emit in the same
+  // session), so we also key the coalesce by tokens+fileCount below so
+  // a genuine re-index with a different count still gets logged.
+  'kb-indexed': 15 * 60 * 1000,
   'summary-saved': 3000,
   'summary-verified': 3000,
   'summary-generated': 3000,
   'medications-saved': 3000,
   'restore-complete': 3000,
-  'setup-complete': 3000
+  'setup-complete': 3000,
+  'test-started': 3000,
+  'test-completed': 3000
+};
+
+/** Some events (kb-indexed) legitimately recur with different payloads in the
+ *  same session; we want to suppress duplicates of the SAME payload but allow
+ *  a different payload through. For those, the coalesce key includes data fields. */
+const coalesceKeyFor = (eventData: Record<string, any>): string => {
+  const evt = String(eventData.event || '');
+  if (evt === 'kb-indexed') {
+    return `${evt}|${eventData.tokens ?? 0}|${eventData.fileCount ?? 0}`;
+  }
+  return evt;
 };
 
 const logProvisioningEvent = async (eventData: Record<string, any>) => {
   if (!props.user?.userId) return;
   const evt = String(eventData.event || '');
+  // Reset the coalesce tracker at the start of a new Setup/Restore section
+  // so legitimate re-emissions (e.g. kb-indexed in Setup then again in Restore)
+  // aren't suppressed across sections.
+  if (evt === 'setup-started' || evt === 'restore-started') {
+    for (const k of Object.keys(lastLoggedEventAt)) delete lastLoggedEventAt[k];
+  }
   const window = COALESCE_WINDOW_MS[evt];
   if (window) {
-    const last = lastLoggedEventAt[evt] || 0;
+    const key = coalesceKeyFor(eventData);
+    const last = lastLoggedEventAt[key] || 0;
     const now = Date.now();
     if (now - last < window) {
-      console.log('[ProvisioningLog] coalesced duplicate %s (last %dms ago)', evt, now - last);
+      console.log('[ProvisioningLog] coalesced duplicate %s (last %dms ago, key=%s)', evt, now - last, key);
       return;
     }
-    lastLoggedEventAt[evt] = now;
+    lastLoggedEventAt[key] = now;
   }
   try {
     await fetch('/api/provisioning-log', {
@@ -3061,10 +3087,20 @@ const generateSetupLogPdf = async () => {
 
       // Render session boundaries and events
       let lastSession = '';
-      for (const evt of events) {
+      for (let i = 0; i < events.length; i++) {
+        const evt = events[i];
         // Draw session divider for start events
         if (evt.event === 'setup-started' || evt.event === 'restore-started') {
-          const testTag = evt.test ? ' (TEST)' : '';
+          let isTest = !!evt.test;
+          if (!isTest) {
+            // Look ahead within this section for a test-started event before the next section boundary
+            for (let j = i + 1; j < events.length; j++) {
+              const nx = events[j].event;
+              if (nx === 'setup-started' || nx === 'restore-started' || nx === 'account-deleted') break;
+              if (nx === 'test-started') { isTest = true; break; }
+            }
+          }
+          const testTag = isTest ? ' (TEST)' : '';
           const label = (evt.event === 'setup-started' ? '--- Setup' : '--- Restore') + testTag + ' ---';
           if (lastSession) {
             y += 3;

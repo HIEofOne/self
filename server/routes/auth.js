@@ -802,12 +802,13 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       // Agent linked to KB: agent exists AND kbId is set AND agent has an endpoint
       const agentLinkedToKb = agentExists && kbExists && !!userDoc?.agentEndpoint;
 
-      // Wizard complete: derived from data presence — does the user have everything the wizard produces?
+      // Wizard complete: the account's restorable state is in place.
+      // Patient Summary and Current Medications content can legitimately be empty
+      // (e.g. the patient has no medications), so we do NOT require them to be non-empty.
+      // What matters is that the agent + KB + endpoint are provisioned.
       const wizardComplete = agentExists
         && kbExists
-        && !!userDoc?.agentEndpoint
-        && !!(userDoc?.patientSummary && String(userDoc.patientSummary).trim())
-        && !!(userDoc?.currentMedications && String(userDoc.currentMedications).trim());
+        && !!userDoc?.agentEndpoint;
 
       console.log(`[WELCOME] agent-exists for ${userId}: agent=${agentExists}, savedFiles=${savedFileCount}/${allFiles.length}, kb=${kbExists}, linked=${agentLinkedToKb}, wizardDone=${wizardComplete}, stage=${userDoc?.workflowStage || 'none'}`);
 
