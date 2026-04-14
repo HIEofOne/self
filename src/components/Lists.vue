@@ -500,10 +500,12 @@ const currentMedicationsStatus = ref<'reviewing' | 'consulting' | 'waiting' | 'w
 const wizardAutoFlow = ref(false);
 const wizardAutoFlowStorageKey = 'wizardMyListsAuto';
 const wizardAutoStartPending = ref(false);
+const wizardMedsExtractionFailed = ref(false);
 const wizardPreparingMeds = computed(() =>
   wizardAutoFlow.value &&
   !currentMedications.value &&
-  (wizardAutoStartPending.value || isProcessing.value || isLoadingCurrentMedications.value || hasSavedResults.value || hasMedicationRecords.value)
+  !wizardMedsExtractionFailed.value &&
+  (wizardAutoStartPending.value || isProcessing.value || isLoadingCurrentMedications.value || hasSavedResults.value)
 );
 const showSummaryDialog = ref(false);
 const showRefreshConfirmDialog = ref(false);
@@ -2323,6 +2325,7 @@ const loadCurrentMedications = async (forceRefresh = false) => {
         isLoadingCurrentMedications.value = false;
         currentMedicationsStatus.value = '';
         if (wizardAutoFlow.value && !currentMedications.value) {
+          wizardMedsExtractionFailed.value = true;
           clearWizardAutoFlow();
         }
       }
@@ -2371,10 +2374,11 @@ const loadCurrentMedications = async (forceRefresh = false) => {
         needsVerifyAction.value = true;
         persistVerifyState();
       } else if (wizardAutoFlow.value) {
-        // During wizard flow, don't show manual entry — processInitialFile will
-        // generate medications from Apple Health records.  Keep the loading spinner.
-        console.log('[Lists] Wizard flow — deferring medications to file processing');
-        logWizardEvent('current_meds_deferred_to_processing');
+        // No medications found from any source — stop the spinner
+        console.log('[Lists] Wizard flow — no medications from any source, clearing spinner');
+        logWizardEvent('current_meds_none_found');
+        wizardMedsExtractionFailed.value = true;
+        clearWizardAutoFlow();
       } else {
         console.log('[Lists] No medications available — opening for manual entry');
         currentMedicationsBlockTitle.value = 'Current Medications as reported by the user';

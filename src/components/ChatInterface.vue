@@ -347,27 +347,27 @@
 
           <!-- Action button: Choose the patient folder -->
           <div v-if="!setupFolderConnected" class="q-mb-md">
-            <!-- Chrome: persistent folder access -->
-            <q-btn
-              v-if="localFolderSupported"
-              unelevated
-              color="primary"
-              label="Choose the patient folder"
-              icon="folder_open"
-              :disable="localFolderAutoRunActive"
-              @click="handlePickLocalFolder"
-            />
-            <!-- TEST button (localhost only, Chrome only) -->
-            <q-btn
-              v-if="localFolderSupported && isLocalhost"
-              flat
-              color="deep-orange"
-              label="TEST"
-              icon="science"
-              class="q-ml-sm"
-              :disable="localFolderAutoRunActive || testMode"
-              @click="handleTestButton"
-            />
+            <!-- Chrome: persistent folder access (+ TEST on localhost) -->
+            <template v-if="localFolderSupported">
+              <q-btn
+                unelevated
+                color="primary"
+                label="Choose the patient folder"
+                icon="folder_open"
+                :disable="localFolderAutoRunActive"
+                @click="handlePickLocalFolder"
+              />
+              <q-btn
+                v-if="isLocalhost"
+                flat
+                color="deep-orange"
+                label="TEST"
+                icon="science"
+                class="q-ml-sm"
+                :disable="localFolderAutoRunActive || testMode"
+                @click="handleTestButton"
+              />
+            </template>
             <!-- Safari: one-time folder read -->
             <q-btn
               v-else-if="props.folderAccessTier === 'safari'"
