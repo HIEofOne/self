@@ -2921,6 +2921,10 @@ const runAutoWizard = async () => {
 /** Generate maia-log.pdf summary and write to local folder. */
 const generateSetupLogPdf = async () => {
   if (!localFolderHandle.value) return;
+  // Refresh providers right before rendering so a freshly deployed agent (e.g. after
+  // a long restore) is reflected in the "Chat providers:" header. Without this, the
+  // PDF can be generated before the post-restore providers refetch settles.
+  try { await loadProviders(); } catch { /* non-fatal */ }
   const doc = new jsPDF();
   const pageWidth = doc.internal.pageSize.getWidth();
   const margin = 14;

@@ -2601,7 +2601,7 @@ const handleRestoreWizardComplete = async () => {
         const logRes = await fetch(`/api/provisioning-log?userId=${encodeURIComponent(user.value!.userId)}`, { credentials: 'include' });
         if (logRes.ok) {
           const logJson = await logRes.json();
-          const events: any[] = Array.isArray(logJson?.events) ? logJson.events : [];
+          const events: any[] = Array.isArray(logJson?.log) ? logJson.log : (Array.isArray(logJson?.events) ? logJson.events : []);
           // Find the most recent test-started; collect events after it
           let startIdx = -1;
           for (let i = events.length - 1; i >= 0; i--) {
