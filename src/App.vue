@@ -425,30 +425,6 @@
       </q-card>
     </q-dialog>
 
-    <!-- Sign-out: prompt to choose folder for saving updated files -->
-    <q-dialog v-model="showSignOutFolderPrompt" persistent>
-      <q-card style="min-width: 420px; max-width: 560px">
-        <q-card-section>
-          <div class="text-h6">Save Updated Files</div>
-          <p class="text-body2 q-mt-sm q-mb-none">
-            Download your updated log and database backup to keep your local
-            MAIA folder in sync with your cloud account.
-          </p>
-        </q-card-section>
-        <q-card-actions align="right">
-          <q-btn flat label="SKIP" color="grey" @click="signOutFolderSkip" />
-          <q-btn
-            unelevated
-            label="DOWNLOAD BACKUP"
-            color="primary"
-            :loading="signOutFolderSaving"
-            @click="signOutFolderPick"
-          />
-        </q-card-actions>
-      </q-card>
-    </q-dialog>
-
-
 
     <!-- Passkey dialog for authenticated users -->
     <q-dialog v-model="showPasskeyDialog" persistent>
@@ -850,8 +826,6 @@ const showDormantDialog = ref(false);
 const dormantDeepLinkCount = ref(0);
 const dormantLoading = ref(false);
 const signOutSnapshot = ref<SignOutSnapshot | null>(null);
-const showSignOutFolderPrompt = ref(false);
-const signOutFolderSaving = ref(false);
 const restoredChatState = ref<any | null>(null);
 const rehydrationFiles = ref<any[]>([]);
 const rehydrationActive = ref(false);
@@ -2169,12 +2143,10 @@ const handleDormantSignOut = async () => {
     } catch { /* not available */ }
   }
 
-  // If still no persistent folder handle, prompt user to choose a folder for saving updated files
-  if (!localFolderHandle.value && !sharedComputerMode.value) {
-    showSignOutFolderPrompt.value = true;
-    return;
-  }
-
+  // No folder handle? Proceed silently. saveLocalSnapshot still writes to
+  // IndexedDB, and discoverUsers() surfaces the user as a Welcome card on
+  // return. The legacy "Save Updated Files" modal (with its Chrome-specific
+  // DOWNLOAD BACKUP wording) was removed.
   await completeDormantSignOut();
 };
 
@@ -2195,69 +2167,6 @@ const completeDormantSignOut = async () => {
     dormantLoading.value = false;
     showDormantDialog.value = false;
     signOutSnapshot.value = null;
-  }
-};
-
-/** User chose to skip folder save on sign-out. */
-const signOutFolderSkip = () => {
-  showSignOutFolderPrompt.value = false;
-  void completeDormantSignOut();
-};
-
-/** User chose to download updated state on sign-out (non-Chrome browsers only). */
-const signOutFolderPick = async () => {
-  signOutFolderSaving.value = true;
-  try {
-    await downloadStateAsFile();
-  } catch (e) {
-    console.warn('[sign-out] State download failed:', e);
-  } finally {
-    signOutFolderSaving.value = false;
-    showSignOutFolderPrompt.value = false;
-    void completeDormantSignOut();
-  }
-};
-
-/** Download state JSON as a file (fallback for browsers without folder write). */
-const downloadStateAsFile = async () => {
-  if (!user.value?.userId) return;
-  try {
-    const [filesResponse, statusResponse, summaryResponse] = await Promise.all([
-      fetch(`/api/user-files?userId=${encodeURIComponent(user.value.userId)}`, { credentials: 'include' }),
-      fetch(`/api/user-status?userId=${encodeURIComponent(user.value.userId)}`, { credentials: 'include' }),
-      fetch(`/api/patient-summary?userId=${encodeURIComponent(user.value.userId)}`, { credentials: 'include' })
-    ]);
-    const files = filesResponse.ok ? await filesResponse.json() : null;
-    const status = statusResponse.ok ? await statusResponse.json() : null;
-    const summary = summaryResponse.ok ? await summaryResponse.json() : null;
-    const filesList = Array.isArray(files?.files) ? files.files : [];
-    const indexedSet = new Set(Array.isArray(files?.indexedFiles) ? files.indexedFiles : []);
-    const state = {
-      version: 1,
-      userId: user.value.userId,
-      displayName: user.value.displayName,
-      updatedAt: new Date().toISOString(),
-      files: filesList.map((f: any) => {
-        const bk = f.bucketKey || '';
-        const kbPrefix = files?.kbName ? `${user.value?.userId}/${files.kbName}/` : null;
-        const inKB = kbPrefix ? bk.startsWith(kbPrefix) : false;
-        let cs: string = 'not_in_kb';
-        if (inKB && indexedSet.has(bk)) cs = 'indexed';
-        else if (inKB) cs = 'pending';
-        return { fileName: f.fileName, size: f.fileSize, cloudStatus: cs, bucketKey: bk };
-      }),
-      currentMedications: status?.currentMedications || null,
-      patientSummary: summary?.summary || null
-    };
-    const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'maia-state.json';
-    a.click();
-    URL.revokeObjectURL(url);
-  } catch (e) {
-    console.warn('[sign-out] Failed to download state:', e);
   }
 };
 
