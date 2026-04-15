@@ -578,6 +578,33 @@ export async function discoverUsers(): Promise<DiscoveredUser[]> {
   } catch {
     // IndexedDB not available
   }
+  // Also include legacy IndexedDB PouchDB snapshot users that have no folder
+  // handle on this origin (e.g. non-Chrome browsers, or cross-origin where
+  // File System Access handles don't carry over). These show up as Welcome
+  // cards with hasPermission:false so the user can RESTORE (which will
+  // prompt for a folder) or X (delete) — instead of seeing a legacy
+  // "Restore Local Backup?" modal they can't easily interpret.
+  try {
+    const existing = new Set(results.map(r => r.userId));
+    // indexedDB.databases() — supported in Chrome, Edge, Safari 14+, Firefox 126+.
+    // Falls through silently on older engines.
+    const idbWithDatabases = window.indexedDB as IDBFactory & { databases?: () => Promise<Array<{ name?: string }>> };
+    if (typeof idbWithDatabases.databases === 'function') {
+      const dbs = await idbWithDatabases.databases();
+      for (const db of dbs) {
+        const name = db?.name || '';
+        // PouchDB creates databases named "_pouch_maia-user-<userId>"
+        const m = name.match(/^_pouch_maia-user-(.+)$/);
+        if (!m) continue;
+        const userId = m[1];
+        if (existing.has(userId)) continue;
+        results.push({ userId, displayName: userId, folderName: '', hasPermission: false });
+        existing.add(userId);
+      }
+    }
+  } catch {
+    // databases() not available or blocked — silently skip
+  }
   // Clean up legacy localStorage if present
   try { window.localStorage.removeItem('maia_known_users'); } catch { /* ignore */ }
   try { window.localStorage.removeItem('maia_last_snapshot_user'); } catch { /* ignore */ }
