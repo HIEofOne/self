@@ -538,40 +538,6 @@
       </q-card>
     </q-dialog>
 
-    <!-- Restore local backup dialog -->
-    <q-dialog v-model="showRestoreDialog" persistent>
-      <q-card style="min-width: 520px; max-width: 640px">
-        <q-card-section>
-          <div class="text-h6">Restore Local Backup?</div>
-        </q-card-section>
-        <q-card-section class="text-body2">
-          <p>
-            We found a local backup from <strong>{{ restoreSnapshot?.user?.userId }}</strong>.
-            This can restore your saved chats and current chat draft to the new temporary account.
-          </p>
-          <p class="q-mt-md">
-            Your files must be re-uploaded if the server was deleted.
-          </p>
-        </q-card-section>
-        <q-card-actions align="right">
-          <q-btn
-            flat
-            label="SKIP"
-            color="primary"
-            :disable="restoreLoading"
-            @click="handleSkipRestore"
-          />
-          <q-btn
-            flat
-            label="RESTORE"
-            color="negative"
-            :disable="restoreLoading"
-            @click="handleRestoreSnapshot"
-          />
-        </q-card-actions>
-      </q-card>
-    </q-dialog>
-
     <!-- Delete local user confirmation dialog (from welcome page) -->
     <q-dialog v-model="showDeleteLocalUserDialog" persistent>
       <q-card style="min-width: 420px; max-width: 540px">
@@ -886,9 +852,6 @@ const dormantLoading = ref(false);
 const signOutSnapshot = ref<SignOutSnapshot | null>(null);
 const showSignOutFolderPrompt = ref(false);
 const signOutFolderSaving = ref(false);
-const showRestoreDialog = ref(false);
-const restoreLoading = ref(false);
-const restoreSnapshot = ref<any | null>(null);
 const restoredChatState = ref<any | null>(null);
 const rehydrationFiles = ref<any[]>([]);
 const rehydrationActive = ref(false);
@@ -993,20 +956,6 @@ const welcomeUserType = computed(() => {
   if (localId && localHasPasskey === true) return 'cloud' as const;
   if (localId) return 'local' as const;
   return 'new' as const;
-});
-
-/** [AUTH] True when cloud account is fully set up: KB exists with saved files, agent linked, wizard complete. */
-// wizardComplete from the server is derived from data presence (has agent + KB + endpoint +
-// patientSummary + currentMedications), so it already implies kb and linked are ok.
-const welcomeCloudValid = computed(() => {
-  if (!welcomeLocalUserId.value) return null;
-  const snap = welcomeLocalSnapshot.value;
-  const savedCount = welcomeSavedFileCount.value;
-  const wizardOk = welcomeWizardComplete.value === true;
-  // Saved files in cloud match or exceed local snapshot count
-  const filesOk = savedCount !== null && (!snap || snap.fileCount === 0 || savedCount >= snap.fileCount);
-  const valid = wizardOk && filesOk;
-  return valid;
 });
 
 /** Per-user cloud status for Welcome page cards: 'loading' | 'ready' | 'restore' */
@@ -2810,30 +2759,6 @@ const handleDestroyedStartFresh = async () => {
   }
 };
 
-const restoreSavedChats = async (snapshot: any) => {
-  const savedChats = snapshot?.savedChats?.chats;
-  if (!Array.isArray(savedChats) || savedChats.length === 0) return;
-
-  for (const chat of savedChats) {
-    try {
-      await fetch('/api/save-group-chat', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        credentials: 'include',
-        body: JSON.stringify({
-          chatHistory: chat.chatHistory || [],
-          uploadedFiles: chat.uploadedFiles || [],
-          connectedKB: chat.connectedKB || 'No KB connected'
-        })
-      });
-    } catch (error) {
-      console.warn('Failed to restore saved chat:', error);
-    }
-  }
-};
-
 const createTemporarySession = async () => {
   // Clear stale wizard flags from any previous session (e.g. destroyed user)
   try {
@@ -2868,133 +2793,6 @@ const createTemporarySession = async () => {
   }
   setAuthenticatedUser(data.user, null);
   return data.user;
-};
-
-const handleRestoreSnapshot = async () => {
-  if (!restoreSnapshot.value || !user.value?.userId) return;
-  restoreLoading.value = true;
-  try {
-    const snapshot = restoreSnapshot.value;
-    const snapshotFiles = Array.isArray(snapshot?.files?.files) ? snapshot.files.files : [];
-    const statusSummary = Array.isArray(snapshot?.fileStatusSummary) ? snapshot.fileStatusSummary : [];
-    const snapshotKbName = snapshot?.files?.kbName || null;
-    const initialFromSnapshot = snapshot?.initialFile || null;
-    if (statusSummary.length > 0) {
-      rehydrationFiles.value = statusSummary.map((entry: any) => ({
-        bucketKey: entry.bucketKey,
-        fileName: entry.fileName,
-        chipStatus: entry.chipStatus,
-        kbName: snapshotKbName
-      }));
-    } else if (snapshotFiles.length === 0 && Array.isArray(snapshot?.files?.indexedFiles)) {
-      rehydrationFiles.value = snapshot.files.indexedFiles.map((bucketKey: string) => ({
-        bucketKey,
-        fileName: bucketKey.split('/').pop(),
-        chipStatus: 'indexed',
-        kbName: snapshotKbName
-      }));
-    } else {
-      rehydrationFiles.value = snapshotFiles.map((entry: any) => ({
-        bucketKey: entry.bucketKey,
-        fileName: entry.fileName,
-        chipStatus: 'not_in_kb',
-        kbName: snapshotKbName
-      }));
-    }
-    if (initialFromSnapshot && (initialFromSnapshot.bucketKey || initialFromSnapshot.fileName)) {
-      const existing = rehydrationFiles.value.find(item =>
-        (initialFromSnapshot.bucketKey && item.bucketKey === initialFromSnapshot.bucketKey) ||
-        (initialFromSnapshot.fileName && item.fileName === initialFromSnapshot.fileName)
-      );
-      if (!existing) {
-        rehydrationFiles.value.unshift({
-          bucketKey: initialFromSnapshot.bucketKey,
-          fileName: initialFromSnapshot.fileName,
-          chipStatus: 'not_in_kb',
-          kbName: snapshotKbName,
-          isInitial: true
-        });
-      } else {
-        existing.isInitial = true;
-        rehydrationFiles.value = [
-          existing,
-          ...rehydrationFiles.value.filter(item => item !== existing)
-        ];
-      }
-    }
-    rehydrationActive.value = rehydrationFiles.value.length > 0;
-    suppressWizard.value = false;
-    if (rehydrationActive.value) {
-      if ($q && typeof $q.notify === 'function') {
-        $q.notify({
-          type: 'info',
-          message: 'Restore in progress: re-upload your files in Saved Files.',
-          timeout: 5000
-        });
-      }
-    }
-    restoredChatState.value = restoreSnapshot.value.currentChat || null;
-    await restoreSavedChats(restoreSnapshot.value);
-    if (restoreSnapshot.value.currentMedications) {
-      try {
-        await fetch('/api/user-current-medications', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          credentials: 'include',
-          body: JSON.stringify({
-            userId: user.value.userId,
-            currentMedications: restoreSnapshot.value.currentMedications
-          })
-        });
-      } catch (medsError) {
-        console.warn('Failed to restore current medications:', medsError);
-      }
-    }
-    if (restoreSnapshot.value.patientSummary) {
-      try {
-        await fetch('/api/patient-summary', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          credentials: 'include',
-          body: JSON.stringify({
-            userId: user.value.userId,
-            summary: restoreSnapshot.value.patientSummary
-          })
-        });
-      } catch (summaryError) {
-        console.warn('Failed to restore patient summary:', summaryError);
-      }
-    }
-    if ($q && typeof $q.notify === 'function') {
-      $q.notify({
-        type: 'positive',
-        message: 'Local backup restored to your new temporary account.',
-        timeout: 4000
-      });
-    }
-  } catch (error) {
-    console.error('Restore failed:', error);
-    if ($q && typeof $q.notify === 'function') {
-      $q.notify({
-        type: 'negative',
-        message: 'Failed to restore local backup.',
-        timeout: 4000
-      });
-    }
-  } finally {
-    restoreLoading.value = false;
-    showRestoreDialog.value = false;
-  }
-};
-
-const handleSkipRestore = () => {
-  showRestoreDialog.value = false;
-  restoreSnapshot.value = null;
-  suppressWizard.value = false;
 };
 
 const handleRehydrationComplete = (_payload: { hasInitialFile: boolean }) => {
@@ -3155,25 +2953,11 @@ const startTemporarySession = async () => {
       if (!newUser) return;
     }
 
-    const effectiveUserId = user.value?.userId;
-    if (activeUserId && activeUserId === effectiveUserId) {
-      // Skip restore dialog if cloud is already valid (agent + spaces in sync)
-      if (welcomeCloudValid.value !== true) {
-        try {
-          const snapshot = await getUserSnapshot(activeUserId);
-          if (snapshot) {
-            restoreSnapshot.value = snapshot;
-            showRestoreDialog.value = true;
-            suppressWizard.value = true;
-            clearWizardPendingKey(activeUserId);
-            clearWizardPendingKey(effectiveUserId);
-          }
-        } catch (restoreError) {
-          console.warn('Unable to read local backup:', restoreError);
-        }
-      } else {
-      }
-    }
+    // Legacy "Restore Local Backup?" modal removed. Users with a local
+    // snapshot but no folder handle now appear as Welcome-page cards
+    // (discoverUsers() enumerates _pouch_maia-user-* IndexedDB databases),
+    // so they can RESTORE via the standard card flow or X to delete —
+    // instead of a confusing modal with SKIP/RESTORE and Chrome-specific wording.
 
     if (sharedComputerMode.value && user.value?.userId) {
       await startPasskeyRegistration();
