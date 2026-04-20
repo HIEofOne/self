@@ -7601,6 +7601,23 @@ async function sendNewUserNotification(userId, options = {}) {
       } catch { /* user may already be deleted */ }
     }
 
+    // Dedup: only notify once per account lifecycle. Skip if an admin-notified
+    // event already exists after the most recent account-deleted event.
+    // Deletion notifications (options.deleted=true) always fire.
+    if (!options.deleted && Array.isArray(userDoc?.provisioningLog)) {
+      const log = userDoc.provisioningLog;
+      let alreadyNotified = false;
+      for (let i = log.length - 1; i >= 0; i--) {
+        const ev = log[i]?.event;
+        if (ev === 'account-deleted') break; // deletion resets notification state
+        if (ev === 'admin-notified') { alreadyNotified = true; break; }
+      }
+      if (alreadyNotified) {
+        console.log(`[NOTIFY] Skipping duplicate notification for ${userId} (already notified in this account lifecycle)`);
+        return;
+      }
+    }
+
     // File info from user doc
     const files = Array.isArray(userDoc?.files) ? userDoc.files : [];
     const fileLines = files.map((f, i) => {
