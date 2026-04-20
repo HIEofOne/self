@@ -105,7 +105,7 @@
                 <!-- No discovered users: passkey link -->
                 <div v-else class="text-center q-mb-md">
                   <p class="q-ma-none text-body2" style="color: #1a1a1a">
-                    Get started with a new account or
+                    Start a new account or
                     <a
                       href="#"
                       style="color: #1976d2; text-decoration: underline; cursor: pointer"
@@ -137,13 +137,13 @@
 
                   <!-- Footer: Privacy | User Guide | FAQ | About + copyright -->
                   <div class="text-center q-mt-lg q-mb-md">
-                    <a href="/privacy.html" target="_blank" class="welcome-footer-link">Privacy</a>
+                    <a href="/page.html?doc=Privacy" target="_blank" class="welcome-footer-link">Privacy</a>
                     <span class="text-grey-5 q-mx-sm">|</span>
-                    <a href="/User_Guide.html" target="_blank" class="welcome-footer-link">User Guide</a>
+                    <a href="/page.html?doc=user-guide" target="_blank" class="welcome-footer-link">User Guide</a>
                     <span class="text-grey-5 q-mx-sm">|</span>
-                    <a href="/faq.html" target="_blank" class="welcome-footer-link">FAQ</a>
+                    <a href="/page.html?doc=faq" target="_blank" class="welcome-footer-link">FAQ</a>
                     <span class="text-grey-5 q-mx-sm">|</span>
-                    <a href="/about.html" target="_blank" class="welcome-footer-link">About</a>
+                    <a href="/page.html?doc=about" target="_blank" class="welcome-footer-link">About</a>
                     <div class="text-caption text-grey-6 q-mt-sm">CC-BY MAIA v{{ appVersion }} by Adrian Gropper, MD</div>
                   </div>
                 </div>
