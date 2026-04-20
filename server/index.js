@@ -7589,8 +7589,8 @@ async function sendNewUserNotification(userId, options = {}) {
     const resend = await initResend();
     if (!resend) return;
 
-    const toEmail = 'agropper@healthurl.com';
-    const fromEmail = process.env.RESEND_FROM_EMAIL || 'onboarding@resend.dev';
+    const toEmail = 'maia@trustee.ai';
+    const fromEmail = process.env.RESEND_FROM_EMAIL || 'noreply@maia.healthurl.com';
     const appUrl = process.env.PUBLIC_APP_URL || 'http://localhost:5173';
 
     // Get user doc (use pre-fetched if provided, e.g. before deletion)
@@ -7610,18 +7610,16 @@ async function sendNewUserNotification(userId, options = {}) {
     });
     const totalSizeKB = files.reduce((sum, f) => sum + (f.fileSize || f.size || 0), 0) / 1024;
 
-    // KB tokens
+    // KB tokens — prefer stored indexing status (always populated), fall back to DO API
     let kbTokens = 'unknown';
-    if (userDoc?.kbId) {
+    if (userDoc?.kbIndexingStatus?.tokens) {
+      kbTokens = Number(userDoc.kbIndexingStatus.tokens).toLocaleString();
+    } else if (userDoc?.kbId) {
       try {
         const kbDetails = await doClient.kb.get(userDoc.kbId);
         const t = kbDetails?.total_tokens || kbDetails?.token_count || kbDetails?.tokens || 0;
-        kbTokens = Number(t).toLocaleString();
+        if (t > 0) kbTokens = Number(t).toLocaleString();
       } catch { /* KB may not exist */ }
-    }
-    // Fallback to stored indexing status
-    if (kbTokens === 'unknown' && userDoc?.kbIndexingStatus?.tokens) {
-      kbTokens = Number(userDoc.kbIndexingStatus.tokens).toLocaleString();
     }
 
     // Passkey
@@ -7642,7 +7640,7 @@ async function sendNewUserNotification(userId, options = {}) {
       const name = ev?.event;
       if (errorEvents.has(name)) {
         errors.push(`${name}${ev.error ? ': ' + ev.error : ''}`);
-      } else if (name === 'medications-offered' && ev.outcome && ev.outcome !== 'verified' && ev.outcome !== 'shown') {
+      } else if (name === 'medications-offered' && ev.outcome && ev.outcome !== 'verified' && ev.outcome !== 'shown' && ev.outcome !== 'success') {
         errors.push(`medications-offered: ${ev.outcome}`);
       }
     }
@@ -7686,24 +7684,31 @@ async function sendNewUserNotification(userId, options = {}) {
 
     // Log email contents to provisioning log so the user's maia-log.pdf shows it
     if (userDoc && !deleted) {
-      try {
-        // Re-fetch to avoid conflicts (userDoc may be stale)
-        const freshDoc = await cloudant.getDocument('maia_users', userId);
-        if (freshDoc) {
-          if (!Array.isArray(freshDoc.provisioningLog)) freshDoc.provisioningLog = [];
-          const maxId = freshDoc.provisioningLog.reduce((m, e) => Math.max(m, e.id || 0), 0);
-          freshDoc.provisioningLog.push({
-            event: 'admin-notified',
-            id: maxId + 1,
-            time: new Date().toISOString(),
-            to: toEmail,
-            subject
-          });
-          freshDoc.updatedAt = new Date().toISOString();
-          await cloudant.saveDocument('maia_users', freshDoc);
+      // Retry up to 3 times — client may be writing to the doc concurrently
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const freshDoc = await cloudant.getDocument('maia_users', userId);
+          if (freshDoc) {
+            if (!Array.isArray(freshDoc.provisioningLog)) freshDoc.provisioningLog = [];
+            const maxId = freshDoc.provisioningLog.reduce((m, e) => Math.max(m, e.id || 0), 0);
+            freshDoc.provisioningLog.push({
+              event: 'admin-notified',
+              id: maxId + 1,
+              time: new Date().toISOString(),
+              to: toEmail,
+              subject
+            });
+            freshDoc.updatedAt = new Date().toISOString();
+            await cloudant.saveDocument('maia_users', freshDoc);
+            break; // success
+          }
+        } catch (logErr) {
+          if (attempt < 2 && logErr.message && logErr.message.includes('conflict')) {
+            await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+            continue;
+          }
+          console.warn('[NOTIFY] Failed to log email to provisioning log:', logErr.message);
         }
-      } catch (logErr) {
-        console.warn('[NOTIFY] Failed to log email to provisioning log:', logErr.message);
       }
     }
   } catch (err) {

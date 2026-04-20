@@ -2567,6 +2567,8 @@ const handleRestoreWizardComplete = async () => {
       try {
         await ci.generateSetupLogPdf();
       } catch { /* non-fatal */ }
+      // Re-generate after delay to pick up server-side admin-notified event
+      setTimeout(() => { try { ci.generateSetupLogPdf(); } catch {} }, 15000);
 
       // Clean up cloud resources — the local maia-log.pdf has all diagnostic info
       await cleanupTestAccount(log);
@@ -2588,6 +2590,8 @@ const handleRestoreWizardComplete = async () => {
       } catch { /* non-fatal */ }
       // Regenerate PDF with failure event, then clean up
       try { await ci.generateSetupLogPdf(); } catch { /* non-fatal */ }
+      // Re-generate after delay to pick up server-side admin-notified event
+      setTimeout(() => { try { ci.generateSetupLogPdf(); } catch {} }, 15000);
       await cleanupTestAccount(log);
     } finally {
       testModeActive.value = false;
