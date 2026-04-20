@@ -1897,6 +1897,31 @@ const handleWizardComplete = async () => {
   }
 };
 
+/** Clean up cloud resources after TEST completes (pass or fail).
+ *  The local maia-log.pdf already has all diagnostic information.
+ *  Deletes agent, KB, Spaces files, user doc, sessions, and chats. */
+const cleanupTestAccount = async (log: (text: string, ok?: boolean) => void) => {
+  const userId = user.value?.userId;
+  if (!userId) return;
+  try {
+    log('Cleaning up cloud resources...');
+    const resp = await fetch('/api/self/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ userId })
+    });
+    if (resp.ok) {
+      log('Cloud resources cleaned up');
+    } else {
+      const err = await resp.json().catch(() => ({}));
+      log(`Cleanup partial: ${err.error || resp.status}`, false);
+    }
+  } catch (e: any) {
+    log(`Cleanup failed: ${e.message}`, false);
+  }
+};
+
 /** Handle TEST mode: setup is complete — orchestrate Delete → Restore → Verify cycle. */
 const testModeActive = ref(false);
 const testSetupVerification = ref<any>(null);
@@ -2535,6 +2560,9 @@ const handleRestoreWizardComplete = async () => {
         await ci.generateSetupLogPdf();
       } catch { /* non-fatal */ }
 
+      // Clean up cloud resources — the local maia-log.pdf has all diagnostic info
+      await cleanupTestAccount(log);
+
     } catch (err: any) {
       log(`Post-restore verification failed: ${err.message}`, false);
       try {
@@ -2550,6 +2578,9 @@ const handleRestoreWizardComplete = async () => {
           })
         });
       } catch { /* non-fatal */ }
+      // Regenerate PDF with failure event, then clean up
+      try { await ci.generateSetupLogPdf(); } catch { /* non-fatal */ }
+      await cleanupTestAccount(log);
     } finally {
       testModeActive.value = false;
       testSetupVerification.value = null;

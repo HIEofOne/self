@@ -2566,12 +2566,52 @@ const parseUserAgent = (): string => {
 
 
 /** TEST button — sets auto-pilot mode and triggers the normal folder picker flow. */
-const handleTestButton = () => {
+const handleTestButton = async () => {
   testMode.value = true;
   testLogLines.value = [];
   testFinalOutput.value = '';
   testSetupVerification.value = null;
   addTestLog('TEST mode activated — wizard will auto-verify');
+
+  // Clean up orphaned cloud resources from any previous interrupted TEST run.
+  // This prevents agents, KBs, and Spaces files from accumulating.
+  if (props.user?.userId) {
+    try {
+      const statusRes = await fetch(`/api/user-status?userId=${encodeURIComponent(props.user.userId)}`, { credentials: 'include' });
+      if (statusRes.ok) {
+        const status = await statusRes.json();
+        if (status.hasAgent || status.hasKB || status.fileCount > 0) {
+          addTestLog('Cleaning up previous test resources...');
+          const delRes = await fetch('/api/self/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ userId: props.user.userId })
+          });
+          if (delRes.ok) {
+            addTestLog('Previous resources cleaned up');
+          } else {
+            addTestLog('Cleanup partial — continuing anyway', false);
+          }
+          // Recreate account so wizard can proceed
+          const recreateRes = await fetch('/api/account/recreate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ userId: props.user.userId })
+          });
+          if (!recreateRes.ok) {
+            addTestLog('Account recreate failed — aborting', false);
+            testMode.value = false;
+            return;
+          }
+        }
+      }
+    } catch (e: any) {
+      addTestLog(`Pre-cleanup check failed: ${e.message} — continuing`, false);
+    }
+  }
+
   logProvisioningEvent({ event: 'test-started' });
   void generateSetupLogPdf();
   // Trigger the normal folder picker; the wizard flow runs as usual
