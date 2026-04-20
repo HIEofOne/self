@@ -2566,15 +2566,79 @@ const parseUserAgent = (): string => {
 
 
 /** TEST button — sets auto-pilot mode and triggers the normal folder picker flow. */
-const handleTestButton = () => {
+const handleTestButton = async () => {
   testMode.value = true;
   testLogLines.value = [];
   testFinalOutput.value = '';
   testSetupVerification.value = null;
   addTestLog('TEST mode activated — wizard will auto-verify');
+
+  // Clean up orphaned cloud resources from any previous interrupted TEST run.
+  // This prevents agents, KBs, and Spaces files from accumulating.
+  // Uses /api/local/delete (unauthenticated) to avoid session issues.
+  if (props.user?.userId) {
+    try {
+      const statusRes = await fetch(`/api/user-status?userId=${encodeURIComponent(props.user.userId)}`, { credentials: 'include' });
+      if (statusRes.ok) {
+        const status = await statusRes.json();
+        if (status.hasAgent || status.hasKB || status.fileCount > 0) {
+          addTestLog('Cleaning up previous test resources...');
+          console.log('[TEST] Pre-cleanup: found existing resources, deleting...');
+          const delRes = await fetch('/api/local/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ userId: props.user.userId })
+          });
+          if (delRes.ok) {
+            console.log('[TEST] Pre-cleanup complete');
+            addTestLog('Previous resources cleaned up');
+          } else {
+            console.error('[TEST] Pre-cleanup failed:', delRes.status);
+            addTestLog('Cleanup partial — continuing anyway', false);
+          }
+          // Recreate account so wizard can proceed
+          const recreateRes = await fetch('/api/account/recreate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ userId: props.user.userId })
+          });
+          if (!recreateRes.ok) {
+            addTestLog('Account recreate failed — aborting', false);
+            testMode.value = false;
+            return;
+          }
+        }
+      }
+    } catch (e: any) {
+      console.error('[TEST] Pre-cleanup error:', e);
+      addTestLog(`Pre-cleanup check failed: ${e.message} — continuing`, false);
+    }
+  }
+
   logProvisioningEvent({ event: 'test-started' });
   void generateSetupLogPdf();
-  // Trigger the normal folder picker; the wizard flow runs as usual
+
+  // If we already have a folder handle (from current session), reuse it
+  // instead of showing a redundant showDirectoryPicker dialog.
+  if (localFolderHandle.value) {
+    try {
+      const files = await listFolderFiles(localFolderHandle.value, { extensions: ['pdf'] });
+      localFolderFiles.value = files;
+    } catch { localFolderFiles.value = []; }
+    wizardFlowPhase.value = 'running';
+    wizardTimeoutTimer = setTimeout(async () => {
+      if (showAgentSetupDialog.value && localFolderHandle.value) {
+        await generateSetupLogPdf();
+        wizardTimeoutModalVisible.value = true;
+      }
+    }, 60 * 60 * 1000);
+    await runAutoWizard();
+    return;
+  }
+
+  // No folder handle — trigger the normal folder picker
   handlePickLocalFolder();
 };
 
@@ -3084,6 +3148,7 @@ const generateSetupLogPdf = async () => {
           case 'test-started': return `[${t}] TEST mode started (automated Setup/Restore run)`;
           case 'test-completed': return `[${t}] TEST mode completed${evt.passed !== undefined ? (evt.passed ? ' — PASS' : ' — FAIL') : ''}`;
           case 'test-verification': return `[${t}] TEST verification: ${evt.label || ''} ${evt.passed ? 'PASS' : 'FAIL'}${evt.detail ? ' - ' + evt.detail : ''}`;
+          case 'admin-notified': return `[${t}] Admin notified (${evt.to || 'email'})`;
           case 'error': return `[${t}] ERROR: ${evt.step || ''} - ${evt.message || ''}`;
           default: return `[${t}] ${evt.event || 'unknown'}`;
         }
