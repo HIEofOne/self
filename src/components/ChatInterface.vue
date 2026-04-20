@@ -2575,6 +2575,7 @@ const handleTestButton = async () => {
 
   // Clean up orphaned cloud resources from any previous interrupted TEST run.
   // This prevents agents, KBs, and Spaces files from accumulating.
+  // Uses /api/local/delete (unauthenticated) to avoid session issues.
   if (props.user?.userId) {
     try {
       const statusRes = await fetch(`/api/user-status?userId=${encodeURIComponent(props.user.userId)}`, { credentials: 'include' });
@@ -2582,15 +2583,18 @@ const handleTestButton = async () => {
         const status = await statusRes.json();
         if (status.hasAgent || status.hasKB || status.fileCount > 0) {
           addTestLog('Cleaning up previous test resources...');
-          const delRes = await fetch('/api/self/delete', {
+          console.log('[TEST] Pre-cleanup: found existing resources, deleting...');
+          const delRes = await fetch('/api/local/delete', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
             body: JSON.stringify({ userId: props.user.userId })
           });
           if (delRes.ok) {
+            console.log('[TEST] Pre-cleanup complete');
             addTestLog('Previous resources cleaned up');
           } else {
+            console.error('[TEST] Pre-cleanup failed:', delRes.status);
             addTestLog('Cleanup partial — continuing anyway', false);
           }
           // Recreate account so wizard can proceed
@@ -2608,6 +2612,7 @@ const handleTestButton = async () => {
         }
       }
     } catch (e: any) {
+      console.error('[TEST] Pre-cleanup error:', e);
       addTestLog(`Pre-cleanup check failed: ${e.message} — continuing`, false);
     }
   }
