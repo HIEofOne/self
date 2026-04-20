@@ -9419,6 +9419,29 @@ app.post('/api/generate-patient-summary', async (req, res) => {
       }
     }
 
+    // Ensure KB is attached to agent before generating summary.
+    // Without an attached KB the agent has no patient documents and returns a stub.
+    if (userDoc.kbId && userDoc.assignedAgentId) {
+      try {
+        await doClient.agent.attachKB(userDoc.assignedAgentId, userDoc.kbId);
+        console.log(`[SUMMARY] ✅ Confirmed KB ${userDoc.kbId} attached to agent ${userDoc.assignedAgentId}`);
+      } catch (attachError) {
+        // "already attached" is fine — any other error is a real problem
+        if (attachError.message && attachError.message.includes('already')) {
+          // Already attached — good
+        } else {
+          console.error(`[SUMMARY] ❌ Failed to attach KB before summary generation:`, attachError.message);
+          return res.status(503).json({
+            success: false,
+            message: 'Knowledge base is not yet available. Please try again shortly.',
+            error: 'KB_NOT_ATTACHED'
+          });
+        }
+      }
+    } else if (!userDoc.kbId) {
+      console.warn(`[SUMMARY] ⚠️ No KB found for user ${userId} — summary will lack patient context`);
+    }
+
     // Use the agent to generate a patient summary
     // We'll use the DigitalOcean provider directly to call the agent
     const { DigitalOceanProvider } = await import('../lib/chat-client/providers/digitalocean.js');
@@ -10163,9 +10186,16 @@ if (isProduction) {
   // fallthrough: true allows requests to continue to the catch-all if file not found
   // Note: Privacy.md is handled above, so it won't be served by static middleware
   app.use(express.static(distPath, {
-    maxAge: '1y', // Cache static assets for 1 year
+    maxAge: '1y', // Cache static assets for 1 year (hashed filenames change on rebuild)
     etag: true,
-    fallthrough: true // Allow fallthrough to catch-all for SPA routes
+    fallthrough: true, // Allow fallthrough to catch-all for SPA routes
+    setHeaders: (res, filePath) => {
+      // index.html must always revalidate — it references hashed chunk filenames
+      // that change on every build. Stale index.html → 404 chunks → blank page.
+      if (filePath.endsWith('index.html')) {
+        res.setHeader('Cache-Control', 'no-cache');
+      }
+    }
   }));
   
   
@@ -10203,6 +10233,9 @@ if (isProduction) {
     }
     
     // For SPA routes, serve index.html (SPA fallback)
+    // Must revalidate on every request so browsers never serve a stale index.html
+    // that references old chunk hashes (which 404 after redeploy → blank page).
+    res.setHeader('Cache-Control', 'no-cache');
     console.log(`📄 [CATCH-ALL] Serving index.html for: ${req.path}`);
     res.sendFile(indexPath, (err) => {
       if (err) {
