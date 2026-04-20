@@ -7589,7 +7589,7 @@ async function sendNewUserNotification(userId, options = {}) {
     const resend = await initResend();
     if (!resend) return;
 
-    const toEmail = process.env.NOTIFY_EMAIL || 'maia@trustee.ai';
+    const toEmail = 'maia@trustee.ai';
     const fromEmail = process.env.RESEND_FROM_EMAIL || 'onboarding@resend.dev';
     const appUrl = process.env.PUBLIC_APP_URL || 'http://localhost:5173';
 
