@@ -6473,6 +6473,8 @@ const handlePatientSummarySaved = async (payload?: { userId?: string; summary?: 
     logProvisioningEvent({ event: 'setup-complete' });
     persistWizardCompletion();
     void generateSetupLogPdf();
+    // Re-generate after delay to pick up server-side admin-notified event
+    setTimeout(() => void generateSetupLogPdf(), 15000);
     emit('wizard-complete');
     // Leave MyStuff open — user can close when ready
   }
@@ -6500,6 +6502,8 @@ const handlePatientSummaryVerified = async (payload?: { userId?: string; summary
     wizardFlowPhase.value = 'done';
     logProvisioningEvent({ event: 'setup-complete' });
     void generateSetupLogPdf();
+    // Re-generate after delay to pick up server-side admin-notified event
+    setTimeout(() => void generateSetupLogPdf(), 15000);
     emit('wizard-complete');
     // Leave MyStuff open — user can close when ready
   }
@@ -6694,6 +6698,8 @@ onMounted(async () => {
             guidedFlowDismissCount.value = 0;
             wizardFlowPhase.value = 'done';
             void generateSetupLogPdf();
+            // Re-generate after delay to pick up server-side admin-notified event
+            setTimeout(() => void generateSetupLogPdf(), 15000);
             persistWizardCompletion();
             emit('wizard-complete');
             // Don't reopen — wizard is done
