@@ -1,45 +1,23 @@
-# Privacy, Security, Communities, and Risk  
-### Policy for the MAIA Open-Source Software and Hosted Demonstration
+# Privacy
 
-## Open Source Software
+**Privacy Note:**
 
-MAIA is [open-source software](https://github.com/agropper/maia-cloud-user-app) built on an open-source large language model and a vector database hosted by commercial providers such as [DigitalOcean](https://www.digitalocean.com) and a database service from [IBM](https://cloud.ibm.com). The author believes these services provide strong privacy and security protections against unintended access or misuse of your data.
+This demo will not share your health records or chats with anyone unless you choose to share a chat with a public AI like ChatGPT or via a deep link. The demo host (agropper.xyz, me) could access your records and chats but you will be registered under a pseudonym and I have no reason to fish through anybody's records without a written request. For privacy from me as open source code and cloud hosting administrator, you should get your own copy of the open source code and a Digital Ocean account. Since I don't want to see your records, MAIA creates a maia-setup-log.pdf log file that you can email or post for help. The file has no personal information other than possibly in the file names themselves — if concerned, edit the file names of your records files.
 
-MAIA is released under the **AGPL-3.0 license**, allowing anyone to copy, extend, self-host, or host the software for a community or organization. Independent privacy and security reviews of the code are welcome and appreciated.
+**No Password**
 
----
+If you are on your own private computer, you can try MAIA without a password or passkey as long as you use the same browser each time. When you "Sign Out" of MAIA, your private records will be backed up locally and can be removed from the cloud. When you return to this MAIA welcome page, we check if your cloud records are still available. If they are not, you may restore MAIA from the local MAIA folder.
 
-## Volunteer-Driven Demonstration
+**Passkeys**
 
-This MAIA demonstration is operated by the author and informally advised by volunteer physicians and medical-business experts. It serves as a long-standing demonstration of **patient-controlled health records**, not a commercial service.
+Setting a Passkey when you sign-out of a No Password account allows you to access MAIA from another computer, browser, or mobile device.
 
-To provide access to higher-cost AI models and to reduce incentives for data misuse, the sponsor pays for subscriptions to OpenAI, Gemini, and Anthropic. Although the sponsor technically has the ability to access user records and chats, **we do not view, analyze, or repurpose personal data** except as needed to operate MAIA **under your direction**.
+**The Wizard**
 
----
+Greets you when you start a new MAIA to upload and process your health records into an AI-enhanced knowledge base accessible your Private AI agent. Prepare for the wizard by collecting all the records **for one patient** in a folder on your computer. More records can be added or removed at any time. If you have an iPhone or iPad, Apple Health makes it particularly convenient to collect records from most of the patient portals that you have a password for. In the Apple Health app, use "Export PDF" to save the file to your MAIA folder. Your records will be collected in minutes and MAIA will create a detailed index and will suggest a Current Medications list for you to edit and verify if needed. Apple Health PDF records are convenient and well organized, but they don't have the signed encounter notes and other details you get by asking for records from each patient portal.
 
-## Communities and Groups
+With MAIA, public AIs like Claude or ChatGPT will not have access to your records except as part of a chat that you see and control. Doctors and other users you invite by sharing a link will have access to your records by asking your Private AI questions in the chat. You can disable this option in your My Agent settings.
 
-MAIA enables patient communities—local groups, advocacy organizations, or affinity networks—to control **how their data, outcomes, and costs are shared** within a group and with outside parties.
+**AI IS NOT PERFECT**
 
-This hosted demonstration is intentionally kept **small-scale and non-commercial** to avoid becoming a high-value target for hacking or exploitation. In principle, larger deployments are possible, limited only by the governance, management, and support resources that a cooperative, nonprofit, or other group chooses to take on when hosting its own MAIA instance.
-
----
-
-## Medical Risk
-
-MAIA is **not** a medical device, medical service, or health-care provider.  
-MAIA does **not** provide medical advice.
-
-MAIA uses an open-source "Private AI" component to help organize access to your health records. This AI is **not medically fine-tuned**, and MAIA's instructions are generic suggestions for helping you create a patient summary. Every patient is encouraged to review and adjust these instructions to meet their own needs.
-
-Because MAIA is non-commercial and patient-directed, it is **not subject to FDA regulation**.
-
-If a physician, therapist, or other licensed professional interacts with MAIA through a deep-linked shared chat at your request, they do so **under their existing professional license** and remain fully responsible for their own clinical or professional judgment. The same principle applies to all licensed professionals—medical, legal, accounting, or otherwise—who may use MAIA at a patient's direction.
-
----
-
-## Our Commitment
-
-MAIA is built to demonstrate that patients can hold and control their own health records, use AI safely on their terms, and share information with professionals or communities **only when they choose**.
-
-If you have questions about privacy, data handling, or how MAIA works, we welcome them.
+MAIA gives you the opportunity to edit and verify whatever you or others might see in the chats. The Wizard requires verification for Current Medications and the Patient Summary. It is your responsibility to check the responses from Private AI as well as public AIs you choose. MAIA helps you verify by offering direct links to information in the PDF files you imported from your health care providers.
