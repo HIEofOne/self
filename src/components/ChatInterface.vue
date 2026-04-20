@@ -5875,8 +5875,33 @@ watch(
       // Step 1: Generate and save Patient Summary BEFORE opening My Lists.
       // This ensures the summary is available when Lists.vue needs to extract medications.
       // The wizard dialog stays visible with "Preparing..." spinners during this.
+      //
+      // Wait for KB to be attached to the agent first. The indexing completion
+      // (phase === 'complete') fires before the server finishes attaching the KB,
+      // so without this wait the agent has no patient documents and returns a stub.
       preGeneratedSummary.value = null;
       if (props.user?.userId) {
+        // Poll /api/user-status until kbStatus === 'attached' (up to 30s)
+        let kbAttached = false;
+        for (let attempt = 0; attempt < 10; attempt++) {
+          try {
+            const statusRes = await fetch(`/api/user-status?userId=${encodeURIComponent(props.user.userId)}`, { credentials: 'include' });
+            if (statusRes.ok) {
+              const statusJson = await statusRes.json();
+              if (statusJson.kbStatus === 'attached') {
+                kbAttached = true;
+                console.log(`[Wizard] KB attached confirmed (attempt ${attempt + 1})`);
+                break;
+              }
+              console.log(`[Wizard] KB status: ${statusJson.kbStatus} (attempt ${attempt + 1}/10)`);
+            }
+          } catch { /* ignore */ }
+          await new Promise(r => setTimeout(r, 3000));
+        }
+        if (!kbAttached) {
+          console.warn('[Wizard] KB not confirmed attached after 30s — proceeding anyway (server will attempt attach)');
+        }
+
         console.log('[Wizard] Generating Patient Summary before opening My Lists...');
         try {
           const genRes = await fetch('/api/generate-patient-summary', {
