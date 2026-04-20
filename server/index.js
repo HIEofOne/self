@@ -7695,8 +7695,10 @@ async function sendNewUserNotification(userId, options = {}) {
               event: 'admin-notified',
               id: maxId + 1,
               time: new Date().toISOString(),
+              from: fromEmail,
               to: toEmail,
-              subject
+              subject,
+              body
             });
             freshDoc.updatedAt = new Date().toISOString();
             await cloudant.saveDocument('maia_users', freshDoc);

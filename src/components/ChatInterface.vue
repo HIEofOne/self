@@ -3148,7 +3148,7 @@ const generateSetupLogPdf = async () => {
           case 'test-started': return `[${t}] TEST mode started (automated Setup/Restore run)`;
           case 'test-completed': return `[${t}] TEST mode completed${evt.passed !== undefined ? (evt.passed ? ' — PASS' : ' — FAIL') : ''}`;
           case 'test-verification': return `[${t}] TEST verification: ${evt.label || ''} ${evt.passed ? 'PASS' : 'FAIL'}${evt.detail ? ' - ' + evt.detail : ''}`;
-          case 'admin-notified': return `[${t}] Admin notified (${evt.to || 'email'})`;
+          case 'admin-notified': return `[${t}] Admin notified — from: ${evt.from || '?'}, to: ${evt.to || '?'}`;
           case 'error': return `[${t}] ERROR: ${evt.step || ''} - ${evt.message || ''}`;
           default: return `[${t}] ${evt.event || 'unknown'}`;
         }
@@ -3213,6 +3213,29 @@ const generateSetupLogPdf = async () => {
           doc.setFont('helvetica', 'normal');
           doc.setFontSize(9);
           y += 2;
+        }
+
+        // Render email body block for admin-notified events
+        if (evt.event === 'admin-notified' && evt.body) {
+          const bodyIndent = margin + 8;
+          const bodyMaxWidth = maxWidth - 8;
+          doc.setFontSize(8);
+          doc.setTextColor(80, 80, 80);
+          // Draw a light background box
+          const bodyLines = doc.splitTextToSize(evt.body, bodyMaxWidth);
+          const blockHeight = bodyLines.length * 4 + 4;
+          if (y + blockHeight > 270) { doc.addPage(); y = 20; }
+          doc.setFillColor(245, 245, 245);
+          doc.roundedRect(margin + 4, y - 3, maxWidth - 4, blockHeight, 1, 1, 'F');
+          y += 1;
+          for (const bl of bodyLines) {
+            if (y > 270) { doc.addPage(); y = 20; }
+            doc.text(bl, bodyIndent, y);
+            y += 4;
+          }
+          y += 3;
+          doc.setTextColor(0, 0, 0);
+          doc.setFontSize(9);
         }
       }
 
