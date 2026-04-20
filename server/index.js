@@ -7554,6 +7554,163 @@ const appendAdminUsageEntry = async (deletedUserId) => {
   }
 };
 
+// ── New-user email notification ─────────────────────────────────────
+// Sends an email summary when setup completes or the account is deleted.
+// Fire-and-forget: errors are logged but never block the caller.
+// If RESEND_API_KEY is not set the function silently no-ops (logged once at startup).
+
+let resendClient = null;
+const RESEND_WARNED = { value: false };
+async function initResend() {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    if (!RESEND_WARNED.value) {
+      console.log('[NOTIFY] RESEND_API_KEY not set — email notifications disabled');
+      RESEND_WARNED.value = true;
+    }
+    return null;
+  }
+  if (!resendClient) {
+    const { Resend } = await import('resend');
+    resendClient = new Resend(apiKey);
+  }
+  return resendClient;
+}
+
+/**
+ * Send a new-user notification email.
+ * @param {string} userId
+ * @param {object} options
+ * @param {boolean} [options.deleted] — true if the account was just deleted
+ * @param {object} [options.userDoc] — pre-fetched user doc (required for deletion since doc is gone after)
+ */
+async function sendNewUserNotification(userId, options = {}) {
+  try {
+    const resend = await initResend();
+    if (!resend) return;
+
+    const toEmail = process.env.NOTIFY_EMAIL || 'maia@trustee.ai';
+    const fromEmail = process.env.RESEND_FROM_EMAIL || 'onboarding@resend.dev';
+    const appUrl = process.env.PUBLIC_APP_URL || 'http://localhost:5173';
+
+    // Get user doc (use pre-fetched if provided, e.g. before deletion)
+    let userDoc = options.userDoc || null;
+    if (!userDoc) {
+      try {
+        userDoc = await cloudant.getDocument('maia_users', userId);
+      } catch { /* user may already be deleted */ }
+    }
+
+    // File info from user doc
+    const files = Array.isArray(userDoc?.files) ? userDoc.files : [];
+    const fileLines = files.map((f, i) => {
+      const sizeKB = Math.round((f.fileSize || f.size || 0) / 1024);
+      const tag = f.isAppleHealth ? ' (Apple Health)' : '';
+      return `  File ${i + 1}: ${sizeKB.toLocaleString()} KB${tag}`;
+    });
+    const totalSizeKB = files.reduce((sum, f) => sum + (f.fileSize || f.size || 0), 0) / 1024;
+
+    // KB tokens
+    let kbTokens = 'unknown';
+    if (userDoc?.kbId) {
+      try {
+        const kbDetails = await doClient.kb.get(userDoc.kbId);
+        const t = kbDetails?.total_tokens || kbDetails?.token_count || kbDetails?.tokens || 0;
+        kbTokens = Number(t).toLocaleString();
+      } catch { /* KB may not exist */ }
+    }
+    // Fallback to stored indexing status
+    if (kbTokens === 'unknown' && userDoc?.kbIndexingStatus?.tokens) {
+      kbTokens = Number(userDoc.kbIndexingStatus.tokens).toLocaleString();
+    }
+
+    // Passkey
+    const hasPasskey = !!(userDoc?.credentialID);
+
+    // Account deleted
+    const deleted = !!options.deleted;
+
+    // Errors from provisioning log
+    const log = Array.isArray(userDoc?.provisioningLog) ? userDoc.provisioningLog : [];
+    const errorEvents = new Set([
+      'current-medications-recovery-failed', 'medications-dismissed',
+      'agent-deploy-failed', 'kb-index-failed', 'summary-generation-failed',
+      'restore-error', 'setup-error'
+    ]);
+    const errors = [];
+    for (const ev of log) {
+      const name = ev?.event;
+      if (errorEvents.has(name)) {
+        errors.push(`${name}${ev.error ? ': ' + ev.error : ''}`);
+      } else if (name === 'medications-offered' && ev.outcome && ev.outcome !== 'verified' && ev.outcome !== 'shown') {
+        errors.push(`medications-offered: ${ev.outcome}`);
+      }
+    }
+
+    // Month-to-date balance
+    let mtdBalance = 'unavailable';
+    try {
+      const balanceData = await fetchBillingBalance();
+      const mtd = extractMonthToDateUsage(balanceData);
+      if (mtd !== null) mtdBalance = `$${mtd}`;
+    } catch { /* non-fatal */ }
+
+    // Is this a TEST run?
+    const isTest = log.some(e => e?.event === 'test-started');
+    const testTag = isTest ? ' (TEST)' : '';
+
+    // Build email body
+    const lines = [
+      `User ID: ${userId}`,
+      `Files: ${files.length}`,
+      ...fileLines,
+      `Total size: ${Math.round(totalSizeKB).toLocaleString()} KB`,
+      `KB tokens: ${kbTokens}`,
+      `Passkey: ${hasPasskey ? 'Yes' : 'No'}`,
+      `Account deleted: ${deleted ? 'Yes' : 'No'}`,
+      ...(errors.length > 0 ? [`Errors (${errors.length}):`, ...errors.map(e => `  - ${e}`)] : []),
+      `MTD balance: ${mtdBalance}`,
+      '',
+      `App: ${appUrl}`
+    ];
+    const body = lines.join('\n');
+    const subject = `MAIA: new account ${userId}${testTag}`;
+
+    await resend.emails.send({
+      from: fromEmail,
+      to: toEmail,
+      subject,
+      text: body
+    });
+    console.log(`[NOTIFY] ✅ Email sent for ${userId} to ${toEmail}`);
+
+    // Log email contents to provisioning log so the user's maia-log.pdf shows it
+    if (userDoc && !deleted) {
+      try {
+        // Re-fetch to avoid conflicts (userDoc may be stale)
+        const freshDoc = await cloudant.getDocument('maia_users', userId);
+        if (freshDoc) {
+          if (!Array.isArray(freshDoc.provisioningLog)) freshDoc.provisioningLog = [];
+          const maxId = freshDoc.provisioningLog.reduce((m, e) => Math.max(m, e.id || 0), 0);
+          freshDoc.provisioningLog.push({
+            event: 'admin-notified',
+            id: maxId + 1,
+            time: new Date().toISOString(),
+            to: toEmail,
+            subject
+          });
+          freshDoc.updatedAt = new Date().toISOString();
+          await cloudant.saveDocument('maia_users', freshDoc);
+        }
+      } catch (logErr) {
+        console.warn('[NOTIFY] Failed to log email to provisioning log:', logErr.message);
+      }
+    }
+  } catch (err) {
+    console.error('[NOTIFY] ❌ Email notification failed:', err.message || err);
+  }
+}
+
 // Admin: Get all users with statistics
 app.get('/api/admin/users', async (req, res) => {
   try {
@@ -8376,9 +8533,20 @@ app.post('/api/self/delete', async (req, res) => {
     }
 
     console.log(`[SELF-DELETE] Account deletion requested by ${sessionUserId}`);
+    // Capture user doc before deletion for the notification email
+    let preDeleteUserDoc = null;
+    try { preDeleteUserDoc = await cloudant.getDocument('maia_users', sessionUserId); } catch { /* ok */ }
     const deletionDetails = await deleteUserAndResources(sessionUserId);
     console.log(`[SELF-DELETE] Deletion completed for ${sessionUserId}:`, JSON.stringify(deletionDetails.errors?.length ? { errors: deletionDetails.errors } : { ok: true }));
     await appendAdminUsageEntry(sessionUserId);
+    // Notify admin (fire-and-forget) — only if no setup-complete was logged (otherwise already notified)
+    if (preDeleteUserDoc) {
+      const log = Array.isArray(preDeleteUserDoc.provisioningLog) ? preDeleteUserDoc.provisioningLog : [];
+      const alreadyNotified = log.some(e => e?.event === 'admin-notified');
+      if (!alreadyNotified) {
+        void sendNewUserNotification(sessionUserId, { deleted: true, userDoc: preDeleteUserDoc });
+      }
+    }
 
     // Destroy session — use a try/catch since session may already be invalid
     try {
@@ -8428,8 +8596,19 @@ app.post('/api/local/delete', async (req, res) => {
       return res.status(403).json({ success: false, error: 'Forbidden' });
     }
     console.log(`[LOCAL-DELETE] Unauthenticated deletion requested for ${userId}`);
+    // Capture user doc before deletion for the notification email
+    let preDeleteUserDoc = null;
+    try { preDeleteUserDoc = await cloudant.getDocument('maia_users', userId); } catch { /* ok */ }
     const deletionDetails = await deleteUserAndResources(userId);
     console.log(`[LOCAL-DELETE] Deletion completed for ${userId}`);
+    // Notify admin (fire-and-forget) — only if no setup-complete was logged
+    if (preDeleteUserDoc) {
+      const log = Array.isArray(preDeleteUserDoc.provisioningLog) ? preDeleteUserDoc.provisioningLog : [];
+      const alreadyNotified = log.some(e => e?.event === 'admin-notified');
+      if (!alreadyNotified) {
+        void sendNewUserNotification(userId, { deleted: true, userDoc: preDeleteUserDoc });
+      }
+    }
     res.json({ success: true, details: deletionDetails });
   } catch (error) {
     if (error?.statusCode === 404) {
@@ -8989,6 +9168,11 @@ app.post('/api/provisioning-log', async (req, res) => {
           throw error;
         }
       }
+    }
+
+    // Fire-and-forget: send admin notification on setup-complete or test-completed
+    if (event === 'setup-complete' || event === 'test-completed') {
+      void sendNewUserNotification(userId);
     }
 
     res.json({ success: true, id: entry.id });

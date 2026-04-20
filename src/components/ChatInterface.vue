@@ -3148,6 +3148,7 @@ const generateSetupLogPdf = async () => {
           case 'test-started': return `[${t}] TEST mode started (automated Setup/Restore run)`;
           case 'test-completed': return `[${t}] TEST mode completed${evt.passed !== undefined ? (evt.passed ? ' — PASS' : ' — FAIL') : ''}`;
           case 'test-verification': return `[${t}] TEST verification: ${evt.label || ''} ${evt.passed ? 'PASS' : 'FAIL'}${evt.detail ? ' - ' + evt.detail : ''}`;
+          case 'admin-notified': return `[${t}] Admin notified (${evt.to || 'email'})`;
           case 'error': return `[${t}] ERROR: ${evt.step || ''} - ${evt.message || ''}`;
           default: return `[${t}] ${evt.event || 'unknown'}`;
         }
