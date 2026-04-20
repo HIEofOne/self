@@ -7589,8 +7589,8 @@ async function sendNewUserNotification(userId, options = {}) {
     const resend = await initResend();
     if (!resend) return;
 
-    const toEmail = 'agropper@healthurl.com';
-    const fromEmail = process.env.RESEND_FROM_EMAIL || 'onboarding@resend.dev';
+    const toEmail = 'maia@trustee.ai';
+    const fromEmail = process.env.RESEND_FROM_EMAIL || 'noreply@maia.healthurl.com';
     const appUrl = process.env.PUBLIC_APP_URL || 'http://localhost:5173';
 
     // Get user doc (use pre-fetched if provided, e.g. before deletion)
