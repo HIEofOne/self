@@ -2619,7 +2619,26 @@ const handleTestButton = async () => {
 
   logProvisioningEvent({ event: 'test-started' });
   void generateSetupLogPdf();
-  // Trigger the normal folder picker; the wizard flow runs as usual
+
+  // If we already have a folder handle (from current session), reuse it
+  // instead of showing a redundant showDirectoryPicker dialog.
+  if (localFolderHandle.value) {
+    try {
+      const files = await listFolderFiles(localFolderHandle.value, { extensions: ['pdf'] });
+      localFolderFiles.value = files;
+    } catch { localFolderFiles.value = []; }
+    wizardFlowPhase.value = 'running';
+    wizardTimeoutTimer = setTimeout(async () => {
+      if (showAgentSetupDialog.value && localFolderHandle.value) {
+        await generateSetupLogPdf();
+        wizardTimeoutModalVisible.value = true;
+      }
+    }, 60 * 60 * 1000);
+    await runAutoWizard();
+    return;
+  }
+
+  // No folder handle — trigger the normal folder picker
   handlePickLocalFolder();
 };
 
