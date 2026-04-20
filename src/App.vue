@@ -1899,25 +1899,33 @@ const handleWizardComplete = async () => {
 
 /** Clean up cloud resources after TEST completes (pass or fail).
  *  The local maia-log.pdf already has all diagnostic information.
- *  Deletes agent, KB, Spaces files, user doc, sessions, and chats. */
+ *  Deletes agent, KB, Spaces files, user doc, sessions, and chats.
+ *  Uses /api/local/delete (unauthenticated) because /api/self/delete
+ *  requires a valid session which may have been destroyed during the
+ *  mid-test delete→recreate cycle. */
 const cleanupTestAccount = async (log: (text: string, ok?: boolean) => void) => {
   const userId = user.value?.userId;
   if (!userId) return;
   try {
     log('Cleaning up cloud resources...');
-    const resp = await fetch('/api/self/delete', {
+    console.log('[TEST] Cleaning up cloud resources for', userId);
+    const resp = await fetch('/api/local/delete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
       body: JSON.stringify({ userId })
     });
     if (resp.ok) {
+      const details = await resp.json().catch(() => ({}));
+      console.log('[TEST] Cleanup complete:', details);
       log('Cloud resources cleaned up');
     } else {
       const err = await resp.json().catch(() => ({}));
+      console.error('[TEST] Cleanup failed:', resp.status, err);
       log(`Cleanup partial: ${err.error || resp.status}`, false);
     }
   } catch (e: any) {
+    console.error('[TEST] Cleanup error:', e);
     log(`Cleanup failed: ${e.message}`, false);
   }
 };
