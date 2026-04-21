@@ -7674,8 +7674,8 @@ async function sendNewUserNotification(userId, options = {}) {
     const isTest = log.some(e => e?.event === 'test-started');
     const testTag = isTest ? ' (TEST)' : '';
 
-    // Build email body
-    const lines = [
+    // Build email body. MTD is admin-only (shown in email, hidden from user PDF log).
+    const commonLines = [
       `User ID: ${userId}`,
       `Files: ${files.length}`,
       ...fileLines,
@@ -7683,19 +7683,17 @@ async function sendNewUserNotification(userId, options = {}) {
       `KB tokens: ${kbTokens}`,
       `Passkey: ${hasPasskey ? 'Yes' : 'No'}`,
       `Account deleted: ${deleted ? 'Yes' : 'No'}`,
-      ...(errors.length > 0 ? [`Errors (${errors.length}):`, ...errors.map(e => `  - ${e}`)] : []),
-      `MTD balance: ${mtdBalance}`,
-      '',
-      `App: ${appUrl}`
+      ...(errors.length > 0 ? [`Errors (${errors.length}):`, ...errors.map(e => `  - ${e}`)] : [])
     ];
-    const body = lines.join('\n');
+    const emailBody = [...commonLines, `MTD balance: ${mtdBalance}`, '', `App: ${appUrl}`].join('\n');
+    const userBody = [...commonLines, '', `App: ${appUrl}`].join('\n');
     const subject = `MAIA: new account ${userId}${testTag}`;
 
     await resend.emails.send({
       from: fromEmail,
       to: toEmail,
       subject,
-      text: body
+      text: emailBody
     });
     console.log(`[NOTIFY] ✅ Email sent for ${userId} to ${toEmail}`);
 
@@ -7715,7 +7713,7 @@ async function sendNewUserNotification(userId, options = {}) {
               from: fromEmail,
               to: toEmail,
               subject,
-              body
+              body: userBody
             });
             freshDoc.updatedAt = new Date().toISOString();
             await cloudant.saveDocument('maia_users', freshDoc);
