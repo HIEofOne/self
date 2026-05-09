@@ -128,10 +128,21 @@
                     {{ tempStartError }}
                   </div>
 
-                  <!-- Introduction from welcome.md -->
-                  <div class="q-mt-lg">
-                    <div class="welcome-intro text-body2 text-grey-8 q-pa-md">
-                      <vue-markdown :source="welcomeIntro || 'Loading...'" />
+                  <!-- Welcome video + Steps from welcome.md -->
+                  <div class="row q-mt-lg q-col-gutter-md welcome-row">
+                    <div class="col-12 col-md-6">
+                      <video
+                        class="welcome-video"
+                        src="/welcome-video.mp4"
+                        controls
+                        preload="metadata"
+                        playsinline
+                      />
+                    </div>
+                    <div class="col-12 col-md-6">
+                      <div class="welcome-intro text-body2 text-grey-8 q-pa-md">
+                        <vue-markdown :source="welcomeIntro || 'Loading...'" />
+                      </div>
                     </div>
                   </div>
 
@@ -3228,6 +3239,19 @@ onMounted(async () => {
 .welcome-intro {
   background-color: #f5f5f5;
   border-radius: 4px;
+}
+
+.welcome-row {
+  align-items: stretch;
+}
+
+.welcome-video {
+  width: 100%;
+  height: auto;
+  max-height: 500px;
+  border-radius: 4px;
+  background-color: #000;
+  display: block;
 }
 
 .welcome-footer-link {
