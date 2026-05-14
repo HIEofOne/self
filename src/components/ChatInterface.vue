@@ -2826,15 +2826,9 @@ const runSafariFolderWizard = async (files: File[]) => {
       const visibleNames = new Set(wizardStage3Files.value.map(f => f.name));
       const missing = uploadedFileNames.filter(n => !visibleNames.has(n));
       if (missing.length === 0) break;
-      console.log(`[Wizard] Waiting for server to surface ${missing.length} file(s): ${missing.join(', ')} (attempt ${waitAttempt + 1}/10)`);
       await new Promise(r => setTimeout(r, 500));
       await refreshWizardState();
     }
-    console.log(`[Wizard] Pre-index wizardStage3Files (${wizardStage3Files.value.length}):`, wizardStage3Files.value.map(f => ({
-      name: f.name,
-      bucketKey: f.bucketKey,
-      inKB: f.inKnowledgeBase
-    })));
 
     // Phase 2: Check agent
     localFolderAutoRunPhase.value = 'Checking agent deployment...';
@@ -2974,20 +2968,13 @@ const runAutoWizard = async () => {
     // wait, handleStage3Index can be called with a partial file list and only
     // a subset of files end up in the KB folder before indexing fires.
     await refreshWizardState();
-    const expectedNames = new Set(uploadedFileNames);
-    for (let waitAttempt = 0; waitAttempt < 10 && expectedNames.size > 0; waitAttempt += 1) {
+    for (let waitAttempt = 0; waitAttempt < 10; waitAttempt += 1) {
       const visibleNames = new Set(wizardStage3Files.value.map(f => f.name));
       const missing = uploadedFileNames.filter(n => !visibleNames.has(n));
       if (missing.length === 0) break;
-      console.log(`[Wizard] Waiting for server to surface ${missing.length} file(s): ${missing.join(', ')} (attempt ${waitAttempt + 1}/10)`);
       await new Promise(r => setTimeout(r, 500));
       await refreshWizardState();
     }
-    console.log(`[Wizard] Pre-index wizardStage3Files (${wizardStage3Files.value.length}):`, wizardStage3Files.value.map(f => ({
-      name: f.name,
-      bucketKey: f.bucketKey,
-      inKB: f.inKnowledgeBase
-    })));
 
     // Phase 2: Check agent deployment status
     localFolderAutoRunPhase.value = 'Checking agent deployment...';
@@ -3185,7 +3172,10 @@ const generateSetupLogPdf = async () => {
           }
           case 'medications-dismissed': return `[${t}] Medications step dismissed without verification`;
           case 'current-medications-recovery-failed': return `[${t}] Current Medications recovery FAILED — fell through ${Array.isArray(evt.pathsTried) ? evt.pathsTried.join(' -> ') : 'all paths'}`;
-          case 'medications-saved': return `[${t}] Current Medications saved (${evt.lines || 0} lines)`;
+          case 'medications-saved': {
+            const src = evt.source ? ` from ${String(evt.source).replace(/-/g, ' ')}` : '';
+            return `[${t}] Current Medications saved (${evt.lines || 0} lines)${src}`;
+          }
           case 'medications-restored': return `[${t}] Current Medications restored (${evt.lines || 0} lines)`;
           case 'summary-saved': return `[${t}] Patient Summary saved (${evt.lines || 0} lines, ${Number(evt.chars || 0).toLocaleString()} chars)`;
           case 'summary-verified': return `[${t}] Patient Summary verified (${evt.lines || 0} lines, ${Number(evt.chars || 0).toLocaleString()} chars)`;
@@ -3517,26 +3507,20 @@ const handleStage3Index = async (overrideNames?: string[], fromRestore = false) 
         throw new Error(`Missing bucket keys for: ${missingTargets.join(', ')}`);
       }
 
-      console.log(`[handleStage3Index] About to toggle ${stage3Names.length} file(s) to KB:`, stage3Names);
       const movedToKbBucketKeys: string[] = [];
       const toggleFailures: Array<{ name: string; status: number; error?: string }> = [];
+      let alreadyInKB = 0;
       for (const name of stage3Names) {
         const file = byName.get(name);
         const bucketKey = file?.bucketKey;
-        if (!bucketKey) {
-          console.log(`[handleStage3Index] Skip ${name}: no bucketKey`);
-          continue;
-        }
+        if (!bucketKey) continue;
         if (file?.inKnowledgeBase) {
-          console.log(`[handleStage3Index] Skip ${name}: already in KB (${bucketKey})`);
+          alreadyInKB++;
           continue;
         }
-        console.log(`[handleStage3Index] Toggling → KB: ${name} (${bucketKey})`);
         const toggleResponse = await fetch('/api/toggle-file-knowledge-base', {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
+          headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
           body: JSON.stringify({
             userId: props.user.userId,
@@ -3547,17 +3531,15 @@ const handleStage3Index = async (overrideNames?: string[], fromRestore = false) 
         if (!toggleResponse.ok) {
           const errorData = await toggleResponse.json().catch(() => ({}));
           const msg = errorData.message || errorData.error || `HTTP ${toggleResponse.status}`;
-          console.warn(`[handleStage3Index] Toggle FAILED for ${name}: status=${toggleResponse.status}, error=${msg}`);
           toggleFailures.push({ name, status: toggleResponse.status, error: msg });
           // Don't throw — keep going so as many files as possible end up in KB.
-          // We'll call update-knowledge-base below regardless.
           continue;
         }
-        console.log(`[handleStage3Index] Toggle OK: ${name}`);
         movedToKbBucketKeys.push(bucketKey);
       }
+      console.log(`[handleStage3Index] Toggled ${movedToKbBucketKeys.length}/${stage3Names.length} files to KB (already in KB: ${alreadyInKB}, failed: ${toggleFailures.length})`);
       if (toggleFailures.length > 0) {
-        console.warn(`[handleStage3Index] ${toggleFailures.length} of ${stage3Names.length} toggles failed:`, toggleFailures);
+        console.warn('[handleStage3Index] Toggle failures:', toggleFailures);
       }
       if (movedToKbBucketKeys.length > 0) {
         handleFilesArchived(movedToKbBucketKeys);
@@ -6041,38 +6023,18 @@ watch(
       // Note: 'medications-offered' event is logged by Lists.vue after extraction
       // completes, so we have an accurate line count for the offered meds.
 
-      // Step 1: Generate and save Patient Summary BEFORE opening My Lists.
-      // This ensures the summary is available when Lists.vue needs to extract medications.
-      // The wizard dialog stays visible with "Preparing..." spinners during this.
+      // Step 1: Generate and save the draft Patient Summary BEFORE opening My
+      // Lists, so the summary text is available when Lists.vue needs to extract
+      // medications.
       //
-      // Wait for KB to be attached to the agent first. The indexing completion
-      // (phase === 'complete') fires before the server finishes attaching the KB,
-      // so without this wait the agent has no patient documents and returns a stub.
+      // No client-side KB-attached poll here: the server's /api/patient-summary/
+      // draft endpoint force-attaches the KB to the agent before calling the
+      // agent (see server/index.js — attachKB call), which makes the poll
+      // redundant. The previous 30s poll always timed out anyway because DO's
+      // agent-record refresh lags the KB completion event.
       preGeneratedSummary.value = null;
       if (props.user?.userId) {
-        // Poll /api/user-status until kbStatus === 'attached' (up to 30s)
-        let kbAttached = false;
-        for (let attempt = 0; attempt < 10; attempt++) {
-          try {
-            const statusRes = await fetch(`/api/user-status?userId=${encodeURIComponent(props.user.userId)}`, { credentials: 'include' });
-            if (statusRes.ok) {
-              const statusJson = await statusRes.json();
-              if (statusJson.kbStatus === 'attached') {
-                kbAttached = true;
-                console.log(`[Wizard] KB attached confirmed (attempt ${attempt + 1})`);
-                break;
-              }
-              console.log(`[Wizard] KB status: ${statusJson.kbStatus} (attempt ${attempt + 1}/10)`);
-            }
-          } catch { /* ignore */ }
-          await new Promise(r => setTimeout(r, 3000));
-        }
-        if (!kbAttached) {
-          console.warn('[Wizard] KB not confirmed attached after 30s — proceeding anyway (server will attempt attach)');
-        }
-
         wizardPreparingMessage.value = 'Generating draft Patient Summary from your records (may take 30–60 seconds)...';
-        console.log('[Wizard] Generating draft Patient Summary before opening My Lists...');
         try {
           const draftStartedAt = Date.now();
           const genRes = await fetch('/api/patient-summary/draft', {
@@ -6094,7 +6056,6 @@ watch(
             const generationSeconds = typeof genResult.generationSeconds === 'number'
               ? genResult.generationSeconds
               : Math.round(((Date.now() - draftStartedAt) / 1000) * 10) / 10;
-            console.log('[Wizard] Draft Patient Summary saved (%d chars, %ss)', text.length, generationSeconds);
             logProvisioningEvent({
               event: 'draft-summary-generated',
               lines: summaryLines,
@@ -6113,7 +6074,6 @@ watch(
       // Opening My Stuff before closing the wizard prevents a flash of the empty chat.
       wizardPreparingMessage.value = 'Opening Current Medications for review...';
       wizardPreparingRecords.value = false;
-      console.log('[Wizard] Opening My Lists tab');
       try {
         sessionStorage.setItem('autoProcessInitialFile', 'true');
         sessionStorage.setItem('wizardMyListsAuto', 'true');
@@ -6503,11 +6463,12 @@ const handleMedicationsOffered = (payload: {
   void generateSetupLogPdf();
 };
 
-const handleCurrentMedicationsSaved = async (payload?: { value?: string; edited?: boolean; changed?: boolean }) => {
+const handleCurrentMedicationsSaved = async (payload?: { value?: string; edited?: boolean; changed?: boolean; source?: string }) => {
   const medsLineCount = payload?.value ? payload.value.split('\n').filter(l => l.trim()).length : 0;
   logProvisioningEvent({
     event: 'medications-saved',
-    lines: medsLineCount
+    lines: medsLineCount,
+    source: payload?.source || (payload?.edited ? 'manual' : undefined)
   });
   wizardCurrentMedications.value = true;
   wizardStage2Complete.value = true;

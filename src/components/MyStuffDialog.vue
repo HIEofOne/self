@@ -1277,7 +1277,7 @@ const emit = defineEmits<{
   'messages-filtered': [messages: Message[]]; // Emit filtered messages with pseudonyms
   'diary-posted': [content: string]; // Emit diary content to add to chat
   'reference-file-added': [file: { fileName: string; bucketKey: string; fileSize: number; uploadedAt: string; fileType?: string; fileUrl?: string; isReference: boolean }]; // Emit reference file to add to chat
-  'current-medications-saved': [data: { value: string; edited: boolean }];
+  'current-medications-saved': [data: { value: string; edited: boolean; source?: string }];
   'medications-offered': [data: {
     lines: number;
     source: 'apple-health' | 'patient-summary' | 'manual' | 'user-doc';
@@ -1302,7 +1302,7 @@ const handleShowPatientSummary = () => {
   emit('show-patient-summary');
 };
 
-const handleCurrentMedicationsSaved = (payload: { value: string; edited: boolean }) => {
+const handleCurrentMedicationsSaved = (payload: { value: string; edited: boolean; source?: string }) => {
   emit('current-medications-saved', payload);
 };
 

@@ -418,7 +418,7 @@ const props = defineProps<Props>();
 const emit = defineEmits<{
   'back-to-chat': [];
   'show-patient-summary': [];
-  'current-medications-saved': [data: { value: string; edited: boolean; changed?: boolean }];
+  'current-medications-saved': [data: { value: string; edited: boolean; changed?: boolean; source?: string }];
   'medications-offered': [data: {
     lines: number;
     source: 'apple-health' | 'patient-summary' | 'manual' | 'user-doc';
@@ -508,6 +508,11 @@ const currentMedicationsBlockTitle = ref('Current Medications');
 const editingOriginalCurrentMedications = ref('');
 const isSavingCurrentMedications = ref(false);
 const isCurrentMedicationsEdited = ref(false);
+// Records where the currently-shown medications came from so the saved event
+// can report it in maia-log.pdf. Set by loadCurrentMedications (apple-health |
+// patient-summary | user-doc) and overridden to 'manual' when the user types
+// or edits in the meds editor.
+const currentMedicationsSource = ref<string>('');
 const currentMedicationsStatus = ref<'reviewing' | 'consulting' | 'waiting' | 'waiting_summary' | ''>('');
 const wizardAutoFlow = ref(false);
 const wizardAutoFlowStorageKey = 'wizardMyListsAuto';
@@ -2124,11 +2129,14 @@ const reloadCategories = async () => {
 onMounted(async () => {
   loadWizardAutoFlow();
 
-  // Resolve Apple Health presence (sets appleHealthFileInfo / hasAppleHealthFile)
-  // BEFORE attempting medications extraction. Otherwise loadCurrentMedications
-  // runs with hasAppleHealthSource=false and the apple-health-augmented extract
+  // Resolve Apple Health presence BEFORE attempting medications extraction.
+  // checkInitialFile() sets initialFileInfo (from userDoc.initialFile), and
+  // loadAppleHealthStatus() sets appleHealthFileInfo (from userDoc.files
+  // where isAppleHealth: true). Both are inputs to hasAppleHealthSource in
+  // loadCurrentMedications; without them the apple-health-augmented extract
   // path never fires for users who do have an AH file.
   await checkInitialFile();
+  await loadAppleHealthStatus();
   await loadCurrentMedications();
   // During wizard flow, keep the loading spinner if medications weren't found yet —
   // processInitialFile will generate them from Apple Health records.
@@ -2245,6 +2253,7 @@ const loadCurrentMedications = async (forceRefresh = false) => {
             isInitialMedsLoading.value = false;
             console.log('[Lists] Current Medications loaded from saved user document (%d chars)', statusResult.currentMedications.length);
             logWizardEvent('current_meds_loaded_from_user_doc', { length: statusResult.currentMedications.length });
+            currentMedicationsSource.value = 'user-doc';
             emit('medications-offered', {
               lines: countMedsLines(statusResult.currentMedications),
               source: 'user-doc',
@@ -2355,6 +2364,7 @@ const loadCurrentMedications = async (forceRefresh = false) => {
       isCurrentMedicationsEdited.value = false;
       isEditingCurrentMedications.value = false;
       currentMedicationsBlockTitle.value = 'Current Medications';
+      currentMedicationsSource.value = source;
       emit('medications-offered', {
         lines: finalMeds.length,
         source,
@@ -2365,6 +2375,7 @@ const loadCurrentMedications = async (forceRefresh = false) => {
     } else if (wizardAutoFlow.value) {
       pathsTried.push('manual');
       const lastError = summaryExtractError || appleHealthExtractError;
+      currentMedicationsSource.value = 'manual';
       emit('medications-offered', {
         lines: 0,
         source: 'manual',
@@ -2394,6 +2405,7 @@ const loadCurrentMedications = async (forceRefresh = false) => {
       pathsTried.push('manual');
       const lastError = summaryExtractError || appleHealthExtractError;
       currentMedicationsBlockTitle.value = 'Please enter your current medications manually';
+      currentMedicationsSource.value = 'manual';
       emit('medications-offered', {
         lines: 0,
         source: 'manual',
@@ -2495,7 +2507,15 @@ const saveCurrentMedicationsValue = async (value: string, markEdited: boolean, c
       clearVerifyRequirement();
     }
 
-    emit('current-medications-saved', { value, edited: markEdited, changed: value !== previousMedications });
+    // If user edited the meds, the source is now 'manual' regardless of where
+    // they originally came from. Otherwise carry forward the offered source.
+    const reportedSource = markEdited ? 'manual' : (currentMedicationsSource.value || 'manual');
+    emit('current-medications-saved', {
+      value,
+      edited: markEdited,
+      changed: value !== previousMedications,
+      source: reportedSource
+    });
 
     // Only offer to update Patient Summary if the medications text actually changed
     if (value !== previousMedications) {
