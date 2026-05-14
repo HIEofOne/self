@@ -3130,6 +3130,10 @@ const generateSetupLogPdf = async () => {
             return `[${t}] KB indexed: ${parts.join(', ')}`;
           }
           case 'summary-generated': return `[${t}] Patient Summary generated (${evt.lines || 0} lines, ${Number(evt.chars || 0).toLocaleString()} chars)`;
+          case 'draft-summary-generated': {
+            const secs = typeof evt.generationSeconds === 'number' ? ` in ${evt.generationSeconds}s` : '';
+            return `[${t}] Draft Patient Summary saved (${evt.lines || 0} lines, ${Number(evt.chars || 0).toLocaleString()} chars${secs}) — hidden until verified`;
+          }
           case 'medications-offered': {
             const src = evt.source ? ` from ${String(evt.source).replace(/-/g, ' ')}` : '';
             const outcome = evt.outcome && evt.outcome !== 'success' ? ` [${evt.outcome}]` : '';
@@ -5990,9 +5994,10 @@ watch(
           console.warn('[Wizard] KB not confirmed attached after 30s — proceeding anyway (server will attempt attach)');
         }
 
-        console.log('[Wizard] Generating Patient Summary before opening My Lists...');
+        console.log('[Wizard] Generating draft Patient Summary before opening My Lists...');
         try {
-          const genRes = await fetch('/api/generate-patient-summary', {
+          const draftStartedAt = Date.now();
+          const genRes = await fetch('/api/patient-summary/draft', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
@@ -6002,30 +6007,27 @@ watch(
           const genResult = await genRes.json();
           const text = (genResult.summary || '').trim();
           if (text) {
+            // Server has stored this on userDoc.draftPatientSummary (not in the
+            // committed patientSummaries array). It will be promoted only after
+            // the user verifies medications and the summary. We keep the text in
+            // a local ref so downstream code can read it without re-fetching.
             preGeneratedSummary.value = text;
-            // Save to server so Lists.vue and Patient Summary tab can load it
-            await fetch('/api/patient-summary', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              credentials: 'include',
-              body: JSON.stringify({
-                userId: props.user?.userId,
-                summary: text,
-                replaceStrategy: 'newest'
-              })
-            });
-            console.log('[Wizard] Patient Summary generated and saved (%d chars)', text.length);
             const summaryLines = text.split('\n').filter((l: string) => l.trim()).length;
+            const generationSeconds = typeof genResult.generationSeconds === 'number'
+              ? genResult.generationSeconds
+              : Math.round(((Date.now() - draftStartedAt) / 1000) * 10) / 10;
+            console.log('[Wizard] Draft Patient Summary saved (%d chars, %ss)', text.length, generationSeconds);
             logProvisioningEvent({
-              event: 'summary-generated',
+              event: 'draft-summary-generated',
               lines: summaryLines,
-              chars: text.length
+              chars: text.length,
+              generationSeconds
             });
           } else {
-            console.warn('[Wizard] Patient Summary generation returned empty text');
+            console.warn('[Wizard] Draft Patient Summary returned empty text');
           }
         } catch (err) {
-          console.warn('[Wizard] Patient Summary generation failed:', err);
+          console.warn('[Wizard] Draft Patient Summary generation failed:', err);
         }
       }
 
