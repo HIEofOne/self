@@ -5014,10 +5014,20 @@ const loadPatientSummary = async () => {
     }
     
     const result = await response.json();
-    const loadedSummary = result.summary || '';
+    // Prefer a committed summary. If none is committed yet, fall back to the
+    // wizard's hidden draft (userDoc.draftPatientSummary) so updateSummary-
+    // WithVerifiedMeds has text to splice the verified meds into.
+    const committedSummary = result.summary || '';
+    const draftSummary = (result.draft && result.draft.text) ? result.draft.text : '';
+    const loadedSummary = committedSummary || draftSummary;
     patientSummary.value = loadedSummary;
     summaryEditText.value = loadedSummary;
     patientSummaries.value = result.summaries || [];
+    // When we're showing the draft (no commit yet), require the user to verify
+    // it before it appears as the "saved" summary.
+    if (!committedSummary && draftSummary) {
+      summaryNeedsVerify.value = true;
+    }
     if (!loadedSummary) {
       isEditingSummaryTab.value = false;
     }

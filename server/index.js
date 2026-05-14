@@ -10154,16 +10154,26 @@ app.get('/api/patient-summary', async (req, res) => {
       }
     }
     const currentSummary = getCurrentSummary(userDoc);
-    
-    res.json({ 
-      success: true, 
+    const draft = userDoc.draftPatientSummary && userDoc.draftPatientSummary.text
+      ? {
+          text: userDoc.draftPatientSummary.text,
+          draftAt: userDoc.draftPatientSummary.draftAt || null,
+          generationSeconds: userDoc.draftPatientSummary.generationSeconds || null,
+          medicationsSplicedAt: userDoc.draftPatientSummary.medicationsSplicedAt || null,
+          medicationsCount: userDoc.draftPatientSummary.medicationsCount || null
+        }
+      : null;
+
+    res.json({
+      success: true,
       summary: currentSummary ? currentSummary.text : '',
       summaries: summaries.map((s, index) => ({
         text: s.text,
         createdAt: s.createdAt,
         updatedAt: s.updatedAt,
         isCurrent: index === summaries.length - 1
-      }))
+      })),
+      draft
     });
   } catch (error) {
     console.error('Error fetching patient summary:', error);
@@ -10228,10 +10238,14 @@ app.post('/api/patient-summary', async (req, res) => {
     } else {
       addNewSummary(userDoc, summary, replaceStrategy || 'newest', replaceIndex);
     }
-    
+
     userDoc.updatedAt = new Date().toISOString();
     userDoc.workflowStage = 'patient_summary';
-    
+    // Committing a summary supersedes any hidden draft from the wizard flow.
+    if (userDoc.draftPatientSummary) {
+      delete userDoc.draftPatientSummary;
+    }
+
     let docToReturn = userDoc;
     let saveErr = await saveWithRetry(userDoc);
     if (saveErr && (saveErr.statusCode === 409 || saveErr.error === 'conflict')) {
@@ -10251,6 +10265,9 @@ app.post('/api/patient-summary', async (req, res) => {
         }
         freshDoc.updatedAt = new Date().toISOString();
         freshDoc.workflowStage = 'patient_summary';
+        if (freshDoc.draftPatientSummary) {
+          delete freshDoc.draftPatientSummary;
+        }
         saveErr = await saveWithRetry(freshDoc);
         if (!saveErr) docToReturn = freshDoc;
       }

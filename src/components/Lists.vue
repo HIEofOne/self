@@ -2124,9 +2124,11 @@ const reloadCategories = async () => {
 onMounted(async () => {
   loadWizardAutoFlow();
 
-  // Always try to load saved medications from the user document first.
-  // This returns instantly if medications are saved, avoiding the 10-second
-  // retry chain in attemptAutoProcessInitialFile.
+  // Resolve Apple Health presence (sets appleHealthFileInfo / hasAppleHealthFile)
+  // BEFORE attempting medications extraction. Otherwise loadCurrentMedications
+  // runs with hasAppleHealthSource=false and the apple-health-augmented extract
+  // path never fires for users who do have an AH file.
+  await checkInitialFile();
   await loadCurrentMedications();
   // During wizard flow, keep the loading spinner if medications weren't found yet —
   // processInitialFile will generate them from Apple Health records.
@@ -2134,7 +2136,6 @@ onMounted(async () => {
     isInitialMedsLoading.value = false;
   }
 
-  await checkInitialFile();
   await loadSavedResults();
 
   // Only start auto-processing if no saved results (file not yet processed into lists)
