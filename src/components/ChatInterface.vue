@@ -322,7 +322,7 @@
               <div class="text-h6">Setting Up Your MAIA</div>
               <div class="text-caption text-grey-7 q-mt-xs">
                 <template v-if="wizardPreparingRecords">
-                  Preparing health records for <strong>{{ props.user?.userId || 'Guest' }}</strong>. Almost done...
+                  {{ wizardPreparingMessage || `Preparing health records for ${props.user?.userId || 'Guest'}. Almost done...` }}
                 </template>
                 <template v-else>
                   Creating account for <strong>{{ props.user?.userId || 'Guest' }}</strong>. This can take 5 to 60 minutes.
@@ -1042,6 +1042,7 @@ const preGeneratedSummary = ref<string | null>(null);
 /** True while the wizard is generating Patient Summary and preparing to open My Lists.
  *  Keeps the wizard dialog visible so the user doesn't see a zombie chat. */
 const wizardPreparingRecords = ref(false);
+const wizardPreparingMessage = ref<string>('');
 
 // ── Provisioning log ────
 // Coalesce duplicate log events (two code paths occasionally emit the same
@@ -2812,8 +2813,23 @@ const runSafariFolderWizard = async (files: File[]) => {
       logProvisioningEvent({ event: 'apple-health-detected', fileName: appleHealthFileName });
     }
 
-    // Refresh wizard state and proceed with indexing (same as Chrome path)
+    // Refresh wizard state and wait for every uploaded file to surface (see
+    // runAutoWizard for the same pattern; CouchDB read-after-write lag can
+    // cause a partial file list otherwise).
     await refreshWizardState();
+    for (let waitAttempt = 0; waitAttempt < 10; waitAttempt += 1) {
+      const visibleNames = new Set(wizardStage3Files.value.map(f => f.name));
+      const missing = uploadedFileNames.filter(n => !visibleNames.has(n));
+      if (missing.length === 0) break;
+      console.log(`[Wizard] Waiting for server to surface ${missing.length} file(s): ${missing.join(', ')} (attempt ${waitAttempt + 1}/10)`);
+      await new Promise(r => setTimeout(r, 500));
+      await refreshWizardState();
+    }
+    console.log(`[Wizard] Pre-index wizardStage3Files (${wizardStage3Files.value.length}):`, wizardStage3Files.value.map(f => ({
+      name: f.name,
+      bucketKey: f.bucketKey,
+      inKB: f.inKnowledgeBase
+    })));
 
     // Phase 2: Check agent
     localFolderAutoRunPhase.value = 'Checking agent deployment...';
@@ -2822,12 +2838,13 @@ const runSafariFolderWizard = async (files: File[]) => {
     if (uploadedCount > 0) {
       localFolderAutoRunPhase.value = 'Starting knowledge base indexing...';
       try {
-        const fileNames = wizardStage3Files.value.map(f => f.name);
-        if (fileNames.length > 0) {
-          await handleStage3Index(fileNames, false);
+        if (uploadedFileNames.length > 0) {
+          await handleStage3Index(uploadedFileNames, false);
           localFolderAutoRunPhase.value = 'Knowledge base indexing in progress...';
         }
-      } catch { /* ignore indexing errors */ }
+      } catch (err) {
+        console.warn('[Wizard] handleStage3Index threw:', err);
+      }
     }
 
     if (uploadedCount > 0) {
@@ -2946,8 +2963,26 @@ const runAutoWizard = async () => {
       logProvisioningEvent({ event: 'apple-health-detected', fileName: appleHealthFileName });
     }
 
-    // Refresh wizard state to pick up new files
+    // Refresh wizard state to pick up new files. Retry until every just-uploaded
+    // file is visible in wizardStage3Files (the server reads userDoc.files which
+    // has read-after-write lag right after the metadata POSTs). Without this
+    // wait, handleStage3Index can be called with a partial file list and only
+    // a subset of files end up in the KB folder before indexing fires.
     await refreshWizardState();
+    const expectedNames = new Set(uploadedFileNames);
+    for (let waitAttempt = 0; waitAttempt < 10 && expectedNames.size > 0; waitAttempt += 1) {
+      const visibleNames = new Set(wizardStage3Files.value.map(f => f.name));
+      const missing = uploadedFileNames.filter(n => !visibleNames.has(n));
+      if (missing.length === 0) break;
+      console.log(`[Wizard] Waiting for server to surface ${missing.length} file(s): ${missing.join(', ')} (attempt ${waitAttempt + 1}/10)`);
+      await new Promise(r => setTimeout(r, 500));
+      await refreshWizardState();
+    }
+    console.log(`[Wizard] Pre-index wizardStage3Files (${wizardStage3Files.value.length}):`, wizardStage3Files.value.map(f => ({
+      name: f.name,
+      bucketKey: f.bucketKey,
+      inKB: f.inKnowledgeBase
+    })));
 
     // Phase 2: Check agent deployment status
     localFolderAutoRunPhase.value = 'Checking agent deployment...';
@@ -2956,12 +2991,16 @@ const runAutoWizard = async () => {
     if (uploadedCount > 0) {
       localFolderAutoRunPhase.value = 'Starting knowledge base indexing...';
       try {
-        const fileNames = wizardStage3Files.value.map(f => f.name);
-        if (fileNames.length > 0) {
-          await handleStage3Index(fileNames, false);
+        // Pass the names of files we KNOW we just uploaded (not whatever
+        // wizardStage3Files currently has — those can be partial during
+        // CouchDB read-after-write lag).
+        if (uploadedFileNames.length > 0) {
+          await handleStage3Index(uploadedFileNames, false);
           localFolderAutoRunPhase.value = 'Knowledge base indexing in progress...';
         }
-      } catch { /* ignore indexing errors */ }
+      } catch (err) {
+        console.warn('[Wizard] handleStage3Index threw:', err);
+      }
     }
 
     // Phase 4: Generate setup log PDF
@@ -3463,16 +3502,21 @@ const handleStage3Index = async (overrideNames?: string[], fromRestore = false) 
         throw new Error(`Missing bucket keys for: ${missingTargets.join(', ')}`);
       }
 
+      console.log(`[handleStage3Index] About to toggle ${stage3Names.length} file(s) to KB:`, stage3Names);
       const movedToKbBucketKeys: string[] = [];
+      const toggleFailures: Array<{ name: string; status: number; error?: string }> = [];
       for (const name of stage3Names) {
         const file = byName.get(name);
         const bucketKey = file?.bucketKey;
         if (!bucketKey) {
+          console.log(`[handleStage3Index] Skip ${name}: no bucketKey`);
           continue;
         }
         if (file?.inKnowledgeBase) {
+          console.log(`[handleStage3Index] Skip ${name}: already in KB (${bucketKey})`);
           continue;
         }
+        console.log(`[handleStage3Index] Toggling → KB: ${name} (${bucketKey})`);
         const toggleResponse = await fetch('/api/toggle-file-knowledge-base', {
           method: 'POST',
           headers: {
@@ -3487,9 +3531,18 @@ const handleStage3Index = async (overrideNames?: string[], fromRestore = false) 
         });
         if (!toggleResponse.ok) {
           const errorData = await toggleResponse.json().catch(() => ({}));
-          throw new Error(errorData.message || `Failed to move ${name} to KB folder`);
+          const msg = errorData.message || errorData.error || `HTTP ${toggleResponse.status}`;
+          console.warn(`[handleStage3Index] Toggle FAILED for ${name}: status=${toggleResponse.status}, error=${msg}`);
+          toggleFailures.push({ name, status: toggleResponse.status, error: msg });
+          // Don't throw — keep going so as many files as possible end up in KB.
+          // We'll call update-knowledge-base below regardless.
+          continue;
         }
+        console.log(`[handleStage3Index] Toggle OK: ${name}`);
         movedToKbBucketKeys.push(bucketKey);
+      }
+      if (toggleFailures.length > 0) {
+        console.warn(`[handleStage3Index] ${toggleFailures.length} of ${stage3Names.length} toggles failed:`, toggleFailures);
       }
       if (movedToKbBucketKeys.length > 0) {
         handleFilesArchived(movedToKbBucketKeys);
@@ -5955,6 +6008,7 @@ watch(
       // Keep the wizard dialog OPEN with spinners so the user doesn't see a zombie chat.
       void generateSetupLogPdf();
       wizardPreparingRecords.value = true;
+      wizardPreparingMessage.value = 'Confirming knowledge base is attached to your agent...';
       if (wizardTimeoutTimer) {
         clearTimeout(wizardTimeoutTimer);
         wizardTimeoutTimer = null;
@@ -5994,6 +6048,7 @@ watch(
           console.warn('[Wizard] KB not confirmed attached after 30s — proceeding anyway (server will attempt attach)');
         }
 
+        wizardPreparingMessage.value = 'Generating draft Patient Summary from your records (may take 30–60 seconds)...';
         console.log('[Wizard] Generating draft Patient Summary before opening My Lists...');
         try {
           const draftStartedAt = Date.now();
@@ -6033,6 +6088,7 @@ watch(
 
       // Step 2: Open My Lists tab FIRST, then close wizard dialog.
       // Opening My Stuff before closing the wizard prevents a flash of the empty chat.
+      wizardPreparingMessage.value = 'Opening Current Medications for review...';
       wizardPreparingRecords.value = false;
       console.log('[Wizard] Opening My Lists tab');
       try {
