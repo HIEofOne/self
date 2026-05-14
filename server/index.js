@@ -9762,10 +9762,259 @@ app.post('/api/generate-patient-summary', async (req, res) => {
   } catch (error) {
     console.error('Error generating patient summary:', error);
     res.status(500).json({ 
-      success: false, 
+      success: false,
       message: `Failed to generate patient summary: ${error.message}`,
-      error: error.message 
+      error: error.message
     });
+  }
+});
+
+// Generate a DRAFT patient summary against the full KB and store it on userDoc.draftPatientSummary
+// (separate from the committed patientSummaries array). The wizard runs this after indexing
+// completes; the draft is NOT shown to the user until they verify medications and the summary.
+app.post('/api/patient-summary/draft', async (req, res) => {
+  const startedAt = Date.now();
+  try {
+    const userId = resolveUserId(req, res);
+    if (!userId) return;
+
+    let userDoc = await cloudant.getDocument('maia_users', userId);
+    if (!userDoc) {
+      return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+    }
+    if (!userDoc.assignedAgentId || !userDoc.agentEndpoint) {
+      return res.status(400).json({ success: false, error: 'AGENT_NOT_CONFIGURED' });
+    }
+
+    if (userDoc.kbId && userDoc.assignedAgentId) {
+      try {
+        await doClient.agent.attachKB(userDoc.assignedAgentId, userDoc.kbId);
+      } catch (attachError) {
+        if (!attachError.message?.includes('already')) {
+          console.error(`[DRAFT SUMMARY] Failed to attach KB: ${attachError.message}`);
+          return res.status(503).json({ success: false, error: 'KB_NOT_ATTACHED' });
+        }
+      }
+    } else if (!userDoc.kbId) {
+      return res.status(400).json({ success: false, error: 'NO_KB' });
+    }
+
+    if (!userDoc.agentApiKey) {
+      userDoc.agentApiKey = await getOrCreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
+    }
+
+    const { DigitalOceanProvider } = await import('../lib/chat-client/providers/digitalocean.js');
+    const agentProvider = new DigitalOceanProvider(userDoc.agentApiKey, { baseURL: userDoc.agentEndpoint });
+    const chatMessages = [{ role: 'user', content: 'Please generate a patient summary.' }];
+    const chatOptions = { model: userDoc.agentModelName || 'deepseek-v4-pro', stream: false };
+
+    let chatResp;
+    try {
+      chatResp = await agentProvider.chat(chatMessages, chatOptions);
+    } catch (firstError) {
+      const sc = firstError.status || firstError.statusCode || 0;
+      if (sc === 401 && userDoc.assignedAgentId) {
+        const { recreateAgentApiKey } = await import('./utils/agent-helper.js');
+        const newApiKey = await recreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
+        const retry = new DigitalOceanProvider(newApiKey, { baseURL: userDoc.agentEndpoint });
+        chatResp = await retry.chat(chatMessages, chatOptions);
+      } else {
+        throw firstError;
+      }
+    }
+
+    const summary = (chatResp.content || chatResp.text || '').trim();
+    if (!summary) throw new Error('Empty draft from agent');
+    const generationSeconds = Math.round(((Date.now() - startedAt) / 1000) * 10) / 10;
+
+    let saved = false;
+    let attempts = 0;
+    while (!saved && attempts < 3) {
+      attempts += 1;
+      const freshDoc = await cloudant.getDocument('maia_users', userId);
+      if (!freshDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+      freshDoc.draftPatientSummary = {
+        text: summary,
+        draftAt: new Date().toISOString(),
+        generationSeconds
+      };
+      try {
+        await cloudant.saveDocument('maia_users', freshDoc);
+        saved = true;
+      } catch (err) {
+        if (err.statusCode === 409 && attempts < 3) continue;
+        throw err;
+      }
+    }
+
+    const lines = summary.split('\n').filter(l => l.trim()).length;
+    res.json({ success: true, summary, lines, chars: summary.length, generationSeconds });
+  } catch (error) {
+    console.error('Error generating draft patient summary:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Extract a Current Medications list using the user's agent (so their system-prompt
+// hide-rules apply). Two modes:
+//   mode=from-summary   → extract from userDoc.draftPatientSummary.text
+//   mode=apple-health   → extract from the Apple Health markdown in Lists/, optionally
+//                          using `contextMeds` (the result of a prior from-summary call)
+//                          as context so the agent can reconcile/dedupe.
+app.post('/api/medications/extract', async (req, res) => {
+  try {
+    const userId = resolveUserId(req, res);
+    if (!userId) return;
+    const { mode, contextMeds } = req.body || {};
+    if (mode !== 'from-summary' && mode !== 'apple-health') {
+      return res.status(400).json({ success: false, error: 'INVALID_MODE' });
+    }
+
+    let userDoc = await cloudant.getDocument('maia_users', userId);
+    if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+    if (!userDoc.assignedAgentId || !userDoc.agentEndpoint) {
+      return res.status(400).json({ success: false, error: 'AGENT_NOT_CONFIGURED' });
+    }
+    const draftText = userDoc.draftPatientSummary?.text;
+    if (!draftText) {
+      return res.status(400).json({ success: false, error: 'NO_DRAFT_SUMMARY' });
+    }
+
+    let prompt;
+    if (mode === 'from-summary') {
+      prompt = `Below is a patient summary. Extract the Current Medications as a simple list, one medication per line, no commentary. Follow your system instructions for any medications that must be omitted or redacted.\n\n${draftText}`;
+    } else {
+      const appleHealthFile = (userDoc.files || []).find(f => f && f.isAppleHealth);
+      if (!appleHealthFile || !appleHealthFile.fileName) {
+        return res.status(400).json({ success: false, error: 'NO_APPLE_HEALTH_FILE' });
+      }
+      const cleanName = String(appleHealthFile.fileName).replace(/[^a-zA-Z0-9.-]/g, '_');
+      const mdName = cleanName.replace(/\.pdf$/i, '.md');
+      const markdownKey = `${userId}/Lists/${mdName}`;
+
+      const bucketUrl = getSpacesBucketName();
+      if (!bucketUrl) return res.status(500).json({ success: false, error: 'BUCKET_NOT_CONFIGURED' });
+      const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+      const { S3Client, GetObjectCommand } = await import('@aws-sdk/client-s3');
+      const s3Client = new S3Client({
+        endpoint: getSpacesEndpoint(),
+        region: 'us-east-1',
+        forcePathStyle: process.env.S3_FORCE_PATH_STYLE === 'true',
+        credentials: {
+          accessKeyId: process.env.DIGITALOCEAN_AWS_ACCESS_KEY_ID || '',
+          secretAccessKey: process.env.DIGITALOCEAN_AWS_SECRET_ACCESS_KEY || ''
+        }
+      });
+      let appleHealthMd = '';
+      try {
+        const r = await s3Client.send(new GetObjectCommand({ Bucket: bucketName, Key: markdownKey }));
+        const chunks = [];
+        for await (const c of r.Body) chunks.push(c);
+        appleHealthMd = Buffer.concat(chunks).toString('utf-8');
+      } catch (e) {
+        return res.status(404).json({ success: false, error: 'APPLE_HEALTH_MARKDOWN_MISSING', message: e.message });
+      }
+
+      const contextBlock = Array.isArray(contextMeds) && contextMeds.length > 0
+        ? `\n\nFor context, these medications were identified in the patient summary you generated earlier from the full knowledge base:\n${contextMeds.map(m => '- ' + m).join('\n')}\n\nUse this list as a starting point, then reconcile and refine against the Apple Health data below. Apply your system instructions for any medications that must be omitted or redacted.\n`
+        : '';
+      prompt = `Extract the Current Medications from the following Apple Health export. List one medication per line, no commentary.${contextBlock}\n\n${appleHealthMd}`;
+    }
+
+    if (!userDoc.agentApiKey) {
+      userDoc.agentApiKey = await getOrCreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
+    }
+
+    const { DigitalOceanProvider } = await import('../lib/chat-client/providers/digitalocean.js');
+    const agentProvider = new DigitalOceanProvider(userDoc.agentApiKey, { baseURL: userDoc.agentEndpoint });
+    const chatOptions = { model: userDoc.agentModelName || 'deepseek-v4-pro', stream: false };
+
+    let chatResp;
+    try {
+      chatResp = await agentProvider.chat([{ role: 'user', content: prompt }], chatOptions);
+    } catch (firstError) {
+      const sc = firstError.status || firstError.statusCode || 0;
+      if (sc === 401 && userDoc.assignedAgentId) {
+        const { recreateAgentApiKey } = await import('./utils/agent-helper.js');
+        const newApiKey = await recreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
+        const retry = new DigitalOceanProvider(newApiKey, { baseURL: userDoc.agentEndpoint });
+        chatResp = await retry.chat([{ role: 'user', content: prompt }], chatOptions);
+      } else {
+        throw firstError;
+      }
+    }
+
+    const raw = (chatResp.content || chatResp.text || '').trim();
+    const medications = raw.split('\n')
+      .map(l => l.replace(/^\s*[-*••\d.)]+\s*/, '').trim())
+      .filter(l => l.length > 0);
+
+    res.json({
+      success: true,
+      medications,
+      lines: medications.length,
+      source: mode === 'apple-health' ? 'apple health' : 'patient summary',
+      raw
+    });
+  } catch (error) {
+    console.error('Error extracting medications:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Splice the verified Current Medications into the saved draft summary's
+// "Current Medications" section. Pure text edit; no AI call.
+app.patch('/api/patient-summary/medications', async (req, res) => {
+  try {
+    const userId = resolveUserId(req, res);
+    if (!userId) return;
+    const { medications } = req.body || {};
+    if (!Array.isArray(medications)) {
+      return res.status(400).json({ success: false, error: 'MEDICATIONS_ARRAY_REQUIRED' });
+    }
+    const medsBlock = medications.length > 0
+      ? medications.map(m => `- ${m}`).join('\n')
+      : '_No current medications_';
+
+    let attempts = 0;
+    while (attempts < 3) {
+      attempts += 1;
+      const userDoc = await cloudant.getDocument('maia_users', userId);
+      if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+      if (!userDoc.draftPatientSummary?.text) {
+        return res.status(400).json({ success: false, error: 'NO_DRAFT_SUMMARY' });
+      }
+      let text = userDoc.draftPatientSummary.text;
+      const headingRe = /(^|\n)(##?\s*Current\s*Medications[^\n]*\n)([\s\S]*?)(?=\n##?\s|\n*$)/i;
+      if (headingRe.test(text)) {
+        text = text.replace(headingRe, (_m, prefix, heading) => `${prefix}${heading}${medsBlock}\n`);
+      } else {
+        text = `${text.trimEnd()}\n\n## Current Medications\n${medsBlock}\n`;
+      }
+      userDoc.draftPatientSummary = {
+        ...userDoc.draftPatientSummary,
+        text,
+        medicationsSplicedAt: new Date().toISOString(),
+        medicationsCount: medications.length
+      };
+      try {
+        await cloudant.saveDocument('maia_users', userDoc);
+        return res.json({
+          success: true,
+          summary: text,
+          lines: text.split('\n').filter(l => l.trim()).length,
+          chars: text.length,
+          medicationsCount: medications.length
+        });
+      } catch (err) {
+        if (err.statusCode === 409 && attempts < 3) continue;
+        throw err;
+      }
+    }
+    return res.status(500).json({ success: false, error: 'SAVE_RETRIES_EXHAUSTED' });
+  } catch (error) {
+    console.error('Error splicing medications into draft:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
