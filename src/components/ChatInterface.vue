@@ -2349,10 +2349,15 @@ const refreshWizardState = async () => {
                 const inferredComplete = !liveActive && Number(tokens) > 0;
                 // Also complete if DO API says not active for > 5 minutes (handles 0-token edge case)
                 const timedOutInactive = !liveActive && !backendDone && elapsedPollMs > 5 * 60 * 1000;
-                // Client-side safety net: if tokens > 0 for > 7 minutes, complete even if liveActive=true
-                const tokenTimeoutComplete = !backendDone && !inferredComplete && Number(tokens) > 0 && elapsedPollMs > 7 * 60 * 1000;
-                // Pure time-based fallback: 20+ min with no completion signal at all (0-token "no changes" case)
-                const pureTimeoutComplete = !backendDone && !inferredComplete && !tokenTimeoutComplete && elapsedPollMs > 20 * 60 * 1000;
+                // Client-side safety net: tokens > 0 for > 7 minutes AND every expected
+                // file already indexed. See handleStage3Index for the rationale.
+                const filesIndexedSoFar = Number(storedStatus.filesIndexed) || 0;
+                const allExpectedFilesIndexed = stage3ExpectedFileCount.value > 0
+                  ? filesIndexedSoFar >= stage3ExpectedFileCount.value
+                  : filesIndexedSoFar > 0;
+                const tokenTimeoutComplete = !backendDone && !inferredComplete && Number(tokens) > 0 && elapsedPollMs > 7 * 60 * 1000 && allExpectedFilesIndexed;
+                // Pure time-based fallback: 30+ min with no completion signal at all.
+                const pureTimeoutComplete = !backendDone && !inferredComplete && !tokenTimeoutComplete && elapsedPollMs > 30 * 60 * 1000;
                 const isCompleted = backendDone || inferredComplete || timedOutInactive || tokenTimeoutComplete || pureTimeoutComplete;
                 const completionReason = backendDone ? 'backendCompleted' : inferredComplete ? 'inferredComplete' : timedOutInactive ? 'timedOutInactive' : tokenTimeoutComplete ? 'tokenTimeout' : 'pureTimeout';
                 if (isCompleted) {
@@ -3416,6 +3421,11 @@ const stage3IndexingPoll = ref<ReturnType<typeof setInterval> | null>(null);
 const stage3IndexingPending = ref(false);
 const stage3IndexingStartedAt = ref<number | null>(null);
 const stage3IndexingCompletedAt = ref<number | null>(null);
+// Number of files we expect to be indexed in the current job. Used to gate the
+// 7-minute tokenTimeout safety net so it doesn't fire while DO is still working
+// through the remaining files (DO's `indexed_file_count` increments as each
+// file finishes; without this check the wizard reports e.g. "1 of 4" indexed).
+const stage3ExpectedFileCount = ref<number>(0);
 const stage3ElapsedTick = ref(0);
 let stage3ElapsedTimer: ReturnType<typeof setInterval> | null = null;
 const formatElapsed = (start: number | null, end?: number | null) => {
@@ -3445,6 +3455,11 @@ const handleStage3Index = async (overrideNames?: string[], fromRestore = false) 
   if (!userId) return;
   if (stage3IndexingActive.value) return;
   stage3IndexingPending.value = true;
+  // Record the expected file count for the tokenTimeout safety-net check below.
+  // Use the override list when provided (that's what we just toggled to KB).
+  stage3ExpectedFileCount.value = Array.isArray(overrideNames) && overrideNames.length > 0
+    ? overrideNames.length
+    : wizardStage3Files.value.length;
   if (fromRestore) {
     restoreIndexingActive.value = true;
   }
@@ -3641,12 +3656,20 @@ const handleStage3Index = async (overrideNames?: string[], fromRestore = false) 
           const inferredComplete = !liveActive && Number(tokens) > 0;
           // Also complete if DO API says not active for > 5 minutes (handles 0-token edge case)
           const timedOutInactive = !liveActive && !backendDone && elapsedPollMs > 5 * 60 * 1000;
-          // Client-side safety net: if tokens > 0 for > 7 minutes, complete even if
-          // liveActive is true (DO API job status can lag indefinitely behind actual completion)
-          const tokenTimeoutComplete = !backendDone && !inferredComplete && Number(tokens) > 0 && elapsedPollMs > 7 * 60 * 1000;
-          // Pure time-based fallback: if 20+ minutes elapsed with no completion signal at all,
-          // the DO API is stuck. Complete to unblock the wizard (handles 0-token "no changes" case).
-          const pureTimeoutComplete = !backendDone && !inferredComplete && !tokenTimeoutComplete && elapsedPollMs > 20 * 60 * 1000;
+          // Client-side safety net: if tokens > 0 for > 7 minutes AND DO has indexed every
+          // expected file, complete even if liveActive is true (DO's job status can lag
+          // indefinitely behind actual completion). Without the file-count gate, this
+          // fires while DO is still working through the remaining files and the wizard
+          // reports e.g. "1 of 4 indexed".
+          const filesIndexedSoFar = Number(kbStatus.filesIndexed) || 0;
+          const allExpectedFilesIndexed = stage3ExpectedFileCount.value > 0
+            ? filesIndexedSoFar >= stage3ExpectedFileCount.value
+            : filesIndexedSoFar > 0;
+          const tokenTimeoutComplete = !backendDone && !inferredComplete && Number(tokens) > 0 && elapsedPollMs > 7 * 60 * 1000 && allExpectedFilesIndexed;
+          // Pure time-based fallback: 30+ minutes with no completion signal at all (handles
+          // 0-token "no changes" or DO API stuck). Raised from 20 → 30 min because some
+          // KBs of 4–10 PDFs legitimately take 15–25 minutes to index.
+          const pureTimeoutComplete = !backendDone && !inferredComplete && !tokenTimeoutComplete && elapsedPollMs > 30 * 60 * 1000;
           const isCompleted = backendDone || inferredComplete || timedOutInactive || tokenTimeoutComplete || pureTimeoutComplete;
           const completionReason = backendDone ? 'backendCompleted' : inferredComplete ? 'inferredComplete' : timedOutInactive ? 'timedOutInactive' : tokenTimeoutComplete ? 'tokenTimeout' : pureTimeoutComplete ? 'pureTimeout' : '';
           if (isCompleted) {

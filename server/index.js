@@ -7208,25 +7208,30 @@ const runPoll = async () => {
                             currentJobId === activeJobId;
 
           // Token-stable completion: if tokens > 0 and haven't changed for 4+ consecutive
-          // polls (60+ seconds), the DO API job status is unreliable — treat as complete.
-          // This handles the common case where DO reports job as "active" long after
-          // indexing has actually finished.
+          // polls (60+ seconds) AND DO has reported indexed_file_count >= expected files,
+          // treat as complete. The file-count gate prevents firing while DO is still
+          // working through the remaining files (a gap between two file's tokenization
+          // can otherwise look like "stable tokens" and end the poll prematurely).
           if (Number(tokens) > 0 && tokens === lastTokenValue) {
             tokenStableCount++;
           } else {
             tokenStableCount = 0;
           }
           lastTokenValue = tokens;
-          const tokenStableCompleted = Number(tokens) > 0 && tokenStableCount >= 4;
+          const expectedFileCount = indexedFiles.length;
+          const allFilesIndexed = expectedFileCount > 0
+            ? Number(fileCount) >= expectedFileCount
+            : Number(fileCount) > 0;
+          const tokenStableCompleted = Number(tokens) > 0 && tokenStableCount >= 4 && allFilesIndexed;
           if (tokenStableCompleted && !statusCompleted) {
-            console.log(`[KB AUTO] ✅ Token-stable completion for job ${activeJobId}: tokens=${tokens} stable for ${tokenStableCount} polls (status still=${status})`);
+            console.log(`[KB AUTO] ✅ Token-stable completion for job ${activeJobId}: tokens=${tokens} stable for ${tokenStableCount} polls files=${fileCount}/${expectedFileCount} (status still=${status})`);
           }
 
-          // Time-based fallback: if polling for 15+ minutes with no completion signal,
-          // the DO API job status is stuck. Complete with whatever state we have.
-          // This handles the 0-token "no changes" case where the DO API never transitions.
+          // Time-based fallback: if polling for 30+ minutes with no completion signal,
+          // the DO API job status is stuck. Complete with whatever state we have. Raised
+          // from 15→30 min because legitimately large KBs (4-10 PDFs) can take 15-25 min.
           const elapsedPollingMs = Date.now() - startTime;
-          const timeBasedCompleted = !statusCompleted && !tokenStableCompleted && elapsedPollingMs > 15 * 60 * 1000;
+          const timeBasedCompleted = !statusCompleted && !tokenStableCompleted && elapsedPollingMs > 30 * 60 * 1000;
           if (timeBasedCompleted) {
             console.log(`[KB AUTO] ✅ Time-based completion for job ${activeJobId}: elapsed=${Math.floor(elapsedPollingMs / 60000)}m tokens=${tokens} status=${status}`);
           }
