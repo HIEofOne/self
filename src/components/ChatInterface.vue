@@ -3016,7 +3016,7 @@ const generateSetupLogPdf = async () => {
   // API versions
   const availableApis = providers.value.map(p => {
     const label = providerLabels[p] || p;
-    if (p === 'digitalocean') return `${label} (openai-gpt-oss-120b)`;
+    if (p === 'digitalocean') return `${label} (deepseek-v4-pro)`;
     if (p === 'anthropic') return `${label} (claude-opus-4-6)`;
     return label;
   }).join(', ');

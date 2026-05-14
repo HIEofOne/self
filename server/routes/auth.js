@@ -58,14 +58,12 @@ async function resolveModelAndProject(doClient) {
   let modelId = process.env.DO_MODEL_ID;
   let projectId = process.env.DO_PROJECT_ID;
 
-  if (!isValidUUID(modelId) || !isValidUUID(projectId)) {
+  // Project ID may still come from an existing agent
+  if (!isValidUUID(projectId)) {
     try {
       const agents = await doClient.agent.list();
       if (agents.length > 0) {
         const existingAgent = await doClient.agent.get(agents[0].uuid || agents[0].id);
-        if (!isValidUUID(modelId) && existingAgent.model?.uuid && isValidUUID(existingAgent.model.uuid)) {
-          modelId = existingAgent.model.uuid;
-        }
         if (!isValidUUID(projectId) && existingAgent.project_id && isValidUUID(existingAgent.project_id)) {
           projectId = existingAgent.project_id;
         }
@@ -75,18 +73,47 @@ async function resolveModelAndProject(doClient) {
     }
   }
 
+  // PREFERRED PATH: look up Deepseek V4 Pro in the DO catalog FIRST.
+  // Only fall back to an existing agent's model if the catalog lookup fails.
   if (!isValidUUID(modelId)) {
     try {
       const modelsResponse = await doClient.request('/v2/gen-ai/models');
       const models = modelsResponse.models || modelsResponse.data?.models || [];
       if (models.length > 0) {
         const preferredModel = models.find(m =>
-          m.inference_name === 'openai-gpt-oss-120b' || m.name === 'OpenAI GPT-oss-120b'
+          m.inference_name === 'deepseek-v4-pro' || m.name === 'Deepseek V4 Pro' || m.id === 'deepseek-v4-pro'
         );
-        const selectedModel = preferredModel || models[0];
-        if (selectedModel && selectedModel.uuid && isValidUUID(selectedModel.uuid)) {
-          modelId = selectedModel.uuid;
+        if (preferredModel && preferredModel.uuid && isValidUUID(preferredModel.uuid)) {
+          modelId = preferredModel.uuid;
         }
+      }
+    } catch (error) {
+      // Continue
+    }
+  }
+
+  // FALLBACK: reuse an existing agent's model UUID
+  if (!isValidUUID(modelId)) {
+    try {
+      const agents = await doClient.agent.list();
+      if (agents.length > 0) {
+        const existingAgent = await doClient.agent.get(agents[0].uuid || agents[0].id);
+        if (existingAgent.model?.uuid && isValidUUID(existingAgent.model.uuid)) {
+          modelId = existingAgent.model.uuid;
+        }
+      }
+    } catch (error) {
+      // Continue
+    }
+  }
+
+  // LAST RESORT: first model in the catalog
+  if (!isValidUUID(modelId)) {
+    try {
+      const modelsResponse = await doClient.request('/v2/gen-ai/models');
+      const models = modelsResponse.models || modelsResponse.data?.models || [];
+      if (models.length > 0 && models[0]?.uuid && isValidUUID(models[0].uuid)) {
+        modelId = models[0].uuid;
       }
     } catch (error) {
       // Continue

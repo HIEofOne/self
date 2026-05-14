@@ -3369,15 +3369,12 @@ async function provisionUserAsync(userId, token) {
     updateStatus('Resolving model and project IDs...');
     logProvisioning(userId, `🔍 Resolving model and project IDs...`, 'info');
 
-    // If not in env vars or invalid, try to get from existing agents
-    if (!isValidUUID(modelId) || !isValidUUID(projectId)) {
+    // Project ID may still come from an existing agent
+    if (!isValidUUID(projectId)) {
       try {
         const agents = await doClient.agent.list();
         if (agents.length > 0) {
           const existingAgent = await doClient.agent.get(agents[0].uuid);
-          if (!isValidUUID(modelId) && existingAgent.model?.uuid && isValidUUID(existingAgent.model.uuid)) {
-            modelId = existingAgent.model.uuid;
-          }
           if (!isValidUUID(projectId) && existingAgent.project_id && isValidUUID(existingAgent.project_id)) {
             projectId = existingAgent.project_id;
           }
@@ -3392,19 +3389,47 @@ async function provisionUserAsync(userId, token) {
       projectId = await getProjectIdForGenAI(doClient) || projectId;
     }
 
-    // If still no valid model, try to list models
+    // PREFERRED PATH: look up Deepseek V4 Pro in the DO catalog FIRST.
+    // Only fall back to an existing agent's model if the catalog lookup fails.
     if (!isValidUUID(modelId)) {
       try {
         const modelsResponse = await doClient.request('/v2/gen-ai/models');
         const models = modelsResponse.models || modelsResponse.data?.models || [];
         if (models.length > 0) {
-          const preferredModel = models.find(m => 
-            m.inference_name === 'openai-gpt-oss-120b' || m.name === 'OpenAI GPT-oss-120b'
+          const preferredModel = models.find(m =>
+            m.inference_name === 'deepseek-v4-pro' || m.name === 'Deepseek V4 Pro' || m.id === 'deepseek-v4-pro'
           );
-          const selectedModel = preferredModel || models[0];
-          if (selectedModel && selectedModel.uuid && isValidUUID(selectedModel.uuid)) {
-            modelId = selectedModel.uuid;
+          if (preferredModel && preferredModel.uuid && isValidUUID(preferredModel.uuid)) {
+            modelId = preferredModel.uuid;
           }
+        }
+      } catch (error) {
+        // Continue
+      }
+    }
+
+    // FALLBACK: reuse an existing agent's model UUID
+    if (!isValidUUID(modelId)) {
+      try {
+        const agents = await doClient.agent.list();
+        if (agents.length > 0) {
+          const existingAgent = await doClient.agent.get(agents[0].uuid);
+          if (existingAgent.model?.uuid && isValidUUID(existingAgent.model.uuid)) {
+            modelId = existingAgent.model.uuid;
+          }
+        }
+      } catch (error) {
+        // Continue
+      }
+    }
+
+    // LAST RESORT: first model in the catalog
+    if (!isValidUUID(modelId)) {
+      try {
+        const modelsResponse = await doClient.request('/v2/gen-ai/models');
+        const models = modelsResponse.models || modelsResponse.data?.models || [];
+        if (models.length > 0 && models[0]?.uuid && isValidUUID(models[0].uuid)) {
+          modelId = models[0].uuid;
         }
       } catch (error) {
         // Continue
@@ -4233,7 +4258,7 @@ async function provisionUserAsync(userId, token) {
               const response = await agentProvider.chat(
                 [{ role: 'user', content: prompt }],
                 { 
-                  model: agentModelName || 'openai-gpt-oss-120b',
+                  model: agentModelName || 'deepseek-v4-pro',
                   stream: false
                 }
               );
@@ -4323,7 +4348,7 @@ async function provisionUserAsync(userId, token) {
 
             const summaryResponse = await agentProvider.chat(
               [{ role: 'user', content: summaryPrompt }],
-              { model: agentModelName || 'openai-gpt-oss-120b' }
+              { model: agentModelName || 'deepseek-v4-pro' }
             );
 
             const summary = summaryResponse.content || summaryResponse.text || '';
@@ -9666,7 +9691,7 @@ app.post('/api/generate-patient-summary', async (req, res) => {
     try {
       // chat() method signature: chat(messages, options, onUpdate)
       const chatMessages = [{ role: 'user', content: summaryPrompt }];
-      const chatOptions = { model: userDoc.agentModelName || 'openai-gpt-oss-120b', stream: false };
+      const chatOptions = { model: userDoc.agentModelName || 'deepseek-v4-pro', stream: false };
 
       let summaryResponse;
       try {
