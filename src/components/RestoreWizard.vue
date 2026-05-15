@@ -147,16 +147,17 @@ const buildRestoreItems = () => {
   const state = props.localState;
   const files = state?.files || [];
 
-  // Individual file lines
+  // Individual file lines. The Apple Health badge follows the flag that
+  // was preserved in maia-state.json — detection was done content-based
+  // (PDF first-page footer) during the original Setup; we never re-guess
+  // from the filename here.
   for (const f of files) {
-    // Detect Apple Health files by filename pattern (same as used elsewhere in the app)
-    const isAppleHealth = /^apple/i.test(f.fileName) && /\.pdf$/i.test(f.fileName);
     items.push({
       key: `file:${f.fileName}`,
       label: f.fileName,
       needed: true,
       status: 'pending',
-      isAppleHealth
+      isAppleHealth: !!(f as any).isAppleHealth
     });
   }
 
@@ -290,7 +291,7 @@ const executeRestore = async () => {
     const kbName = await resolveKbName(uid);
 
     // 1. Upload files — KB-bound files go to KB folder, archived-only files go to root (auto-archived later)
-    const uploadFile = async (file: File, fileName: string, toKB: boolean = true) => {
+    const uploadFile = async (file: File, fileName: string, toKB: boolean = true, isAppleHealth: boolean = false) => {
       const formData = new FormData();
       formData.append('file', file);
       formData.append('userId', uid);
@@ -305,7 +306,11 @@ const executeRestore = async () => {
       });
       if (!resp.ok) throw new Error(`Upload failed: ${resp.status}`);
       const data = await resp.json();
-      // Register file in user doc so KB update can find it
+      // Register file in user doc so KB update can find it. The
+      // isAppleHealth flag rides through the body so the server sets it
+      // correctly on userDoc.files[] — detection is content-based, done
+      // by the caller (either from preserved state, or from a post-upload
+      // first-page parse for files added since last sign-off).
       try {
         const regResp = await fetch('/api/files/register', {
           method: 'POST',
@@ -315,7 +320,8 @@ const executeRestore = async () => {
             userId: uid,
             fileName,
             bucketKey: data.fileInfo?.bucketKey,
-            fileSize: data.fileInfo?.size
+            fileSize: data.fileInfo?.size,
+            ...(isAppleHealth ? { isAppleHealth: true } : {})
           })
         });
         if (!regResp.ok) {
@@ -332,22 +338,27 @@ const executeRestore = async () => {
     const uploadedFileNames: string[] = [];
     let appleHealthCount = 0;
 
+    // Track bucketKeys of folder-added files so we can content-detect them
+    // for AH after upload (we don't have content for them in state).
+    const addedBucketKeys: Array<{ fileName: string; bucketKey: string }> = [];
+
     if (filesToRestore.length > 0 && props.localFolderHandle) {
       for (const fileInfo of filesToRestore) {
         const key = `file:${fileInfo.fileName}`;
-        // Only upload to KB folder if the file was previously indexed or pending indexing.
-        // Files that were only in archived/ (not_in_kb) go to root → auto-archived on next Saved Files open.
         const shouldGoToKB = fileInfo.cloudStatus === 'indexed' || fileInfo.cloudStatus === 'pending';
+        // AH flag is preserved from maia-state.json (content-detected at
+        // last Setup). No filename guessing.
+        const stateIsAH = !!(fileInfo as any).isAppleHealth;
         updateItem(key, { status: 'running' });
         try {
           const fileHandle = await props.localFolderHandle.getFileHandle(fileInfo.fileName);
           const file = await fileHandle.getFile();
-          await uploadFile(file, fileInfo.fileName, shouldGoToKB);
+          await uploadFile(file, fileInfo.fileName, shouldGoToKB, stateIsAH);
           filesUploaded++;
           if (shouldGoToKB) filesUploadedToKB++;
           totalUploadedBytes += file.size;
           uploadedFileNames.push(fileInfo.fileName);
-          if (/^apple/i.test(fileInfo.fileName) && /\.pdf$/i.test(fileInfo.fileName)) appleHealthCount++;
+          if (stateIsAH) appleHealthCount++;
           updateItem(key, { status: 'done', progress: shouldGoToKB ? 'Uploaded to KB' : 'Uploaded to archive' });
         } catch (e: any) {
           console.error(`[RestoreWizard] File upload failed: ${fileInfo.fileName}:`, e?.message);
@@ -363,14 +374,15 @@ const executeRestore = async () => {
           continue;
         }
         const shouldGoToKB = fileInfo.cloudStatus === 'indexed' || fileInfo.cloudStatus === 'pending';
+        const stateIsAH = !!(fileInfo as any).isAppleHealth;
         updateItem(key, { status: 'running' });
         try {
-          await uploadFile(safariFile, fileInfo.fileName, shouldGoToKB);
+          await uploadFile(safariFile, fileInfo.fileName, shouldGoToKB, stateIsAH);
           filesUploaded++;
           if (shouldGoToKB) filesUploadedToKB++;
           totalUploadedBytes += safariFile.size;
           uploadedFileNames.push(fileInfo.fileName);
-          if (/^apple/i.test(fileInfo.fileName) && /\.pdf$/i.test(fileInfo.fileName)) appleHealthCount++;
+          if (stateIsAH) appleHealthCount++;
           updateItem(key, { status: 'done', progress: shouldGoToKB ? 'Uploaded to KB' : 'Uploaded to archive' });
         } catch (e: any) {
           updateItem(key, { status: 'error', errorMsg: e?.message || 'Upload failed' });
@@ -382,20 +394,23 @@ const executeRestore = async () => {
       }
     }
 
-    // Upload folder-added files (present in folder but missing from
-    // maia-state.json — user added them while signed out). Send them to the
-    // KB folder so they participate in the post-restore indexing job.
+    // Upload folder-added files. We don't have a content-based AH flag for
+    // these yet; we set isAppleHealth=false on register and the category-
+    // rebuild step below content-detects them and re-calls /api/files/
+    // register with isAppleHealth: true for the one that matches.
     if (addedFiles.length > 0 && props.localFolderHandle) {
       for (const fileName of addedFiles) {
         try {
           const fileHandle = await props.localFolderHandle.getFileHandle(fileName);
           const file = await fileHandle.getFile();
-          await uploadFile(file, fileName, true);
+          const data = await uploadFile(file, fileName, true, false);
           filesUploaded++;
           filesUploadedToKB++;
           totalUploadedBytes += file.size;
           uploadedFileNames.push(fileName);
-          if (/^apple/i.test(fileName) && /\.pdf$/i.test(fileName)) appleHealthCount++;
+          if (data?.fileInfo?.bucketKey) {
+            addedBucketKeys.push({ fileName, bucketKey: data.fileInfo.bucketKey });
+          }
         } catch (e: any) {
           console.error(`[RestoreWizard] Added-file upload failed: ${fileName}:`, e?.message);
         }
@@ -405,12 +420,14 @@ const executeRestore = async () => {
         const safariFile = props.safariFolderFiles.find(f => f.name === fileName);
         if (!safariFile) continue;
         try {
-          await uploadFile(safariFile, fileName, true);
+          const data = await uploadFile(safariFile, fileName, true, false);
           filesUploaded++;
           filesUploadedToKB++;
           totalUploadedBytes += safariFile.size;
           uploadedFileNames.push(fileName);
-          if (/^apple/i.test(fileName) && /\.pdf$/i.test(fileName)) appleHealthCount++;
+          if (data?.fileInfo?.bucketKey) {
+            addedBucketKeys.push({ fileName, bucketKey: data.fileInfo.bucketKey });
+          }
         } catch (e: any) {
           console.error(`[RestoreWizard] Added-file upload failed: ${fileName}:`, e?.message);
         }
@@ -700,26 +717,36 @@ const executeRestore = async () => {
       const kbPrefix = `${uid}/${kbName}`;
       let appleBucketKey: string | null = null;
       let appleFileName: string | null = null;
-      // Limit to files we know are PDFs and were uploaded; iterate sequentially
-      // since this is a one-off post-restore step and we usually find it on
-      // the first or second file.
-      const candidates = filesToRestore
-        .filter(f => /\.pdf$/i.test(f.fileName))
-        .map(f => ({ fileName: f.fileName, bucketKey: `${kbPrefix}/${f.fileName.replace(/[^a-zA-Z0-9.-]/g, '_')}` }));
-      for (const c of candidates) {
-        try {
-          const r = await fetch(`/api/files/parse-pdf-first-page/${encodeURIComponent(c.bucketKey)}`, { credentials: 'include' });
-          if (!r.ok) continue;
-          const data = await r.json();
-          const text = String(data?.firstPageText || '').toLowerCase().replace(/\s+/g, ' ').trim();
-          if (text.includes(appleFooterNorm)) {
-            appleBucketKey = c.bucketKey;
-            appleFileName = c.fileName;
-            break;
-          }
-        } catch { /* try next */ }
+
+      // Fast path: state.files preserves the AH flag (content-detected at
+      // the original Setup). If we have it, no PDF parsing needed.
+      const stateAH = filesToRestore.find(f => (f as any).isAppleHealth);
+      if (stateAH) {
+        appleBucketKey = `${kbPrefix}/${stateAH.fileName.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
+        appleFileName = stateAH.fileName;
+      } else {
+        // Slow path: content-detect across files we don't have a flag for.
+        // These are the folder-added files (the user added them in Finder
+        // while signed out, so they aren't in state.files yet).
+        const candidates = addedBucketKeys.slice();
+        for (const c of candidates) {
+          try {
+            const r = await fetch(`/api/files/parse-pdf-first-page/${encodeURIComponent(c.bucketKey)}`, { credentials: 'include' });
+            if (!r.ok) continue;
+            const data = await r.json();
+            const text = String(data?.firstPageText || '').toLowerCase().replace(/\s+/g, ' ').trim();
+            if (text.includes(appleFooterNorm)) {
+              appleBucketKey = c.bucketKey;
+              appleFileName = c.fileName;
+              break;
+            }
+          } catch { /* try next */ }
+        }
       }
       if (appleBucketKey && appleFileName) {
+        // process-initial-file self-heals userDoc.files[].isAppleHealth
+        // when it sees the AH footer in the markdown, so we don't need a
+        // separate /api/files/register call here.
         await fetch('/api/files/lists/process-initial-file', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },

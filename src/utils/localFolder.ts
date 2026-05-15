@@ -63,6 +63,11 @@ export interface MaiaState {
     size?: number;
     cloudStatus?: 'indexed' | 'pending' | 'not_in_kb' | 'uploaded';
     bucketKey?: string;
+    // The Apple Health designation is set by reading the PDF first page
+    // (looking for the Apple-export footer string) during Setup — not from
+    // the filename, which can be anything Finder chooses. Persisting it
+    // here means Restore can re-flag the file without re-parsing the PDF.
+    isAppleHealth?: boolean;
   }>;
   currentMedications?: string | null;
   patientSummary?: string | null;

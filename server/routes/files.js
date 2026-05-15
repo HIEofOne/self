@@ -834,8 +834,15 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       const userId = sessionUserId || bodyUserId;
       console.log(`[files/register] Called: userId=${userId}, fileName=${req.body?.fileName}, bucketKey=${req.body?.bucketKey}`);
       if (!userId) return res.status(401).json({ error: 'Authentication required' });
-      const { fileName, bucketKey, fileSize } = req.body;
+      const { fileName, bucketKey, fileSize, isAppleHealth: bodyIsAppleHealth } = req.body;
       if (!fileName || !bucketKey) return res.status(400).json({ error: 'fileName and bucketKey required' });
+      // The Apple Health designation is content-based (PDF first-page
+      // footer), not filename-based — the real export is named
+      // "Health Records - <Patient> - <date>.pdf". Callers should detect
+      // and pass `isAppleHealth: true` in the body; we no longer try to
+      // guess from fileName here (the legacy /^apple/i check missed the
+      // real export and produced silent feature loss on Restore).
+      const isAppleHealth = bodyIsAppleHealth === true;
 
       let saved = false;
       let attempts = 0;
@@ -845,8 +852,8 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         if (!userDoc) return res.status(404).json({ error: 'User not found' });
         if (!Array.isArray(userDoc.files)) userDoc.files = [];
         // Don't duplicate
-        if (!userDoc.files.some(f => f.bucketKey === bucketKey)) {
-          const isAppleHealth = /^apple/i.test(fileName) && /\.pdf$/i.test(fileName);
+        const existingIdx = userDoc.files.findIndex(f => f.bucketKey === bucketKey);
+        if (existingIdx < 0) {
           userDoc.files.push({
             fileName,
             bucketKey,
@@ -854,6 +861,12 @@ export default function setupFileRoutes(app, cloudant, doClient) {
             uploadedAt: new Date().toISOString(),
             ...(isAppleHealth ? { isAppleHealth: true } : {})
           });
+          userDoc.updatedAt = new Date().toISOString();
+        } else if (isAppleHealth && !userDoc.files[existingIdx].isAppleHealth) {
+          // Re-registration of an existing file may carry the AH flag
+          // for the first time (e.g. Restore where the original Setup
+          // detected AH after registration). Self-heal.
+          userDoc.files[existingIdx].isAppleHealth = true;
           userDoc.updatedAt = new Date().toISOString();
         }
         try {

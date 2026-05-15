@@ -1776,7 +1776,16 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
             let cs: 'indexed' | 'pending' | 'not_in_kb' | 'uploaded' = 'not_in_kb';
             if (inKB && indexedSet.has(bk)) cs = 'indexed';
             else if (inKB) cs = 'pending';
-            return { fileName: f.fileName, size: f.fileSize, cloudStatus: cs, bucketKey: bk };
+            return {
+              fileName: f.fileName,
+              size: f.fileSize,
+              cloudStatus: cs,
+              bucketKey: bk,
+              // Preserve Apple Health designation across the round-trip.
+              // Detection is content-based (PDF first-page footer) and
+              // happens during Setup — this is just persisting the result.
+              ...(f.isAppleHealth ? { isAppleHealth: true } : {})
+            };
           }) : existingState?.files || [],
           currentMedications: (status?.currentMedications && status.currentMedications.trim()) ? status.currentMedications : (existingState?.currentMedications || null),
           patientSummary: (summary?.summary && summary.summary.trim()) ? summary.summary : (existingState?.patientSummary || null),
