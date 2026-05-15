@@ -2465,18 +2465,21 @@ const handleRestoreWizardComplete = async () => {
   // Restore is done; clear the resume sentinel so a future reload doesn't
   // try to relaunch Restore.
   clearRestoreActive();
-  suppressWizard.value = false; // Allow normal ChatInterface operation now
-  // Re-sync ChatInterface from the server so wizardPatientSummary /
-  // wizardCurrentMedications reflect what Restore just wrote to userDoc.
-  // Without this, shouldHideSetupWizard stays false (in-memory refs are
-  // boot-state) and the Setup wizard auto-shows on top of the restored app.
-  if (chatInterfaceRef.value && typeof (chatInterfaceRef.value as any).refreshWizardState === 'function') {
+  // Synchronously seal the wizard state from server data BEFORE flipping
+  // suppressWizard. This sets wizardPatientSummary/wizardCurrentMedications
+  // from userDoc and opens a 60 s grace window during which the post-
+  // suppressWizard refreshWizardState skips its re-poll branch and skips
+  // its "resume guided flow → generate-summary" branch. Without this, the
+  // post-restore polling overwrites the restored summary with a fresh AI
+  // draft (~1m after Restore complete).
+  if (chatInterfaceRef.value && typeof (chatInterfaceRef.value as any).markRestoreComplete === 'function') {
     try {
-      await (chatInterfaceRef.value as any).refreshWizardState();
+      await (chatInterfaceRef.value as any).markRestoreComplete();
     } catch (e) {
-      console.warn('[RESTORE] Post-restore refreshWizardState failed:', e);
+      console.warn('[RESTORE] markRestoreComplete failed:', e);
     }
   }
+  suppressWizard.value = false; // Allow normal ChatInterface operation now
   // Regenerate maia-log.pdf with all restore entries
   try {
     if (chatInterfaceRef.value) {

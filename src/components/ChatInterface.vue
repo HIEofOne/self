@@ -2273,9 +2273,9 @@ const refreshWizardState = async () => {
       }
     }
 
-      if (indexingActiveFromFiles === true) {
+      if (indexingActiveFromFiles === true && !isPostRestoreLocked()) {
         wizardStage3Complete.value = false;
-        if (!indexingStatus.value || indexingStatus.value.phase !== 'indexing') {
+        if (!indexingStatus.value || (indexingStatus.value.phase !== 'indexing' && indexingStatus.value.phase !== 'complete')) {
           const stage3Key = wizardStage3IndexingStartedKey(props.user?.userId);
           try {
             const stored = stage3Key ? sessionStorage.getItem(stage3Key) : null;
@@ -5813,7 +5813,10 @@ const startSetupWizardPolling = () => {
       // On reload wizardFlowPhase resets to 'done'. If the server shows indexing
       // complete + agent ready but medications or summary are still pending, the
       // user was mid-guided-flow. Resume it so the wizard doesn't get stuck.
+      // Skip entirely during the post-Restore grace window — otherwise this
+      // generates a fresh draft summary and overwrites what Restore restored.
       if (
+        !isPostRestoreLocked() &&
         wizardFlowPhase.value === 'done' &&
         (safariFolderName.value || localFolderHandle.value) &&
         indexingStatus.value?.phase === 'complete' &&
@@ -6924,6 +6927,56 @@ const markIndexingAlreadyCompleted = () => {
   stage3IndexingCompletedAt.value = Date.now();
 };
 
+/** Post-restore grace window. While set, refreshWizardState's "indexing
+ *  active" re-poll branch and the post-poll resume-guided-flow logic
+ *  (which would generate a fresh draft summary and overwrite what
+ *  Restore just restored) are both suppressed. App.vue's
+ *  handleRestoreWizardComplete sets this; it auto-expires after 60 s. */
+const postRestoreLockUntil = ref<number>(0);
+const isPostRestoreLocked = () => Date.now() < postRestoreLockUntil.value;
+
+/** Called from App.vue after Restore completes. Synchronously stamps in
+ *  the in-memory wizard flags from server state (so shouldHideSetupWizard
+ *  resolves true and the Setup wizard doesn't auto-show), seals the
+ *  indexingStatus as complete, and opens a 60 s grace window during which
+ *  refreshWizardState side effects are bypassed. */
+const markRestoreComplete = async () => {
+  postRestoreLockUntil.value = Date.now() + 60_000;
+  wizardFlowPhase.value = 'done';
+  stage3IndexingCompletedAt.value = Date.now();
+  if (!props.user?.userId) return;
+  try {
+    const [statusRes, summaryRes] = await Promise.all([
+      fetch(`/api/user-status?userId=${encodeURIComponent(props.user.userId)}`, { credentials: 'include' }),
+      fetch(`/api/patient-summary?userId=${encodeURIComponent(props.user.userId)}`, { credentials: 'include' })
+    ]);
+    if (statusRes.ok) {
+      const status = await statusRes.json();
+      if (status.currentMedications && String(status.currentMedications).trim()) {
+        wizardCurrentMedications.value = true;
+      }
+    }
+    if (summaryRes.ok) {
+      const sum = await summaryRes.json();
+      if (sum?.summary && String(sum.summary).trim()) {
+        wizardPatientSummary.value = true;
+        preGeneratedSummary.value = sum.summary;
+      }
+    }
+    // Seal indexingStatus so the refreshWizardState indexing-active branch
+    // (the line 2276 area below) skips the re-poll branch.
+    indexingStatus.value = {
+      active: false,
+      phase: 'complete',
+      tokens: indexingStatus.value?.tokens || '0',
+      filesIndexed: indexingStatus.value?.filesIndexed || 0,
+      progress: 1
+    };
+  } catch (e) {
+    console.warn('[markRestoreComplete] state probe failed:', e);
+  }
+};
+
 const closeMyStuff = () => {
   showMyStuffDialog.value = false;
 };
@@ -6931,6 +6984,7 @@ const closeMyStuff = () => {
 defineExpose({
   generateSetupLogPdf,
   markIndexingAlreadyCompleted,
+  markRestoreComplete,
   refreshWizardState,
   testMode,
   addTestLog,

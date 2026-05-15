@@ -681,6 +681,31 @@ const executeRestore = async () => {
       }
     }
 
+    // 5. Re-extract Apple Health categories. The lists-restore step above
+    // writes a single restored.md back to S3 but doesn't rebuild the
+    // per-category files (Medications.md, Conditions.md, ...) that
+    // Lists.vue renders from. Without this step, the My Lists tab is
+    // empty after Restore even though "My Lists restored" was logged.
+    // process-initial-file extracts categories from the Apple Health PDF
+    // and writes one .md per category, the same path Setup uses.
+    try {
+      const apple = (expectedFiles.length > 0 ? expectedFiles : []).find(f =>
+        /^apple/i.test(f.fileName) && /\.pdf$/i.test(f.fileName)
+      );
+      if (apple?.fileName) {
+        const kbPrefix = `${uid}/${(await resolveKbName(uid))}`;
+        const bucketKey = `${kbPrefix}/${apple.fileName.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
+        await fetch('/api/files/lists/process-initial-file', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ bucketKey, fileName: apple.fileName })
+        });
+      }
+    } catch (e: any) {
+      console.warn('[RestoreWizard] Category rebuild failed (non-fatal):', e?.message);
+    }
+
     // Build summary
     const doneItems = restoreItems.value.filter(i => i.status === 'done');
     const errorItems = restoreItems.value.filter(i => i.status === 'error');
