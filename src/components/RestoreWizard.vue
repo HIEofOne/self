@@ -205,7 +205,7 @@ const executeRestore = async () => {
   phase.value = 'execute';
   const uid = props.userId;
   const state = props.localState;
-  const files = state?.files || [];
+  const expectedFiles = state?.files || [];
   let filesUploaded = 0;
   let filesUploadedToKB = 0;
 
@@ -221,6 +221,56 @@ const executeRestore = async () => {
       version: ''
     }
   });
+
+  // Folder diff: users can add/remove PDFs in Finder while signed out.
+  // maia-state.json is the snapshot of "what the folder contained at last
+  // sign-off"; the actual folder is the source of truth right now. Detect
+  // both directions and surface them in maia-log.pdf so the user / support
+  // can see why post-restore Saved Files differs from pre-sign-out.
+  const MAIA_GENERATED = new Set(['maia-log.pdf', 'maia-state.json']);
+  const isMaiaGenerated = (name: string) => {
+    const lower = name.toLowerCase();
+    return MAIA_GENERATED.has(lower) || lower.endsWith('.webloc');
+  };
+  let presentFileNames: string[] = [];
+  if (props.localFolderHandle) {
+    try {
+      const { listFolderFiles } = await import('../utils/localFolder');
+      const folderFiles = await listFolderFiles(props.localFolderHandle, { extensions: ['pdf'] });
+      presentFileNames = folderFiles.map(f => f.name).filter(n => !isMaiaGenerated(n));
+    } catch (e: any) {
+      console.warn('[RestoreWizard] Folder scan failed:', e?.message);
+    }
+  } else if (props.safariFolderFiles) {
+    presentFileNames = props.safariFolderFiles.map(f => f.name).filter(n => !isMaiaGenerated(n));
+  }
+
+  const expectedNameSet = new Set(expectedFiles.map(f => f.fileName));
+  const presentNameSet = new Set(presentFileNames);
+  const addedFiles = presentFileNames.filter(n => !expectedNameSet.has(n));
+  const removedFiles = expectedFiles.map(f => f.fileName).filter(n => !presentNameSet.has(n));
+
+  if (presentFileNames.length > 0 && (addedFiles.length > 0 || removedFiles.length > 0)) {
+    if (addedFiles.length > 0) {
+      logProvisioningEvent({
+        event: 'restore-folder-added',
+        count: addedFiles.length,
+        files: addedFiles
+      });
+    }
+    if (removedFiles.length > 0) {
+      logProvisioningEvent({
+        event: 'restore-folder-removed',
+        count: removedFiles.length,
+        files: removedFiles
+      });
+    }
+  }
+
+  // Build the actual upload set. Skip expected files that have been removed
+  // from the folder (would error otherwise); treat folder-added files as new
+  // KB-bound uploads alongside the previously-indexed set.
+  const filesToRestore = expectedFiles.filter(f => presentNameSet.has(f.fileName));
 
   try {
     // Resolve KB name for file uploads
@@ -269,8 +319,8 @@ const executeRestore = async () => {
     const uploadedFileNames: string[] = [];
     let appleHealthCount = 0;
 
-    if (files.length > 0 && props.localFolderHandle) {
-      for (const fileInfo of files) {
+    if (filesToRestore.length > 0 && props.localFolderHandle) {
+      for (const fileInfo of filesToRestore) {
         const key = `file:${fileInfo.fileName}`;
         // Only upload to KB folder if the file was previously indexed or pending indexing.
         // Files that were only in archived/ (not_in_kb) go to root → auto-archived on next Saved Files open.
@@ -291,8 +341,8 @@ const executeRestore = async () => {
           updateItem(key, { status: 'error', errorMsg: e?.message || 'Upload failed' });
         }
       }
-    } else if (files.length > 0 && props.safariFolderFiles) {
-      for (const fileInfo of files) {
+    } else if (filesToRestore.length > 0 && props.safariFolderFiles) {
+      for (const fileInfo of filesToRestore) {
         const key = `file:${fileInfo.fileName}`;
         const safariFile = props.safariFolderFiles.find(f => f.name === fileInfo.fileName);
         if (!safariFile) {
@@ -313,9 +363,44 @@ const executeRestore = async () => {
           updateItem(key, { status: 'error', errorMsg: e?.message || 'Upload failed' });
         }
       }
-    } else if (files.length > 0) {
-      for (const fileInfo of files) {
+    } else if (expectedFiles.length > 0) {
+      for (const fileInfo of expectedFiles) {
         updateItem(`file:${fileInfo.fileName}`, { status: 'error', errorMsg: 'No local folder connected' });
+      }
+    }
+
+    // Upload folder-added files (present in folder but missing from
+    // maia-state.json — user added them while signed out). Send them to the
+    // KB folder so they participate in the post-restore indexing job.
+    if (addedFiles.length > 0 && props.localFolderHandle) {
+      for (const fileName of addedFiles) {
+        try {
+          const fileHandle = await props.localFolderHandle.getFileHandle(fileName);
+          const file = await fileHandle.getFile();
+          await uploadFile(file, fileName, true);
+          filesUploaded++;
+          filesUploadedToKB++;
+          totalUploadedBytes += file.size;
+          uploadedFileNames.push(fileName);
+          if (/^apple/i.test(fileName) && /\.pdf$/i.test(fileName)) appleHealthCount++;
+        } catch (e: any) {
+          console.error(`[RestoreWizard] Added-file upload failed: ${fileName}:`, e?.message);
+        }
+      }
+    } else if (addedFiles.length > 0 && props.safariFolderFiles) {
+      for (const fileName of addedFiles) {
+        const safariFile = props.safariFolderFiles.find(f => f.name === fileName);
+        if (!safariFile) continue;
+        try {
+          await uploadFile(safariFile, fileName, true);
+          filesUploaded++;
+          filesUploadedToKB++;
+          totalUploadedBytes += safariFile.size;
+          uploadedFileNames.push(fileName);
+          if (/^apple/i.test(fileName) && /\.pdf$/i.test(fileName)) appleHealthCount++;
+        } catch (e: any) {
+          console.error(`[RestoreWizard] Added-file upload failed: ${fileName}:`, e?.message);
+        }
       }
     }
 

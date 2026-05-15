@@ -3180,6 +3180,14 @@ const generateSetupLogPdf = async () => {
           case 'summary-saved': return `[${t}] Patient Summary saved (${evt.lines || 0} lines, ${Number(evt.chars || 0).toLocaleString()} chars)`;
           case 'summary-verified': return `[${t}] Patient Summary verified (${evt.lines || 0} lines, ${Number(evt.chars || 0).toLocaleString()} chars)`;
           case 'summary-restored': return `[${t}] Patient Summary restored (${evt.lines || 0} lines, ${Number(evt.chars || 0).toLocaleString()} chars)`;
+          case 'restore-folder-added': {
+            const names = Array.isArray(evt.files) ? evt.files.join(', ') : '';
+            return `[${t}] Folder change: ${evt.count || 0} file(s) added since last sign-off${names ? ': ' + names : ''}`;
+          }
+          case 'restore-folder-removed': {
+            const names = Array.isArray(evt.files) ? evt.files.join(', ') : '';
+            return `[${t}] Folder change: ${evt.count || 0} file(s) removed since last sign-off${names ? ': ' + names : ''}`;
+          }
           case 'chats-restored': return `[${t}] Saved chats restored (${evt.count || 0})`;
           case 'instructions-restored': return `[${t}] Agent Instructions restored`;
           case 'lists-restored': return `[${t}] My Lists restored`;
