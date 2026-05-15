@@ -725,10 +725,19 @@ const executeRestore = async () => {
         appleBucketKey = `${kbPrefix}/${stateAH.fileName.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
         appleFileName = stateAH.fileName;
       } else {
-        // Slow path: content-detect across files we don't have a flag for.
-        // These are the folder-added files (the user added them in Finder
-        // while signed out, so they aren't in state.files yet).
-        const candidates = addedBucketKeys.slice();
+        // Slow path: content-detect across every PDF we just uploaded.
+        // This covers TWO cases:
+        //   1. maia-state.json was written by an older version that didn't
+        //      preserve isAppleHealth (the field is now in MaiaState but
+        //      pre-fix snapshots have it absent on every file).
+        //   2. Files added in Finder since last sign-off — they have no
+        //      state entry at all.
+        // We iterate ALL uploaded PDFs (state-known + added) rather than
+        // just added ones, so older snapshots heal automatically.
+        const stateKnownCandidates = filesToRestore
+          .filter(f => /\.pdf$/i.test(f.fileName))
+          .map(f => ({ fileName: f.fileName, bucketKey: `${kbPrefix}/${f.fileName.replace(/[^a-zA-Z0-9.-]/g, '_')}` }));
+        const candidates = [...stateKnownCandidates, ...addedBucketKeys];
         for (const c of candidates) {
           try {
             const r = await fetch(`/api/files/parse-pdf-first-page/${encodeURIComponent(c.bucketKey)}`, { credentials: 'include' });
