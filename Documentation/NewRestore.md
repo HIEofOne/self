@@ -250,3 +250,343 @@ the function and gate it on the env var.
 
 Neither of these affects the Restore-resume / Apple-Health-preservation
 work described above. Filing here so they aren't lost.
+
+---
+
+# Backup & Restore: design fragility and a path to bulletproof
+
+The fixes earlier in this document patched a series of bugs in the
+Setup → sign-out → Restore path. Each one removed one specific way the
+Apple Health designation, the Current Medications list, the Patient
+Summary, or the My Lists categories could be lost. After ~10 commits
+the symptom **still recurs**: the user sees a successful "Restore
+complete" log but the Apple Health badge is missing from Saved Files,
+or categories don't appear, or a fresh draft summary overwrites the
+restored one.
+
+This is not a bug in any single function. It is a **design** problem.
+This section names the design problem, lists the cases that break, and
+sketches what would make it bulletproof. Future work on Setup / Restore
+should reference this section instead of adding another patch.
+
+## Why it stays fragile
+
+### Too many setters, no chokepoint
+
+The Apple Health designation (`isAppleHealth: true` on a
+`userDoc.files[]` entry) can be written from **nine** different code
+paths today:
+
+| # | Caller | Endpoint | Source of the flag |
+|---|---|---|---|
+| 1 | ChatInterface `runAutoWizard` | `POST /api/user-file-metadata` | `detectAppleHealthFromBucket` (PDF first page) |
+| 2 | ChatInterface `runSafariFolderWizard` | `POST /api/user-file-metadata` | `detectAppleHealthFromBucket` |
+| 3 | ChatInterface `handleFileSelect` (manual upload) | `POST /api/user-file-metadata` | `detectAppleHealthFromBucket` |
+| 4 | ChatInterface `uploadPDFFile` | `POST /api/user-file-metadata` | `detectAppleHealthFromBucket` |
+| 5 | ChatInterface `uploadTextFile` | `POST /api/user-file-metadata` | `false` (text never AH) |
+| 6 | MyStuffDialog rehydration (line 1495) | `POST /api/user-file-metadata` | `detectAppleHealthFromBucket` |
+| 7 | MyStuffDialog upload (line 4750) | `POST /api/user-file-metadata` | `detectAppleHealthFromBucket` |
+| 8 | RestoreWizard `uploadFile` | `POST /api/files/register` | state-derived OR `false`, with post-upload first-page parse as fallback |
+| 9 | server `process-initial-file` self-heal | direct CouchDB write | content match on full markdown |
+
+Plus **`/api/archive-user-files`** can push a *new* entry to
+`userDoc.files[]` if it finds a root-level file in S3 with no matching
+entry in the document — and that new entry has no `isAppleHealth`
+field at all (server/index.js:5209). That's a **tenth** path that
+silently de-flags a file under the right race.
+
+There is no schema for what a "file write" means and no place where
+all writes converge. Every new feature that touches files re-implements
+the detection.
+
+### Detection runs at write time, never re-validates
+
+`isAppleHealth` is set when the file is *first* registered. From then
+on, nothing re-checks the underlying PDF. Consequences:
+
+- If the user **replaces** the Apple Health export with a newer one
+  (same filename — Apple's export always names it
+  `Health Records - <Patient> - <date> at <time>.pdf` with a fresh
+  date), the S3 object changes but the `userDoc.files[]` entry's
+  `isAppleHealth` stays whatever it was, and crucially
+  `appleHealthCategoriesBuiltAt` is also "true forever". The Lists
+  categories are computed from the *old* PDF and never refresh.
+
+- If the user **removes** the Apple Health file and adds a different
+  one, `appleHealthCategoriesSourceKey` still points at the deleted
+  object. Categories stay stale until the user manually clicks
+  refresh.
+
+- If the original Setup's `detectAppleHealthFromBucket` failed for
+  *any* reason (network blip, `parse-pdf-first-page` 500, race with
+  S3 eventual consistency), the flag is `false` and stays `false`.
+  No safety net.
+
+### Two parallel record types: the file list and the "initial file"
+
+`userDoc.initialFile` is a single object — the AH file from
+registration time. `userDoc.files[]` is the list. They drift:
+
+- `process-initial-file` keys off `initialFile.bucketKey` to find
+  the file in `userDoc.files`, then checks `isAppleHealth` on that
+  entry. If `initialFile` is stale (points at a previous bucketKey
+  after a toggle / archive cycle), the lookup misses and category
+  extraction silently no-ops.
+
+- Restore today does **not** restore `userDoc.initialFile`. Even
+  with the categories rebuild fix from earlier in this document,
+  post-Restore `userDoc.initialFile` is `null`, so any later code
+  that goes through it (Lists tab, certain wizard restarts) starts
+  empty-handed.
+
+### Two parallel detection mechanisms: filename and content
+
+Before the recent commits, six call sites used `/^apple/i.test(name)`.
+The real Apple Health export does not start with "apple" — Apple
+names it `Health Records - <Patient> - …pdf`. Those six checks all
+silently mis-classified the real export and stayed wrong forever.
+The fixes removed them but the architecture invites the bug back: the
+next dev who adds an Apple-Health-aware feature will reach for the
+filename, see it works in their test with `applehealth.pdf`, and
+re-introduce the heuristic.
+
+### Frontend reads from four caches that can disagree
+
+| Source | Where | Used by |
+|---|---|---|
+| `userDoc.files[i].isAppleHealth` | server | source of truth |
+| `appleHealthFileInfo` ref | `Lists.vue` | meds-extract path, Lists UI |
+| `categoriesList` ref | `Lists.vue` | the actual categories panel |
+| `file.isAppleHealth` on files row | `MyStuffDialog.vue` Saved Files tab | the badge in the screenshot |
+| `item.isAppleHealth` | `RestoreWizard.vue` checklist | Restore UI |
+| `restoreWizardLocalState.files[i].isAppleHealth` | `App.vue` | passes to Restore |
+
+Each cache is populated by its own `load*` function on its own
+schedule. After Restore, the *server* may have the right answer in
+`userDoc.files` (because `process-initial-file` self-healed), but
+`MyStuffDialog.userFiles` was loaded a few seconds earlier from the
+pre-self-heal response, so the Saved Files badge stays missing
+until the user closes and reopens the dialog. The "Restore loses the
+badge" bug the user reported on 2026-05-15 was exactly this:
+`userDoc.files` was correct, the UI cache was not.
+
+### maia-state.json is a lossy mirror
+
+`saveLocalSnapshot` reduces `userDoc.files[]` to four fields:
+`fileName`, `size`, `cloudStatus`, `bucketKey` (the latest fix added
+`isAppleHealth`). Anything else on the file entry is dropped on the
+floor at sign-out and unrecoverable on Restore: `addedAt`,
+`updatedAt`, `bucketPath`, `fileType`, `mimeType`, any future flag.
+A new feature that adds a per-file field (say, `priorIndexingErrors`)
+will look correct in dev, work through Setup, then silently lose
+itself across one sign-out cycle.
+
+There is also no schema version on `maia-state.json`. An older client
+that wrote a snapshot without `isAppleHealth` is indistinguishable
+from a current client whose AH detection genuinely returned false on
+every file. The Restore code has to guess.
+
+## The cases that break (catalog)
+
+1. **First Restore from an old snapshot.** `maia-state.json` predates
+   the AH-preservation fix. State has no flag. Restore's fast-path
+   finds nothing; the slow path used to only look at *added* files and
+   so found nothing either (now fixed, but only once). Categories
+   never built.
+
+2. **Restore after a partial Setup (page reload mid-flow).** Setup
+   detected AH and called `/api/user-file-metadata`, but `setupWizard`
+   crashed between AH detection and the metadata POST. `userDoc.files`
+   has the file with no AH flag. Subsequent sign-out writes a snapshot
+   that confirms the false negative. Restore has no way to know.
+
+3. **User replaces Apple Health PDF with a newer export.** Same
+   filename pattern, new content (more conditions, different med list).
+   `userDoc.files[i].bucketKey` is unchanged (or differs only in the
+   timestamp portion). `appleHealthCategoriesBuiltAt` is still set,
+   so Lists shows the old categories forever. Same drift in the
+   meds-from-AH extraction.
+
+4. **User adds a non-AH PDF mid-session.** Goes through
+   `runAutoWizard`'s upload path. AH detection runs but returns false.
+   No problem here — but the file's metadata POST happens *concurrently*
+   with `runAutoWizard`'s next file, and a 409 conflict on userDoc
+   can drop the second file's `isAppleHealth: true` if the conflict
+   retry re-reads a stale doc.
+
+5. **User deletes the Apple Health file from the folder.** Folder
+   diff detects "removed". Restore skips uploading it. But
+   `userDoc.appleHealthCategoriesBuiltAt` is still set, so a future
+   Lists view still shows categories from a file that doesn't exist
+   in the KB anymore.
+
+6. **`/api/archive-user-files` runs and creates a new entry.** When
+   Saved Files is opened, this endpoint scans S3 for root-level files
+   and moves them to `archived/`. If it finds a file with no matching
+   `userDoc.files` entry, it pushes a new entry with no
+   `isAppleHealth` field. The badge disappears even though the
+   underlying PDF is the same.
+
+7. **A second Restore on the same machine, same folder, different
+   account.** `userDoc.files[i].isAppleHealth` from the previous user
+   is gone (different userDoc), and `maia-state.json` is now for a
+   different userId. The folder picker on Restore re-reads state — if
+   the state's `userId` doesn't match, things get unpredictable.
+
+8. **Server-side ChatInterface vs. MyStuffDialog race during
+   rehydration.** Both paths call `/api/user-file-metadata` for the
+   same bucketKey within seconds (line 1495 in MyStuffDialog, then
+   ChatInterface's runAutoWizard for the same file). Last-write wins
+   on CouchDB. The first call's `isAppleHealth: true` is overwritten
+   by the second call's `isAppleHealth: false` (or vice versa)
+   depending on which detection lap finished first.
+
+9. **User signs in on a second device.** Folder picker on device 2
+   reads `maia-state.json` from cloud-sync'd disk. Server's
+   `userDoc.files` for that user was built on device 1. Both have AH
+   flags, but if device 2's client version is older it may drop
+   them on the next sign-out.
+
+10. **Account recreate without local snapshot.** User deletes cloud,
+    has no backup. Account recreated. They re-upload the Apple Health
+    PDF manually via MyStuffDialog (line 4748 path). That path uses
+    `detectAppleHealthFromBucket`, so the flag should be set. But if
+    detection fails silently (no error UI), the user sees a working
+    Saved Files tab with no badge and no idea why.
+
+## What "bulletproof" would look like
+
+Three principles, in priority order:
+
+### 1. **One server-side chokepoint that owns the flag**
+
+Every file write to `userDoc.files[]` — from any caller — goes through
+one server function that, before saving, reads the uploaded PDF's first
+page from S3 and decides `isAppleHealth` itself. Clients never *send*
+the flag; the server *derives* it. The signature stops being
+`{ fileName, bucketKey, ..., isAppleHealth }` and becomes just
+`{ fileName, bucketKey, ... }`. Detection is a server concern.
+
+This collapses #1–#7 in the setters table into one function, removes
+the regex bug surface entirely (clients can't introduce a filename
+heuristic because they don't decide), and gives us one place to add
+caching, logging, error handling.
+
+Implementation sketch:
+
+```
+POST /api/files/register-with-detect  (or fold into existing register)
+  body: { fileName, bucketKey, fileSize? }
+  server:
+    1. await classify(bucketKey)         // reads first page, returns { isAppleHealth }
+    2. upsert userDoc.files entry with classification result
+    3. if isAppleHealth and !userDoc.appleHealthCategoriesBuiltAt:
+         queue category extraction (don't block the response)
+    4. emit `file-classified` event so frontends invalidate caches
+```
+
+### 2. **Re-validate on every read of "Apple Health files"**
+
+The AH file isn't a static fact; it's a derived property of "which file
+in S3 contains the Apple Health export footer". The single source of
+truth should be checked, not cached forever.
+
+Concretely: instead of `appleHealthCategoriesBuiltAt` being a boolean
+"have we ever built", make it a content hash:
+`appleHealthCategoriesSourceETag` plus `appleHealthCategoriesSourceKey`.
+On every Lists view:
+
+1. Server resolves which file is the AH file (`userDoc.files.find(f =>
+   f.isAppleHealth)`).
+2. Compare its current S3 `ETag` against
+   `appleHealthCategoriesSourceETag`.
+3. If they differ (replaced file) or `bucketKey` differs (moved file)
+   or no AH file in the list (removed), trigger rebuild and update.
+
+This makes case #3 (replace) and case #5 (remove) auto-correct without
+a manual click.
+
+### 3. **`maia-state.json` should be authoritative for the *folder*, not the *user*. The userDoc should be authoritative for the *user*.**
+
+Today `maia-state.json` is a *partial* snapshot of `userDoc` plus the
+folder's file list. Restore tries to rebuild `userDoc` from this
+snapshot. The two roles are mixed, and every field we add to one needs
+manual mirroring to the other.
+
+A cleaner split:
+
+- `maia-state.json` holds **only** what cannot be recovered from cloud:
+  the folder's PDF inventory (filenames + sizes + mtimes), the user's
+  device/local preferences, and a pointer (`userId`) to the cloud
+  account it belongs to. Nothing about agent state, summaries, meds,
+  or AH flags — those are recovered *from cloud*.
+
+- Restore = "this user wants to sign back into their cloud account
+  from this folder". The server's userDoc rebuild from cloud backup
+  (the maia_accounts_backup CouchDB collection we already maintain, or
+  a fresh re-derivation) is the single source of truth.
+
+- The Restore Wizard's job becomes: re-upload the files from the
+  folder, then call **one** `/api/account/rehydrate` that does the
+  whole reconciliation server-side: agent, KB, files, AH detection,
+  category extraction, summary, meds, instructions, chats. No
+  client-side orchestration of those nine endpoints.
+
+This removes the duplicated MaiaState schema and the `/^apple/i`
+heuristic from the wire entirely. It also fixes case #2 (mid-flow
+crash leaves bad userDoc): re-running rehydrate is idempotent.
+
+## A leaner implementation plan
+
+Not all of the above has to ship at once. In order of impact-per-line:
+
+### Phase 1 — Stop the bleeding (a few hours)
+
+- Add `/api/files/audit` server endpoint that:
+  - lists every file in `userDoc.files[]`
+  - for each, fetches its first PDF page via existing
+    `parse-pdf-first-page`
+  - flips `isAppleHealth` based on content
+  - if the AH file's bucketKey differs from
+    `appleHealthCategoriesSourceKey`, clears
+    `appleHealthCategoriesBuiltAt` so categories rebuild next view
+  - returns `{ changed: number, appleHealthBucketKey: string|null }`
+- Call it from `handleRestoreWizardComplete` *after* `markRestoreComplete`,
+  and from MyStuffDialog after `loadFiles` if the AH badge would be
+  inconsistent with what `loadAppleHealthStatus` finds.
+- Remove the front-end `detectAppleHealthFromBucket` calls and the
+  client-passed `isAppleHealth` body fields once the audit is the
+  single source.
+
+That alone closes cases #1, #2, #6, #7, #10.
+
+### Phase 2 — Schema version + auto-heal (half a day)
+
+- Add `version` field to `MaiaState`. Bump on every schema change.
+- Backup-version mismatch on Restore triggers a server-side
+  `/api/files/audit` automatically and a one-line maia-log.pdf entry:
+  `Snapshot from v3 client — re-detecting Apple Health from PDF content`.
+
+### Phase 3 — Content-hash on category extraction (half a day)
+
+- Store `appleHealthCategoriesSourceETag` alongside the bucketKey.
+- On every Lists view fetch, compare to the live S3 `HEAD`. Diff →
+  rebuild.
+
+Closes cases #3, #5.
+
+### Phase 4 — Single rehydrate endpoint (1–2 days)
+
+- Collapse the 9 file-touching endpoints into one
+  `POST /api/account/rehydrate` that takes the folder file list and
+  rebuilds everything. Client just sends the list and uploads the
+  bytes; the server decides everything else.
+
+Closes the "next dev re-introduces a heuristic" risk for good.
+
+## Net suggestion
+
+Stop adding restore-path patches. The next thing we do in this area
+should be Phase 1 — the audit endpoint — because (a) it removes more
+existing bug surface than every patch we've written combined, and
+(b) every future patch we'd otherwise write becomes redundant.
