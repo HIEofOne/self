@@ -6468,7 +6468,7 @@ const handleCurrentMedicationsSaved = async (payload?: { value?: string; edited?
   logProvisioningEvent({
     event: 'medications-saved',
     lines: medsLineCount,
-    source: payload?.source || (payload?.edited ? 'manual' : undefined)
+    source: payload?.source || undefined
   });
   wizardCurrentMedications.value = true;
   wizardStage2Complete.value = true;

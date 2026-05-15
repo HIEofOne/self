@@ -2507,14 +2507,15 @@ const saveCurrentMedicationsValue = async (value: string, markEdited: boolean, c
       clearVerifyRequirement();
     }
 
-    // If user edited the meds, the source is now 'manual' regardless of where
-    // they originally came from. Otherwise carry forward the offered source.
-    const reportedSource = markEdited ? 'manual' : (currentMedicationsSource.value || 'manual');
+    // Report the AUTOMATED source (where the list was originally proposed
+    // from). User edits don't change this — the source describes provenance
+    // of the proposal, not what the user did with it. Only fall back to
+    // 'manual' if nothing was ever offered automatically.
     emit('current-medications-saved', {
       value,
       edited: markEdited,
       changed: value !== previousMedications,
-      source: reportedSource
+      source: currentMedicationsSource.value || 'manual'
     });
 
     // Only offer to update Patient Summary if the medications text actually changed
