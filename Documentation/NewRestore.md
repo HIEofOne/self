@@ -204,3 +204,49 @@ localStorage['maia:restore-active'] = JSON.stringify({
 Clearing this key (e.g. via DevTools Application → Local Storage) is a
 safe way to recover from a stuck "always tries to resume Restore" state.
 The next reload will fall through to the normal welcome / setup flow.
+
+## Known follow-up issues (out of scope here)
+
+These surfaced during multi-cycle Restore testing but are not caused by
+the changes above. They are pre-existing and worth fixing in their own
+focused changes:
+
+### `ensureUserAgent` has no timeout/retry around `doClient.agent.create`
+
+If the DigitalOcean GenAI API hangs (`undici TimeoutError` after the
+default 5 minutes), the unhandled rejection takes down the whole Node
+process. Observed during a long test session — backend exited with stack
+trace:
+
+```
+DOMException [TimeoutError]: The operation was aborted due to timeout
+  at AgentClient.create (lib/do-client/agent.js:84)
+  at ensureUserAgent (server/routes/auth.js:335)
+  at server/routes/chat.js:489
+```
+
+Recommended fix: wrap `agent.create` (and the other unbounded `doClient`
+calls along that path) in a try/catch with a sane per-call timeout, and
+have callers either fail the request cleanly or queue a retry. A
+process-level `unhandledRejection` handler would also be defense in
+depth — currently any background promise rejection from the DO SDK can
+kill the server.
+
+### `resend` package is referenced but not installed
+
+When the admin-notification path fires on cloud-account events
+(account-deleted, etc.) the server logs:
+
+```
+[NOTIFY] ❌ Email notification failed: Cannot find package 'resend'
+  imported from server/index.js
+```
+
+The notification feature is gated by `process.env.RESEND_API_KEY` being
+set, so this fails silently in normal runs, but the import is at the top
+of the call site and throws even when the feature is disabled. Either
+add `resend` to `package.json` dependencies, or move the import inside
+the function and gate it on the env var.
+
+Neither of these affects the Restore-resume / Apple-Health-preservation
+work described above. Filing here so they aren't lost.
