@@ -686,21 +686,48 @@ const executeRestore = async () => {
     // per-category files (Medications.md, Conditions.md, ...) that
     // Lists.vue renders from. Without this step, the My Lists tab is
     // empty after Restore even though "My Lists restored" was logged.
-    // process-initial-file extracts categories from the Apple Health PDF
-    // and writes one .md per category, the same path Setup uses.
+    //
+    // To find the AH file we read the first page of each restored PDF
+    // looking for the Apple Health export footer (same approach Setup
+    // uses via detectAppleHealthFromBucket). Filename-based detection
+    // is unreliable because the real Apple Health export is named
+    // "Health Records - <Patient Name> - YYYY-MM-DD at HH.MM.SS.pdf"
+    // — it does not start with "apple".
     try {
-      const apple = (expectedFiles.length > 0 ? expectedFiles : []).find(f =>
-        /^apple/i.test(f.fileName) && /\.pdf$/i.test(f.fileName)
-      );
-      if (apple?.fileName) {
-        const kbPrefix = `${uid}/${(await resolveKbName(uid))}`;
-        const bucketKey = `${kbPrefix}/${apple.fileName.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
+      const APPLE_EXPORT_FOOTER = 'This summary displays certain health information made available to you by your healthcare provider and may not completely';
+      const appleFooterNorm = APPLE_EXPORT_FOOTER.toLowerCase().replace(/\s+/g, ' ').trim();
+      const kbName = await resolveKbName(uid);
+      const kbPrefix = `${uid}/${kbName}`;
+      let appleBucketKey: string | null = null;
+      let appleFileName: string | null = null;
+      // Limit to files we know are PDFs and were uploaded; iterate sequentially
+      // since this is a one-off post-restore step and we usually find it on
+      // the first or second file.
+      const candidates = filesToRestore
+        .filter(f => /\.pdf$/i.test(f.fileName))
+        .map(f => ({ fileName: f.fileName, bucketKey: `${kbPrefix}/${f.fileName.replace(/[^a-zA-Z0-9.-]/g, '_')}` }));
+      for (const c of candidates) {
+        try {
+          const r = await fetch(`/api/files/parse-pdf-first-page/${encodeURIComponent(c.bucketKey)}`, { credentials: 'include' });
+          if (!r.ok) continue;
+          const data = await r.json();
+          const text = String(data?.firstPageText || '').toLowerCase().replace(/\s+/g, ' ').trim();
+          if (text.includes(appleFooterNorm)) {
+            appleBucketKey = c.bucketKey;
+            appleFileName = c.fileName;
+            break;
+          }
+        } catch { /* try next */ }
+      }
+      if (appleBucketKey && appleFileName) {
         await fetch('/api/files/lists/process-initial-file', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
-          body: JSON.stringify({ bucketKey, fileName: apple.fileName })
+          body: JSON.stringify({ bucketKey: appleBucketKey, fileName: appleFileName })
         });
+      } else {
+        console.log('[RestoreWizard] No Apple Health file detected — skipping category rebuild');
       }
     } catch (e: any) {
       console.warn('[RestoreWizard] Category rebuild failed (non-fatal):', e?.message);

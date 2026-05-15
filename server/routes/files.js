@@ -2165,13 +2165,26 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         throw new Error(`Failed to save markdown file: ${saveErr.message}`);
       }
 
-      // Extract categories and observations once, only for Apple Health imports
+      // Extract categories and observations only for Apple Health imports.
+      //
+      // We prefer to trust an explicit userDoc.files[].isAppleHealth flag,
+      // but that flag is set by /api/files/register's filename-based check
+      // (/^apple/i) which misses the real Apple Health export naming
+      // ("Health Records - <Patient> - <date>.pdf"). When the flag is
+      // missing, fall back to a content check: the AH export has a
+      // distinctive footer string that won't appear in unrelated PDFs.
+      // This makes process-initial-file self-correct on the Restore path
+      // where the register-time flag was lost.
       let categoryFiles = [];
       const appleHealthSource = Array.isArray(userDoc?.files)
         ? userDoc.files.find(file => file?.bucketKey === initialFileBucketKey && !!file?.isAppleHealth)
         : null;
+      const APPLE_EXPORT_FOOTER_NORM = 'this summary displays certain health information made available to you by your healthcare provider and may not completely';
+      const markdownNorm = String(fullMarkdown || '').toLowerCase().replace(/\s+/g, ' ');
+      const contentLooksLikeAppleHealth = markdownNorm.includes(APPLE_EXPORT_FOOTER_NORM);
+      const isAppleHealth = !!appleHealthSource || contentLooksLikeAppleHealth;
       const alreadyBuilt = !!userDoc?.appleHealthCategoriesBuiltAt;
-      if (appleHealthSource && !alreadyBuilt) {
+      if (isAppleHealth && !alreadyBuilt) {
         categoryFiles = await extractAndSaveCategoryFiles(
           fullMarkdown,
           userId,
@@ -2184,11 +2197,17 @@ export default function setupFileRoutes(app, cloudant, doClient) {
           const freshUserDoc = await cloudant.getDocument('maia_users', userId);
           freshUserDoc.appleHealthCategoriesBuiltAt = new Date().toISOString();
           freshUserDoc.appleHealthCategoriesSourceKey = initialFileBucketKey;
+          // Also self-heal the file's isAppleHealth flag so subsequent
+          // logic (e.g. Lists.vue's hasAppleHealthSource) sees it.
+          if (!appleHealthSource && Array.isArray(freshUserDoc.files)) {
+            const idx = freshUserDoc.files.findIndex(f => f?.bucketKey === initialFileBucketKey);
+            if (idx >= 0) freshUserDoc.files[idx].isAppleHealth = true;
+          }
           await cloudant.saveDocument('maia_users', freshUserDoc);
         } catch (catSaveErr) {
           console.warn('[VIZ] Apple Health categories flag save conflict (non-fatal):', catSaveErr?.message);
         }
-        console.log(`[VIZ] Categories built for Apple Health file: ${initialFileName}`);
+        console.log(`[VIZ] Categories built for Apple Health file: ${initialFileName} (detected via ${appleHealthSource ? 'flag' : 'content footer'})`);
       }
 
       res.json({
