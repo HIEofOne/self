@@ -272,6 +272,19 @@ const executeRestore = async () => {
   // KB-bound uploads alongside the previously-indexed set.
   const filesToRestore = expectedFiles.filter(f => presentNameSet.has(f.fileName));
 
+  // Surface gaps in maia-state.json. If the snapshot is missing fields
+  // that a fully-finished setup would have had, the user (or support) needs
+  // to see that on the log so they know why post-restore tabs are empty.
+  const stateGaps: string[] = [];
+  if (!state?.currentMedications) stateGaps.push('Current Medications');
+  if (!state?.patientSummary) stateGaps.push('Patient Summary');
+  if (stateGaps.length > 0) {
+    logProvisioningEvent({
+      event: 'restore-state-incomplete',
+      missing: stateGaps
+    });
+  }
+
   try {
     // Resolve KB name for file uploads
     const kbName = await resolveKbName(uid);

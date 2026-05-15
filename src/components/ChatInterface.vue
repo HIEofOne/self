@@ -3188,6 +3188,10 @@ const generateSetupLogPdf = async () => {
             const names = Array.isArray(evt.files) ? evt.files.join(', ') : '';
             return `[${t}] Folder change: ${evt.count || 0} file(s) removed since last sign-off${names ? ': ' + names : ''}`;
           }
+          case 'restore-state-incomplete': {
+            const missing = Array.isArray(evt.missing) ? evt.missing.join(', ') : '';
+            return `[${t}] maia-state.json is missing: ${missing} — manual entry will be required after restore`;
+          }
           case 'chats-restored': return `[${t}] Saved chats restored (${evt.count || 0})`;
           case 'instructions-restored': return `[${t}] Agent Instructions restored`;
           case 'lists-restored': return `[${t}] My Lists restored`;
@@ -6927,6 +6931,7 @@ const closeMyStuff = () => {
 defineExpose({
   generateSetupLogPdf,
   markIndexingAlreadyCompleted,
+  refreshWizardState,
   testMode,
   addTestLog,
   setTestFinalOutput,

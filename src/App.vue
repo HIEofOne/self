@@ -745,7 +745,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import VueMarkdown from 'vue-markdown-render';
 
 // Store route check interval and event listener for cleanup (must be at top level)
@@ -775,6 +775,7 @@ import {
   writeStateFile, clearDirectoryHandle, scanWeblocOwner,
   getActiveUserId, setActiveUserId, discoverUsers,
   readStateFileByUserId,
+  setRestoreActive, clearRestoreActive, getRestoreActive,
   type MaiaState, type DiscoveredUser
 } from './utils/localFolder';
 import packageJson from '../package.json';
@@ -848,6 +849,14 @@ const cloudHealthLoading = ref(false);
 const showRestoreWizard = ref(false);
 const restoreWizardLocalState = ref<MaiaState | null>(null);
 const restoreWizardKbName = ref<string | null>(null);
+
+// Whenever the Restore Wizard closes (completion via emit, cancel,
+// outside-click, ESC, navigate-away), clear the resume sentinel so a
+// subsequent page reload doesn't try to relaunch Restore. handleRestoreWizard-
+// Complete already calls clearRestoreActive() but this is the catch-all.
+watch(showRestoreWizard, (open) => {
+  if (!open) clearRestoreActive();
+});
 const showDestroyedRestoreDialog = ref(false);
 const destroyedUserId = ref<string | null>(null);
 const showDevicePrivacyDialog = ref(false);
@@ -1104,6 +1113,7 @@ const handleUserCardRestore = async (du: DiscoveredUser) => {
 
     // Launch RestoreWizard (localState is guaranteed non-null at this point)
     restoreWizardLocalState.value = localState;
+    if (du.userId) setRestoreActive(du.userId, 'welcome');
     showRestoreWizard.value = true;
   } catch (error) {
     tempStartError.value = error instanceof Error ? error.message : 'Restore failed';
@@ -2046,6 +2056,7 @@ const handleTestSetupComplete = async (payload: { verification: any; folderHandl
     // Step 5: Launch RestoreWizard — it will call handleRestoreWizardComplete when done
     log('Launching Restore Wizard...');
     restoreWizardLocalState.value = localState;
+    if (userId) setRestoreActive(userId, 'test-mode');
     showRestoreWizard.value = true;
 
     // The rest happens in handleRestoreWizardComplete which checks testModeActive
@@ -2359,6 +2370,7 @@ const handleCloudRestore = async () => {
     // Launch the Restore Wizard
     restoreWizardLocalState.value = localState;
     showCloudHealthDialog.value = false;
+    if (user.value?.userId) setRestoreActive(user.value.userId, 'cloud-health');
     showRestoreWizard.value = true;
   } catch (e) {
     console.error('[cloud-health] Restore failed:', e);
@@ -2450,7 +2462,21 @@ const handleRestoreWizardComplete = async () => {
   if (chatInterfaceRef.value) {
     chatInterfaceRef.value.markIndexingAlreadyCompleted();
   }
+  // Restore is done; clear the resume sentinel so a future reload doesn't
+  // try to relaunch Restore.
+  clearRestoreActive();
   suppressWizard.value = false; // Allow normal ChatInterface operation now
+  // Re-sync ChatInterface from the server so wizardPatientSummary /
+  // wizardCurrentMedications reflect what Restore just wrote to userDoc.
+  // Without this, shouldHideSetupWizard stays false (in-memory refs are
+  // boot-state) and the Setup wizard auto-shows on top of the restored app.
+  if (chatInterfaceRef.value && typeof (chatInterfaceRef.value as any).refreshWizardState === 'function') {
+    try {
+      await (chatInterfaceRef.value as any).refreshWizardState();
+    } catch (e) {
+      console.warn('[RESTORE] Post-restore refreshWizardState failed:', e);
+    }
+  }
   // Regenerate maia-log.pdf with all restore entries
   try {
     if (chatInterfaceRef.value) {
@@ -2678,6 +2704,7 @@ const handleDestroyedRestore = async () => {
     // Step 4: Launch the Restore Wizard
     if (localState) {
       restoreWizardLocalState.value = localState;
+      if (user.value?.userId) setRestoreActive(user.value.userId, 'destroyed-account');
       showRestoreWizard.value = true;
     } else {
       // No local state — just notify, they'll need to re-upload manually
@@ -3161,7 +3188,38 @@ onMounted(async () => {
         const normalizedUrl = `${window.location.origin}/?share=${encodeURIComponent(info.shareId)}${window.location.hash}`;
         window.history.replaceState({}, '', normalizedUrl);
       }
-      // If user is already authenticated and we have a pending medications edit, 
+      // Resume a Restore Wizard that was interrupted by a page reload.
+      // Sentinel was set in localStorage when Restore launched; if it
+      // matches the signed-in user, re-read maia-state.json from the
+      // stored folder handle and re-launch the wizard. Without this, the
+      // Setup wizard's auto-show watcher fires instead (because the user
+      // looks like a pre-summary new user from server state alone).
+      const restoreSentinel = getRestoreActive();
+      if (restoreSentinel && data.user?.userId === restoreSentinel.userId) {
+        try {
+          const result = await readStateFileByUserId(restoreSentinel.userId);
+          if (result?.state && result?.handle) {
+            localFolderHandle.value = result.handle;
+            restoreWizardLocalState.value = result.state;
+            suppressWizard.value = true;
+            showRestoreWizard.value = true;
+            console.log('[Restore] Resumed from sentinel after page reload', {
+              userId: restoreSentinel.userId,
+              source: restoreSentinel.source,
+              startedAt: restoreSentinel.startedAt
+            });
+          } else {
+            // Couldn't re-read state — clear the sentinel so we don't keep
+            // trying on subsequent reloads.
+            console.warn('[Restore] Sentinel present but state could not be read; clearing.');
+            clearRestoreActive();
+          }
+        } catch (e) {
+          console.warn('[Restore] Resume attempt failed:', e);
+          clearRestoreActive();
+        }
+      }
+      // If user is already authenticated and we have a pending medications edit,
       // it will be handled in ChatInterface's onMounted
       return;
     }

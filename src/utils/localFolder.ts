@@ -376,6 +376,54 @@ export async function writeStateFile(
   await writeFileToFolder(handle, STATE_FILE_NAME, json);
 }
 
+// ── Restore-in-progress sentinel ───────────────────────────────────
+// Used so a page reload mid-Restore can resume the Restore Wizard instead
+// of dropping the user into the new-user Setup flow. Survives reloads
+// because it lives in localStorage; the folder handle separately survives
+// in IndexedDB via storeDirectoryHandle. On boot, App.vue checks the
+// sentinel and re-launches Restore if it matches the signed-in user.
+
+const RESTORE_ACTIVE_KEY = 'maia:restore-active';
+
+export interface RestoreActiveSentinel {
+  userId: string;
+  startedAt: string;
+  source?: 'welcome' | 'cloud-health' | 'destroyed-account' | 'test-mode';
+}
+
+export function setRestoreActive(userId: string, source?: RestoreActiveSentinel['source']): void {
+  try {
+    const payload: RestoreActiveSentinel = {
+      userId,
+      startedAt: new Date().toISOString(),
+      source
+    };
+    localStorage.setItem(RESTORE_ACTIVE_KEY, JSON.stringify(payload));
+  } catch {
+    // ignore storage errors (private mode, quota, etc.)
+  }
+}
+
+export function clearRestoreActive(): void {
+  try {
+    localStorage.removeItem(RESTORE_ACTIVE_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+export function getRestoreActive(): RestoreActiveSentinel | null {
+  try {
+    const raw = localStorage.getItem(RESTORE_ACTIVE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as RestoreActiveSentinel;
+    if (!parsed?.userId || !parsed?.startedAt) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Extract patient name from a patient summary text.
  * Tries several formats: "Patient Summary for X", "Summary for X",
