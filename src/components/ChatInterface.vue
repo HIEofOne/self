@@ -3198,6 +3198,9 @@ const generateSetupLogPdf = async () => {
               : `legacy per-field path (snapshot v${evt.snapshotSchemaVersion || 1}${evt.hasUserDocInState ? ', has userDoc' : ', no userDoc'})`;
             return `[${t}] Restore path: ${detail}`;
           }
+          case 'maia-state-saved': {
+            return `[${t}] maia-state.json saved: schemaVersion=${evt.schemaVersion || 1}, userDoc fetch status=${evt.status} hasUserDoc=${evt.hasUserDoc}`;
+          }
           case 'restore-fallback-to-legacy': {
             return `[${t}] Restore fell back to legacy path: ${evt.reason || 'unknown error'}`;
           }

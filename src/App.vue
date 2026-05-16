@@ -1771,16 +1771,41 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
         // server, network glitch); the legacy v1 fields below still write.
         let fullUserDoc: Record<string, any> | null = null;
         let userDocSchemaVersion = 1;
+        let fetchStatus: number | string = 'not-attempted';
         try {
           const docRes = await fetch('/api/user-doc/full', { credentials: 'include' });
+          fetchStatus = docRes.status;
           if (docRes.ok) {
             const docPayload = await docRes.json();
             fullUserDoc = docPayload?.userDoc || null;
             userDocSchemaVersion = docPayload?.schemaVersion || 1;
           }
-        } catch (e) {
+        } catch (e: any) {
+          fetchStatus = `error: ${e?.message || e}`;
           console.warn('[saveLocalSnapshot] /api/user-doc/full unreachable:', e);
         }
+        // Loud telemetry: we've been chasing why maia-state.json keeps
+        // landing as v1. Every snapshot write logs what happened with
+        // the /api/user-doc/full fetch so the next Restore log shows
+        // the cause unambiguously.
+        console.log(
+          `[saveLocalSnapshot] /api/user-doc/full → status=${fetchStatus} ` +
+          `hasUserDoc=${!!fullUserDoc} schemaVersion=${fullUserDoc ? 2 : 1}`
+        );
+        try {
+          await fetch('/api/provisioning-log', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({
+              userId: user.value.userId,
+              event: 'maia-state-saved',
+              status: fetchStatus,
+              hasUserDoc: !!fullUserDoc,
+              schemaVersion: fullUserDoc ? 2 : 1
+            })
+          });
+        } catch { /* non-fatal */ }
         // Folder inventory (what files are physically in the folder right
         // now). Used by Restore to diff against userDoc.files and detect
         // files the user added or removed in Finder while signed out.
