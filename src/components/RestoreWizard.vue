@@ -93,15 +93,27 @@ const emit = defineEmits<{
 }>();
 
 const logProvisioningEvent = async (eventData: Record<string, any>) => {
+  let delivered = false;
   try {
-    await fetch('/api/provisioning-log', {
+    const resp = await fetch('/api/provisioning-log', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
       body: JSON.stringify({ userId: props.userId, ...eventData })
     });
+    // fetch only throws on network failure; a 401/500 is a resolved
+    // promise with ok=false. Treat both as "not delivered".
+    delivered = resp.ok;
   } catch (err) {
     console.warn('Failed to log provisioning event:', eventData.event, err);
+  }
+  if (!delivered) {
+    // Server didn't accept it (session gone during destroy/restore is
+    // the common case). Buffer locally so maia-log.pdf still shows it.
+    try {
+      const { bufferLogEvent } = await import('../utils/localFolder');
+      bufferLogEvent({ userId: props.userId, ...eventData });
+    } catch { /* ignore */ }
   }
 };
 

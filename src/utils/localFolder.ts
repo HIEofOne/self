@@ -450,6 +450,47 @@ export function getRestoreActive(): RestoreActiveSentinel | null {
   }
 }
 
+// ── Offline log-event buffer ───────────────────────────────────────
+// Provisioning events (including errors/warnings) are normally POSTed
+// to /api/provisioning-log. But errors most often happen exactly when
+// the session is gone (sign-out, cloud destroy) and that POST 401/500s,
+// losing the event. We buffer failed events in localStorage so
+// generateSetupLogPdf can still render them — "maia-log must always
+// show errors and warnings", even ones that occurred after the cloud
+// was destroyed.
+
+const PENDING_LOG_KEY = 'maia:pending-log-events';
+
+export function bufferLogEvent(event: Record<string, any>): void {
+  try {
+    const raw = localStorage.getItem(PENDING_LOG_KEY);
+    const arr: Array<Record<string, any>> = raw ? JSON.parse(raw) : [];
+    arr.push({ ...event, time: event.time || new Date().toISOString(), _buffered: true });
+    // Cap so a pathological loop can't blow the quota.
+    while (arr.length > 200) arr.shift();
+    localStorage.setItem(PENDING_LOG_KEY, JSON.stringify(arr));
+  } catch {
+    // ignore (private mode / quota)
+  }
+}
+
+export function readBufferedLogEvents(): Array<Record<string, any>> {
+  try {
+    const raw = localStorage.getItem(PENDING_LOG_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function clearBufferedLogEvents(): void {
+  try {
+    localStorage.removeItem(PENDING_LOG_KEY);
+  } catch {
+    // ignore
+  }
+}
+
 /**
  * Extract patient name from a patient summary text.
  * Tries several formats: "Patient Summary for X", "Summary for X",

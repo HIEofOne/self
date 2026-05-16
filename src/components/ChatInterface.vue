@@ -1096,15 +1096,25 @@ const logProvisioningEvent = async (eventData: Record<string, any>) => {
     }
     lastLoggedEventAt[key] = now;
   }
+  let delivered = false;
   try {
-    await fetch('/api/provisioning-log', {
+    const resp = await fetch('/api/provisioning-log', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
       body: JSON.stringify({ userId: props.user.userId, ...eventData })
     });
+    delivered = resp.ok;
   } catch (err) {
     console.warn('Failed to log provisioning event:', eventData.event, err);
+  }
+  if (!delivered) {
+    // Session likely gone (sign-out / destroy). Buffer so the next
+    // maia-log.pdf still shows this event — especially errors/warnings.
+    try {
+      const { bufferLogEvent } = await import('../utils/localFolder');
+      bufferLogEvent({ userId: props.user.userId, ...eventData });
+    } catch { /* ignore */ }
   }
   // Regenerate maia-log.pdf so the local folder always reflects the latest events
   void generateSetupLogPdf();
@@ -3103,15 +3113,30 @@ const generateSetupLogPdf = async () => {
       } catch { /* no local state */ }
     }
 
+    // Buffered events: provisioning events whose server POST failed
+    // (session gone during sign-out / cloud destroy). Without these the
+    // maia-log.pdf would silently omit errors that happened after the
+    // cloud was torn down. "maia-log must always show errors/warnings."
+    let bufferedEvents: Array<Record<string, any>> = [];
+    try {
+      const { readBufferedLogEvents } = await import('../utils/localFolder');
+      const uid = props.user?.userId;
+      bufferedEvents = readBufferedLogEvents().filter(e => !e.userId || e.userId === uid);
+    } catch { /* ignore */ }
+
     // Merge: deduplicate by compound key (id+time) to handle ID collisions after account recreation
     // After account deletion and recreation, server resets IDs from 1, so bare id dedup would
     // incorrectly filter out all restore events when setup events had the same IDs.
-    const eventKey = (e: Record<string, any>) => `${e.id ?? ''}-${e.time ?? ''}`;
-    const localKeys = new Set(localEvents.map(eventKey));
-    const mergedNew = serverEvents.filter(e => !localKeys.has(eventKey(e)));
-    const events = [...localEvents, ...mergedNew].sort((a, b) => {
-      return (a.time || '').localeCompare(b.time || '');
-    });
+    const eventKey = (e: Record<string, any>) => `${e.id ?? ''}-${e.time ?? ''}-${e.event ?? ''}`;
+    const seen = new Set<string>();
+    const events: Array<Record<string, any>> = [];
+    for (const e of [...localEvents, ...serverEvents, ...bufferedEvents]) {
+      const k = eventKey(e);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      events.push(e);
+    }
+    events.sort((a, b) => (a.time || '').localeCompare(b.time || ''));
 
     if (events.length > 0) {
 
