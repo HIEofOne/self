@@ -9089,6 +9089,22 @@ app.put('/api/account/rehydrate', async (req, res) => {
     for (const f of REGENERABLE_SECRET_FIELDS) delete docToWrite[f];
     if (existing?._rev) docToWrite._rev = existing._rev;
 
+    // assignedAgentId / kbId in the incoming backup are STALE pointers to
+    // resources destroyed by "Destroy Cloud Account". They're hints, not
+    // truth. If a previous rehydrate pass already created live resources
+    // and recorded their IDs on the existing doc, keep those — otherwise
+    // pass 2 would clobber the freshly-created agent's ID with the dead
+    // one and force a redundant agent recreation (leaving orphans).
+    if (existing?.assignedAgentId) {
+      docToWrite.assignedAgentId = existing.assignedAgentId;
+    }
+    if (existing?.kbId) {
+      docToWrite.kbId = existing.kbId;
+    }
+    if (existing?.agentEndpoint && !docToWrite.agentEndpoint) {
+      docToWrite.agentEndpoint = existing.agentEndpoint;
+    }
+
     // Save with conflict retry.
     let writeAttempts = 0;
     while (writeAttempts < 3) {

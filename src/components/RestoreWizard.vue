@@ -358,11 +358,17 @@ const executeRehydrate = async () => {
   }
   const data2 = await r2.json();
 
-  // If userDoc had a kbId but DO no longer has it, request a fresh
-  // indexing job via the existing update-knowledge-base endpoint —
-  // it handles KB creation and indexing in one call.
-  if (data2.rebuilt?.kb === 'needs-rebuild' || data2.rebuilt?.kb === 'created' || data2.rebuilt?.kb === 'reused') {
-    updateItem('kb', { status: 'running', progress: 'Indexing...' });
+  // Rebuild + reindex the KB. After a cloud destroy the KB, agent, and
+  // Spaces files are all gone, so this is a full re-index (7+ min for a
+  // typical 2-file set). /api/update-knowledge-base is ASYNC — it kicks
+  // off the indexing job and returns 200 immediately. We MUST poll
+  // /api/kb-indexing-status until the job actually completes, otherwise
+  // the wizard races to "done" in milliseconds and the user is dropped
+  // into a chat with an empty KB (the bug the user hit). This mirrors
+  // the legacy path's polling loop exactly.
+  {
+    updateItem('kb', { status: 'running', progress: 'Creating knowledge base...' });
+    const kbStartTime = Date.now();
     const kbResp = await fetch('/api/update-knowledge-base', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -370,10 +376,69 @@ const executeRehydrate = async () => {
       body: JSON.stringify({ userId: uid })
     });
     if (!kbResp.ok) {
-      updateItem('kb', { status: 'error', errorMsg: `KB update failed: ${kbResp.status}` });
+      const errData = await kbResp.json().catch(() => ({}));
+      updateItem('kb', { status: 'error', errorMsg: errData.message || `KB update failed: ${kbResp.status}` });
     } else {
-      updateItem('kb', { status: 'done', progress: 'Indexed' });
-      logProvisioningEvent({ event: 'kb-indexed' });
+      const indexData = await kbResp.json();
+      const kbId = indexData.kbId;
+      const jobId = indexData.jobId || kbId;
+      const filesCount = indexData.filesIndexed || indexData.filesCount || 0;
+      const seedTokens = indexData.totalTokens || indexData.tokenCount || 0;
+      if (kbId) {
+        updateItem('kb', { progress: 'Indexing...' });
+        let done = false;
+        let attempts = 0;
+        // 300 × 3s = 15 min ceiling. Typical 2-file set is ~7-8 min.
+        while (!done && attempts < 300) {
+          await new Promise(r => setTimeout(r, 3000));
+          try {
+            const statusResp = await fetch(
+              `/api/kb-indexing-status/${jobId}?userId=${encodeURIComponent(uid)}`,
+              { credentials: 'include' }
+            );
+            if (statusResp.ok) {
+              const sd = await statusResp.json();
+              if (sd.completed || sd.backendCompleted) {
+                done = true;
+                const t = sd.tokens || sd.tokenCount || sd.total_tokens || seedTokens || 0;
+                const f = sd.filesIndexed || filesCount || 0;
+                const parts: string[] = [];
+                if (f) parts.push(`${f} file${f === 1 ? '' : 's'}`);
+                if (t) parts.push(`${Number(t).toLocaleString()} tokens`);
+                updateItem('kb', { status: 'done', progress: parts.join(', ') || 'Indexed' });
+                logProvisioningEvent({
+                  event: 'kb-indexed',
+                  tokens: Number(t) || 0,
+                  fileCount: Number(f) || 0,
+                  elapsedMs: Date.now() - kbStartTime
+                });
+              } else if (sd.status === 'INDEX_JOB_STATUS_FAILED') {
+                throw new Error(sd.error || 'Indexing failed');
+              } else {
+                const t = sd.tokens || sd.tokenCount || 0;
+                const tokenStr = Number(t) > 0 ? ` — ${Number(t).toLocaleString()} tokens` : '';
+                const elapsedSec = attempts * 3;
+                const mins = Math.floor(elapsedSec / 60);
+                const secs = elapsedSec % 60;
+                const timeStr = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+                updateItem('kb', { progress: `Indexing...${tokenStr} (${timeStr})` });
+              }
+            }
+          } catch (pollErr: any) {
+            if (pollErr?.message?.includes('failed')) throw pollErr;
+          }
+          attempts++;
+        }
+        if (!done) {
+          updateItem('kb', { status: 'done', progress: 'Indexing continues in background' });
+          logProvisioningEvent({ event: 'kb-indexed', tokens: 0, fileCount: 0, elapsedMs: Date.now() - kbStartTime });
+        }
+      } else if (seedTokens > 0) {
+        updateItem('kb', { status: 'done', progress: `${filesCount} file${filesCount === 1 ? '' : 's'}, ${Number(seedTokens).toLocaleString()} tokens` });
+        logProvisioningEvent({ event: 'kb-indexed', tokens: Number(seedTokens), fileCount: Number(filesCount), elapsedMs: Date.now() - kbStartTime });
+      } else {
+        updateItem('kb', { status: 'done', progress: 'Created' });
+      }
     }
   }
 

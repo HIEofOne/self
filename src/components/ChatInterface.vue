@@ -3328,11 +3328,29 @@ const generateSetupLogPdf = async () => {
 // during the in-flight window are folded into that single follow-up.
 let saveStateInFlight = false;
 let saveStatePending = false;
+let saveStateLastDoneAt = 0;
+let saveStateTrailingTimer: ReturnType<typeof setTimeout> | null = null;
+const SAVE_STATE_MIN_INTERVAL_MS = 4000;
 
-/** Save current app state to maia-state.json in the local folder. */
+/** Save current app state to maia-state.json in the local folder.
+ *  Throttled: at most one write per SAVE_STATE_MIN_INTERVAL_MS. Calls
+ *  during the cooldown schedule a single trailing write so the final
+ *  state always lands. generateSetupLogPdf (the only caller) fires from
+ *  ~6 watchers during a Setup cycle; without this we get 15+ writes,
+ *  each fetching /api/user-doc/full + scanning the folder. */
 const saveStateToLocalFolder = async () => {
   if (!localFolderHandle.value || !props.user?.userId) return;
-  if (saveStateInFlight) {
+  const sinceLast = Date.now() - saveStateLastDoneAt;
+  if (saveStateInFlight || sinceLast < SAVE_STATE_MIN_INTERVAL_MS) {
+    // Schedule (or reschedule) a single trailing write.
+    if (saveStateTrailingTimer) clearTimeout(saveStateTrailingTimer);
+    const delay = saveStateInFlight
+      ? SAVE_STATE_MIN_INTERVAL_MS
+      : Math.max(0, SAVE_STATE_MIN_INTERVAL_MS - sinceLast);
+    saveStateTrailingTimer = setTimeout(() => {
+      saveStateTrailingTimer = null;
+      void saveStateToLocalFolder();
+    }, delay);
     saveStatePending = true;
     return;
   }
@@ -3341,10 +3359,13 @@ const saveStateToLocalFolder = async () => {
     await saveStateToLocalFolderImpl();
   } finally {
     saveStateInFlight = false;
-    if (saveStatePending) {
+    saveStateLastDoneAt = Date.now();
+    if (saveStatePending && !saveStateTrailingTimer) {
       saveStatePending = false;
-      // Fire-and-forget follow-up to capture the final state.
-      void saveStateToLocalFolder();
+      saveStateTrailingTimer = setTimeout(() => {
+        saveStateTrailingTimer = null;
+        void saveStateToLocalFolder();
+      }, SAVE_STATE_MIN_INTERVAL_MS);
     }
   }
 };
