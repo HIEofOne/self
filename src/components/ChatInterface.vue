@@ -1104,7 +1104,12 @@ const logProvisioningEvent = async (eventData: Record<string, any>) => {
       credentials: 'include',
       body: JSON.stringify({ userId: props.user.userId, ...eventData })
     });
-    delivered = resp.ok;
+    // Server returns 200 + {success:false} when it couldn't persist
+    // (so the browser logs no error line); treat that as not delivered.
+    if (resp.ok) {
+      const body = await resp.json().catch(() => ({}));
+      delivered = body?.success !== false;
+    }
   } catch (err) {
     console.warn('Failed to log provisioning event:', eventData.event, err);
   }

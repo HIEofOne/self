@@ -9480,41 +9480,53 @@ app.post('/api/provisioning-log', async (req, res) => {
       });
     }
 
-    // Build the log entry
-    if (!Array.isArray(userDoc.provisioningLog)) {
-      userDoc.provisioningLog = [];
-    }
-    const maxId = userDoc.provisioningLog.reduce((m, e) => Math.max(m, e.id || 0), 0);
-    const entry = { ...extraFields, event, id: maxId + 1, time: new Date().toISOString() };
-    userDoc.provisioningLog.push(entry);
-    userDoc.updatedAt = new Date().toISOString();
+    // Append the log entry with conflict-tolerant save. The userDoc is
+    // under heavy concurrent mutation during Restore (the rehydrate
+    // endpoint replaces the whole doc while restore events stream in),
+    // so 409s are EXPECTED here, not exceptional. Re-read + re-apply on
+    // every conflict, with backoff, up to a generous attempt count.
+    const isConflict = (err) =>
+      err?.statusCode === 409 ||
+      err?.status === 409 ||
+      err?.error === 'conflict' ||
+      /conflict/i.test(err?.message || '');
 
-    // Save with retry logic for conflicts
-    let retries = 3;
+    const entry = { ...extraFields, event, id: 0, time: new Date().toISOString() };
     let saved = false;
-
-    while (retries > 0 && !saved) {
+    let lastErr = null;
+    const MAX_ATTEMPTS = 8;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS && !saved; attempt++) {
       try {
-        await cloudant.saveDocument('maia_users', userDoc);
+        // Always work from a fresh copy so the _rev is current.
+        const fresh = attempt === 1 ? userDoc : await cloudant.getDocument('maia_users', userId);
+        if (!fresh) break; // user deleted mid-restore — nothing to append to
+        if (!Array.isArray(fresh.provisioningLog)) fresh.provisioningLog = [];
+        entry.id = fresh.provisioningLog.reduce((m, e) => Math.max(m, e.id || 0), 0) + 1;
+        fresh.provisioningLog.push(entry);
+        fresh.updatedAt = new Date().toISOString();
+        await cloudant.saveDocument('maia_users', fresh);
         saved = true;
       } catch (error) {
-        if (error.statusCode === 409 && retries > 1) {
-          // Conflict - re-read and retry
-          userDoc = await cloudant.getDocument('maia_users', userId);
-          if (!Array.isArray(userDoc.provisioningLog)) {
-            userDoc.provisioningLog = [];
-          }
-          const retryMaxId = userDoc.provisioningLog.reduce((m, e) => Math.max(m, e.id || 0), 0);
-          entry.id = retryMaxId + 1;
-          entry.time = new Date().toISOString();
-          userDoc.provisioningLog.push(entry);
-          userDoc.updatedAt = new Date().toISOString();
-          retries--;
-          await new Promise(resolve => setTimeout(resolve, 100));
-        } else {
-          throw error;
+        lastErr = error;
+        if (isConflict(error) && attempt < MAX_ATTEMPTS) {
+          await new Promise(r => setTimeout(r, 80 * attempt)); // linear backoff
+          continue;
         }
+        break;
       }
+    }
+
+    if (!saved) {
+      // A provisioning-log entry is non-essential telemetry. Never 500
+      // the client over it — that just produces an alarming red console
+      // line during Restore and the client buffers the event anyway.
+      // Return 202 so the client's `resp.ok` is false → it buffers the
+      // event locally (maia-log.pdf still shows it) without surfacing a
+      // server error.
+      console.warn(`⚠️ provisioning-log entry not persisted after ${MAX_ATTEMPTS} attempts (event=${event}): ${lastErr?.message || lastErr}`);
+      // 200 (not 4xx/5xx) so the browser logs no error line. The body's
+      // success:false tells the client to buffer the event locally.
+      return res.status(200).json({ success: false, buffered: true, error: 'NOT_PERSISTED' });
     }
 
     // Fire-and-forget: send admin notification on setup-complete or test-completed
@@ -9525,9 +9537,12 @@ app.post('/api/provisioning-log', async (req, res) => {
     res.json({ success: true, id: entry.id });
   } catch (error) {
     console.error('❌ Error saving provisioning log entry:', error);
-    res.status(500).json({
+    // Still don't 500 — non-essential telemetry. 200 + success:false so
+    // the client buffers it instead of logging an Internal Server Error.
+    res.status(200).json({
       success: false,
-      message: `Failed to save provisioning log entry: ${error.message}`,
+      buffered: true,
+      message: `provisioning log not saved: ${error.message}`,
       error: 'SAVE_FAILED'
     });
   }

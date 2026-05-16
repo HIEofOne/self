@@ -101,9 +101,14 @@ const logProvisioningEvent = async (eventData: Record<string, any>) => {
       credentials: 'include',
       body: JSON.stringify({ userId: props.userId, ...eventData })
     });
-    // fetch only throws on network failure; a 401/500 is a resolved
-    // promise with ok=false. Treat both as "not delivered".
-    delivered = resp.ok;
+    // fetch only throws on network failure; a 401 is a resolved promise
+    // with ok=false. The server now also returns 200 with
+    // {success:false} when it couldn't persist (so the browser logs no
+    // error line) — treat that as "not delivered" too.
+    if (resp.ok) {
+      const body = await resp.json().catch(() => ({}));
+      delivered = body?.success !== false;
+    }
   } catch (err) {
     console.warn('Failed to log provisioning event:', eventData.event, err);
   }
