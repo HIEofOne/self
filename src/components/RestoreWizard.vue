@@ -20,17 +20,19 @@
         <q-list dense>
           <q-item v-for="item in restoreItems" :key="item.key" dense class="q-py-xs">
             <q-item-section avatar style="min-width: 28px">
-              <q-spinner v-if="item.status === 'running'" size="sm" color="primary" />
+              <q-icon v-if="item.removed" name="remove_circle_outline" color="grey-5" size="sm" />
+              <q-spinner v-else-if="item.status === 'running'" size="sm" color="primary" />
               <q-icon v-else-if="item.status === 'done'" name="check_circle" color="green" size="sm" />
               <q-icon v-else-if="item.status === 'error'" name="error" color="negative" size="sm" />
               <q-icon v-else name="radio_button_unchecked" color="grey-4" size="sm" />
             </q-item-section>
             <q-item-section>
-              <q-item-label :class="{ 'text-grey-5': item.status === 'pending' }">
-                {{ item.label }}
-                <q-chip v-if="item.isAppleHealth" color="blue-6" text-color="white" size="sm" dense class="q-ml-xs">Apple Health</q-chip>
-                <span v-if="item.status === 'running' && item.progress" class="text-primary text-caption q-ml-sm">{{ item.progress }}</span>
-                <span v-if="item.status === 'done' && item.progress" class="text-green text-caption q-ml-sm">{{ item.progress }}</span>
+              <q-item-label :class="{ 'text-grey-5': item.status === 'pending' || item.removed }">
+                <span :class="{ 'text-strike': item.removed }">{{ item.label }}</span>
+                <q-chip v-if="item.isAppleHealth && !item.removed" color="blue-6" text-color="white" size="sm" dense class="q-ml-xs">Apple Health</q-chip>
+                <span v-if="item.removed && item.progress" class="text-grey-6 text-caption q-ml-sm">{{ item.progress }}</span>
+                <span v-else-if="item.status === 'running' && item.progress" class="text-primary text-caption q-ml-sm">{{ item.progress }}</span>
+                <span v-else-if="item.status === 'done' && item.progress" class="text-green text-caption q-ml-sm">{{ item.progress }}</span>
               </q-item-label>
               <q-item-label v-if="item.status === 'error' && item.errorMsg" caption class="text-negative">{{ item.errorMsg }}</q-item-label>
             </q-item-section>
@@ -78,6 +80,7 @@ interface RestoreItem {
   progress?: string;
   errorMsg?: string;
   isAppleHealth?: boolean;
+  removed?: boolean;
 }
 
 interface CloudHealth {
@@ -415,6 +418,19 @@ const executeRehydrate = async () => {
   // runs — not only after it completes. Also defensively add a row for
   // any server-reported missing file that the backup didn't list.
   for (const name of folderAdded) ensureFileItem(name);
+  // Files the user deleted from the folder were just dropped from the
+  // cloud by pass 1. They still have a checklist row (built from the
+  // stale maia-state.json backup) — relabel it clearly instead of
+  // letting the "Already in cloud" pass below mislabel them.
+  const removedSet = new Set(folderRemoved);
+  for (const name of folderRemoved) {
+    ensureFileItem(name);
+    updateItem(`file:${name}`, {
+      status: 'done',
+      removed: true,
+      progress: 'Removed from Knowledge Base'
+    });
+  }
   for (const m of (Array.isArray(data1.missingFiles) ? data1.missingFiles : [])) {
     if (m?.fileName) ensureFileItem(m.fileName);
   }
@@ -518,6 +534,7 @@ const executeRehydrate = async () => {
   }
   // For files that were already in S3 (not in `missing`), mark done now.
   for (const f of (userDoc.files || [])) {
+    if (removedSet.has(f.fileName)) continue; // keep the "Removed" label
     const k = `file:${f.fileName}`;
     if (!missing.some((mf: any) => mf.bucketKey === f.bucketKey)) {
       updateItem(k, { status: 'done', progress: 'Already in cloud' });
