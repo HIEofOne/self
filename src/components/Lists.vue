@@ -2235,7 +2235,6 @@ const loadCurrentMedications = async (forceRefresh = false) => {
   }
   loadCurrentMedicationsRunning = true;
 
-  console.log('[Lists] Loading Current Medications (forceRefresh=%s)', forceRefresh);
   logWizardEvent('current_meds_load_start', { forceRefresh });
 
   try {
@@ -2251,7 +2250,6 @@ const loadCurrentMedications = async (forceRefresh = false) => {
             currentMedications.value = statusResult.currentMedications;
             isCurrentMedicationsEdited.value = true;
             isInitialMedsLoading.value = false;
-            console.log('[Lists] Current Medications loaded from saved user document (%d chars)', statusResult.currentMedications.length);
             logWizardEvent('current_meds_loaded_from_user_doc', { length: statusResult.currentMedications.length });
             currentMedicationsSource.value = 'user-doc';
             emit('medications-offered', {

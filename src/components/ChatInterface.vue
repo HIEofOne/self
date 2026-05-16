@@ -1092,7 +1092,6 @@ const logProvisioningEvent = async (eventData: Record<string, any>) => {
     const last = lastLoggedEventAt[key] || 0;
     const now = Date.now();
     if (now - last < window) {
-      console.log('[ProvisioningLog] coalesced duplicate %s (last %dms ago, key=%s)', evt, now - last, key);
       return;
     }
     lastLoggedEventAt[key] = now;
@@ -3198,11 +3197,15 @@ const generateSetupLogPdf = async () => {
               : `legacy per-field path (snapshot v${evt.snapshotSchemaVersion || 1}${evt.hasUserDocInState ? ', has userDoc' : ', no userDoc'})`;
             return `[${t}] Restore path: ${detail}`;
           }
-          case 'maia-state-saved': {
-            return `[${t}] maia-state.json saved: schemaVersion=${evt.schemaVersion || 1}, userDoc fetch status=${evt.status} hasUserDoc=${evt.hasUserDoc}`;
-          }
+          // maia-state-saved was a diagnostic event; no longer emitted.
+          // Keep a no-op renderer so any old events in existing logs
+          // don't fall to the default 'unknown' line.
+          case 'maia-state-saved': return null as any;
           case 'restore-fallback-to-legacy': {
             return `[${t}] Restore fell back to legacy path: ${evt.reason || 'unknown error'}`;
+          }
+          case 'restore-postcommit-error': {
+            return `[${t}] Restore completed with a post-step warning (account is restored): ${evt.reason || 'unknown'}`;
           }
           case 'chats-restored': return `[${t}] Saved chats restored (${evt.count || 0})`;
           case 'instructions-restored': return `[${t}] Agent Instructions restored`;
@@ -3257,6 +3260,9 @@ const generateSetupLogPdf = async () => {
 
         const [r, g, b] = getEventColor(evt);
         const text = formatEvent(evt);
+        // A null/empty render means "intentionally not shown" (diagnostic
+        // events we keep a renderer for but don't want in the PDF).
+        if (!text) continue;
         const isMilestone = evt.event?.endsWith('-complete') || evt.event?.endsWith('-started') || evt.event === 'account-deleted';
 
         if (isMilestone) {
@@ -3472,9 +3478,24 @@ const saveStateToLocalFolderImpl = async () => {
           const data = await res.json();
           if (data?.userDoc) fullUserDoc = data.userDoc;
         }
-      } catch { /* default to null; snapshot will be v1 */ }
+      } catch { /* fall back to existing below */ }
     })()
   ]);
+
+  // INVARIANT: never downgrade the backup. This writer is invoked by
+  // generateSetupLogPdf, which App.vue calls during sign-out / cloud
+  // destroy — by then the session is gone and /api/user-doc/full 401s.
+  // If the fresh fetch failed, reuse the userDoc already on disk so a
+  // transient auth failure can't turn a good v2 backup into a v1 one.
+  if (!fullUserDoc) {
+    try {
+      const existingState = await readStateFile(localFolderHandle.value);
+      if (existingState?.userDoc) {
+        fullUserDoc = existingState.userDoc;
+        console.warn('[saveState] userDoc fetch failed — preserving existing v2 backup (no downgrade)');
+      }
+    } catch { /* no existing state; will write v1 (first run only) */ }
+  }
 
   // Folder inventory (only PDFs / structured records — exclude MAIA-
   // generated files). Used by Restore to diff against userDoc.files.
@@ -3514,9 +3535,6 @@ const saveStateToLocalFolderImpl = async () => {
     listsMarkdown: listsMarkdownText,
     provisioningLog: provisioningLogData
   };
-  console.log(
-    `[saveStateToLocalFolder] /api/user-doc/full hasUserDoc=${!!fullUserDoc} schemaVersion=${fullUserDoc ? 2 : 1}`
-  );
   await writeStateFile(localFolderHandle.value, state);
 };
 

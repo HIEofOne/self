@@ -208,7 +208,12 @@ const buildRestoreItems = () => {
 // rebuilt and indexing is triggered. The cloud doesn't have to remember
 // anything — we push everything that matters from maia-state.json.
 //
-// Falls back to the legacy executeRestore body below if anything throws.
+// Falls back to the legacy executeRestore body below ONLY if it throws
+// before the userDoc is pushed (rehydratePastNoReturn still false).
+// After that point every error is handled in-line and the wizard always
+// reaches phase='complete' — falling back later would re-run a full
+// 7-minute restore on top of a half-rehydrated account.
+let rehydratePastNoReturn = false;
 const executeRehydrate = async () => {
   const state = props.localState as any;
   const uid = props.userId;
@@ -243,7 +248,14 @@ const executeRehydrate = async () => {
   }
 
   // Pass 1: push the full userDoc; server reports which file bytes it
-  // doesn't have in Spaces yet.
+  // doesn't have in Spaces yet. THIS is the only place executeRehydrate
+  // is allowed to throw — before it, falling back to the legacy path is
+  // safe (no server-side mutation yet). After pass 1 succeeds the userDoc
+  // has been replaced server-side; from here on every failure is handled
+  // in-line and we ALWAYS reach phase='complete'. Throwing past this
+  // point would make executeRestore's catch run the legacy path on top
+  // of a half-rehydrated account — that's the "Restore ran twice / a
+  // second 7-minute index" bug.
   const r1 = await fetch('/api/account/rehydrate', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -258,6 +270,7 @@ const executeRehydrate = async () => {
     const err = await r1.json().catch(() => ({}));
     throw new Error(err.error || `rehydrate failed: ${r1.status}`);
   }
+  rehydratePastNoReturn = true;
   const data1 = await r1.json();
 
   // Surface the folder diff in maia-log.pdf, same shape the legacy path
@@ -520,16 +533,33 @@ const executeRestore = async () => {
     hasUserDocInState: !!stateAny?.userDoc
   });
   if (hasV2) {
+    rehydratePastNoReturn = false;
     try {
       await executeRehydrate();
       return;
     } catch (e: any) {
-      console.error('[RestoreWizard] Rehydrate path failed, falling back to legacy:', e);
+      if (rehydratePastNoReturn) {
+        // The userDoc was already pushed and (likely) the KB indexed.
+        // Falling back to the legacy path here would run a SECOND full
+        // restore on top of a half-rehydrated account — the "Restore
+        // ran twice / second 7-minute index" bug. Surface the error,
+        // mark complete, and stop. The account is already mostly
+        // restored; a reload + manual retry is safer than auto-rerun.
+        console.error('[RestoreWizard] Rehydrate failed AFTER commit — NOT falling back:', e);
+        logProvisioningEvent({
+          event: 'restore-postcommit-error',
+          reason: e?.message || 'post-commit failure'
+        });
+        restoreSummary.value = 'Account restored (with a post-step warning — see log).';
+        phase.value = 'complete';
+        return;
+      }
+      console.error('[RestoreWizard] Rehydrate failed before commit, falling back to legacy:', e);
       logProvisioningEvent({
         event: 'restore-fallback-to-legacy',
         reason: e?.message || 'rehydrate failed'
       });
-      // fall through to legacy path
+      // fall through to legacy path (safe — no server mutation yet)
     }
   }
 
