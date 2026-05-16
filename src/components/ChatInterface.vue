@@ -492,12 +492,8 @@
               </q-item-section>
             </q-item>
           </q-list>
-
-          <!-- Active phase status -->
-          <div v-if="localFolderAutoRunActive" class="text-caption text-primary q-mt-md">
-            <q-spinner size="14px" class="q-mr-xs" />
-            {{ localFolderAutoRunPhase }}
-          </div>
+          <!-- (Old transient "Active phase status" line removed — the
+               persistent footer below now covers the whole flow.) -->
         </q-card-section>
 
         <!-- Test results panel (localhost only, shown below wizard progress) -->
@@ -511,6 +507,29 @@
               {{ line.ok ? '\u2713' : '\u2717' }} {{ line.text }}
             </div>
             <pre v-if="testFinalOutput" class="q-mt-sm text-caption" style="white-space: pre-wrap; max-height: 300px; overflow-y: auto; background: #fff; padding: 6px; border-radius: 4px; font-family: monospace; font-size: 11px;">{{ testFinalOutput }}</pre>
+          </div>
+        </q-card-section>
+
+        <!-- Persistent running-status footer (mirrors the Restore wizard).
+             Driven by a computed so it stays accurate through upload,
+             agent deploy, KB indexing and the verify steps — instead of
+             the old localFolderAutoRunActive line that vanished the
+             moment indexing was kicked off. -->
+        <q-card-section v-if="setupFolderConnected" class="q-pt-none">
+          <div
+            class="row items-center text-caption text-grey-7"
+            style="border-top: 1px solid #ececec; padding-top: 8px"
+          >
+            <q-icon
+              v-if="setupAllComplete"
+              name="check_circle" color="green" size="14px" class="q-mr-sm"
+            />
+            <q-icon
+              v-else-if="agentSetupTimedOut && !wizardStage1Complete"
+              name="error" color="negative" size="14px" class="q-mr-sm"
+            />
+            <q-spinner v-else size="14px" color="primary" class="q-mr-sm" />
+            <span>{{ wizardStatusLine }}</span>
           </div>
         </q-card-section>
 
@@ -6140,6 +6159,51 @@ const setupChecklistFiles = computed(() => {
   }
 
   return items;
+});
+
+// True once every Setup stage the user is waiting on has finished.
+const setupAllComplete = computed(() => {
+  const agentReady = wizardStage1Complete.value;
+  const kbDone = indexingStatus.value?.phase === 'complete' || !stage3HasFiles.value;
+  const recordsDone = !stage3HasFiles.value
+    || (wizardCurrentMedications.value && wizardPatientSummary.value);
+  return agentReady && kbDone && recordsDone && !wizardPreparingRecords.value;
+});
+
+// Persistent bottom status line for the Setup wizard. Derived from the
+// existing reactive state (not a flag that gets cleared early), so it
+// stays accurate through upload → agent deploy → KB indexing → verify,
+// in both local and cloud environments.
+const wizardStatusLine = computed(() => {
+  if (setupAllComplete.value) return 'Setup complete.';
+  if (wizardPreparingRecords.value) {
+    return wizardPreparingMessage.value || 'Preparing your health records…';
+  }
+  if (localFolderAutoRunActive.value && localFolderAutoRunPhase.value) {
+    return localFolderAutoRunPhase.value;
+  }
+  if (agentSetupTimedOut.value && !wizardStage1Complete.value) {
+    return 'AI agent deployment timed out — see maia-log.pdf';
+  }
+  if (stage3IndexingActive.value) {
+    const n = Number(stage2StatusDisplay.value.tokens);
+    const tok = Number.isFinite(n) && n > 0 ? `${n.toLocaleString()} tokens` : 'indexing';
+    return `Indexing knowledge base… (${tok}) — can take 5 to 60 minutes`;
+  }
+  if (!wizardStage1Complete.value && agentSetupPollingActive.value) {
+    const s = agentSetupElapsed.value;
+    return s
+      ? `Deploying AI agent… (${Math.floor(s / 60)}m ${s % 60}s)`
+      : 'Deploying AI agent…';
+  }
+  if (stage2StatusDisplay.value.completed && !wizardCurrentMedications.value) {
+    return 'Verify your Current Medications to continue.';
+  }
+  if (wizardCurrentMedications.value && !wizardPatientSummary.value
+      && stage2StatusDisplay.value.completed) {
+    return 'Verify your Patient Summary to continue.';
+  }
+  return 'Working…';
 });
 
 // Log when indexing completes (watch indexingStatus phase transition to 'complete')
