@@ -1876,7 +1876,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         return res.status(401).json({ error: 'Authentication required' });
       }
 
-      const { bucketKey: providedBucketKey, fileName: providedFileName } = req.body || {};
+      const { bucketKey: providedBucketKey, fileName: providedFileName, force: forceRebuild } = req.body || {};
       console.log('[SAVE-RESTORE] process-initial-file request', {
         userId,
         providedBucketKey: providedBucketKey || null,
@@ -2196,8 +2196,42 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       const markdownNorm = String(fullMarkdown || '').toLowerCase().replace(/\s+/g, ' ');
       const contentLooksLikeAppleHealth = markdownNorm.includes(APPLE_EXPORT_FOOTER_NORM);
       const isAppleHealth = !!appleHealthSource || contentLooksLikeAppleHealth;
+      // `appleHealthCategoriesBuiltAt` round-trips in the v2 backup, so
+      // on Restore it is set even though the cloud (Spaces category .md
+      // files) was wiped by "Destroy Cloud Account". Treating that as
+      // "already built" used to skip BOTH the rebuild and the
+      // isAppleHealth self-heal — which is why a re-added Apple Health
+      // file came back unrecognized (Lists showed "requires an Apple
+      // Health Export PDF"). Two fixes:
+      //  1. Always self-heal the isAppleHealth flag when AH is detected,
+      //     regardless of alreadyBuilt.
+      //  2. Rebuild categories when forced (Restore passes force:true),
+      //     when not yet built, OR when the source file changed.
       const alreadyBuilt = !!userDoc?.appleHealthCategoriesBuiltAt;
-      if (isAppleHealth && !alreadyBuilt) {
+      const sourceChanged = userDoc?.appleHealthCategoriesSourceKey !== initialFileBucketKey;
+      const shouldBuild = isAppleHealth && (forceRebuild === true || !alreadyBuilt || sourceChanged);
+
+      // Self-heal the file's isAppleHealth flag whenever AH is detected
+      // by content, even if we don't rebuild categories. Lists.vue's
+      // appleHealthFileInfo depends on this flag.
+      if (isAppleHealth && !appleHealthSource) {
+        try {
+          const flagDoc = await cloudant.getDocument('maia_users', userId);
+          if (Array.isArray(flagDoc.files)) {
+            const idx = flagDoc.files.findIndex(f => f?.bucketKey === initialFileBucketKey);
+            if (idx >= 0 && !flagDoc.files[idx].isAppleHealth) {
+              flagDoc.files[idx].isAppleHealth = true;
+              flagDoc.updatedAt = new Date().toISOString();
+              await cloudant.saveDocument('maia_users', flagDoc);
+              console.log(`[VIZ] Self-healed isAppleHealth flag for ${initialFileName} (content footer)`);
+            }
+          }
+        } catch (flagErr) {
+          console.warn('[VIZ] isAppleHealth self-heal conflict (non-fatal):', flagErr?.message);
+        }
+      }
+
+      if (shouldBuild) {
         categoryFiles = await extractAndSaveCategoryFiles(
           fullMarkdown,
           userId,
@@ -2210,9 +2244,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
           const freshUserDoc = await cloudant.getDocument('maia_users', userId);
           freshUserDoc.appleHealthCategoriesBuiltAt = new Date().toISOString();
           freshUserDoc.appleHealthCategoriesSourceKey = initialFileBucketKey;
-          // Also self-heal the file's isAppleHealth flag so subsequent
-          // logic (e.g. Lists.vue's hasAppleHealthSource) sees it.
-          if (!appleHealthSource && Array.isArray(freshUserDoc.files)) {
+          if (Array.isArray(freshUserDoc.files)) {
             const idx = freshUserDoc.files.findIndex(f => f?.bucketKey === initialFileBucketKey);
             if (idx >= 0) freshUserDoc.files[idx].isAppleHealth = true;
           }
@@ -2220,7 +2252,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         } catch (catSaveErr) {
           console.warn('[VIZ] Apple Health categories flag save conflict (non-fatal):', catSaveErr?.message);
         }
-        console.log(`[VIZ] Categories built for Apple Health file: ${initialFileName} (detected via ${appleHealthSource ? 'flag' : 'content footer'})`);
+        console.log(`[VIZ] Categories built for Apple Health file: ${initialFileName} (detected via ${appleHealthSource ? 'flag' : 'content footer'}, force=${forceRebuild === true}, sourceChanged=${sourceChanged})`);
       }
 
       res.json({

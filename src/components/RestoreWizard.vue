@@ -244,7 +244,11 @@ const rebuildAppleHealthCategories = async (
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ bucketKey: appleBucketKey, fileName: appleFileName })
+        // force:true — on Restore the cloud (Spaces category .md
+        // files) was wiped even though the backed-up userDoc still has
+        // appleHealthCategoriesBuiltAt set. Without force the server
+        // would treat it as already-built and skip the rebuild.
+        body: JSON.stringify({ bucketKey: appleBucketKey, fileName: appleFileName, force: true })
       });
       return true;
     }
