@@ -3178,6 +3178,7 @@ const generateSetupLogPdf = async () => {
             if (evt.totalKB) parts.push(`(${Number(evt.totalKB).toLocaleString()} KB)`);
             if (evt.appleHealthCount) parts.push(`${evt.appleHealthCount} Apple Health`);
             if (evt.failedCount) parts.push(`${evt.failedCount} failed`);
+            if (evt.method === 'folder-added-ingest') parts.push('(added in folder, ingested)');
             return `[${t}] Files uploaded: ${parts.join(', ')}`;
           }
           case 'apple-health-detected': return `[${t}] Apple Health detected: ${evt.fileName || ''}`;
@@ -3211,11 +3212,13 @@ const generateSetupLogPdf = async () => {
           case 'summary-restored': return `[${t}] Patient Summary restored (${evt.lines || 0} lines, ${Number(evt.chars || 0).toLocaleString()} chars)`;
           case 'restore-folder-added': {
             const names = Array.isArray(evt.files) ? evt.files.join(', ') : '';
-            return `[${t}] Folder change: ${evt.count || 0} file(s) added since last sign-off${names ? ': ' + names : ''}`;
+            const act = evt.action ? ` — ${evt.action}` : '';
+            return `[${t}] Folder change: ${evt.count || 0} file(s) added since last sign-off${names ? ': ' + names : ''}${act}`;
           }
           case 'restore-folder-removed': {
             const names = Array.isArray(evt.files) ? evt.files.join(', ') : '';
-            return `[${t}] Folder change: ${evt.count || 0} file(s) removed since last sign-off${names ? ': ' + names : ''}`;
+            const act = evt.action ? ` — ${evt.action}` : '';
+            return `[${t}] Folder change: ${evt.count || 0} file(s) removed since last sign-off${names ? ': ' + names : ''}${act}`;
           }
           case 'restore-state-incomplete': {
             const missing = Array.isArray(evt.missing) ? evt.missing.join(', ') : '';

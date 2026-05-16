@@ -258,6 +258,109 @@ others.
    folder, PUT rehydrate, stream missing bytes, poll indexing
    progress. The current 9-step orchestration becomes ~50 lines.
 
+### Phase 1 — status as built (2026-05-16)
+
+Phase 1 shipped, but the as-built shape deviates from the clean plan
+above. The deviations are deliberate — each one closed a real bug
+found in testing. Recording them so the doc matches reality.
+
+**What matches the plan**
+- `GET /api/user-doc/full` exists (strips `agentApiKey`,
+  `agentApiKeyId`, `challenge`).
+- `PUT /api/account/rehydrate` exists and runs the Restore steps.
+- `MaiaState` is now `{ schemaVersion: 2, userDoc, folder, ...v1
+  fields }`.
+
+**What deviates**
+- *Two state writers still coexist.* `saveLocalSnapshot` (App.vue) and
+  `saveStateToLocalFolder` (ChatInterface.vue) were not collapsed into
+  one. Both now write v2; `saveStateToLocalFolder` still does its own
+  multi-fetch, but it was decoupled from log generation (that coupling
+  was the 401/404 console cascade).
+- *`executeRehydrate` was added alongside the legacy `executeRestore`,
+  not as a replacement.* The legacy 9-step path is still in
+  RestoreWizard.vue and still runs for v1 snapshots. `executeRestore`
+  dispatches on `schemaVersion >= 2 && userDoc` → `executeRehydrate`,
+  else legacy. It is ~250 lines, not ~50, because it also owns
+  missing-byte upload, real indexing-poll, and category rebuild.
+- *Old per-field MaiaState fields are still written, not just read.*
+  Keeping them write-active avoids a one-way migration cliff if a
+  user rolls back the client.
+
+**New invariants discovered in testing (not in the original plan)**
+- **Never-downgrade.** If `/api/user-doc/full` fails (e.g. a transient
+  401 during sign-out), the writer reuses the on-disk `userDoc`
+  instead of writing a v1 doc. A v2 backup must never be clobbered by
+  a v1 one.
+- **rehydratePastNoReturn.** Once `executeRehydrate` has PUT the
+  userDoc successfully, a later failure must NOT fall back to the
+  legacy path — that caused a double full restore (two 7-min index
+  jobs). After the commit point, errors are logged as
+  `restore-postcommit-error` and Restore is marked complete.
+- **Offline log buffer.** `bufferLogEvent`/`readBufferedLogEvents`/
+  `clearBufferedLogEvents` in localFolder.ts. Provisioning-log events
+  emitted after the session is dead are buffered locally and merged
+  into maia-log.pdf on next render, so errors during sign-out/destroy
+  still appear in the audit log.
+- **Conflict-tolerant telemetry.** `POST /api/provisioning-log` never
+  500s. On a persistent CouchDB 409 it returns
+  `200 {success:false, buffered:true}`; the client treats
+  `resp.ok && body.success !== false` as delivered and buffers
+  otherwise.
+
+**"What this design removes" — reconciliation**
+The "What this design removes" list earlier in this doc is aspirational,
+not as-built. The following were NOT removed and are still live:
+`markRestoreComplete` / `postRestoreLockUntil` (60s post-restore lock),
+the `restore-state-incomplete` event, and the kb-attached poll. They
+are load-bearing for the as-built flow and should only be removed when
+Phase 2 collapses the orchestration.
+
+**Folder add/remove — implemented (2026-05-16)**
+The v2 rehydrate path now acts on `folderDiff`, not just logs it:
+
+1. **Server, `PUT /api/account/rehydrate`:** `folderDiff` is computed
+   *before* the pass-1 save. Every `removed` entry is dropped from
+   `docToWrite.files` before the save and before `missingFiles` is
+   computed, so a folder-removed file is neither re-requested (no
+   "Not found in local folder" error) nor left in the KB.
+2. **Client, `executeRehydrate`:** after the missing-bytes loop and
+   before pass 2, each `folderDiff.added` file is read from the local
+   folder handle, uploaded via `/api/files/upload` to the KB subfolder,
+   and registered via `/api/files/register`. The added entries are
+   passed into `rebuildAppleHealthCategories`, which content-detects a
+   newly-added Apple Health export (footer check) and self-heals its
+   `isAppleHealth` flag.
+3. **Pass-2 anti-clobber:** pass 1 + restore-bytes + register mutate
+   the *server's* userDoc; the client's in-memory copy is now stale.
+   Before pass 2 the client re-fetches `/api/user-doc/full` and sends
+   that authoritative doc back, so the server-side file changes (added
+   registered, removed dropped) are not overwritten. The KB reindex
+   (`/api/update-knowledge-base` + `/api/kb-indexing-status` poll) then
+   covers the new file set.
+4. **Audit:** `restore-folder-added` / `restore-folder-removed` carry
+   an `action` field (`will ingest` / `dropped from cloud`) and a
+   `files-uploaded` event with `method: 'folder-added-ingest'` records
+   the ingested files in maia-log.pdf.
+
+## Folder add/remove — test plan
+
+This is now testable end to end:
+
+1. Complete Setup, sign out (writes maia-state.json v2, destroys cloud
+   if "Destroy Cloud Account" was used).
+2. In Finder, **add** a new PDF to the local folder and **delete** an
+   existing one.
+3. Sign in → Restore.
+4. Expect in maia-log.pdf: a `Folder change: N file(s) added … — will
+   ingest` line, a `Folder change: N file(s) removed … — dropped from
+   cloud` line, a `Files uploaded … (added in folder, ingested)` line,
+   and `KB indexed` reflecting the new file count.
+5. Expect in the app: the added file present in Saved Files and the
+   KB; the removed file absent everywhere; no "Not found in local
+   folder" error; if the added file is an Apple Health export, its
+   badge and My Lists categories present.
+
 ### Phase 2 — Single file-ingest chokepoint (half a day)
 
 Goal: every file mutation goes through one endpoint that does

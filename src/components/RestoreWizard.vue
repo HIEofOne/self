@@ -348,18 +348,24 @@ const executeRehydrate = async () => {
 
   // Surface the folder diff in maia-log.pdf, same shape the legacy path
   // already emits, so the user-facing log stays consistent.
-  if (data1.folderDiff?.added?.length > 0) {
+  const folderAdded: string[] = Array.isArray(data1.folderDiff?.added) ? data1.folderDiff.added : [];
+  const folderRemoved: string[] = Array.isArray(data1.folderDiff?.removed) ? data1.folderDiff.removed : [];
+  if (folderAdded.length > 0) {
     logProvisioningEvent({
       event: 'restore-folder-added',
-      count: data1.folderDiff.added.length,
-      files: data1.folderDiff.added
+      count: folderAdded.length,
+      files: folderAdded,
+      action: 'will ingest'
     });
   }
-  if (data1.folderDiff?.removed?.length > 0) {
+  if (folderRemoved.length > 0) {
+    // The server already dropped these from userDoc.files before the
+    // pass-1 save, so they will not be re-requested or re-indexed.
     logProvisioningEvent({
       event: 'restore-folder-removed',
-      count: data1.folderDiff.removed.length,
-      files: data1.folderDiff.removed
+      count: folderRemoved.length,
+      files: folderRemoved,
+      action: 'dropped from cloud'
     });
   }
 
@@ -425,16 +431,115 @@ const executeRehydrate = async () => {
     });
   }
 
+  // Ingest folder-ADDED files. These are files the user dropped into
+  // the local folder while signed out — they are NOT in userDoc.files,
+  // so the server never listed them as "missing". Upload each to the
+  // KB folder and register it so pass 2 + the KB reindex pick it up.
+  // AH detection is content-based and happens in the category-rebuild
+  // step below (we have no content-detected flag for new files yet).
+  const addedFileEntries: Array<{ fileName: string; bucketKey: string }> = [];
+  if (folderAdded.length > 0) {
+    const kbName = await resolveKbName(uid);
+    let addedUploaded = 0;
+    let addedBytes = 0;
+    for (const fileName of folderAdded) {
+      const key = `file:${fileName}`;
+      updateItem(key, { label: fileName, needed: true, status: 'running' });
+      try {
+        let file: File | null = null;
+        if (folderNameToHandle[fileName]) {
+          file = await folderNameToHandle[fileName].getFile();
+        } else if (folderNameToSafariFile[fileName]) {
+          file = folderNameToSafariFile[fileName];
+        }
+        if (!file) {
+          updateItem(key, { status: 'error', errorMsg: 'Not found in local folder' });
+          continue;
+        }
+        const fd = new FormData();
+        fd.append('file', file);
+        fd.append('userId', uid);
+        if (kbName) {
+          fd.append('isInitialImport', 'true');
+          fd.append('subfolder', kbName);
+        }
+        const upResp = await fetch('/api/files/upload', {
+          method: 'POST',
+          credentials: 'include',
+          body: fd
+        });
+        if (!upResp.ok) {
+          const t = await upResp.text().catch(() => '');
+          updateItem(key, { status: 'error', errorMsg: `Upload failed: ${upResp.status} ${t}` });
+          continue;
+        }
+        const upData = await upResp.json();
+        const bucketKey = upData?.fileInfo?.bucketKey;
+        // Register so KB reindex (pass 2 / update-knowledge-base) finds
+        // it. isAppleHealth is left false here; rebuildAppleHealthCategories
+        // content-detects and self-heals the flag afterward.
+        if (bucketKey) {
+          try {
+            await fetch('/api/files/register', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              credentials: 'include',
+              body: JSON.stringify({
+                userId: uid,
+                fileName,
+                bucketKey,
+                fileSize: upData?.fileInfo?.size || file.size
+              })
+            });
+          } catch (regErr: any) {
+            console.error('[Rehydrate] register added file failed:', regErr?.message);
+          }
+          addedFileEntries.push({ fileName, bucketKey });
+        }
+        addedUploaded++;
+        addedBytes += file.size;
+        updateItem(key, { status: 'done', progress: 'Ingested (added in folder)' });
+      } catch (e: any) {
+        updateItem(key, { status: 'error', errorMsg: e?.message || 'Ingest failed' });
+      }
+    }
+    if (addedUploaded > 0) {
+      logProvisioningEvent({
+        event: 'files-uploaded',
+        count: addedUploaded,
+        totalKB: Math.round(addedBytes / 1024),
+        method: 'folder-added-ingest',
+        files: addedFileEntries.map(e => e.fileName)
+      });
+    }
+  }
+
   // Pass 2: now that all bytes are in S3, ask the server to finalize —
   // ensures KB exists and triggers indexing. This is also where any
   // newly-needed cloud resources get created.
+  //
+  // IMPORTANT: pass 1 + restore-bytes + /api/files/register have mutated
+  // the SERVER's userDoc (folder-removed files dropped, folder-added
+  // files registered). The client's in-memory `userDoc` is now stale —
+  // sending it back would clobber those server-side changes. Re-fetch
+  // the authoritative server doc and send THAT as the pass-2 body.
+  let pass2Doc: any = userDoc;
+  try {
+    const fresh = await fetch('/api/user-doc/full', { credentials: 'include' });
+    if (fresh.ok) {
+      const fd = await fresh.json();
+      if (fd && (fd.userDoc || fd.userId)) pass2Doc = fd.userDoc || fd;
+    }
+  } catch (e: any) {
+    console.warn('[Rehydrate] pass-2 doc refetch failed, using client copy:', e?.message);
+  }
   const r2 = await fetch('/api/account/rehydrate', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     credentials: 'include',
     body: JSON.stringify({
       schemaVersion: state.schemaVersion || 2,
-      userDoc,
+      userDoc: pass2Doc,
       folderFiles: folderInventory
     })
   });
@@ -533,7 +638,11 @@ const executeRehydrate = async () => {
   // isAppleHealth flag through the v2 round-trip, so the fast path
   // usually hits without re-parsing any PDF.
   try {
-    const rebuilt = await rebuildAppleHealthCategories(userDoc.files || []);
+    // Include folder-added files so a newly-added Apple Health export
+    // is content-detected and its categories built (it isn't in
+    // userDoc.files yet on this client-side copy).
+    const filesForRebuild = [...(userDoc.files || []), ...addedFileEntries];
+    const rebuilt = await rebuildAppleHealthCategories(filesForRebuild);
     if (rebuilt) {
       updateItem('lists', { status: 'done', progress: 'Restored' });
       logProvisioningEvent({ event: 'lists-restored' });

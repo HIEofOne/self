@@ -9105,6 +9105,36 @@ app.put('/api/account/rehydrate', async (req, res) => {
       docToWrite.agentEndpoint = existing.agentEndpoint;
     }
 
+    // Reconcile folder changes BEFORE the save. The user may have
+    // added or removed files in the local folder (Finder) while signed
+    // out. maia-state.json is the snapshot of "what the folder held at
+    // sign-off"; the folder is the source of truth now.
+    //  - REMOVED: drop the entry from userDoc.files so it is neither
+    //    re-requested as a "missing" file (which would surface a
+    //    "Not found in local folder" error) nor left in the KB.
+    //  - ADDED: reported back so the client uploads + ingests it; the
+    //    server can't read the user's local disk.
+    let folderDiff = null;
+    if (Array.isArray(folderFiles)) {
+      const MAIA_GENERATED = /^(maia-log\.pdf|maia-state\.json)$/i;
+      const isGenerated = (n) => MAIA_GENERATED.test(n) || /\.webloc$/i.test(n);
+      const presentNames = new Set(
+        folderFiles.map(f => f && f.name).filter(n => n && !isGenerated(n))
+      );
+      const docFiles = Array.isArray(docToWrite.files) ? docToWrite.files : [];
+      const expectedNames = new Set(docFiles.map(f => f.fileName));
+      const removed = docFiles
+        .map(f => f.fileName)
+        .filter(n => n && !presentNames.has(n));
+      const added = [...presentNames].filter(n => !expectedNames.has(n));
+      folderDiff = { added, removed };
+      if (removed.length > 0) {
+        const removedSet = new Set(removed);
+        docToWrite.files = docFiles.filter(f => !removedSet.has(f.fileName));
+        console.log(`[rehydrate] Dropped ${removed.length} folder-removed file(s) from userDoc.files: ${removed.join(', ')}`);
+      }
+    }
+
     // Save with conflict retry.
     let writeAttempts = 0;
     while (writeAttempts < 3) {
@@ -9154,7 +9184,6 @@ app.put('/api/account/rehydrate', async (req, res) => {
     // bucketKey isn't in Spaces, add it to missingFiles. The client
     // uploads each via POST /api/files/restore-bytes.
     const missingFiles = [];
-    let folderDiff = null;
     try {
       const { S3Client, HeadObjectCommand, ListObjectsV2Command } = await import('@aws-sdk/client-s3');
       const bucketUrl = getSpacesBucketName();
@@ -9179,16 +9208,6 @@ app.put('/api/account/rehydrate', async (req, res) => {
             }
             // Other errors: leave it; client retry will surface them.
           }
-        }
-        // Optional folder diff using client-supplied folderFiles. Mirrors
-        // the current RestoreWizard "added/removed since sign-off" log.
-        if (Array.isArray(folderFiles)) {
-          const expected = new Set((docToWrite.files || []).map(f => f.fileName));
-          const present = new Set(folderFiles.map(f => f.name));
-          folderDiff = {
-            added: folderFiles.map(f => f.name).filter(n => !expected.has(n)),
-            removed: (docToWrite.files || []).map(f => f.fileName).filter(n => !present.has(n))
-          };
         }
       }
     } catch (e) {
