@@ -3330,6 +3330,12 @@ const saveStateToLocalFolder = async () => {
   let agentInstructionsText: string | null = null;
   let listsMarkdownText: string | null = null;
   let provisioningLogData: Array<Record<string, any>> | undefined = undefined;
+  // Phase 1 of the local-first redesign: ALSO fetch the full userDoc so
+  // this writer produces a v2 snapshot. Without this, every call to
+  // saveStateToLocalFolder clobbered App.vue's saveLocalSnapshot v2
+  // write back to a v1 shape — the second writer that we missed when
+  // upgrading the schema. See Documentation/NewRestore.md.
+  let fullUserDoc: Record<string, any> | null = null;
 
   const fetchOpts = { credentials: 'include' as RequestCredentials };
 
@@ -3407,18 +3413,47 @@ const saveStateToLocalFolder = async () => {
         );
         if (merged.length > 0) provisioningLogData = merged;
       } catch { /* default to undefined */ }
+    })(),
+    (async () => {
+      try {
+        const res = await fetch('/api/user-doc/full', fetchOpts);
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.userDoc) fullUserDoc = data.userDoc;
+        }
+      } catch { /* default to null; snapshot will be v1 */ }
     })()
   ]);
 
+  // Folder inventory (only PDFs / structured records — exclude MAIA-
+  // generated files). Used by Restore to diff against userDoc.files.
+  let folderInventory: Array<{ name: string; size?: number; mtime?: number }> = [];
+  try {
+    const { listFolderFiles } = await import('../utils/localFolder');
+    const folderEntries = await listFolderFiles(localFolderHandle.value);
+    folderInventory = folderEntries
+      .filter(f => {
+        const n = f.name.toLowerCase();
+        return n !== 'maia-log.pdf' && n !== 'maia-state.json' && !n.endsWith('.webloc');
+      })
+      .map(f => ({ name: f.name, size: f.size, mtime: f.lastModified }));
+  } catch { /* default to empty */ }
+
   const state: MaiaState = {
-    version: 1,
+    // ── v2 fields (the actual backup) ─────────────────────────
+    schemaVersion: fullUserDoc ? 2 : 1,
+    userDoc: fullUserDoc || undefined,
+    folder: { files: folderInventory },
+    // ── v1 legacy fields (kept for one release for back-compat) ─
+    version: 2,
     userId: userId,
     displayName: props.user.displayName,
     updatedAt: new Date().toISOString(),
     files: wizardStage3Files.value.map(f => ({
       fileName: f.name,
       cloudStatus: f.inKnowledgeBase ? 'indexed' as const : 'pending' as const,
-      bucketKey: f.bucketKey
+      bucketKey: f.bucketKey,
+      ...(f.isAppleHealth ? { isAppleHealth: true } : {})
     })),
     currentMedications: medicationsText,
     patientSummary: summaryText,
@@ -3428,6 +3463,9 @@ const saveStateToLocalFolder = async () => {
     listsMarkdown: listsMarkdownText,
     provisioningLog: provisioningLogData
   };
+  console.log(
+    `[saveStateToLocalFolder] /api/user-doc/full hasUserDoc=${!!fullUserDoc} schemaVersion=${fullUserDoc ? 2 : 1}`
+  );
   await writeStateFile(localFolderHandle.value, state);
 };
 
