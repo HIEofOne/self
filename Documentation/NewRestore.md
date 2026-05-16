@@ -316,32 +316,40 @@ the `restore-state-incomplete` event, and the kb-attached poll. They
 are load-bearing for the as-built flow and should only be removed when
 Phase 2 collapses the orchestration.
 
-**Folder add/remove — implemented (2026-05-16)**
-The v2 rehydrate path now acts on `folderDiff`, not just logs it:
+**Folder add/remove — implemented (2026-05-16, server-driven)**
+The v2 rehydrate path acts on `folderDiff`. The first cut had the
+client upload added files itself with a *guessed* KB name, which left
+them registered-but-unindexed (the bucketKey didn't match the KB
+folder `update-knowledge-base` scans). The corrected design is
+**server-driven** — only the server knows the real KB name:
 
 1. **Server, `PUT /api/account/rehydrate`:** `folderDiff` is computed
-   *before* the pass-1 save. Every `removed` entry is dropped from
-   `docToWrite.files` before the save and before `missingFiles` is
-   computed, so a folder-removed file is neither re-requested (no
-   "Not found in local folder" error) nor left in the KB.
-2. **Client, `executeRehydrate`:** after the missing-bytes loop and
-   before pass 2, each `folderDiff.added` file is read from the local
-   folder handle, uploaded via `/api/files/upload` to the KB subfolder,
-   and registered via `/api/files/register`. The added entries are
-   passed into `rebuildAppleHealthCategories`, which content-detects a
-   newly-added Apple Health export (footer check) and self-heals its
-   `isAppleHealth` flag.
-3. **Pass-2 anti-clobber:** pass 1 + restore-bytes + register mutate
-   the *server's* userDoc; the client's in-memory copy is now stale.
-   Before pass 2 the client re-fetches `/api/user-doc/full` and sends
-   that authoritative doc back, so the server-side file changes (added
-   registered, removed dropped) are not overwritten. The KB reindex
-   (`/api/update-knowledge-base` + `/api/kb-indexing-status` poll) then
-   covers the new file set.
+   *before* the pass-1 save, after filtering out MAIA artifacts AND
+   dotfiles (`.DS_Store` etc — these are never user content and must
+   not be ingested).
+   - `removed` → dropped from `docToWrite.files` before the save and
+     before `missingFiles` (no "Not found in local folder" error, not
+     left in the KB).
+   - `added` → the server resolves the **permanent** KB name
+     (`getKBNameFromUserDoc`, round-tripped in the backup) and pushes
+     a `userDoc.files` entry with the correct bucketKey
+     `${userId}/${kbName}/${cleanName}` and `cloudStatus: 'pending'`.
+2. **Client, `executeRehydrate`:** no separate added-file upload path.
+   Because the added entries are now in `docToWrite.files` before the
+   Spaces-HEAD inspection, they appear in `data1.missingFiles` and are
+   streamed up by the **existing missing-bytes loop** via the proven
+   `/api/files/restore-bytes` path — into the correct KB folder, so
+   `update-knowledge-base` indexes them.
+3. **Pass-2 anti-clobber:** pass 1 + restore-bytes mutate the
+   *server's* userDoc; the client's in-memory copy is stale. Before
+   pass 2 the client re-fetches `/api/user-doc/full` and sends that
+   authoritative doc back. `rebuildAppleHealthCategories` runs on that
+   refetched doc, so a newly-added Apple Health export is
+   content-detected and its categories built.
 4. **Audit:** `restore-folder-added` / `restore-folder-removed` carry
-   an `action` field (`will ingest` / `dropped from cloud`) and a
-   `files-uploaded` event with `method: 'folder-added-ingest'` records
-   the ingested files in maia-log.pdf.
+   an `action` field (`ingested into KB` / `dropped from cloud`); the
+   added bytes are counted in the existing `files-uploaded`
+   (`method: restore-bytes`) event.
 
 ## Folder add/remove — test plan
 

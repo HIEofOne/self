@@ -3178,7 +3178,6 @@ const generateSetupLogPdf = async () => {
             if (evt.totalKB) parts.push(`(${Number(evt.totalKB).toLocaleString()} KB)`);
             if (evt.appleHealthCount) parts.push(`${evt.appleHealthCount} Apple Health`);
             if (evt.failedCount) parts.push(`${evt.failedCount} failed`);
-            if (evt.method === 'folder-added-ingest') parts.push('(added in folder, ingested)');
             return `[${t}] Files uploaded: ${parts.join(', ')}`;
           }
           case 'apple-health-detected': return `[${t}] Apple Health detected: ${evt.fileName || ''}`;

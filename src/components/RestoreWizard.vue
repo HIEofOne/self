@@ -304,7 +304,9 @@ const executeRehydrate = async () => {
       const entries = await listFolderFiles(props.localFolderHandle);
       for (const e of entries) {
         const lower = e.name.toLowerCase();
-        if (lower === 'maia-log.pdf' || lower === 'maia-state.json' || lower.endsWith('.webloc')) continue;
+        // Skip MAIA-generated artifacts and OS junk (dotfiles like
+        // .DS_Store). These are never user content.
+        if (e.name.startsWith('.') || lower === 'maia-log.pdf' || lower === 'maia-state.json' || lower.endsWith('.webloc')) continue;
         folderInventory.push({ name: e.name, size: e.size, mtime: e.lastModified });
         folderNameToHandle[e.name] = e.fileHandle;
       }
@@ -314,7 +316,7 @@ const executeRehydrate = async () => {
   } else if (props.safariFolderFiles) {
     for (const f of props.safariFolderFiles) {
       const lower = f.name.toLowerCase();
-      if (lower === 'maia-log.pdf' || lower === 'maia-state.json' || lower.endsWith('.webloc')) continue;
+      if (f.name.startsWith('.') || lower === 'maia-log.pdf' || lower === 'maia-state.json' || lower.endsWith('.webloc')) continue;
       folderInventory.push({ name: f.name, size: f.size, mtime: f.lastModified });
       folderNameToSafariFile[f.name] = f;
     }
@@ -355,7 +357,7 @@ const executeRehydrate = async () => {
       event: 'restore-folder-added',
       count: folderAdded.length,
       files: folderAdded,
-      action: 'will ingest'
+      action: 'ingested into KB'
     });
   }
   if (folderRemoved.length > 0) {
@@ -431,88 +433,14 @@ const executeRehydrate = async () => {
     });
   }
 
-  // Ingest folder-ADDED files. These are files the user dropped into
-  // the local folder while signed out — they are NOT in userDoc.files,
-  // so the server never listed them as "missing". Upload each to the
-  // KB folder and register it so pass 2 + the KB reindex pick it up.
-  // AH detection is content-based and happens in the category-rebuild
-  // step below (we have no content-detected flag for new files yet).
-  const addedFileEntries: Array<{ fileName: string; bucketKey: string }> = [];
-  if (folderAdded.length > 0) {
-    const kbName = await resolveKbName(uid);
-    let addedUploaded = 0;
-    let addedBytes = 0;
-    for (const fileName of folderAdded) {
-      const key = `file:${fileName}`;
-      updateItem(key, { label: fileName, needed: true, status: 'running' });
-      try {
-        let file: File | null = null;
-        if (folderNameToHandle[fileName]) {
-          file = await folderNameToHandle[fileName].getFile();
-        } else if (folderNameToSafariFile[fileName]) {
-          file = folderNameToSafariFile[fileName];
-        }
-        if (!file) {
-          updateItem(key, { status: 'error', errorMsg: 'Not found in local folder' });
-          continue;
-        }
-        const fd = new FormData();
-        fd.append('file', file);
-        fd.append('userId', uid);
-        if (kbName) {
-          fd.append('isInitialImport', 'true');
-          fd.append('subfolder', kbName);
-        }
-        const upResp = await fetch('/api/files/upload', {
-          method: 'POST',
-          credentials: 'include',
-          body: fd
-        });
-        if (!upResp.ok) {
-          const t = await upResp.text().catch(() => '');
-          updateItem(key, { status: 'error', errorMsg: `Upload failed: ${upResp.status} ${t}` });
-          continue;
-        }
-        const upData = await upResp.json();
-        const bucketKey = upData?.fileInfo?.bucketKey;
-        // Register so KB reindex (pass 2 / update-knowledge-base) finds
-        // it. isAppleHealth is left false here; rebuildAppleHealthCategories
-        // content-detects and self-heals the flag afterward.
-        if (bucketKey) {
-          try {
-            await fetch('/api/files/register', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              credentials: 'include',
-              body: JSON.stringify({
-                userId: uid,
-                fileName,
-                bucketKey,
-                fileSize: upData?.fileInfo?.size || file.size
-              })
-            });
-          } catch (regErr: any) {
-            console.error('[Rehydrate] register added file failed:', regErr?.message);
-          }
-          addedFileEntries.push({ fileName, bucketKey });
-        }
-        addedUploaded++;
-        addedBytes += file.size;
-        updateItem(key, { status: 'done', progress: 'Ingested (added in folder)' });
-      } catch (e: any) {
-        updateItem(key, { status: 'error', errorMsg: e?.message || 'Ingest failed' });
-      }
-    }
-    if (addedUploaded > 0) {
-      logProvisioningEvent({
-        event: 'files-uploaded',
-        count: addedUploaded,
-        totalKB: Math.round(addedBytes / 1024),
-        method: 'folder-added-ingest',
-        files: addedFileEntries.map(e => e.fileName)
-      });
-    }
-  }
+  // NOTE: folder-ADDED files need no separate upload path here. The
+  // server (PUT /api/account/rehydrate) already created a userDoc.files
+  // entry for each added file with the correct KB bucketKey, so they
+  // appear in `data1.missingFiles` and were just streamed up by the
+  // missing-bytes loop above (proven /api/files/restore-bytes path,
+  // correct KB folder → update-knowledge-base indexes them). This
+  // removes the old kbName-guessing client upload that left added
+  // files unindexed.
 
   // Pass 2: now that all bytes are in S3, ask the server to finalize —
   // ensures KB exists and triggers indexing. This is also where any
@@ -638,10 +566,13 @@ const executeRehydrate = async () => {
   // isAppleHealth flag through the v2 round-trip, so the fast path
   // usually hits without re-parsing any PDF.
   try {
-    // Include folder-added files so a newly-added Apple Health export
-    // is content-detected and its categories built (it isn't in
-    // userDoc.files yet on this client-side copy).
-    const filesForRebuild = [...(userDoc.files || []), ...addedFileEntries];
+    // Use the authoritative server doc (pass2Doc), which already
+    // includes any folder-added files with their correct KB
+    // bucketKeys — so a newly-added Apple Health export is
+    // content-detected and its categories built.
+    const filesForRebuild = (pass2Doc?.files && pass2Doc.files.length)
+      ? pass2Doc.files
+      : (userDoc.files || []);
     const rebuilt = await rebuildAppleHealthCategories(filesForRebuild);
     if (rebuilt) {
       updateItem('lists', { status: 'done', progress: 'Restored' });

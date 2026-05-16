@@ -9112,14 +9112,27 @@ app.put('/api/account/rehydrate', async (req, res) => {
     //  - REMOVED: drop the entry from userDoc.files so it is neither
     //    re-requested as a "missing" file (which would surface a
     //    "Not found in local folder" error) nor left in the KB.
-    //  - ADDED: reported back so the client uploads + ingests it; the
-    //    server can't read the user's local disk.
+    //  - ADDED: the server can't read the user's local disk, but it
+    //    knows the real KB folder name. It creates a userDoc.files
+    //    entry with the correct KB bucketKey so the file (a) registers
+    //    in Saved Files and (b) gets indexed by update-knowledge-base,
+    //    then the existing Spaces-HEAD loop flags it "missing" and the
+    //    client streams the bytes via the proven /api/files/restore-
+    //    bytes path — the SAME path that already works for restored
+    //    files. No separate, kbName-guessing client upload flow.
     let folderDiff = null;
     if (Array.isArray(folderFiles)) {
+      // Exclude MAIA-generated artifacts AND OS junk (dotfiles such as
+      // .DS_Store). These are never user content and must not be
+      // ingested or indexed.
       const MAIA_GENERATED = /^(maia-log\.pdf|maia-state\.json)$/i;
-      const isGenerated = (n) => MAIA_GENERATED.test(n) || /\.webloc$/i.test(n);
+      const isIgnorable = (n) =>
+        !n ||
+        n.startsWith('.') ||
+        MAIA_GENERATED.test(n) ||
+        /\.webloc$/i.test(n);
       const presentNames = new Set(
-        folderFiles.map(f => f && f.name).filter(n => n && !isGenerated(n))
+        folderFiles.map(f => f && f.name).filter(n => !isIgnorable(n))
       );
       const docFiles = Array.isArray(docToWrite.files) ? docToWrite.files : [];
       const expectedNames = new Set(docFiles.map(f => f.fileName));
@@ -9132,6 +9145,27 @@ app.put('/api/account/rehydrate', async (req, res) => {
         const removedSet = new Set(removed);
         docToWrite.files = docFiles.filter(f => !removedSet.has(f.fileName));
         console.log(`[rehydrate] Dropped ${removed.length} folder-removed file(s) from userDoc.files: ${removed.join(', ')}`);
+      }
+      if (added.length > 0) {
+        // Resolve the permanent KB name (round-tripped in the backup).
+        const kbName = getKBNameFromUserDoc(docToWrite, userId) || generateKBName(userId);
+        docToWrite.kbName = docToWrite.kbName || kbName;
+        if (!Array.isArray(docToWrite.files)) docToWrite.files = [];
+        const sizeByName = {};
+        for (const f of folderFiles) if (f && f.name) sizeByName[f.name] = f.size || 0;
+        for (const name of added) {
+          const cleanName = name.replace(/[^a-zA-Z0-9.-]/g, '_');
+          const bucketKey = `${userId}/${kbName}/${cleanName}`;
+          if (docToWrite.files.some(f => f.bucketKey === bucketKey)) continue;
+          docToWrite.files.push({
+            fileName: name,
+            bucketKey,
+            fileSize: sizeByName[name] || 0,
+            uploadedAt: new Date().toISOString(),
+            cloudStatus: 'pending'
+          });
+        }
+        console.log(`[rehydrate] Registered ${added.length} folder-added file(s) into KB folder: ${added.join(', ')}`);
       }
     }
 
