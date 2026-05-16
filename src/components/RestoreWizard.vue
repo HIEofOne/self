@@ -142,6 +142,28 @@ const updateItem = (key: string, updates: Partial<RestoreItem>) => {
   }
 };
 
+// Insert a file checklist line if it isn't already present. Used for
+// folder-ADDED files (not in the maia-state.json backup, so
+// buildRestoreItems never created a row for them) so the user can see
+// them being ingested live instead of discovering them only after the
+// wizard finishes. New rows are placed just before the first non-file
+// item (kb / agent / metadata) to keep all files grouped at the top.
+const ensureFileItem = (fileName: string, extra: Partial<RestoreItem> = {}) => {
+  const key = `file:${fileName}`;
+  if (restoreItems.value.some(i => i.key === key)) return;
+  const insertAt = restoreItems.value.findIndex(i => !i.key.startsWith('file:'));
+  const row: RestoreItem = {
+    key,
+    label: fileName,
+    needed: true,
+    status: 'pending',
+    progress: 'Added in folder',
+    ...extra
+  };
+  if (insertAt < 0) restoreItems.value.push(row);
+  else restoreItems.value.splice(insertAt, 0, row);
+};
+
 /** Get the KB name for this user — prefer the prop passed from recreate response */
 const resolveKbName = async (uid: string): Promise<string | null> => {
   // 1. Use the kbName prop (set at user doc creation time, always correct)
@@ -369,6 +391,15 @@ const executeRehydrate = async () => {
       files: folderRemoved,
       action: 'dropped from cloud'
     });
+  }
+
+  // Surface folder-ADDED files in the checklist NOW (right after pass 1
+  // reports them) so the user sees them being ingested while the wizard
+  // runs — not only after it completes. Also defensively add a row for
+  // any server-reported missing file that the backup didn't list.
+  for (const name of folderAdded) ensureFileItem(name);
+  for (const m of (Array.isArray(data1.missingFiles) ? data1.missingFiles : [])) {
+    if (m?.fileName) ensureFileItem(m.fileName);
   }
 
   // Mark agent and per-file checklist as "running" → done based on what
