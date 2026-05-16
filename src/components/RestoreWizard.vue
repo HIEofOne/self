@@ -597,7 +597,7 @@ const executeRehydrate = async () => {
     const err = await r2.json().catch(() => ({}));
     throw new Error(err.error || `rehydrate pass-2 failed: ${r2.status}`);
   }
-  const data2 = await r2.json();
+  await r2.json().catch(() => ({}));
 
   // Rebuild + reindex the KB. After a cloud destroy the KB, agent, and
   // Spaces files are all gone, so this is a full re-index (7+ min for a

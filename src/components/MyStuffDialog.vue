@@ -1281,7 +1281,7 @@ const emit = defineEmits<{
   'medications-offered': [data: {
     lines: number;
     source: 'apple-health' | 'patient-summary' | 'manual' | 'user-doc';
-    outcome: 'success' | 'ai-refusal' | 'ai-error' | 'ai-empty' | 'summary-empty' | 'no-source' | 'agent-not-ready';
+    outcome: 'success' | 'ai-refusal' | 'ai-error' | 'ai-empty' | 'summary-empty' | 'no-source' | 'agent-not-ready' | 'extract-error';
     detail?: string;
   }];
   'patient-summary-saved': [data: { userId: string; summary?: string }];
@@ -1309,7 +1309,7 @@ const handleCurrentMedicationsSaved = (payload: { value: string; edited: boolean
 const handleMedicationsOffered = (payload: {
   lines: number;
   source: 'apple-health' | 'patient-summary' | 'manual' | 'user-doc';
-  outcome: 'success' | 'ai-refusal' | 'ai-error' | 'ai-empty' | 'summary-empty' | 'no-source' | 'agent-not-ready';
+  outcome: 'success' | 'ai-refusal' | 'ai-error' | 'ai-empty' | 'summary-empty' | 'no-source' | 'agent-not-ready' | 'extract-error';
   detail?: string;
 }) => {
   emit('medications-offered', payload);
