@@ -1,8 +1,10 @@
-# Setup and Restore — proposed design
+# Setup and Restore — design and as-built
 
-Status: proposal, not yet implemented.
-Replaces: `OldNewRestore.md` (archived; describes the current,
-patch-heavy implementation).
+Status: **Phase 1 shipped and in active testing** (v1.3.60, 2026-05-16).
+The forward plan (Phases 2–4) is still a proposal. Read the
+"Phase 1 — status as built" and "Robustness fixes" sections for what
+the code actually does today; the "four operations" / Phase sections
+describe the target design.
 
 ## The mental model
 
@@ -171,11 +173,17 @@ working because absent flags are falsy.
 
 ## Derived state (categories, summaries) ages with content
 
-The current code has `appleHealthCategoriesBuiltAt` — a boolean "have
-we ever built." That's why a replaced Apple Health PDF leaves stale
-categories forever.
+The current code has `appleHealthCategoriesBuiltAt` — a timestamp
+"have we ever built." As of v1.3.59 `process-initial-file` mitigates
+the worst cases: it rebuilds when `force: true` (Restore always passes
+this), when not yet built, **or** when
+`appleHealthCategoriesSourceKey` no longer matches the file being
+processed. That stops Restore and a replaced AH file from leaving
+stale categories. It is still not content-keyed (no `sha256`
+comparison), so an *edited* AH file with the same bucketKey outside
+Restore can still serve stale categories — Phase 3 closes that.
 
-Replace with content-keyed:
+Target — replace with content-keyed:
 
 ```
 userDoc.derived = {
@@ -231,9 +239,9 @@ exists today as a band-aid for the mis-framed model:
 - The maia-log.pdf entries themselves — they're a user-facing audit
   log of what the server did, and the new server-side rehydrate
   endpoint can emit them at the same granularity.
-- The two known follow-up issues from the archived doc (DO API
-  timeout crashing Node, missing `resend` package). Both are still
-  pre-existing and worth fixing in their own changes.
+- Two pre-existing follow-up issues (DO API timeout crashing Node,
+  missing `resend` package). Both are unrelated to Restore and worth
+  fixing in their own changes.
 
 ## Implementation plan
 
@@ -343,31 +351,81 @@ folder `update-knowledge-base` scans). The corrected design is
 3. **Pass-2 anti-clobber:** pass 1 + restore-bytes mutate the
    *server's* userDoc; the client's in-memory copy is stale. Before
    pass 2 the client re-fetches `/api/user-doc/full` and sends that
-   authoritative doc back. `rebuildAppleHealthCategories` runs on that
-   refetched doc, so a newly-added Apple Health export is
-   content-detected and its categories built.
+   authoritative doc back, so server-side file changes (added
+   registered, removed dropped, isAppleHealth stamped) are not
+   overwritten.
 4. **Audit:** `restore-folder-added` / `restore-folder-removed` carry
    an `action` field (`ingested into KB` / `dropped from cloud`); the
    added bytes are counted in the existing `files-uploaded`
    (`method: restore-bytes`) event.
 
+## Robustness fixes (2026-05-16, v1.3.55 – v1.3.60)
+
+Iterative test rounds exposed several fragilities. Each is now closed:
+
+- **Folder-added files indexed via the real KB folder (v1.3.55).** The
+  first cut had the client guess the KB name; files landed outside the
+  folder `update-knowledge-base` scans and were never indexed. Now the
+  server (which knows the permanent KB name) assigns the bucketKey and
+  the file rides the proven restore-bytes path. Dotfiles (`.DS_Store`)
+  are filtered on both client scan and server diff.
+
+- **Apple Health detection is now SERVER-SIDE and single-source
+  (v1.3.60).** This was the most fragile area — detection used to be a
+  post-restore client step (`rebuildAppleHealthCategories`) that
+  re-derived AH from a *stale* `pass2Doc` snapshot taken before
+  `update-knowledge-base`, then called `process-initial-file` with a
+  bucketKey that might no longer match the live doc. It also returned
+  success without checking that call. Replaced: `/api/files/restore-
+  bytes` parses the first page of every uploaded PDF, matches the
+  Apple Health footer, and stamps `userDoc.files[].isAppleHealth` on
+  the exact entry it just wrote — at the one moment the bytes and the
+  bucketKey are both unambiguous. Every downstream consumer
+  (`Lists.vue`, the wizard badge, the category rebuild fast-path) just
+  reads the flag. `process-initial-file` additionally self-heals the
+  flag whenever content matches and accepts `force: true` so Restore
+  rebuilds categories even though the backed-up
+  `appleHealthCategoriesBuiltAt` makes it look "already built" (the
+  Spaces category `.md` files were wiped by Destroy Cloud Account).
+
+- **Agent-ready gate (v1.3.57).** `executeRehydrate` now polls
+  `/api/agent-setup-status` until `endpointReady` (concurrently with
+  KB indexing) and awaits it before completing. Previously the agent
+  step flipped to "Recreated" the instant the DO *create* call
+  returned — minutes before the deployment was actually online — which
+  is what produced the first-chat 401.
+
+- **Transparent 401 recovery (v1.3.57).** On a 401, the chat handler
+  recreates the agent API key *and re-runs the request* with the fresh
+  key (streaming + non-streaming, only if no body sent yet). The user
+  sees the answer, not an "authentication failed, please retry"
+  message. The message only appears if the retry also fails.
+
+- **Restore wizard UX (v1.3.56–1.3.58).** A running-status footer
+  (spinner + one-liner) mirrors the Setup wizard. Folder-added files
+  get checklist rows live (not only after completion), and on a
+  mid-restore reload the wizard re-fetches the authoritative doc so
+  the full file set still shows. Folder-removed files are labelled
+  "Removed from Knowledge Base" (grey, struck-through) instead of the
+  misleading "Already in cloud".
+
 ## Folder add/remove — test plan
 
-This is now testable end to end:
+Testable end to end:
 
-1. Complete Setup, sign out (writes maia-state.json v2, destroys cloud
-   if "Destroy Cloud Account" was used).
+1. Complete Setup, sign out (writes `maia-state.json` v2; optionally
+   "Destroy Cloud Account").
 2. In Finder, **add** a new PDF to the local folder and **delete** an
    existing one.
 3. Sign in → Restore.
-4. Expect in maia-log.pdf: a `Folder change: N file(s) added … — will
-   ingest` line, a `Folder change: N file(s) removed … — dropped from
-   cloud` line, a `Files uploaded … (added in folder, ingested)` line,
-   and `KB indexed` reflecting the new file count.
+4. Expect in maia-log.pdf: `Folder change: N file(s) added … —
+   ingested into KB`, `Folder change: N file(s) removed … — dropped
+   from cloud`, a `Files uploaded …` line (method restore-bytes), and
+   `KB indexed` reflecting the new file count.
 5. Expect in the app: the added file present in Saved Files and the
    KB; the removed file absent everywhere; no "Not found in local
    folder" error; if the added file is an Apple Health export, its
-   badge and My Lists categories present.
+   badge appears in Saved Files and the My Lists categories rebuild.
 
 ### Phase 2 — Single file-ingest chokepoint (half a day)
 
