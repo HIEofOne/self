@@ -3318,8 +3318,38 @@ const generateSetupLogPdf = async () => {
   await saveStateToLocalFolder();
 };
 
+// Coalesce back-to-back saveStateToLocalFolder calls. generateSetupLogPdf
+// invokes this and is itself called by half a dozen watchers during a
+// normal Setup cycle (file uploaded, file moved to KB, indexing progress,
+// medications saved, summary saved, etc.). Without a guard we get 10–15
+// duplicate writes per cycle, each fetching /api/user-doc/full and
+// scanning the folder. We trail-debounce: if a write is already in
+// flight, queue ONE follow-up write after it lands; further calls
+// during the in-flight window are folded into that single follow-up.
+let saveStateInFlight = false;
+let saveStatePending = false;
+
 /** Save current app state to maia-state.json in the local folder. */
 const saveStateToLocalFolder = async () => {
+  if (!localFolderHandle.value || !props.user?.userId) return;
+  if (saveStateInFlight) {
+    saveStatePending = true;
+    return;
+  }
+  saveStateInFlight = true;
+  try {
+    await saveStateToLocalFolderImpl();
+  } finally {
+    saveStateInFlight = false;
+    if (saveStatePending) {
+      saveStatePending = false;
+      // Fire-and-forget follow-up to capture the final state.
+      void saveStateToLocalFolder();
+    }
+  }
+};
+
+const saveStateToLocalFolderImpl = async () => {
   if (!localFolderHandle.value || !props.user?.userId) return;
   const userId = props.user.userId;
 

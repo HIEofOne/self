@@ -5229,19 +5229,29 @@ const replaceMedicationsInSummary = (
 ): string | null => {
   const lines = summaryText.split('\n');
   let headingIdx = -1;
+  // Permissive: match any line where, after stripping markdown decoration
+  // (#, *, _, whitespace), the visible text starts with "current medications".
+  // Catches:  ## Current Medications  /  **Current Medications**  /
+  //   ## **Current Medications**  /  Current Medications:  /
+  //   **Current Medications** (Patient Verified)  /  etc.
+  // The previous regex needed `*` or `#` exclusively at line start which
+  // missed the heading-plus-bold combo agents commonly produce.
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim().toLowerCase();
-    if (
-      line.match(/^#{1,3}\s*current\s+medications/) ||
-      line.match(/^\*{1,2}current\s+medications\*{1,2}/) ||
-      line === 'current medications' ||
-      line === 'current medications:'
-    ) {
+    const stripped = lines[i].toLowerCase().replace(/[#*_`]/g, '').trim();
+    if (stripped.startsWith('current medications')) {
       headingIdx = i;
       break;
     }
   }
-  if (headingIdx < 0) return null;
+  // If no heading was found, fall back to appending a fresh one at the end.
+  // The user's verified meds must always end up in the summary; returning
+  // null here is what caused the "summary has different meds than I saved"
+  // regression.
+  if (headingIdx < 0) {
+    if (!newMedsText || !newMedsText.trim()) return null;
+    const appended = `${summaryText.trimEnd()}\n\n## Current Medications${markVerified ? ' (Patient Verified)' : ''}\n\n${newMedsText}\n`;
+    return appended;
+  }
 
   // Safety: if the caller handed us empty meds, never blank the section body.
   // Just toggle the verification marker on the heading and keep the original body.
