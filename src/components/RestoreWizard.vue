@@ -48,6 +48,17 @@
         </div>
       </q-card-section>
 
+      <!-- Running status footer (same idea as the Setup wizard) -->
+      <q-card-section v-if="phase === 'execute'" class="q-pt-none">
+        <div
+          class="row items-center text-caption text-grey-7"
+          style="border-top: 1px solid #ececec; padding-top: 8px"
+        >
+          <q-spinner size="14px" color="primary" class="q-mr-sm" />
+          <span>{{ statusMessage }}</span>
+        </div>
+      </q-card-section>
+
       <q-card-actions align="right">
         <q-btn v-if="phase === 'complete'" unelevated label="Continue" color="primary" @click="emit('restore-complete')" />
       </q-card-actions>
@@ -134,6 +145,11 @@ const handleClose = () => {
 const phase = ref<'execute' | 'complete'>('execute');
 const restoreItems = ref<RestoreItem[]>([]);
 const restoreSummary = ref('');
+
+// Bottom status line (mirrors the Setup wizard's running-status footer)
+// so the user always sees a one-liner of what's happening right now.
+const statusMessage = ref('Starting restore…');
+const setStatus = (msg: string) => { statusMessage.value = msg; };
 
 const updateItem = (key: string, updates: Partial<RestoreItem>) => {
   const idx = restoreItems.value.findIndex(i => i.key === key);
@@ -353,6 +369,7 @@ const executeRehydrate = async () => {
   // point would make executeRestore's catch run the legacy path on top
   // of a half-rehydrated account — that's the "Restore ran twice / a
   // second 7-minute index" bug.
+  setStatus('Pushing your backup to the cloud…');
   const r1 = await fetch('/api/account/rehydrate', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -401,20 +418,72 @@ const executeRehydrate = async () => {
   for (const m of (Array.isArray(data1.missingFiles) ? data1.missingFiles : [])) {
     if (m?.fileName) ensureFileItem(m.fileName);
   }
+  // Resume robustness: if the page was reloaded mid-Restore, the first
+  // run already registered folder-added files server-side, so this
+  // run's folderDiff/missing is empty and buildRestoreItems (built from
+  // the stale maia-state.json) wouldn't show them. Fetch the
+  // authoritative server doc and ensure a row for every file it lists,
+  // so the checklist always reflects the full current file set.
+  try {
+    const dResp = await fetch('/api/user-doc/full', { credentials: 'include' });
+    if (dResp.ok) {
+      const dJson = await dResp.json();
+      for (const f of (dJson?.userDoc?.files || [])) {
+        if (f?.fileName) ensureFileItem(f.fileName, { isAppleHealth: !!f.isAppleHealth });
+      }
+    }
+  } catch { /* non-fatal: folderAdded/missing rows still show */ }
 
-  // Mark agent and per-file checklist as "running" → done based on what
-  // the server reports back.
-  if (data1.rebuilt?.agent) {
-    updateItem('agent', { status: 'done', progress: data1.rebuilt.agent === 'created' ? 'Recreated' : 'Reused' });
-  }
+  // Agent: the rehydrate endpoint returns as soon as the DO *create*
+  // call returns — but a freshly-created agent's deployment takes a few
+  // minutes to actually come online. Reporting "Recreated" immediately
+  // (the old behaviour) is why the first chat hit a 401: the agent
+  // wasn't deployed yet. Poll /api/agent-setup-status until the
+  // endpoint is actually ready, concurrently with KB indexing, and
+  // only then mark the step done. Reused agents usually flip ready on
+  // the first poll.
+  const recreated = data1.rebuilt?.agent === 'created';
+  updateItem('agent', {
+    status: 'running',
+    progress: recreated ? 'Deploying agent…' : 'Verifying agent…'
+  });
+  const agentReadyPromise = (async () => {
+    const agentStart = Date.now();
+    // 200 × 3s = 10 min ceiling (DO agent deploy is typically 1-3 min).
+    for (let i = 0; i < 200; i++) {
+      try {
+        const r = await fetch('/api/agent-setup-status', { credentials: 'include' });
+        if (r.ok) {
+          const s = await r.json();
+          if (s?.endpointReady) {
+            updateItem('agent', {
+              status: 'done',
+              progress: recreated ? 'Recreated' : 'Reused'
+            });
+            logProvisioningEvent({ event: 'agent-deployed', elapsedMs: Date.now() - agentStart });
+            return;
+          }
+        }
+      } catch { /* keep polling */ }
+      const secs = Math.round((Date.now() - agentStart) / 1000);
+      updateItem('agent', { progress: `Deploying agent… (${Math.floor(secs / 60)}m ${secs % 60}s)` });
+      await new Promise(res => setTimeout(res, 3000));
+    }
+    // Timed out — don't block Restore; deployment usually finishes
+    // shortly after. The transparent 401-retry covers the gap.
+    updateItem('agent', { status: 'done', progress: 'Deploying in background' });
+    logProvisioningEvent({ event: 'agent-deploy-timeout', elapsedMs: Date.now() - agentStart });
+  })();
 
   // Stream missing file bytes back. The server already knows where each
   // file belongs (its bucketKey was supplied in the userDoc).
   const missing = Array.isArray(data1.missingFiles) ? data1.missingFiles : [];
   let filesUploaded = 0;
   let totalUploadedBytes = 0;
+  if (missing.length > 0) setStatus(`Uploading ${missing.length} file${missing.length === 1 ? '' : 's'} to the cloud…`);
   for (const m of missing) {
     const key = `file:${m.fileName}`;
+    setStatus(`Uploading ${m.fileName}…`);
     updateItem(key, { status: 'running' });
     try {
       let file: File | null = null;
@@ -482,6 +551,7 @@ const executeRehydrate = async () => {
   // files registered). The client's in-memory `userDoc` is now stale —
   // sending it back would clobber those server-side changes. Re-fetch
   // the authoritative server doc and send THAT as the pass-2 body.
+  setStatus('Finalizing cloud account…');
   let pass2Doc: any = userDoc;
   try {
     const fresh = await fetch('/api/user-doc/full', { credentials: 'include' });
@@ -517,6 +587,7 @@ const executeRehydrate = async () => {
   // into a chat with an empty KB (the bug the user hit). This mirrors
   // the legacy path's polling loop exactly.
   {
+    setStatus('Indexing your records into the knowledge base… (this is the long step)');
     updateItem('kb', { status: 'running', progress: 'Creating knowledge base...' });
     const kbStartTime = Date.now();
     const kbResp = await fetch('/api/update-knowledge-base', {
@@ -650,8 +721,16 @@ const executeRehydrate = async () => {
     logProvisioningEvent({ event: 'lists-restored' });
   }
 
+  // Wait for the agent deployment poll (running concurrently with KB
+  // indexing) so we don't declare Restore complete while the Private AI
+  // agent is still coming online — that gap is what produced the
+  // user-visible "Authentication failed" on the first chat.
+  setStatus('Waiting for the Private AI agent to finish deploying…');
+  try { await agentReadyPromise; } catch { /* non-fatal */ }
+
   await logProvisioningEvent({ event: 'restore-complete' });
   restoreSummary.value = 'Account restored from local backup.';
+  setStatus('Restore complete.');
   phase.value = 'complete';
 };
 

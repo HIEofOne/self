@@ -81,6 +81,9 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
     let agentOwnerId = null;
     let userId = null;
     let agentId = null;
+    // Captured so the 401 handler can transparently re-run the request
+    // with a freshly recreated API key (no user-visible error).
+    let retryCtx = null;
     
     try {
       const { provider } = req.params;
@@ -221,6 +224,8 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
           } else {
             options.model = profileAgentName;
           }
+
+          retryCtx = { endpoint: profileEndpoint };
         } else {
           return res.status(404).json({
             error: 'Private AI agent not provisioned for this user',
@@ -299,7 +304,38 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
           // Recreate the API key (already imported at top of file)
           const newApiKey = await recreateAgentApiKey(doClient, cloudant, resolvedUserId, resolvedAgentId);
           console.log(`✅ Successfully recreated API key for agent ${resolvedAgentId}`);
-          
+
+          // Transparently re-run the request with the fresh key. The
+          // user should never see the auth failure if we can self-heal.
+          // Only possible if we haven't already started writing the
+          // response (a 401 fails before any body is sent).
+          if (retryCtx && !res.headersSent) {
+            try {
+              const freshProvider = new DigitalOceanProvider(newApiKey, { baseURL: retryCtx.endpoint });
+              const reqMessages = req.body?.messages;
+              const reqOptions = req.body?.options || {};
+              if (reqOptions.model == null && options?.model != null) reqOptions.model = options.model;
+              const wantStream = reqOptions.stream || req.headers.accept === 'text/event-stream';
+              if (wantStream) {
+                res.setHeader('Content-Type', 'text/event-stream');
+                res.setHeader('Cache-Control', 'no-cache');
+                res.setHeader('Connection', 'keep-alive');
+                await freshProvider.chat(reqMessages, { ...reqOptions, stream: true }, (update) => {
+                  res.write(`data: ${JSON.stringify(update)}\n\n`);
+                  if (update.isComplete) res.end();
+                });
+              } else {
+                const retryResponse = await freshProvider.chat(reqMessages, reqOptions);
+                res.json({ ...retryResponse, _meta: { provider, recovered: true } });
+              }
+              console.log(`✅ Auto-retried chat after key recreation for agent ${resolvedAgentId} (no user-visible error)`);
+              return;
+            } catch (retryError) {
+              console.error(`Auto-retry after key recreation failed for agent ${resolvedAgentId}:`, retryError.message);
+              // Fall through to the user-facing message below.
+            }
+          }
+
           errorMessage = 'Authentication failed for your Private AI agent. The API key has been automatically recreated. Please try your request again.';
         } catch (recreateError) {
           console.error(`Failed to recreate API key for agent ${resolvedAgentId}:`, recreateError.message);
