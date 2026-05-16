@@ -9014,8 +9014,11 @@ function sanitizeUserDocForExport(userDoc) {
 // maia-state.json carries a verbatim copy. Read-only; doesn't mutate.
 app.get('/api/user-doc/full', async (req, res) => {
   try {
-    const userId = resolveUserId(req, res);
-    if (!userId) return; // 403 already sent
+    const sessionUserId = req.session?.userId || null;
+    if (!sessionUserId) {
+      return res.status(401).json({ success: false, error: 'NOT_AUTHENTICATED' });
+    }
+    const userId = sessionUserId;
     const userDoc = await cloudant.getDocument('maia_users', userId);
     if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
     res.json({
