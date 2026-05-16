@@ -3192,6 +3192,15 @@ const generateSetupLogPdf = async () => {
             const missing = Array.isArray(evt.missing) ? evt.missing.join(', ') : '';
             return `[${t}] maia-state.json is missing: ${missing} — manual entry will be required after restore`;
           }
+          case 'restore-path-chosen': {
+            const detail = evt.path === 'rehydrate-v2'
+              ? 'new full-doc rehydrate path (v2 snapshot)'
+              : `legacy per-field path (snapshot v${evt.snapshotSchemaVersion || 1}${evt.hasUserDocInState ? ', has userDoc' : ', no userDoc'})`;
+            return `[${t}] Restore path: ${detail}`;
+          }
+          case 'restore-fallback-to-legacy': {
+            return `[${t}] Restore fell back to legacy path: ${evt.reason || 'unknown error'}`;
+          }
           case 'chats-restored': return `[${t}] Saved chats restored (${evt.count || 0})`;
           case 'instructions-restored': return `[${t}] Agent Instructions restored`;
           case 'lists-restored': return `[${t}] My Lists restored`;

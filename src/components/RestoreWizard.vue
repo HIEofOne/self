@@ -444,8 +444,17 @@ const executeRestore = async () => {
   // a full userDoc backup), take the new rehydrate path. Otherwise fall
   // through to the legacy per-field reconstruction below. See
   // Documentation/NewRestore.md for the model.
-  const v2 = state && (state as any).schemaVersion >= 2 && (state as any).userDoc;
-  if (v2) {
+  const stateAny = state as any;
+  const hasV2 = !!(stateAny?.schemaVersion && stateAny.schemaVersion >= 2 && stateAny.userDoc);
+  // Always log which path we're taking so the user / support can see it
+  // in maia-log.pdf without inspecting the JSON.
+  logProvisioningEvent({
+    event: 'restore-path-chosen',
+    path: hasV2 ? 'rehydrate-v2' : 'legacy-v1',
+    snapshotSchemaVersion: stateAny?.schemaVersion || 1,
+    hasUserDocInState: !!stateAny?.userDoc
+  });
+  if (hasV2) {
     try {
       await executeRehydrate();
       return;
