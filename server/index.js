@@ -9317,7 +9317,55 @@ app.post('/api/files/restore-bytes', restoreBytesUpload.single('file'), async (r
       ContentType: req.file.mimetype || 'application/octet-stream'
     }));
     console.log(`[restore-bytes] PUT ${bucketKey} (${req.file.size} bytes)`);
-    res.json({ success: true, bucketKey, size: req.file.size });
+
+    // Apple Health detection — SINGLE SOURCE OF TRUTH.
+    //
+    // We have the actual PDF bytes right here, at the authoritative
+    // moment. Detect Apple Health from content NOW and stamp
+    // userDoc.files[].isAppleHealth, instead of relying on a fragile
+    // post-restore client rebuild that re-derives it from a stale doc
+    // snapshot. After this, every downstream consumer (Lists.vue,
+    // rebuildAppleHealthCategories' fast path, the wizard badge) just
+    // reads the flag — no re-detection, no ordering hazards.
+    let isAppleHealth = false;
+    try {
+      const isPdf = /\.pdf$/i.test(bucketKey) ||
+        (req.file.mimetype || '').toLowerCase().includes('pdf');
+      if (isPdf) {
+        const { extractPdfWithPages } = await import('./utils/pdf-parser.js');
+        const parsed = await extractPdfWithPages(req.file.buffer);
+        const firstPageText = String(parsed?.pages?.[0]?.text || '')
+          .toLowerCase().replace(/\s+/g, ' ').trim();
+        const AH_FOOTER = 'this summary displays certain health information made available to you by your healthcare provider and may not completely';
+        if (firstPageText.includes(AH_FOOTER)) {
+          isAppleHealth = true;
+          // Persist the flag on the matching files[] entry (conflict-
+          // tolerant; never fail the upload over this).
+          for (let attempt = 0; attempt < 4; attempt++) {
+            try {
+              const doc = await cloudant.getDocument('maia_users', userId);
+              if (!Array.isArray(doc.files)) break;
+              const idx = doc.files.findIndex(f => f?.bucketKey === bucketKey);
+              if (idx < 0) break;
+              if (doc.files[idx].isAppleHealth === true) break;
+              doc.files[idx].isAppleHealth = true;
+              doc.updatedAt = new Date().toISOString();
+              await cloudant.saveDocument('maia_users', doc);
+              console.log(`[restore-bytes] Apple Health detected & flagged: ${bucketKey}`);
+              break;
+            } catch (saveErr) {
+              if (saveErr?.statusCode === 409 && attempt < 3) continue;
+              console.warn(`[restore-bytes] isAppleHealth flag save failed (non-fatal): ${saveErr?.message}`);
+              break;
+            }
+          }
+        }
+      }
+    } catch (ahErr) {
+      console.warn(`[restore-bytes] Apple Health detection skipped (non-fatal): ${ahErr?.message}`);
+    }
+
+    res.json({ success: true, bucketKey, size: req.file.size, isAppleHealth });
   } catch (error) {
     console.error('[restore-bytes] Error:', error);
     res.status(500).json({ success: false, error: error.message });
