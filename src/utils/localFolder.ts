@@ -53,6 +53,31 @@ export interface MaiaFileEntry {
 }
 
 export interface MaiaState {
+  // v2 (current). The local folder is the persistent home of all user
+  // state; the cloud is a disposable accelerator that gets rebuilt from
+  // this file on Restore. See Documentation/NewRestore.md.
+  schemaVersion?: number;        // 2 = userDoc + folder blocks present.
+                                 // Absent or 1 = legacy partial mirror below.
+  userDoc?: Record<string, any>; // Full userDoc verbatim (minus regenerable
+                                 //   secrets). Stripped of CouchDB _rev.
+                                 //   This is the authoritative backup.
+  folder?: {                     // Folder inventory at the moment of save.
+                                 //   Used to diff against the folder as it
+                                 //   is now at Restore time.
+    files?: Array<{
+      name: string;
+      size?: number;
+      mtime?: number;            // epoch ms
+      // sha256 will be added once Phase 2 (ingest chokepoint) lands; for
+      // now content-hash isn't computed locally.
+      sha256?: string;
+    }>;
+  };
+
+  // Legacy v1 fields. Still written by saveLocalSnapshot for one release
+  // so older clients can read recent backups; new clients prefer the
+  // v2 shape above when schemaVersion >= 2. Will be removed in a later
+  // change once everyone has migrated.
   version: number;
   userId: string;
   displayName?: string;
@@ -63,10 +88,6 @@ export interface MaiaState {
     size?: number;
     cloudStatus?: 'indexed' | 'pending' | 'not_in_kb' | 'uploaded';
     bucketKey?: string;
-    // The Apple Health designation is set by reading the PDF first page
-    // (looking for the Apple-export footer string) during Setup — not from
-    // the filename, which can be anything Finder chooses. Persisting it
-    // here means Restore can re-flag the file without re-parsing the PDF.
     isAppleHealth?: boolean;
   }>;
   currentMedications?: string | null;

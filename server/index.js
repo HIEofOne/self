@@ -4,6 +4,7 @@
  */
 
 import express from 'express';
+import multer from 'multer';
 import dotenv from 'dotenv';
 import session from 'express-session';
 import cookieParser from 'cookie-parser';
@@ -8972,6 +8973,281 @@ app.post('/api/user-status', async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     console.error('[user-status POST] Error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Multer for the restore-bytes endpoint. 50 MB matches the limit used by
+// the wizard's /api/files/upload in server/routes/files.js.
+const restoreBytesUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 }
+});
+
+// ── Phase 1 of the local-first redesign (see Documentation/NewRestore.md) ──
+//
+// Three endpoints implement the "maia-state.json is the full backup of
+// userDoc; the cloud is a disposable accelerator" model. The existing
+// per-field /api/restore + RestoreWizard orchestration stays in place
+// during transition; the new path is preferred when MaiaState.schemaVersion
+// >= 2 is present in the snapshot.
+//
+//   GET  /api/user-doc/full         — read the whole userDoc (minus secrets)
+//   PUT  /api/account/rehydrate     — push it back; rebuild missing cloud bits
+//   POST /api/files/restore-bytes   — stream a file to a specific bucketKey
+
+const REGENERABLE_SECRET_FIELDS = ['agentApiKey', 'agentApiKeyId', 'challenge'];
+
+function sanitizeUserDocForExport(userDoc) {
+  if (!userDoc) return null;
+  const clone = { ...userDoc };
+  // Strip CouchDB internals — they'll be reapplied on import.
+  delete clone._rev;
+  // Strip regenerable secrets. The DO API can issue a fresh agent API key
+  // on demand (recreateAgentApiKey), so backing this up is both unnecessary
+  // and a footgun if the local folder leaks.
+  for (const f of REGENERABLE_SECRET_FIELDS) delete clone[f];
+  return clone;
+}
+
+// Full userDoc export. Used by saveLocalSnapshot at sign-out so
+// maia-state.json carries a verbatim copy. Read-only; doesn't mutate.
+app.get('/api/user-doc/full', async (req, res) => {
+  try {
+    const userId = resolveUserId(req, res);
+    if (!userId) return; // 403 already sent
+    const userDoc = await cloudant.getDocument('maia_users', userId);
+    if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+    res.json({
+      success: true,
+      schemaVersion: 1,         // userDoc shape version; bump on breaking changes
+      exportedAt: new Date().toISOString(),
+      userDoc: sanitizeUserDocForExport(userDoc)
+    });
+  } catch (error) {
+    console.error('[user-doc/full] Error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Rehydrate the cloud from a local backup. Idempotent: if the cloud is
+// already in sync with the supplied userDoc, this returns success with
+// nothing rebuilt. Otherwise it replaces userDoc, ensures agent+KB exist
+// (regenerating their UUIDs if the DO records are gone), and returns the
+// list of files the client still needs to re-upload via
+// POST /api/files/restore-bytes.
+//
+// Request body: {
+//   schemaVersion: number,
+//   userDoc: { ... full userDoc, no _rev / no secrets ... },
+//   folderFiles?: [{ name, size, mtime, sha256 }, ...]  // optional, for diff
+// }
+//
+// Response: {
+//   success: true,
+//   rebuilt: { agent?: 'created'|'reused', kb?: 'created'|'reused' },
+//   missingFiles: [{ fileName, bucketKey }, ...],
+//   folderDiff?: { added: [...], removed: [...] }
+// }
+app.put('/api/account/rehydrate', async (req, res) => {
+  try {
+    const userId = req.session?.userId;
+    if (!userId) return res.status(401).json({ success: false, error: 'Authentication required' });
+
+    const { schemaVersion, userDoc: incoming, folderFiles } = req.body || {};
+    if (!incoming || typeof incoming !== 'object') {
+      return res.status(400).json({ success: false, error: 'MISSING_USER_DOC' });
+    }
+    if (incoming.userId && incoming.userId !== userId) {
+      return res.status(403).json({ success: false, error: 'USER_ID_MISMATCH' });
+    }
+
+    const rebuilt = {};
+    const errors = [];
+
+    // 1. Replace userDoc. Preserve _id and _rev from any existing doc so
+    // CouchDB accepts the write; otherwise create fresh. Strip the
+    // incoming doc of fields we don't want to round-trip (regenerable
+    // secrets, _rev). The supplied schemaVersion is recorded so future
+    // migrations have a baseline.
+    let existing = null;
+    try {
+      existing = await cloudant.getDocument('maia_users', userId);
+    } catch { /* may not exist */ }
+
+    const docToWrite = {
+      ...incoming,
+      _id: existing?._id || userId,
+      userId,
+      maiaStateSchemaVersionAtRestore: schemaVersion || 1,
+      restoredAt: new Date().toISOString()
+    };
+    // Strip any secrets the client may have included.
+    for (const f of REGENERABLE_SECRET_FIELDS) delete docToWrite[f];
+    if (existing?._rev) docToWrite._rev = existing._rev;
+
+    // Save with conflict retry.
+    let writeAttempts = 0;
+    while (writeAttempts < 3) {
+      writeAttempts += 1;
+      try {
+        await cloudant.saveDocument('maia_users', docToWrite);
+        break;
+      } catch (err) {
+        if (err.statusCode === 409 && writeAttempts < 3) {
+          const fresh = await cloudant.getDocument('maia_users', userId);
+          if (fresh?._rev) docToWrite._rev = fresh._rev;
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    // 2. Ensure agent exists in DO. If userDoc.assignedAgentId no longer
+    // resolves, ensureUserAgent (called from auth.js's path) creates a
+    // fresh one and updates the doc.
+    let agentResolved = null;
+    if (docToWrite.assignedAgentId) {
+      try {
+        agentResolved = await doClient.agent.get(docToWrite.assignedAgentId);
+        rebuilt.agent = 'reused';
+      } catch (e) {
+        if (e?.status === 404 || e?.statusCode === 404 || /not[_ ]?found/i.test(e?.message || '')) {
+          agentResolved = null; // fall through to recreate
+        } else {
+          errors.push(`agent.get: ${e.message || e}`);
+        }
+      }
+    }
+    if (!agentResolved) {
+      try {
+        const freshDoc = await cloudant.getDocument('maia_users', userId);
+        const { ensureUserAgent } = await import('./routes/auth.js');
+        const updated = await ensureUserAgent(doClient, cloudant, freshDoc);
+        rebuilt.agent = 'created';
+        if (updated?.assignedAgentId) docToWrite.assignedAgentId = updated.assignedAgentId;
+      } catch (e) {
+        errors.push(`ensureUserAgent: ${e.message || e}`);
+      }
+    }
+
+    // 3. Inspect Spaces against userDoc.files. For each entry whose
+    // bucketKey isn't in Spaces, add it to missingFiles. The client
+    // uploads each via POST /api/files/restore-bytes.
+    const missingFiles = [];
+    let folderDiff = null;
+    try {
+      const { S3Client, HeadObjectCommand, ListObjectsV2Command } = await import('@aws-sdk/client-s3');
+      const bucketUrl = getSpacesBucketName();
+      const bucketName = bucketUrl ? (bucketUrl.split('//')[1]?.split('.')[0] || 'maia') : null;
+      if (bucketName) {
+        const s3Client = new S3Client({
+          endpoint: getSpacesEndpoint(),
+          region: 'us-east-1',
+          forcePathStyle: process.env.S3_FORCE_PATH_STYLE === 'true',
+          credentials: {
+            accessKeyId: process.env.DIGITALOCEAN_AWS_ACCESS_KEY_ID || '',
+            secretAccessKey: process.env.DIGITALOCEAN_AWS_SECRET_ACCESS_KEY || ''
+          }
+        });
+        for (const f of (docToWrite.files || [])) {
+          if (!f.bucketKey || !f.fileName) continue;
+          try {
+            await s3Client.send(new HeadObjectCommand({ Bucket: bucketName, Key: f.bucketKey }));
+          } catch (headErr) {
+            if (headErr?.$metadata?.httpStatusCode === 404 || headErr?.name === 'NotFound') {
+              missingFiles.push({ fileName: f.fileName, bucketKey: f.bucketKey });
+            }
+            // Other errors: leave it; client retry will surface them.
+          }
+        }
+        // Optional folder diff using client-supplied folderFiles. Mirrors
+        // the current RestoreWizard "added/removed since sign-off" log.
+        if (Array.isArray(folderFiles)) {
+          const expected = new Set((docToWrite.files || []).map(f => f.fileName));
+          const present = new Set(folderFiles.map(f => f.name));
+          folderDiff = {
+            added: folderFiles.map(f => f.name).filter(n => !expected.has(n)),
+            removed: (docToWrite.files || []).map(f => f.fileName).filter(n => !present.has(n))
+          };
+        }
+      }
+    } catch (e) {
+      errors.push(`spaces inspect: ${e.message || e}`);
+    }
+
+    // 4. KB will be reconciled after the client uploads any missing files
+    // (calling POST /api/account/rehydrate a second time after the file
+    // uploads completes, OR POST /api/update-knowledge-base). We don't
+    // ensure KB here because triggering indexing with a partial file set
+    // is worse than waiting one more round-trip.
+    if (missingFiles.length === 0 && docToWrite.kbId) {
+      try {
+        await doClient.kb.get(docToWrite.kbId);
+        rebuilt.kb = 'reused';
+      } catch (e) {
+        if (e?.status === 404 || e?.statusCode === 404) {
+          // KB gone; rebuild on next pass when client may explicitly
+          // request /api/update-knowledge-base. Mark for follow-up.
+          rebuilt.kb = 'needs-rebuild';
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      rebuilt,
+      missingFiles,
+      folderDiff,
+      errors: errors.length > 0 ? errors : undefined
+    });
+  } catch (error) {
+    console.error('[rehydrate] Error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Restore-only file upload. The rehydrate endpoint returns a list of
+// missingFiles by bucketKey; the client streams each here. Unlike the
+// general /api/files/upload, this writes to an explicit bucketKey
+// (preserving what userDoc.files already says) and does NOT mutate the
+// user doc — the entry already exists from the rehydrate step.
+//
+// multipart/form-data:
+//   file=<bytes>
+//   bucketKey=userId/kbName/filename.ext
+app.post('/api/files/restore-bytes', restoreBytesUpload.single('file'), async (req, res) => {
+  try {
+    const userId = req.session?.userId;
+    if (!userId) return res.status(401).json({ error: 'Authentication required' });
+    if (!req.file) return res.status(400).json({ error: 'No file' });
+    const { bucketKey } = req.body || {};
+    if (typeof bucketKey !== 'string' || !bucketKey.startsWith(`${userId}/`)) {
+      return res.status(400).json({ error: 'INVALID_BUCKET_KEY' });
+    }
+    const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
+    const bucketUrl = getSpacesBucketName();
+    if (!bucketUrl) return res.status(500).json({ error: 'BUCKET_NOT_CONFIGURED' });
+    const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+    const s3Client = new S3Client({
+      endpoint: getSpacesEndpoint(),
+      region: 'us-east-1',
+      forcePathStyle: process.env.S3_FORCE_PATH_STYLE === 'true',
+      credentials: {
+        accessKeyId: process.env.DIGITALOCEAN_AWS_ACCESS_KEY_ID || '',
+        secretAccessKey: process.env.DIGITALOCEAN_AWS_SECRET_ACCESS_KEY || ''
+      }
+    });
+    await s3Client.send(new PutObjectCommand({
+      Bucket: bucketName,
+      Key: bucketKey,
+      Body: req.file.buffer,
+      ContentType: req.file.mimetype || 'application/octet-stream'
+    }));
+    console.log(`[restore-bytes] PUT ${bucketKey} (${req.file.size} bytes)`);
+    res.json({ success: true, bucketKey, size: req.file.size });
+  } catch (error) {
+    console.error('[restore-bytes] Error:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });

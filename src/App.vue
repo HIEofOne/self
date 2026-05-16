@@ -1752,7 +1752,7 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
       patientSummary: summary?.summary || null
     });
 
-    // Also save to local folder if connected (v2 state file)
+    // Also save to local folder if connected (v2 state file).
     if (localFolderHandle.value && user.value?.userId) {
       try {
         const now = new Date().toISOString();
@@ -1763,7 +1763,47 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
           const { readStateFile } = await import('./utils/localFolder');
           existingState = await readStateFile(localFolderHandle.value);
         } catch { /* first time, no existing state */ }
+
+        // Phase 1 of the local-first redesign: fetch the full userDoc and
+        // a folder inventory so the snapshot is a complete backup, not a
+        // hand-picked mirror. See Documentation/NewRestore.md.
+        // Falls through gracefully if the endpoint is unreachable (older
+        // server, network glitch); the legacy v1 fields below still write.
+        let fullUserDoc: Record<string, any> | null = null;
+        let userDocSchemaVersion = 1;
+        try {
+          const docRes = await fetch('/api/user-doc/full', { credentials: 'include' });
+          if (docRes.ok) {
+            const docPayload = await docRes.json();
+            fullUserDoc = docPayload?.userDoc || null;
+            userDocSchemaVersion = docPayload?.schemaVersion || 1;
+          }
+        } catch (e) {
+          console.warn('[saveLocalSnapshot] /api/user-doc/full unreachable:', e);
+        }
+        // Folder inventory (what files are physically in the folder right
+        // now). Used by Restore to diff against userDoc.files and detect
+        // files the user added or removed in Finder while signed out.
+        let folderInventory: Array<{ name: string; size?: number; mtime?: number }> = [];
+        try {
+          const { listFolderFiles } = await import('./utils/localFolder');
+          const folderEntries = await listFolderFiles(localFolderHandle.value);
+          folderInventory = folderEntries
+            .filter(f => {
+              const n = f.name.toLowerCase();
+              return n !== 'maia-log.pdf' && n !== 'maia-state.json' && !n.endsWith('.webloc');
+            })
+            .map(f => ({ name: f.name, size: f.size, mtime: f.lastModified }));
+        } catch (e) {
+          console.warn('[saveLocalSnapshot] folder scan failed:', e);
+        }
+
         const state: MaiaState = {
+          // ── v2 fields (the actual backup) ─────────────────────────
+          schemaVersion: fullUserDoc ? 2 : 1,
+          userDoc: fullUserDoc || undefined,
+          folder: { files: folderInventory },
+          // ── v1 legacy fields (kept for one release for back-compat) ─
           version: 2,
           userId: user.value.userId,
           displayName: user.value.displayName,

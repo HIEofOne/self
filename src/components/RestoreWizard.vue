@@ -202,6 +202,223 @@ const buildRestoreItems = () => {
   restoreItems.value = items;
 };
 
+// ── Phase 1: new rehydrate flow ─────────────────────────────────────
+// One PUT replaces userDoc on the server; server tells us which files
+// are missing in Spaces; we stream them up; second PUT confirms KB is
+// rebuilt and indexing is triggered. The cloud doesn't have to remember
+// anything — we push everything that matters from maia-state.json.
+//
+// Falls back to the legacy executeRestore body below if anything throws.
+const executeRehydrate = async () => {
+  const state = props.localState as any;
+  const uid = props.userId;
+  const userDoc = state?.userDoc;
+  if (!userDoc) throw new Error('rehydrate: no userDoc in state');
+
+  // Build the folder inventory (used for added/removed diff and for
+  // looking up the source file when uploading missing bytes).
+  let folderInventory: Array<{ name: string; size?: number; mtime?: number }> = [];
+  let folderNameToHandle: Record<string, FileSystemFileHandle> = {};
+  let folderNameToSafariFile: Record<string, File> = {};
+  if (props.localFolderHandle) {
+    try {
+      const { listFolderFiles } = await import('../utils/localFolder');
+      const entries = await listFolderFiles(props.localFolderHandle);
+      for (const e of entries) {
+        const lower = e.name.toLowerCase();
+        if (lower === 'maia-log.pdf' || lower === 'maia-state.json' || lower.endsWith('.webloc')) continue;
+        folderInventory.push({ name: e.name, size: e.size, mtime: e.lastModified });
+        folderNameToHandle[e.name] = e.fileHandle;
+      }
+    } catch (e) {
+      console.warn('[Rehydrate] Folder scan failed:', e);
+    }
+  } else if (props.safariFolderFiles) {
+    for (const f of props.safariFolderFiles) {
+      const lower = f.name.toLowerCase();
+      if (lower === 'maia-log.pdf' || lower === 'maia-state.json' || lower.endsWith('.webloc')) continue;
+      folderInventory.push({ name: f.name, size: f.size, mtime: f.lastModified });
+      folderNameToSafariFile[f.name] = f;
+    }
+  }
+
+  // Pass 1: push the full userDoc; server reports which file bytes it
+  // doesn't have in Spaces yet.
+  const r1 = await fetch('/api/account/rehydrate', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({
+      schemaVersion: state.schemaVersion || 2,
+      userDoc,
+      folderFiles: folderInventory
+    })
+  });
+  if (!r1.ok) {
+    const err = await r1.json().catch(() => ({}));
+    throw new Error(err.error || `rehydrate failed: ${r1.status}`);
+  }
+  const data1 = await r1.json();
+
+  // Surface the folder diff in maia-log.pdf, same shape the legacy path
+  // already emits, so the user-facing log stays consistent.
+  if (data1.folderDiff?.added?.length > 0) {
+    logProvisioningEvent({
+      event: 'restore-folder-added',
+      count: data1.folderDiff.added.length,
+      files: data1.folderDiff.added
+    });
+  }
+  if (data1.folderDiff?.removed?.length > 0) {
+    logProvisioningEvent({
+      event: 'restore-folder-removed',
+      count: data1.folderDiff.removed.length,
+      files: data1.folderDiff.removed
+    });
+  }
+
+  // Mark agent and per-file checklist as "running" → done based on what
+  // the server reports back.
+  if (data1.rebuilt?.agent) {
+    updateItem('agent', { status: 'done', progress: data1.rebuilt.agent === 'created' ? 'Recreated' : 'Reused' });
+  }
+
+  // Stream missing file bytes back. The server already knows where each
+  // file belongs (its bucketKey was supplied in the userDoc).
+  const missing = Array.isArray(data1.missingFiles) ? data1.missingFiles : [];
+  let filesUploaded = 0;
+  let totalUploadedBytes = 0;
+  for (const m of missing) {
+    const key = `file:${m.fileName}`;
+    updateItem(key, { status: 'running' });
+    try {
+      let file: File | null = null;
+      if (folderNameToHandle[m.fileName]) {
+        file = await folderNameToHandle[m.fileName].getFile();
+      } else if (folderNameToSafariFile[m.fileName]) {
+        file = folderNameToSafariFile[m.fileName];
+      }
+      if (!file) {
+        updateItem(key, { status: 'error', errorMsg: 'Not found in local folder' });
+        continue;
+      }
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('bucketKey', m.bucketKey);
+      const upResp = await fetch('/api/files/restore-bytes', {
+        method: 'POST',
+        credentials: 'include',
+        body: fd
+      });
+      if (!upResp.ok) {
+        const t = await upResp.text().catch(() => '');
+        updateItem(key, { status: 'error', errorMsg: `Upload failed: ${upResp.status} ${t}` });
+        continue;
+      }
+      filesUploaded++;
+      totalUploadedBytes += file.size;
+      updateItem(key, { status: 'done', progress: 'Uploaded' });
+    } catch (e: any) {
+      updateItem(key, { status: 'error', errorMsg: e?.message || 'Upload failed' });
+    }
+  }
+  // For files that were already in S3 (not in `missing`), mark done now.
+  for (const f of (userDoc.files || [])) {
+    const k = `file:${f.fileName}`;
+    if (!missing.some((mf: any) => mf.bucketKey === f.bucketKey)) {
+      updateItem(k, { status: 'done', progress: 'Already in cloud' });
+    }
+  }
+
+  if (filesUploaded > 0) {
+    logProvisioningEvent({
+      event: 'files-uploaded',
+      count: filesUploaded,
+      totalKB: Math.round(totalUploadedBytes / 1024),
+      method: 'restore-bytes'
+    });
+  }
+
+  // Pass 2: now that all bytes are in S3, ask the server to finalize —
+  // ensures KB exists and triggers indexing. This is also where any
+  // newly-needed cloud resources get created.
+  const r2 = await fetch('/api/account/rehydrate', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({
+      schemaVersion: state.schemaVersion || 2,
+      userDoc,
+      folderFiles: folderInventory
+    })
+  });
+  if (!r2.ok) {
+    const err = await r2.json().catch(() => ({}));
+    throw new Error(err.error || `rehydrate pass-2 failed: ${r2.status}`);
+  }
+  const data2 = await r2.json();
+
+  // If userDoc had a kbId but DO no longer has it, request a fresh
+  // indexing job via the existing update-knowledge-base endpoint —
+  // it handles KB creation and indexing in one call.
+  if (data2.rebuilt?.kb === 'needs-rebuild' || data2.rebuilt?.kb === 'created' || data2.rebuilt?.kb === 'reused') {
+    updateItem('kb', { status: 'running', progress: 'Indexing...' });
+    const kbResp = await fetch('/api/update-knowledge-base', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ userId: uid })
+    });
+    if (!kbResp.ok) {
+      updateItem('kb', { status: 'error', errorMsg: `KB update failed: ${kbResp.status}` });
+    } else {
+      updateItem('kb', { status: 'done', progress: 'Indexed' });
+      logProvisioningEvent({ event: 'kb-indexed' });
+    }
+  }
+
+  // The metadata items (medications, summary, chats, instructions) are
+  // already part of userDoc, so they're restored as a side effect of
+  // pass 1. Mark them done in the UI and log the same events the legacy
+  // path emitted, so maia-log.pdf reads the same as before.
+  if (userDoc.currentMedications) {
+    updateItem('medications', { status: 'done', progress: 'Restored' });
+    logProvisioningEvent({
+      event: 'medications-restored',
+      lines: String(userDoc.currentMedications).split('\n').filter((l: string) => l.trim()).length
+    });
+  }
+  if (userDoc.patientSummary || userDoc.patientSummaries?.length) {
+    const summaryText = userDoc.patientSummary
+      || (userDoc.patientSummaries && userDoc.patientSummaries[userDoc.patientSummaries.length - 1]?.text)
+      || '';
+    updateItem('summary', { status: 'done', progress: 'Restored' });
+    if (summaryText) {
+      logProvisioningEvent({
+        event: 'summary-restored',
+        lines: summaryText.split('\n').filter((l: string) => l.trim()).length,
+        chars: summaryText.length
+      });
+    }
+  }
+  if (userDoc.agentInstructions) {
+    updateItem('instructions', { status: 'done', progress: 'Applied' });
+    logProvisioningEvent({ event: 'instructions-restored' });
+  }
+  if (Array.isArray(userDoc.savedChats?.chats) && userDoc.savedChats.chats.length > 0) {
+    updateItem('chats', { status: 'done', progress: `${userDoc.savedChats.chats.length} restored` });
+    logProvisioningEvent({ event: 'chats-restored', count: userDoc.savedChats.chats.length });
+  }
+  if (userDoc.listsMarkdown) {
+    updateItem('lists', { status: 'done', progress: 'Restored' });
+    logProvisioningEvent({ event: 'lists-restored' });
+  }
+
+  await logProvisioningEvent({ event: 'restore-complete' });
+  restoreSummary.value = 'Account restored from local backup.';
+  phase.value = 'complete';
+};
+
 const executeRestore = async () => {
   phase.value = 'execute';
   const uid = props.userId;
@@ -222,6 +439,25 @@ const executeRestore = async () => {
       version: ''
     }
   });
+
+  // Phase 1 of the local-first redesign: if maia-state.json is v2 (carries
+  // a full userDoc backup), take the new rehydrate path. Otherwise fall
+  // through to the legacy per-field reconstruction below. See
+  // Documentation/NewRestore.md for the model.
+  const v2 = state && (state as any).schemaVersion >= 2 && (state as any).userDoc;
+  if (v2) {
+    try {
+      await executeRehydrate();
+      return;
+    } catch (e: any) {
+      console.error('[RestoreWizard] Rehydrate path failed, falling back to legacy:', e);
+      logProvisioningEvent({
+        event: 'restore-fallback-to-legacy',
+        reason: e?.message || 'rehydrate failed'
+      });
+      // fall through to legacy path
+    }
+  }
 
   // Folder diff: users can add/remove PDFs in Finder while signed out.
   // maia-state.json is the snapshot of "what the folder contained at last
