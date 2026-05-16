@@ -3320,8 +3320,17 @@ const generateSetupLogPdf = async () => {
   await writeFileToFolder(localFolderHandle.value, 'maia-log.pdf', pdfBlob);
   // Clean up legacy filename
   try { await localFolderHandle.value.removeEntry('maia-setup-log.pdf'); } catch { /* doesn't exist */ }
-  // Persist app state in maia-state.json
-  await saveStateToLocalFolder();
+  // NOTE: state persistence is intentionally DECOUPLED from log-PDF
+  // generation. generateSetupLogPdf is called on every wizard event
+  // (~12×/cycle) and during sign-out/destroy when the session is
+  // already gone. Previously it also called saveStateToLocalFolder,
+  // which fired a 7-endpoint re-save each time — flooding the console
+  // with 401/404s during session transitions and risking a v1
+  // clobber. maia-state.json is now written ONLY by App.vue's
+  // saveLocalSnapshot at the meaningful persistence points (sign-out,
+  // destroy-before-delete, wizard-complete, restore-complete) and by
+  // runAutoWizard's explicit Phase-5 call. The PDF here is rendered
+  // from the in-memory provisioning events; it needs no network.
 };
 
 // Coalesce back-to-back saveStateToLocalFolder calls. generateSetupLogPdf
