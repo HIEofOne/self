@@ -142,6 +142,62 @@ const resolveKbName = async (uid: string): Promise<string | null> => {
   return `${uid}-kb`;
 };
 
+// Rebuild the My Lists categories from the Apple Health PDF. Both restore
+// paths (legacy executeRestore and v2 executeRehydrate) need this: the
+// lists-restore step only writes a single restored.md, NOT the per-
+// category files (Medications.md, Conditions.md, …) the Lists tab
+// renders. process-initial-file regenerates them and self-heals
+// userDoc.files[].isAppleHealth. Returns true if a rebuild was triggered.
+const rebuildAppleHealthCategories = async (
+  files: Array<{ fileName: string; bucketKey?: string; isAppleHealth?: boolean }>
+): Promise<boolean> => {
+  try {
+    const APPLE_EXPORT_FOOTER = 'This summary displays certain health information made available to you by your healthcare provider and may not completely';
+    const appleFooterNorm = APPLE_EXPORT_FOOTER.toLowerCase().replace(/\s+/g, ' ').trim();
+    let appleBucketKey: string | null = null;
+    let appleFileName: string | null = null;
+
+    // Fast path: a file flagged isAppleHealth (content-detected at Setup,
+    // preserved through the v2 userDoc round-trip).
+    const flagged = files.find(f => f.isAppleHealth && f.bucketKey);
+    if (flagged?.bucketKey) {
+      appleBucketKey = flagged.bucketKey;
+      appleFileName = flagged.fileName;
+    } else {
+      // Slow path: content-detect across every restored PDF. Heals
+      // older snapshots that predate the isAppleHealth field.
+      for (const f of files) {
+        if (!f.bucketKey || !/\.pdf$/i.test(f.fileName)) continue;
+        try {
+          const r = await fetch(`/api/files/parse-pdf-first-page/${encodeURIComponent(f.bucketKey)}`, { credentials: 'include' });
+          if (!r.ok) continue;
+          const data = await r.json();
+          const text = String(data?.firstPageText || '').toLowerCase().replace(/\s+/g, ' ').trim();
+          if (text.includes(appleFooterNorm)) {
+            appleBucketKey = f.bucketKey;
+            appleFileName = f.fileName;
+            break;
+          }
+        } catch { /* next */ }
+      }
+    }
+    if (appleBucketKey && appleFileName) {
+      await fetch('/api/files/lists/process-initial-file', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ bucketKey: appleBucketKey, fileName: appleFileName })
+      });
+      return true;
+    }
+    console.log('[RestoreWizard] No Apple Health file detected — skipping category rebuild');
+    return false;
+  } catch (e: any) {
+    console.warn('[RestoreWizard] Category rebuild failed (non-fatal):', e?.message);
+    return false;
+  }
+};
+
 const buildRestoreItems = () => {
   const items: RestoreItem[] = [];
   const state = props.localState;
@@ -453,6 +509,20 @@ const executeRehydrate = async () => {
         updateItem('kb', { status: 'done', progress: 'Created' });
       }
     }
+  }
+
+  // Rebuild My Lists categories from the Apple Health PDF (same as the
+  // legacy path). userDoc.files carries the content-detected
+  // isAppleHealth flag through the v2 round-trip, so the fast path
+  // usually hits without re-parsing any PDF.
+  try {
+    const rebuilt = await rebuildAppleHealthCategories(userDoc.files || []);
+    if (rebuilt) {
+      updateItem('lists', { status: 'done', progress: 'Restored' });
+      logProvisioningEvent({ event: 'lists-restored' });
+    }
+  } catch (e: any) {
+    console.warn('[Rehydrate] Category rebuild failed (non-fatal):', e?.message);
   }
 
   // The metadata items (medications, summary, chats, instructions) are
