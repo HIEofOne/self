@@ -322,7 +322,7 @@
               <div class="text-h6">Setting Up Your MAIA</div>
               <div class="text-caption text-grey-7 q-mt-xs">
                 <template v-if="wizardPreparingRecords">
-                  Preparing health records for <strong>{{ props.user?.userId || 'Guest' }}</strong>. Almost done...
+                  {{ wizardPreparingMessage || `Preparing health records for ${props.user?.userId || 'Guest'}. Almost done...` }}
                 </template>
                 <template v-else>
                   Creating account for <strong>{{ props.user?.userId || 'Guest' }}</strong>. This can take 5 to 60 minutes.
@@ -1042,6 +1042,7 @@ const preGeneratedSummary = ref<string | null>(null);
 /** True while the wizard is generating Patient Summary and preparing to open My Lists.
  *  Keeps the wizard dialog visible so the user doesn't see a zombie chat. */
 const wizardPreparingRecords = ref(false);
+const wizardPreparingMessage = ref<string>('');
 
 // ── Provisioning log ────
 // Coalesce duplicate log events (two code paths occasionally emit the same
@@ -1091,20 +1092,34 @@ const logProvisioningEvent = async (eventData: Record<string, any>) => {
     const last = lastLoggedEventAt[key] || 0;
     const now = Date.now();
     if (now - last < window) {
-      console.log('[ProvisioningLog] coalesced duplicate %s (last %dms ago, key=%s)', evt, now - last, key);
       return;
     }
     lastLoggedEventAt[key] = now;
   }
+  let delivered = false;
   try {
-    await fetch('/api/provisioning-log', {
+    const resp = await fetch('/api/provisioning-log', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
       body: JSON.stringify({ userId: props.user.userId, ...eventData })
     });
+    // Server returns 200 + {success:false} when it couldn't persist
+    // (so the browser logs no error line); treat that as not delivered.
+    if (resp.ok) {
+      const body = await resp.json().catch(() => ({}));
+      delivered = body?.success !== false;
+    }
   } catch (err) {
     console.warn('Failed to log provisioning event:', eventData.event, err);
+  }
+  if (!delivered) {
+    // Session likely gone (sign-out / destroy). Buffer so the next
+    // maia-log.pdf still shows this event — especially errors/warnings.
+    try {
+      const { bufferLogEvent } = await import('../utils/localFolder');
+      bufferLogEvent({ userId: props.user.userId, ...eventData });
+    } catch { /* ignore */ }
   }
   // Regenerate maia-log.pdf so the local folder always reflects the latest events
   void generateSetupLogPdf();
@@ -2272,9 +2287,9 @@ const refreshWizardState = async () => {
       }
     }
 
-      if (indexingActiveFromFiles === true) {
+      if (indexingActiveFromFiles === true && !isPostRestoreLocked()) {
         wizardStage3Complete.value = false;
-        if (!indexingStatus.value || indexingStatus.value.phase !== 'indexing') {
+        if (!indexingStatus.value || (indexingStatus.value.phase !== 'indexing' && indexingStatus.value.phase !== 'complete')) {
           const stage3Key = wizardStage3IndexingStartedKey(props.user?.userId);
           try {
             const stored = stage3Key ? sessionStorage.getItem(stage3Key) : null;
@@ -2348,10 +2363,15 @@ const refreshWizardState = async () => {
                 const inferredComplete = !liveActive && Number(tokens) > 0;
                 // Also complete if DO API says not active for > 5 minutes (handles 0-token edge case)
                 const timedOutInactive = !liveActive && !backendDone && elapsedPollMs > 5 * 60 * 1000;
-                // Client-side safety net: if tokens > 0 for > 7 minutes, complete even if liveActive=true
-                const tokenTimeoutComplete = !backendDone && !inferredComplete && Number(tokens) > 0 && elapsedPollMs > 7 * 60 * 1000;
-                // Pure time-based fallback: 20+ min with no completion signal at all (0-token "no changes" case)
-                const pureTimeoutComplete = !backendDone && !inferredComplete && !tokenTimeoutComplete && elapsedPollMs > 20 * 60 * 1000;
+                // Client-side safety net: tokens > 0 for > 7 minutes AND every expected
+                // file already indexed. See handleStage3Index for the rationale.
+                const filesIndexedSoFar = Number(storedStatus.filesIndexed) || 0;
+                const allExpectedFilesIndexed = stage3ExpectedFileCount.value > 0
+                  ? filesIndexedSoFar >= stage3ExpectedFileCount.value
+                  : filesIndexedSoFar > 0;
+                const tokenTimeoutComplete = !backendDone && !inferredComplete && Number(tokens) > 0 && elapsedPollMs > 7 * 60 * 1000 && allExpectedFilesIndexed;
+                // Pure time-based fallback: 30+ min with no completion signal at all.
+                const pureTimeoutComplete = !backendDone && !inferredComplete && !tokenTimeoutComplete && elapsedPollMs > 30 * 60 * 1000;
                 const isCompleted = backendDone || inferredComplete || timedOutInactive || tokenTimeoutComplete || pureTimeoutComplete;
                 const completionReason = backendDone ? 'backendCompleted' : inferredComplete ? 'inferredComplete' : timedOutInactive ? 'timedOutInactive' : tokenTimeoutComplete ? 'tokenTimeout' : 'pureTimeout';
                 if (isCompleted) {
@@ -2812,8 +2832,17 @@ const runSafariFolderWizard = async (files: File[]) => {
       logProvisioningEvent({ event: 'apple-health-detected', fileName: appleHealthFileName });
     }
 
-    // Refresh wizard state and proceed with indexing (same as Chrome path)
+    // Refresh wizard state and wait for every uploaded file to surface (see
+    // runAutoWizard for the same pattern; CouchDB read-after-write lag can
+    // cause a partial file list otherwise).
     await refreshWizardState();
+    for (let waitAttempt = 0; waitAttempt < 10; waitAttempt += 1) {
+      const visibleNames = new Set(wizardStage3Files.value.map(f => f.name));
+      const missing = uploadedFileNames.filter(n => !visibleNames.has(n));
+      if (missing.length === 0) break;
+      await new Promise(r => setTimeout(r, 500));
+      await refreshWizardState();
+    }
 
     // Phase 2: Check agent
     localFolderAutoRunPhase.value = 'Checking agent deployment...';
@@ -2822,12 +2851,13 @@ const runSafariFolderWizard = async (files: File[]) => {
     if (uploadedCount > 0) {
       localFolderAutoRunPhase.value = 'Starting knowledge base indexing...';
       try {
-        const fileNames = wizardStage3Files.value.map(f => f.name);
-        if (fileNames.length > 0) {
-          await handleStage3Index(fileNames, false);
+        if (uploadedFileNames.length > 0) {
+          await handleStage3Index(uploadedFileNames, false);
           localFolderAutoRunPhase.value = 'Knowledge base indexing in progress...';
         }
-      } catch { /* ignore indexing errors */ }
+      } catch (err) {
+        console.warn('[Wizard] handleStage3Index threw:', err);
+      }
     }
 
     if (uploadedCount > 0) {
@@ -2946,8 +2976,19 @@ const runAutoWizard = async () => {
       logProvisioningEvent({ event: 'apple-health-detected', fileName: appleHealthFileName });
     }
 
-    // Refresh wizard state to pick up new files
+    // Refresh wizard state to pick up new files. Retry until every just-uploaded
+    // file is visible in wizardStage3Files (the server reads userDoc.files which
+    // has read-after-write lag right after the metadata POSTs). Without this
+    // wait, handleStage3Index can be called with a partial file list and only
+    // a subset of files end up in the KB folder before indexing fires.
     await refreshWizardState();
+    for (let waitAttempt = 0; waitAttempt < 10; waitAttempt += 1) {
+      const visibleNames = new Set(wizardStage3Files.value.map(f => f.name));
+      const missing = uploadedFileNames.filter(n => !visibleNames.has(n));
+      if (missing.length === 0) break;
+      await new Promise(r => setTimeout(r, 500));
+      await refreshWizardState();
+    }
 
     // Phase 2: Check agent deployment status
     localFolderAutoRunPhase.value = 'Checking agent deployment...';
@@ -2956,12 +2997,16 @@ const runAutoWizard = async () => {
     if (uploadedCount > 0) {
       localFolderAutoRunPhase.value = 'Starting knowledge base indexing...';
       try {
-        const fileNames = wizardStage3Files.value.map(f => f.name);
-        if (fileNames.length > 0) {
-          await handleStage3Index(fileNames, false);
+        // Pass the names of files we KNOW we just uploaded (not whatever
+        // wizardStage3Files currently has — those can be partial during
+        // CouchDB read-after-write lag).
+        if (uploadedFileNames.length > 0) {
+          await handleStage3Index(uploadedFileNames, false);
           localFolderAutoRunPhase.value = 'Knowledge base indexing in progress...';
         }
-      } catch { /* ignore indexing errors */ }
+      } catch (err) {
+        console.warn('[Wizard] handleStage3Index threw:', err);
+      }
     }
 
     // Phase 4: Generate setup log PDF
@@ -3016,7 +3061,7 @@ const generateSetupLogPdf = async () => {
   // API versions
   const availableApis = providers.value.map(p => {
     const label = providerLabels[p] || p;
-    if (p === 'digitalocean') return `${label} (openai-gpt-oss-120b)`;
+    if (p === 'digitalocean') return `${label} (deepseek-v4-pro)`;
     if (p === 'anthropic') return `${label} (claude-opus-4-6)`;
     return label;
   }).join(', ');
@@ -3073,15 +3118,30 @@ const generateSetupLogPdf = async () => {
       } catch { /* no local state */ }
     }
 
+    // Buffered events: provisioning events whose server POST failed
+    // (session gone during sign-out / cloud destroy). Without these the
+    // maia-log.pdf would silently omit errors that happened after the
+    // cloud was torn down. "maia-log must always show errors/warnings."
+    let bufferedEvents: Array<Record<string, any>> = [];
+    try {
+      const { readBufferedLogEvents } = await import('../utils/localFolder');
+      const uid = props.user?.userId;
+      bufferedEvents = readBufferedLogEvents().filter(e => !e.userId || e.userId === uid);
+    } catch { /* ignore */ }
+
     // Merge: deduplicate by compound key (id+time) to handle ID collisions after account recreation
     // After account deletion and recreation, server resets IDs from 1, so bare id dedup would
     // incorrectly filter out all restore events when setup events had the same IDs.
-    const eventKey = (e: Record<string, any>) => `${e.id ?? ''}-${e.time ?? ''}`;
-    const localKeys = new Set(localEvents.map(eventKey));
-    const mergedNew = serverEvents.filter(e => !localKeys.has(eventKey(e)));
-    const events = [...localEvents, ...mergedNew].sort((a, b) => {
-      return (a.time || '').localeCompare(b.time || '');
-    });
+    const eventKey = (e: Record<string, any>) => `${e.id ?? ''}-${e.time ?? ''}-${e.event ?? ''}`;
+    const seen = new Set<string>();
+    const events: Array<Record<string, any>> = [];
+    for (const e of [...localEvents, ...serverEvents, ...bufferedEvents]) {
+      const k = eventKey(e);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      events.push(e);
+    }
+    events.sort((a, b) => (a.time || '').localeCompare(b.time || ''));
 
     if (events.length > 0) {
 
@@ -3130,6 +3190,10 @@ const generateSetupLogPdf = async () => {
             return `[${t}] KB indexed: ${parts.join(', ')}`;
           }
           case 'summary-generated': return `[${t}] Patient Summary generated (${evt.lines || 0} lines, ${Number(evt.chars || 0).toLocaleString()} chars)`;
+          case 'draft-summary-generated': {
+            const secs = typeof evt.generationSeconds === 'number' ? ` in ${evt.generationSeconds}s` : '';
+            return `[${t}] Draft Patient Summary saved (${evt.lines || 0} lines, ${Number(evt.chars || 0).toLocaleString()} chars${secs}) — hidden until verified`;
+          }
           case 'medications-offered': {
             const src = evt.source ? ` from ${String(evt.source).replace(/-/g, ' ')}` : '';
             const outcome = evt.outcome && evt.outcome !== 'success' ? ` [${evt.outcome}]` : '';
@@ -3137,11 +3201,44 @@ const generateSetupLogPdf = async () => {
           }
           case 'medications-dismissed': return `[${t}] Medications step dismissed without verification`;
           case 'current-medications-recovery-failed': return `[${t}] Current Medications recovery FAILED — fell through ${Array.isArray(evt.pathsTried) ? evt.pathsTried.join(' -> ') : 'all paths'}`;
-          case 'medications-saved': return `[${t}] Current Medications saved (${evt.lines || 0} lines)`;
+          case 'medications-saved': {
+            const src = evt.source ? ` from ${String(evt.source).replace(/-/g, ' ')}` : '';
+            return `[${t}] Current Medications saved (${evt.lines || 0} lines)${src}`;
+          }
           case 'medications-restored': return `[${t}] Current Medications restored (${evt.lines || 0} lines)`;
           case 'summary-saved': return `[${t}] Patient Summary saved (${evt.lines || 0} lines, ${Number(evt.chars || 0).toLocaleString()} chars)`;
           case 'summary-verified': return `[${t}] Patient Summary verified (${evt.lines || 0} lines, ${Number(evt.chars || 0).toLocaleString()} chars)`;
           case 'summary-restored': return `[${t}] Patient Summary restored (${evt.lines || 0} lines, ${Number(evt.chars || 0).toLocaleString()} chars)`;
+          case 'restore-folder-added': {
+            const names = Array.isArray(evt.files) ? evt.files.join(', ') : '';
+            const act = evt.action ? ` — ${evt.action}` : '';
+            return `[${t}] Folder change: ${evt.count || 0} file(s) added since last sign-off${names ? ': ' + names : ''}${act}`;
+          }
+          case 'restore-folder-removed': {
+            const names = Array.isArray(evt.files) ? evt.files.join(', ') : '';
+            const act = evt.action ? ` — ${evt.action}` : '';
+            return `[${t}] Folder change: ${evt.count || 0} file(s) removed since last sign-off${names ? ': ' + names : ''}${act}`;
+          }
+          case 'restore-state-incomplete': {
+            const missing = Array.isArray(evt.missing) ? evt.missing.join(', ') : '';
+            return `[${t}] maia-state.json is missing: ${missing} — manual entry will be required after restore`;
+          }
+          case 'restore-path-chosen': {
+            const detail = evt.path === 'rehydrate-v2'
+              ? 'new full-doc rehydrate path (v2 snapshot)'
+              : `legacy per-field path (snapshot v${evt.snapshotSchemaVersion || 1}${evt.hasUserDocInState ? ', has userDoc' : ', no userDoc'})`;
+            return `[${t}] Restore path: ${detail}`;
+          }
+          // maia-state-saved was a diagnostic event; no longer emitted.
+          // Keep a no-op renderer so any old events in existing logs
+          // don't fall to the default 'unknown' line.
+          case 'maia-state-saved': return null as any;
+          case 'restore-fallback-to-legacy': {
+            return `[${t}] Restore fell back to legacy path: ${evt.reason || 'unknown error'}`;
+          }
+          case 'restore-postcommit-error': {
+            return `[${t}] Restore completed with a post-step warning (account is restored): ${evt.reason || 'unknown'}`;
+          }
           case 'chats-restored': return `[${t}] Saved chats restored (${evt.count || 0})`;
           case 'instructions-restored': return `[${t}] Agent Instructions restored`;
           case 'lists-restored': return `[${t}] My Lists restored`;
@@ -3195,6 +3292,9 @@ const generateSetupLogPdf = async () => {
 
         const [r, g, b] = getEventColor(evt);
         const text = formatEvent(evt);
+        // A null/empty render means "intentionally not shown" (diagnostic
+        // events we keep a renderer for but don't want in the PDF).
+        if (!text) continue;
         const isMilestone = evt.event?.endsWith('-complete') || evt.event?.endsWith('-started') || evt.event === 'account-deleted';
 
         if (isMilestone) {
@@ -3252,12 +3352,72 @@ const generateSetupLogPdf = async () => {
   await writeFileToFolder(localFolderHandle.value, 'maia-log.pdf', pdfBlob);
   // Clean up legacy filename
   try { await localFolderHandle.value.removeEntry('maia-setup-log.pdf'); } catch { /* doesn't exist */ }
-  // Persist app state in maia-state.json
-  await saveStateToLocalFolder();
+  // NOTE: state persistence is intentionally DECOUPLED from log-PDF
+  // generation. generateSetupLogPdf is called on every wizard event
+  // (~12×/cycle) and during sign-out/destroy when the session is
+  // already gone. Previously it also called saveStateToLocalFolder,
+  // which fired a 7-endpoint re-save each time — flooding the console
+  // with 401/404s during session transitions and risking a v1
+  // clobber. maia-state.json is now written ONLY by App.vue's
+  // saveLocalSnapshot at the meaningful persistence points (sign-out,
+  // destroy-before-delete, wizard-complete, restore-complete) and by
+  // runAutoWizard's explicit Phase-5 call. The PDF here is rendered
+  // from the in-memory provisioning events; it needs no network.
 };
 
-/** Save current app state to maia-state.json in the local folder. */
+// Coalesce back-to-back saveStateToLocalFolder calls. generateSetupLogPdf
+// invokes this and is itself called by half a dozen watchers during a
+// normal Setup cycle (file uploaded, file moved to KB, indexing progress,
+// medications saved, summary saved, etc.). Without a guard we get 10–15
+// duplicate writes per cycle, each fetching /api/user-doc/full and
+// scanning the folder. We trail-debounce: if a write is already in
+// flight, queue ONE follow-up write after it lands; further calls
+// during the in-flight window are folded into that single follow-up.
+let saveStateInFlight = false;
+let saveStatePending = false;
+let saveStateLastDoneAt = 0;
+let saveStateTrailingTimer: ReturnType<typeof setTimeout> | null = null;
+const SAVE_STATE_MIN_INTERVAL_MS = 4000;
+
+/** Save current app state to maia-state.json in the local folder.
+ *  Throttled: at most one write per SAVE_STATE_MIN_INTERVAL_MS. Calls
+ *  during the cooldown schedule a single trailing write so the final
+ *  state always lands. generateSetupLogPdf (the only caller) fires from
+ *  ~6 watchers during a Setup cycle; without this we get 15+ writes,
+ *  each fetching /api/user-doc/full + scanning the folder. */
 const saveStateToLocalFolder = async () => {
+  if (!localFolderHandle.value || !props.user?.userId) return;
+  const sinceLast = Date.now() - saveStateLastDoneAt;
+  if (saveStateInFlight || sinceLast < SAVE_STATE_MIN_INTERVAL_MS) {
+    // Schedule (or reschedule) a single trailing write.
+    if (saveStateTrailingTimer) clearTimeout(saveStateTrailingTimer);
+    const delay = saveStateInFlight
+      ? SAVE_STATE_MIN_INTERVAL_MS
+      : Math.max(0, SAVE_STATE_MIN_INTERVAL_MS - sinceLast);
+    saveStateTrailingTimer = setTimeout(() => {
+      saveStateTrailingTimer = null;
+      void saveStateToLocalFolder();
+    }, delay);
+    saveStatePending = true;
+    return;
+  }
+  saveStateInFlight = true;
+  try {
+    await saveStateToLocalFolderImpl();
+  } finally {
+    saveStateInFlight = false;
+    saveStateLastDoneAt = Date.now();
+    if (saveStatePending && !saveStateTrailingTimer) {
+      saveStatePending = false;
+      saveStateTrailingTimer = setTimeout(() => {
+        saveStateTrailingTimer = null;
+        void saveStateToLocalFolder();
+      }, SAVE_STATE_MIN_INTERVAL_MS);
+    }
+  }
+};
+
+const saveStateToLocalFolderImpl = async () => {
   if (!localFolderHandle.value || !props.user?.userId) return;
   const userId = props.user.userId;
 
@@ -3268,6 +3428,12 @@ const saveStateToLocalFolder = async () => {
   let agentInstructionsText: string | null = null;
   let listsMarkdownText: string | null = null;
   let provisioningLogData: Array<Record<string, any>> | undefined = undefined;
+  // Phase 1 of the local-first redesign: ALSO fetch the full userDoc so
+  // this writer produces a v2 snapshot. Without this, every call to
+  // saveStateToLocalFolder clobbered App.vue's saveLocalSnapshot v2
+  // write back to a v1 shape — the second writer that we missed when
+  // upgrading the schema. See Documentation/NewRestore.md.
+  let fullUserDoc: Record<string, any> | null = null;
 
   const fetchOpts = { credentials: 'include' as RequestCredentials };
 
@@ -3345,18 +3511,62 @@ const saveStateToLocalFolder = async () => {
         );
         if (merged.length > 0) provisioningLogData = merged;
       } catch { /* default to undefined */ }
+    })(),
+    (async () => {
+      try {
+        const res = await fetch('/api/user-doc/full', fetchOpts);
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.userDoc) fullUserDoc = data.userDoc;
+        }
+      } catch { /* fall back to existing below */ }
     })()
   ]);
 
+  // INVARIANT: never downgrade the backup. This writer is invoked by
+  // generateSetupLogPdf, which App.vue calls during sign-out / cloud
+  // destroy — by then the session is gone and /api/user-doc/full 401s.
+  // If the fresh fetch failed, reuse the userDoc already on disk so a
+  // transient auth failure can't turn a good v2 backup into a v1 one.
+  if (!fullUserDoc) {
+    try {
+      const existingState = await readStateFile(localFolderHandle.value);
+      if (existingState?.userDoc) {
+        fullUserDoc = existingState.userDoc;
+        console.warn('[saveState] userDoc fetch failed — preserving existing v2 backup (no downgrade)');
+      }
+    } catch { /* no existing state; will write v1 (first run only) */ }
+  }
+
+  // Folder inventory (only PDFs / structured records — exclude MAIA-
+  // generated files). Used by Restore to diff against userDoc.files.
+  let folderInventory: Array<{ name: string; size?: number; mtime?: number }> = [];
+  try {
+    const { listFolderFiles } = await import('../utils/localFolder');
+    const folderEntries = await listFolderFiles(localFolderHandle.value);
+    folderInventory = folderEntries
+      .filter(f => {
+        const n = f.name.toLowerCase();
+        return n !== 'maia-log.pdf' && n !== 'maia-state.json' && !n.endsWith('.webloc');
+      })
+      .map(f => ({ name: f.name, size: f.size, mtime: f.lastModified }));
+  } catch { /* default to empty */ }
+
   const state: MaiaState = {
-    version: 1,
+    // ── v2 fields (the actual backup) ─────────────────────────
+    schemaVersion: fullUserDoc ? 2 : 1,
+    userDoc: fullUserDoc || undefined,
+    folder: { files: folderInventory },
+    // ── v1 legacy fields (kept for one release for back-compat) ─
+    version: 2,
     userId: userId,
     displayName: props.user.displayName,
     updatedAt: new Date().toISOString(),
     files: wizardStage3Files.value.map(f => ({
       fileName: f.name,
       cloudStatus: f.inKnowledgeBase ? 'indexed' as const : 'pending' as const,
-      bucketKey: f.bucketKey
+      bucketKey: f.bucketKey,
+      ...(f.isAppleHealth ? { isAppleHealth: true } : {})
     })),
     currentMedications: medicationsText,
     patientSummary: summaryText,
@@ -3373,6 +3583,11 @@ const stage3IndexingPoll = ref<ReturnType<typeof setInterval> | null>(null);
 const stage3IndexingPending = ref(false);
 const stage3IndexingStartedAt = ref<number | null>(null);
 const stage3IndexingCompletedAt = ref<number | null>(null);
+// Number of files we expect to be indexed in the current job. Used to gate the
+// 7-minute tokenTimeout safety net so it doesn't fire while DO is still working
+// through the remaining files (DO's `indexed_file_count` increments as each
+// file finishes; without this check the wizard reports e.g. "1 of 4" indexed).
+const stage3ExpectedFileCount = ref<number>(0);
 const stage3ElapsedTick = ref(0);
 let stage3ElapsedTimer: ReturnType<typeof setInterval> | null = null;
 const formatElapsed = (start: number | null, end?: number | null) => {
@@ -3402,6 +3617,11 @@ const handleStage3Index = async (overrideNames?: string[], fromRestore = false) 
   if (!userId) return;
   if (stage3IndexingActive.value) return;
   stage3IndexingPending.value = true;
+  // Record the expected file count for the tokenTimeout safety-net check below.
+  // Use the override list when provided (that's what we just toggled to KB).
+  stage3ExpectedFileCount.value = Array.isArray(overrideNames) && overrideNames.length > 0
+    ? overrideNames.length
+    : wizardStage3Files.value.length;
   if (fromRestore) {
     restoreIndexingActive.value = true;
   }
@@ -3460,20 +3680,19 @@ const handleStage3Index = async (overrideNames?: string[], fromRestore = false) 
       }
 
       const movedToKbBucketKeys: string[] = [];
+      const toggleFailures: Array<{ name: string; status: number; error?: string }> = [];
+      let alreadyInKB = 0;
       for (const name of stage3Names) {
         const file = byName.get(name);
         const bucketKey = file?.bucketKey;
-        if (!bucketKey) {
-          continue;
-        }
+        if (!bucketKey) continue;
         if (file?.inKnowledgeBase) {
+          alreadyInKB++;
           continue;
         }
         const toggleResponse = await fetch('/api/toggle-file-knowledge-base', {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
+          headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
           body: JSON.stringify({
             userId: props.user.userId,
@@ -3483,9 +3702,16 @@ const handleStage3Index = async (overrideNames?: string[], fromRestore = false) 
         });
         if (!toggleResponse.ok) {
           const errorData = await toggleResponse.json().catch(() => ({}));
-          throw new Error(errorData.message || `Failed to move ${name} to KB folder`);
+          const msg = errorData.message || errorData.error || `HTTP ${toggleResponse.status}`;
+          toggleFailures.push({ name, status: toggleResponse.status, error: msg });
+          // Don't throw — keep going so as many files as possible end up in KB.
+          continue;
         }
         movedToKbBucketKeys.push(bucketKey);
+      }
+      console.log(`[handleStage3Index] Toggled ${movedToKbBucketKeys.length}/${stage3Names.length} files to KB (already in KB: ${alreadyInKB}, failed: ${toggleFailures.length})`);
+      if (toggleFailures.length > 0) {
+        console.warn('[handleStage3Index] Toggle failures:', toggleFailures);
       }
       if (movedToKbBucketKeys.length > 0) {
         handleFilesArchived(movedToKbBucketKeys);
@@ -3584,12 +3810,20 @@ const handleStage3Index = async (overrideNames?: string[], fromRestore = false) 
           const inferredComplete = !liveActive && Number(tokens) > 0;
           // Also complete if DO API says not active for > 5 minutes (handles 0-token edge case)
           const timedOutInactive = !liveActive && !backendDone && elapsedPollMs > 5 * 60 * 1000;
-          // Client-side safety net: if tokens > 0 for > 7 minutes, complete even if
-          // liveActive is true (DO API job status can lag indefinitely behind actual completion)
-          const tokenTimeoutComplete = !backendDone && !inferredComplete && Number(tokens) > 0 && elapsedPollMs > 7 * 60 * 1000;
-          // Pure time-based fallback: if 20+ minutes elapsed with no completion signal at all,
-          // the DO API is stuck. Complete to unblock the wizard (handles 0-token "no changes" case).
-          const pureTimeoutComplete = !backendDone && !inferredComplete && !tokenTimeoutComplete && elapsedPollMs > 20 * 60 * 1000;
+          // Client-side safety net: if tokens > 0 for > 7 minutes AND DO has indexed every
+          // expected file, complete even if liveActive is true (DO's job status can lag
+          // indefinitely behind actual completion). Without the file-count gate, this
+          // fires while DO is still working through the remaining files and the wizard
+          // reports e.g. "1 of 4 indexed".
+          const filesIndexedSoFar = Number(kbStatus.filesIndexed) || 0;
+          const allExpectedFilesIndexed = stage3ExpectedFileCount.value > 0
+            ? filesIndexedSoFar >= stage3ExpectedFileCount.value
+            : filesIndexedSoFar > 0;
+          const tokenTimeoutComplete = !backendDone && !inferredComplete && Number(tokens) > 0 && elapsedPollMs > 7 * 60 * 1000 && allExpectedFilesIndexed;
+          // Pure time-based fallback: 30+ minutes with no completion signal at all (handles
+          // 0-token "no changes" or DO API stuck). Raised from 20 → 30 min because some
+          // KBs of 4–10 PDFs legitimately take 15–25 minutes to index.
+          const pureTimeoutComplete = !backendDone && !inferredComplete && !tokenTimeoutComplete && elapsedPollMs > 30 * 60 * 1000;
           const isCompleted = backendDone || inferredComplete || timedOutInactive || tokenTimeoutComplete || pureTimeoutComplete;
           const completionReason = backendDone ? 'backendCompleted' : inferredComplete ? 'inferredComplete' : timedOutInactive ? 'timedOutInactive' : tokenTimeoutComplete ? 'tokenTimeout' : pureTimeoutComplete ? 'pureTimeout' : '';
           if (isCompleted) {
@@ -5739,7 +5973,10 @@ const startSetupWizardPolling = () => {
       // On reload wizardFlowPhase resets to 'done'. If the server shows indexing
       // complete + agent ready but medications or summary are still pending, the
       // user was mid-guided-flow. Resume it so the wizard doesn't get stuck.
+      // Skip entirely during the post-Restore grace window — otherwise this
+      // generates a fresh draft summary and overwrites what Restore restored.
       if (
+        !isPostRestoreLocked() &&
         wizardFlowPhase.value === 'done' &&
         (safariFolderName.value || localFolderHandle.value) &&
         indexingStatus.value?.phase === 'complete' &&
@@ -5951,6 +6188,7 @@ watch(
       // Keep the wizard dialog OPEN with spinners so the user doesn't see a zombie chat.
       void generateSetupLogPdf();
       wizardPreparingRecords.value = true;
+      wizardPreparingMessage.value = 'Confirming knowledge base is attached to your agent...';
       if (wizardTimeoutTimer) {
         clearTimeout(wizardTimeoutTimer);
         wizardTimeoutTimer = null;
@@ -5960,39 +6198,21 @@ watch(
       // Note: 'medications-offered' event is logged by Lists.vue after extraction
       // completes, so we have an accurate line count for the offered meds.
 
-      // Step 1: Generate and save Patient Summary BEFORE opening My Lists.
-      // This ensures the summary is available when Lists.vue needs to extract medications.
-      // The wizard dialog stays visible with "Preparing..." spinners during this.
+      // Step 1: Generate and save the draft Patient Summary BEFORE opening My
+      // Lists, so the summary text is available when Lists.vue needs to extract
+      // medications.
       //
-      // Wait for KB to be attached to the agent first. The indexing completion
-      // (phase === 'complete') fires before the server finishes attaching the KB,
-      // so without this wait the agent has no patient documents and returns a stub.
+      // No client-side KB-attached poll here: the server's /api/patient-summary/
+      // draft endpoint force-attaches the KB to the agent before calling the
+      // agent (see server/index.js — attachKB call), which makes the poll
+      // redundant. The previous 30s poll always timed out anyway because DO's
+      // agent-record refresh lags the KB completion event.
       preGeneratedSummary.value = null;
       if (props.user?.userId) {
-        // Poll /api/user-status until kbStatus === 'attached' (up to 30s)
-        let kbAttached = false;
-        for (let attempt = 0; attempt < 10; attempt++) {
-          try {
-            const statusRes = await fetch(`/api/user-status?userId=${encodeURIComponent(props.user.userId)}`, { credentials: 'include' });
-            if (statusRes.ok) {
-              const statusJson = await statusRes.json();
-              if (statusJson.kbStatus === 'attached') {
-                kbAttached = true;
-                console.log(`[Wizard] KB attached confirmed (attempt ${attempt + 1})`);
-                break;
-              }
-              console.log(`[Wizard] KB status: ${statusJson.kbStatus} (attempt ${attempt + 1}/10)`);
-            }
-          } catch { /* ignore */ }
-          await new Promise(r => setTimeout(r, 3000));
-        }
-        if (!kbAttached) {
-          console.warn('[Wizard] KB not confirmed attached after 30s — proceeding anyway (server will attempt attach)');
-        }
-
-        console.log('[Wizard] Generating Patient Summary before opening My Lists...');
+        wizardPreparingMessage.value = 'Generating draft Patient Summary from your records (may take 30–60 seconds)...';
         try {
-          const genRes = await fetch('/api/generate-patient-summary', {
+          const draftStartedAt = Date.now();
+          const genRes = await fetch('/api/patient-summary/draft', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
@@ -6002,37 +6222,33 @@ watch(
           const genResult = await genRes.json();
           const text = (genResult.summary || '').trim();
           if (text) {
+            // Server has stored this on userDoc.draftPatientSummary (not in the
+            // committed patientSummaries array). It will be promoted only after
+            // the user verifies medications and the summary. We keep the text in
+            // a local ref so downstream code can read it without re-fetching.
             preGeneratedSummary.value = text;
-            // Save to server so Lists.vue and Patient Summary tab can load it
-            await fetch('/api/patient-summary', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              credentials: 'include',
-              body: JSON.stringify({
-                userId: props.user?.userId,
-                summary: text,
-                replaceStrategy: 'newest'
-              })
-            });
-            console.log('[Wizard] Patient Summary generated and saved (%d chars)', text.length);
             const summaryLines = text.split('\n').filter((l: string) => l.trim()).length;
+            const generationSeconds = typeof genResult.generationSeconds === 'number'
+              ? genResult.generationSeconds
+              : Math.round(((Date.now() - draftStartedAt) / 1000) * 10) / 10;
             logProvisioningEvent({
-              event: 'summary-generated',
+              event: 'draft-summary-generated',
               lines: summaryLines,
-              chars: text.length
+              chars: text.length,
+              generationSeconds
             });
           } else {
-            console.warn('[Wizard] Patient Summary generation returned empty text');
+            console.warn('[Wizard] Draft Patient Summary returned empty text');
           }
         } catch (err) {
-          console.warn('[Wizard] Patient Summary generation failed:', err);
+          console.warn('[Wizard] Draft Patient Summary generation failed:', err);
         }
       }
 
       // Step 2: Open My Lists tab FIRST, then close wizard dialog.
       // Opening My Stuff before closing the wizard prevents a flash of the empty chat.
+      wizardPreparingMessage.value = 'Opening Current Medications for review...';
       wizardPreparingRecords.value = false;
-      console.log('[Wizard] Opening My Lists tab');
       try {
         sessionStorage.setItem('autoProcessInitialFile', 'true');
         sessionStorage.setItem('wizardMyListsAuto', 'true');
@@ -6422,11 +6638,12 @@ const handleMedicationsOffered = (payload: {
   void generateSetupLogPdf();
 };
 
-const handleCurrentMedicationsSaved = async (payload?: { value?: string; edited?: boolean; changed?: boolean }) => {
+const handleCurrentMedicationsSaved = async (payload?: { value?: string; edited?: boolean; changed?: boolean; source?: string }) => {
   const medsLineCount = payload?.value ? payload.value.split('\n').filter(l => l.trim()).length : 0;
   logProvisioningEvent({
     event: 'medications-saved',
-    lines: medsLineCount
+    lines: medsLineCount,
+    source: payload?.source || undefined
   });
   wizardCurrentMedications.value = true;
   wizardStage2Complete.value = true;
@@ -6870,6 +7087,56 @@ const markIndexingAlreadyCompleted = () => {
   stage3IndexingCompletedAt.value = Date.now();
 };
 
+/** Post-restore grace window. While set, refreshWizardState's "indexing
+ *  active" re-poll branch and the post-poll resume-guided-flow logic
+ *  (which would generate a fresh draft summary and overwrite what
+ *  Restore just restored) are both suppressed. App.vue's
+ *  handleRestoreWizardComplete sets this; it auto-expires after 60 s. */
+const postRestoreLockUntil = ref<number>(0);
+const isPostRestoreLocked = () => Date.now() < postRestoreLockUntil.value;
+
+/** Called from App.vue after Restore completes. Synchronously stamps in
+ *  the in-memory wizard flags from server state (so shouldHideSetupWizard
+ *  resolves true and the Setup wizard doesn't auto-show), seals the
+ *  indexingStatus as complete, and opens a 60 s grace window during which
+ *  refreshWizardState side effects are bypassed. */
+const markRestoreComplete = async () => {
+  postRestoreLockUntil.value = Date.now() + 60_000;
+  wizardFlowPhase.value = 'done';
+  stage3IndexingCompletedAt.value = Date.now();
+  if (!props.user?.userId) return;
+  try {
+    const [statusRes, summaryRes] = await Promise.all([
+      fetch(`/api/user-status?userId=${encodeURIComponent(props.user.userId)}`, { credentials: 'include' }),
+      fetch(`/api/patient-summary?userId=${encodeURIComponent(props.user.userId)}`, { credentials: 'include' })
+    ]);
+    if (statusRes.ok) {
+      const status = await statusRes.json();
+      if (status.currentMedications && String(status.currentMedications).trim()) {
+        wizardCurrentMedications.value = true;
+      }
+    }
+    if (summaryRes.ok) {
+      const sum = await summaryRes.json();
+      if (sum?.summary && String(sum.summary).trim()) {
+        wizardPatientSummary.value = true;
+        preGeneratedSummary.value = sum.summary;
+      }
+    }
+    // Seal indexingStatus so the refreshWizardState indexing-active branch
+    // (the line 2276 area below) skips the re-poll branch.
+    indexingStatus.value = {
+      active: false,
+      phase: 'complete',
+      tokens: indexingStatus.value?.tokens || '0',
+      filesIndexed: indexingStatus.value?.filesIndexed || 0,
+      progress: 1
+    };
+  } catch (e) {
+    console.warn('[markRestoreComplete] state probe failed:', e);
+  }
+};
+
 const closeMyStuff = () => {
   showMyStuffDialog.value = false;
 };
@@ -6877,6 +7144,8 @@ const closeMyStuff = () => {
 defineExpose({
   generateSetupLogPdf,
   markIndexingAlreadyCompleted,
+  markRestoreComplete,
+  refreshWizardState,
   testMode,
   addTestLog,
   setTestFinalOutput,

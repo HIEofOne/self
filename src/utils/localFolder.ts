@@ -53,6 +53,31 @@ export interface MaiaFileEntry {
 }
 
 export interface MaiaState {
+  // v2 (current). The local folder is the persistent home of all user
+  // state; the cloud is a disposable accelerator that gets rebuilt from
+  // this file on Restore. See Documentation/NewRestore.md.
+  schemaVersion?: number;        // 2 = userDoc + folder blocks present.
+                                 // Absent or 1 = legacy partial mirror below.
+  userDoc?: Record<string, any>; // Full userDoc verbatim (minus regenerable
+                                 //   secrets). Stripped of CouchDB _rev.
+                                 //   This is the authoritative backup.
+  folder?: {                     // Folder inventory at the moment of save.
+                                 //   Used to diff against the folder as it
+                                 //   is now at Restore time.
+    files?: Array<{
+      name: string;
+      size?: number;
+      mtime?: number;            // epoch ms
+      // sha256 will be added once Phase 2 (ingest chokepoint) lands; for
+      // now content-hash isn't computed locally.
+      sha256?: string;
+    }>;
+  };
+
+  // Legacy v1 fields. Still written by saveLocalSnapshot for one release
+  // so older clients can read recent backups; new clients prefer the
+  // v2 shape above when schemaVersion >= 2. Will be removed in a later
+  // change once everyone has migrated.
   version: number;
   userId: string;
   displayName?: string;
@@ -63,6 +88,7 @@ export interface MaiaState {
     size?: number;
     cloudStatus?: 'indexed' | 'pending' | 'not_in_kb' | 'uploaded';
     bucketKey?: string;
+    isAppleHealth?: boolean;
   }>;
   currentMedications?: string | null;
   patientSummary?: string | null;
@@ -374,6 +400,95 @@ export async function writeStateFile(
   state.updatedAt = new Date().toISOString();
   const json = JSON.stringify(state, null, 2);
   await writeFileToFolder(handle, STATE_FILE_NAME, json);
+}
+
+// ── Restore-in-progress sentinel ───────────────────────────────────
+// Used so a page reload mid-Restore can resume the Restore Wizard instead
+// of dropping the user into the new-user Setup flow. Survives reloads
+// because it lives in localStorage; the folder handle separately survives
+// in IndexedDB via storeDirectoryHandle. On boot, App.vue checks the
+// sentinel and re-launches Restore if it matches the signed-in user.
+
+const RESTORE_ACTIVE_KEY = 'maia:restore-active';
+
+export interface RestoreActiveSentinel {
+  userId: string;
+  startedAt: string;
+  source?: 'welcome' | 'cloud-health' | 'destroyed-account' | 'test-mode';
+}
+
+export function setRestoreActive(userId: string, source?: RestoreActiveSentinel['source']): void {
+  try {
+    const payload: RestoreActiveSentinel = {
+      userId,
+      startedAt: new Date().toISOString(),
+      source
+    };
+    localStorage.setItem(RESTORE_ACTIVE_KEY, JSON.stringify(payload));
+  } catch {
+    // ignore storage errors (private mode, quota, etc.)
+  }
+}
+
+export function clearRestoreActive(): void {
+  try {
+    localStorage.removeItem(RESTORE_ACTIVE_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+export function getRestoreActive(): RestoreActiveSentinel | null {
+  try {
+    const raw = localStorage.getItem(RESTORE_ACTIVE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as RestoreActiveSentinel;
+    if (!parsed?.userId || !parsed?.startedAt) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+// ── Offline log-event buffer ───────────────────────────────────────
+// Provisioning events (including errors/warnings) are normally POSTed
+// to /api/provisioning-log. But errors most often happen exactly when
+// the session is gone (sign-out, cloud destroy) and that POST 401/500s,
+// losing the event. We buffer failed events in localStorage so
+// generateSetupLogPdf can still render them — "maia-log must always
+// show errors and warnings", even ones that occurred after the cloud
+// was destroyed.
+
+const PENDING_LOG_KEY = 'maia:pending-log-events';
+
+export function bufferLogEvent(event: Record<string, any>): void {
+  try {
+    const raw = localStorage.getItem(PENDING_LOG_KEY);
+    const arr: Array<Record<string, any>> = raw ? JSON.parse(raw) : [];
+    arr.push({ ...event, time: event.time || new Date().toISOString(), _buffered: true });
+    // Cap so a pathological loop can't blow the quota.
+    while (arr.length > 200) arr.shift();
+    localStorage.setItem(PENDING_LOG_KEY, JSON.stringify(arr));
+  } catch {
+    // ignore (private mode / quota)
+  }
+}
+
+export function readBufferedLogEvents(): Array<Record<string, any>> {
+  try {
+    const raw = localStorage.getItem(PENDING_LOG_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function clearBufferedLogEvents(): void {
+  try {
+    localStorage.removeItem(PENDING_LOG_KEY);
+  } catch {
+    // ignore
+  }
 }
 
 /**

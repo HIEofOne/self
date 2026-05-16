@@ -745,7 +745,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import VueMarkdown from 'vue-markdown-render';
 
 // Store route check interval and event listener for cleanup (must be at top level)
@@ -775,6 +775,7 @@ import {
   writeStateFile, clearDirectoryHandle, scanWeblocOwner,
   getActiveUserId, setActiveUserId, discoverUsers,
   readStateFileByUserId,
+  setRestoreActive, clearRestoreActive, getRestoreActive,
   type MaiaState, type DiscoveredUser
 } from './utils/localFolder';
 import packageJson from '../package.json';
@@ -848,6 +849,14 @@ const cloudHealthLoading = ref(false);
 const showRestoreWizard = ref(false);
 const restoreWizardLocalState = ref<MaiaState | null>(null);
 const restoreWizardKbName = ref<string | null>(null);
+
+// Whenever the Restore Wizard closes (completion via emit, cancel,
+// outside-click, ESC, navigate-away), clear the resume sentinel so a
+// subsequent page reload doesn't try to relaunch Restore. handleRestoreWizard-
+// Complete already calls clearRestoreActive() but this is the catch-all.
+watch(showRestoreWizard, (open) => {
+  if (!open) clearRestoreActive();
+});
 const showDestroyedRestoreDialog = ref(false);
 const destroyedUserId = ref<string | null>(null);
 const showDevicePrivacyDialog = ref(false);
@@ -1104,6 +1113,7 @@ const handleUserCardRestore = async (du: DiscoveredUser) => {
 
     // Launch RestoreWizard (localState is guaranteed non-null at this point)
     restoreWizardLocalState.value = localState;
+    if (du.userId) setRestoreActive(du.userId, 'welcome');
     showRestoreWizard.value = true;
   } catch (error) {
     tempStartError.value = error instanceof Error ? error.message : 'Restore failed';
@@ -1742,7 +1752,7 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
       patientSummary: summary?.summary || null
     });
 
-    // Also save to local folder if connected (v2 state file)
+    // Also save to local folder if connected (v2 state file).
     if (localFolderHandle.value && user.value?.userId) {
       try {
         const now = new Date().toISOString();
@@ -1753,7 +1763,56 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
           const { readStateFile } = await import('./utils/localFolder');
           existingState = await readStateFile(localFolderHandle.value);
         } catch { /* first time, no existing state */ }
+
+        // Phase 1 of the local-first redesign: fetch the full userDoc and
+        // a folder inventory so the snapshot is a complete backup, not a
+        // hand-picked mirror. See Documentation/NewRestore.md.
+        // Falls through gracefully if the endpoint is unreachable (older
+        // server, network glitch); the legacy v1 fields below still write.
+        // INVARIANT: never downgrade the backup. If the fresh fetch fails
+        // (typically a 401 because this runs during sign-out / cloud
+        // destroy when the session is already torn down), reuse the
+        // userDoc already in the existing maia-state.json. A transient
+        // auth failure must never turn a good v2 backup into a v1 one —
+        // that clobber was the root cause of "Restore lost everything".
+        let fullUserDoc: Record<string, any> | null = null;
+        let fetchOk = false;
+        try {
+          const docRes = await fetch('/api/user-doc/full', { credentials: 'include' });
+          if (docRes.ok) {
+            const docPayload = await docRes.json();
+            fullUserDoc = docPayload?.userDoc || null;
+            fetchOk = !!fullUserDoc;
+          }
+        } catch { /* fall back to existing below */ }
+        if (!fullUserDoc && existingState?.userDoc) {
+          fullUserDoc = existingState.userDoc;
+          console.warn('[saveLocalSnapshot] userDoc fetch failed — preserving existing v2 backup (no downgrade)');
+        }
+        void fetchOk;
+        // Folder inventory (what files are physically in the folder right
+        // now). Used by Restore to diff against userDoc.files and detect
+        // files the user added or removed in Finder while signed out.
+        let folderInventory: Array<{ name: string; size?: number; mtime?: number }> = [];
+        try {
+          const { listFolderFiles } = await import('./utils/localFolder');
+          const folderEntries = await listFolderFiles(localFolderHandle.value);
+          folderInventory = folderEntries
+            .filter(f => {
+              const n = f.name.toLowerCase();
+              return n !== 'maia-log.pdf' && n !== 'maia-state.json' && !n.endsWith('.webloc');
+            })
+            .map(f => ({ name: f.name, size: f.size, mtime: f.lastModified }));
+        } catch (e) {
+          console.warn('[saveLocalSnapshot] folder scan failed:', e);
+        }
+
         const state: MaiaState = {
+          // ── v2 fields (the actual backup) ─────────────────────────
+          schemaVersion: fullUserDoc ? 2 : 1,
+          userDoc: fullUserDoc || undefined,
+          folder: { files: folderInventory },
+          // ── v1 legacy fields (kept for one release for back-compat) ─
           version: 2,
           userId: user.value.userId,
           displayName: user.value.displayName,
@@ -1766,7 +1825,16 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
             let cs: 'indexed' | 'pending' | 'not_in_kb' | 'uploaded' = 'not_in_kb';
             if (inKB && indexedSet.has(bk)) cs = 'indexed';
             else if (inKB) cs = 'pending';
-            return { fileName: f.fileName, size: f.fileSize, cloudStatus: cs, bucketKey: bk };
+            return {
+              fileName: f.fileName,
+              size: f.fileSize,
+              cloudStatus: cs,
+              bucketKey: bk,
+              // Preserve Apple Health designation across the round-trip.
+              // Detection is content-based (PDF first-page footer) and
+              // happens during Setup — this is just persisting the result.
+              ...(f.isAppleHealth ? { isAppleHealth: true } : {})
+            };
           }) : existingState?.files || [],
           currentMedications: (status?.currentMedications && status.currentMedications.trim()) ? status.currentMedications : (existingState?.currentMedications || null),
           patientSummary: (summary?.summary && summary.summary.trim()) ? summary.summary : (existingState?.patientSummary || null),
@@ -2046,6 +2114,7 @@ const handleTestSetupComplete = async (payload: { verification: any; folderHandl
     // Step 5: Launch RestoreWizard — it will call handleRestoreWizardComplete when done
     log('Launching Restore Wizard...');
     restoreWizardLocalState.value = localState;
+    if (userId) setRestoreActive(userId, 'test-mode');
     showRestoreWizard.value = true;
 
     // The rest happens in handleRestoreWizardComplete which checks testModeActive
@@ -2359,6 +2428,7 @@ const handleCloudRestore = async () => {
     // Launch the Restore Wizard
     restoreWizardLocalState.value = localState;
     showCloudHealthDialog.value = false;
+    if (user.value?.userId) setRestoreActive(user.value.userId, 'cloud-health');
     showRestoreWizard.value = true;
   } catch (e) {
     console.error('[cloud-health] Restore failed:', e);
@@ -2449,6 +2519,23 @@ const handleRestoreWizardComplete = async () => {
   // re-create indexingStatus and log a duplicate "Indexing Complete" entry
   if (chatInterfaceRef.value) {
     chatInterfaceRef.value.markIndexingAlreadyCompleted();
+  }
+  // Restore is done; clear the resume sentinel so a future reload doesn't
+  // try to relaunch Restore.
+  clearRestoreActive();
+  // Synchronously seal the wizard state from server data BEFORE flipping
+  // suppressWizard. This sets wizardPatientSummary/wizardCurrentMedications
+  // from userDoc and opens a 60 s grace window during which the post-
+  // suppressWizard refreshWizardState skips its re-poll branch and skips
+  // its "resume guided flow → generate-summary" branch. Without this, the
+  // post-restore polling overwrites the restored summary with a fresh AI
+  // draft (~1m after Restore complete).
+  if (chatInterfaceRef.value && typeof (chatInterfaceRef.value as any).markRestoreComplete === 'function') {
+    try {
+      await (chatInterfaceRef.value as any).markRestoreComplete();
+    } catch (e) {
+      console.warn('[RESTORE] markRestoreComplete failed:', e);
+    }
   }
   suppressWizard.value = false; // Allow normal ChatInterface operation now
   // Regenerate maia-log.pdf with all restore entries
@@ -2678,6 +2765,7 @@ const handleDestroyedRestore = async () => {
     // Step 4: Launch the Restore Wizard
     if (localState) {
       restoreWizardLocalState.value = localState;
+      if (user.value?.userId) setRestoreActive(user.value.userId, 'destroyed-account');
       showRestoreWizard.value = true;
     } else {
       // No local state — just notify, they'll need to re-upload manually
@@ -3161,7 +3249,38 @@ onMounted(async () => {
         const normalizedUrl = `${window.location.origin}/?share=${encodeURIComponent(info.shareId)}${window.location.hash}`;
         window.history.replaceState({}, '', normalizedUrl);
       }
-      // If user is already authenticated and we have a pending medications edit, 
+      // Resume a Restore Wizard that was interrupted by a page reload.
+      // Sentinel was set in localStorage when Restore launched; if it
+      // matches the signed-in user, re-read maia-state.json from the
+      // stored folder handle and re-launch the wizard. Without this, the
+      // Setup wizard's auto-show watcher fires instead (because the user
+      // looks like a pre-summary new user from server state alone).
+      const restoreSentinel = getRestoreActive();
+      if (restoreSentinel && data.user?.userId === restoreSentinel.userId) {
+        try {
+          const result = await readStateFileByUserId(restoreSentinel.userId);
+          if (result?.state && result?.handle) {
+            localFolderHandle.value = result.handle;
+            restoreWizardLocalState.value = result.state;
+            suppressWizard.value = true;
+            showRestoreWizard.value = true;
+            console.log('[Restore] Resumed from sentinel after page reload', {
+              userId: restoreSentinel.userId,
+              source: restoreSentinel.source,
+              startedAt: restoreSentinel.startedAt
+            });
+          } else {
+            // Couldn't re-read state — clear the sentinel so we don't keep
+            // trying on subsequent reloads.
+            console.warn('[Restore] Sentinel present but state could not be read; clearing.');
+            clearRestoreActive();
+          }
+        } catch (e) {
+          console.warn('[Restore] Resume attempt failed:', e);
+          clearRestoreActive();
+        }
+      }
+      // If user is already authenticated and we have a pending medications edit,
       // it will be handled in ChatInterface's onMounted
       return;
     }

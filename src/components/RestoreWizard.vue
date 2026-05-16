@@ -20,17 +20,19 @@
         <q-list dense>
           <q-item v-for="item in restoreItems" :key="item.key" dense class="q-py-xs">
             <q-item-section avatar style="min-width: 28px">
-              <q-spinner v-if="item.status === 'running'" size="sm" color="primary" />
+              <q-icon v-if="item.removed" name="remove_circle_outline" color="grey-5" size="sm" />
+              <q-spinner v-else-if="item.status === 'running'" size="sm" color="primary" />
               <q-icon v-else-if="item.status === 'done'" name="check_circle" color="green" size="sm" />
               <q-icon v-else-if="item.status === 'error'" name="error" color="negative" size="sm" />
               <q-icon v-else name="radio_button_unchecked" color="grey-4" size="sm" />
             </q-item-section>
             <q-item-section>
-              <q-item-label :class="{ 'text-grey-5': item.status === 'pending' }">
-                {{ item.label }}
-                <q-chip v-if="item.isAppleHealth" color="blue-6" text-color="white" size="sm" dense class="q-ml-xs">Apple Health</q-chip>
-                <span v-if="item.status === 'running' && item.progress" class="text-primary text-caption q-ml-sm">{{ item.progress }}</span>
-                <span v-if="item.status === 'done' && item.progress" class="text-green text-caption q-ml-sm">{{ item.progress }}</span>
+              <q-item-label :class="{ 'text-grey-5': item.status === 'pending' || item.removed }">
+                <span :class="{ 'text-strike': item.removed }">{{ item.label }}</span>
+                <q-chip v-if="item.isAppleHealth && !item.removed" color="blue-6" text-color="white" size="sm" dense class="q-ml-xs">Apple Health</q-chip>
+                <span v-if="item.removed && item.progress" class="text-grey-6 text-caption q-ml-sm">{{ item.progress }}</span>
+                <span v-else-if="item.status === 'running' && item.progress" class="text-primary text-caption q-ml-sm">{{ item.progress }}</span>
+                <span v-else-if="item.status === 'done' && item.progress" class="text-green text-caption q-ml-sm">{{ item.progress }}</span>
               </q-item-label>
               <q-item-label v-if="item.status === 'error' && item.errorMsg" caption class="text-negative">{{ item.errorMsg }}</q-item-label>
             </q-item-section>
@@ -45,6 +47,17 @@
           <div class="text-h6 text-green q-mt-sm">All Restored</div>
           <p class="q-mt-md text-grey-7">Your MAIA account has been fully restored from your local backup.</p>
           <div v-if="restoreSummary" class="text-caption text-grey-6 q-mt-sm">{{ restoreSummary }}</div>
+        </div>
+      </q-card-section>
+
+      <!-- Running status footer (same idea as the Setup wizard) -->
+      <q-card-section v-if="phase === 'execute'" class="q-pt-none">
+        <div
+          class="row items-center text-caption text-grey-7"
+          style="border-top: 1px solid #ececec; padding-top: 8px"
+        >
+          <q-spinner size="14px" color="primary" class="q-mr-sm" />
+          <span>{{ statusMessage }}</span>
         </div>
       </q-card-section>
 
@@ -67,6 +80,7 @@ interface RestoreItem {
   progress?: string;
   errorMsg?: string;
   isAppleHealth?: boolean;
+  removed?: boolean;
 }
 
 interface CloudHealth {
@@ -93,15 +107,32 @@ const emit = defineEmits<{
 }>();
 
 const logProvisioningEvent = async (eventData: Record<string, any>) => {
+  let delivered = false;
   try {
-    await fetch('/api/provisioning-log', {
+    const resp = await fetch('/api/provisioning-log', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
       body: JSON.stringify({ userId: props.userId, ...eventData })
     });
+    // fetch only throws on network failure; a 401 is a resolved promise
+    // with ok=false. The server now also returns 200 with
+    // {success:false} when it couldn't persist (so the browser logs no
+    // error line) — treat that as "not delivered" too.
+    if (resp.ok) {
+      const body = await resp.json().catch(() => ({}));
+      delivered = body?.success !== false;
+    }
   } catch (err) {
     console.warn('Failed to log provisioning event:', eventData.event, err);
+  }
+  if (!delivered) {
+    // Server didn't accept it (session gone during destroy/restore is
+    // the common case). Buffer locally so maia-log.pdf still shows it.
+    try {
+      const { bufferLogEvent } = await import('../utils/localFolder');
+      bufferLogEvent({ userId: props.userId, ...eventData });
+    } catch { /* ignore */ }
   }
 };
 
@@ -118,11 +149,38 @@ const phase = ref<'execute' | 'complete'>('execute');
 const restoreItems = ref<RestoreItem[]>([]);
 const restoreSummary = ref('');
 
+// Bottom status line (mirrors the Setup wizard's running-status footer)
+// so the user always sees a one-liner of what's happening right now.
+const statusMessage = ref('Starting restore…');
+const setStatus = (msg: string) => { statusMessage.value = msg; };
+
 const updateItem = (key: string, updates: Partial<RestoreItem>) => {
   const idx = restoreItems.value.findIndex(i => i.key === key);
   if (idx >= 0) {
     restoreItems.value[idx] = { ...restoreItems.value[idx], ...updates };
   }
+};
+
+// Insert a file checklist line if it isn't already present. Used for
+// folder-ADDED files (not in the maia-state.json backup, so
+// buildRestoreItems never created a row for them) so the user can see
+// them being ingested live instead of discovering them only after the
+// wizard finishes. New rows are placed just before the first non-file
+// item (kb / agent / metadata) to keep all files grouped at the top.
+const ensureFileItem = (fileName: string, extra: Partial<RestoreItem> = {}) => {
+  const key = `file:${fileName}`;
+  if (restoreItems.value.some(i => i.key === key)) return;
+  const insertAt = restoreItems.value.findIndex(i => !i.key.startsWith('file:'));
+  const row: RestoreItem = {
+    key,
+    label: fileName,
+    needed: true,
+    status: 'pending',
+    progress: 'Added in folder',
+    ...extra
+  };
+  if (insertAt < 0) restoreItems.value.push(row);
+  else restoreItems.value.splice(insertAt, 0, row);
 };
 
 /** Get the KB name for this user — prefer the prop passed from recreate response */
@@ -142,21 +200,82 @@ const resolveKbName = async (uid: string): Promise<string | null> => {
   return `${uid}-kb`;
 };
 
+// Rebuild the My Lists categories from the Apple Health PDF. Both restore
+// paths (legacy executeRestore and v2 executeRehydrate) need this: the
+// lists-restore step only writes a single restored.md, NOT the per-
+// category files (Medications.md, Conditions.md, …) the Lists tab
+// renders. process-initial-file regenerates them and self-heals
+// userDoc.files[].isAppleHealth. Returns true if a rebuild was triggered.
+const rebuildAppleHealthCategories = async (
+  files: Array<{ fileName: string; bucketKey?: string; isAppleHealth?: boolean }>
+): Promise<boolean> => {
+  try {
+    const APPLE_EXPORT_FOOTER = 'This summary displays certain health information made available to you by your healthcare provider and may not completely';
+    const appleFooterNorm = APPLE_EXPORT_FOOTER.toLowerCase().replace(/\s+/g, ' ').trim();
+    let appleBucketKey: string | null = null;
+    let appleFileName: string | null = null;
+
+    // Fast path: a file flagged isAppleHealth (content-detected at Setup,
+    // preserved through the v2 userDoc round-trip).
+    const flagged = files.find(f => f.isAppleHealth && f.bucketKey);
+    if (flagged?.bucketKey) {
+      appleBucketKey = flagged.bucketKey;
+      appleFileName = flagged.fileName;
+    } else {
+      // Slow path: content-detect across every restored PDF. Heals
+      // older snapshots that predate the isAppleHealth field.
+      for (const f of files) {
+        if (!f.bucketKey || !/\.pdf$/i.test(f.fileName)) continue;
+        try {
+          const r = await fetch(`/api/files/parse-pdf-first-page/${encodeURIComponent(f.bucketKey)}`, { credentials: 'include' });
+          if (!r.ok) continue;
+          const data = await r.json();
+          const text = String(data?.firstPageText || '').toLowerCase().replace(/\s+/g, ' ').trim();
+          if (text.includes(appleFooterNorm)) {
+            appleBucketKey = f.bucketKey;
+            appleFileName = f.fileName;
+            break;
+          }
+        } catch { /* next */ }
+      }
+    }
+    if (appleBucketKey && appleFileName) {
+      await fetch('/api/files/lists/process-initial-file', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        // force:true — on Restore the cloud (Spaces category .md
+        // files) was wiped even though the backed-up userDoc still has
+        // appleHealthCategoriesBuiltAt set. Without force the server
+        // would treat it as already-built and skip the rebuild.
+        body: JSON.stringify({ bucketKey: appleBucketKey, fileName: appleFileName, force: true })
+      });
+      return true;
+    }
+    console.log('[RestoreWizard] No Apple Health file detected — skipping category rebuild');
+    return false;
+  } catch (e: any) {
+    console.warn('[RestoreWizard] Category rebuild failed (non-fatal):', e?.message);
+    return false;
+  }
+};
+
 const buildRestoreItems = () => {
   const items: RestoreItem[] = [];
   const state = props.localState;
   const files = state?.files || [];
 
-  // Individual file lines
+  // Individual file lines. The Apple Health badge follows the flag that
+  // was preserved in maia-state.json — detection was done content-based
+  // (PDF first-page footer) during the original Setup; we never re-guess
+  // from the filename here.
   for (const f of files) {
-    // Detect Apple Health files by filename pattern (same as used elsewhere in the app)
-    const isAppleHealth = /^apple/i.test(f.fileName) && /\.pdf$/i.test(f.fileName);
     items.push({
       key: `file:${f.fileName}`,
       label: f.fileName,
       needed: true,
       status: 'pending',
-      isAppleHealth
+      isAppleHealth: !!(f as any).isAppleHealth
     });
   }
 
@@ -201,11 +320,446 @@ const buildRestoreItems = () => {
   restoreItems.value = items;
 };
 
+// ── Phase 1: new rehydrate flow ─────────────────────────────────────
+// One PUT replaces userDoc on the server; server tells us which files
+// are missing in Spaces; we stream them up; second PUT confirms KB is
+// rebuilt and indexing is triggered. The cloud doesn't have to remember
+// anything — we push everything that matters from maia-state.json.
+//
+// Falls back to the legacy executeRestore body below ONLY if it throws
+// before the userDoc is pushed (rehydratePastNoReturn still false).
+// After that point every error is handled in-line and the wizard always
+// reaches phase='complete' — falling back later would re-run a full
+// 7-minute restore on top of a half-rehydrated account.
+let rehydratePastNoReturn = false;
+const executeRehydrate = async () => {
+  const state = props.localState as any;
+  const uid = props.userId;
+  const userDoc = state?.userDoc;
+  if (!userDoc) throw new Error('rehydrate: no userDoc in state');
+
+  // Build the folder inventory (used for added/removed diff and for
+  // looking up the source file when uploading missing bytes).
+  let folderInventory: Array<{ name: string; size?: number; mtime?: number }> = [];
+  let folderNameToHandle: Record<string, FileSystemFileHandle> = {};
+  let folderNameToSafariFile: Record<string, File> = {};
+  if (props.localFolderHandle) {
+    try {
+      const { listFolderFiles } = await import('../utils/localFolder');
+      const entries = await listFolderFiles(props.localFolderHandle);
+      for (const e of entries) {
+        const lower = e.name.toLowerCase();
+        // Skip MAIA-generated artifacts and OS junk (dotfiles like
+        // .DS_Store). These are never user content.
+        if (e.name.startsWith('.') || lower === 'maia-log.pdf' || lower === 'maia-state.json' || lower.endsWith('.webloc')) continue;
+        folderInventory.push({ name: e.name, size: e.size, mtime: e.lastModified });
+        folderNameToHandle[e.name] = e.fileHandle;
+      }
+    } catch (e) {
+      console.warn('[Rehydrate] Folder scan failed:', e);
+    }
+  } else if (props.safariFolderFiles) {
+    for (const f of props.safariFolderFiles) {
+      const lower = f.name.toLowerCase();
+      if (f.name.startsWith('.') || lower === 'maia-log.pdf' || lower === 'maia-state.json' || lower.endsWith('.webloc')) continue;
+      folderInventory.push({ name: f.name, size: f.size, mtime: f.lastModified });
+      folderNameToSafariFile[f.name] = f;
+    }
+  }
+
+  // Pass 1: push the full userDoc; server reports which file bytes it
+  // doesn't have in Spaces yet. THIS is the only place executeRehydrate
+  // is allowed to throw — before it, falling back to the legacy path is
+  // safe (no server-side mutation yet). After pass 1 succeeds the userDoc
+  // has been replaced server-side; from here on every failure is handled
+  // in-line and we ALWAYS reach phase='complete'. Throwing past this
+  // point would make executeRestore's catch run the legacy path on top
+  // of a half-rehydrated account — that's the "Restore ran twice / a
+  // second 7-minute index" bug.
+  setStatus('Pushing your backup to the cloud…');
+  const r1 = await fetch('/api/account/rehydrate', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({
+      schemaVersion: state.schemaVersion || 2,
+      userDoc,
+      folderFiles: folderInventory
+    })
+  });
+  if (!r1.ok) {
+    const err = await r1.json().catch(() => ({}));
+    throw new Error(err.error || `rehydrate failed: ${r1.status}`);
+  }
+  rehydratePastNoReturn = true;
+  const data1 = await r1.json();
+
+  // Surface the folder diff in maia-log.pdf, same shape the legacy path
+  // already emits, so the user-facing log stays consistent.
+  const folderAdded: string[] = Array.isArray(data1.folderDiff?.added) ? data1.folderDiff.added : [];
+  const folderRemoved: string[] = Array.isArray(data1.folderDiff?.removed) ? data1.folderDiff.removed : [];
+  if (folderAdded.length > 0) {
+    logProvisioningEvent({
+      event: 'restore-folder-added',
+      count: folderAdded.length,
+      files: folderAdded,
+      action: 'ingested into KB'
+    });
+  }
+  if (folderRemoved.length > 0) {
+    // The server already dropped these from userDoc.files before the
+    // pass-1 save, so they will not be re-requested or re-indexed.
+    logProvisioningEvent({
+      event: 'restore-folder-removed',
+      count: folderRemoved.length,
+      files: folderRemoved,
+      action: 'dropped from cloud'
+    });
+  }
+
+  // Surface folder-ADDED files in the checklist NOW (right after pass 1
+  // reports them) so the user sees them being ingested while the wizard
+  // runs — not only after it completes. Also defensively add a row for
+  // any server-reported missing file that the backup didn't list.
+  for (const name of folderAdded) ensureFileItem(name);
+  // Files the user deleted from the folder were just dropped from the
+  // cloud by pass 1. They still have a checklist row (built from the
+  // stale maia-state.json backup) — relabel it clearly instead of
+  // letting the "Already in cloud" pass below mislabel them.
+  const removedSet = new Set(folderRemoved);
+  for (const name of folderRemoved) {
+    ensureFileItem(name);
+    updateItem(`file:${name}`, {
+      status: 'done',
+      removed: true,
+      progress: 'Removed from Knowledge Base'
+    });
+  }
+  for (const m of (Array.isArray(data1.missingFiles) ? data1.missingFiles : [])) {
+    if (m?.fileName) ensureFileItem(m.fileName);
+  }
+  // Resume robustness: if the page was reloaded mid-Restore, the first
+  // run already registered folder-added files server-side, so this
+  // run's folderDiff/missing is empty and buildRestoreItems (built from
+  // the stale maia-state.json) wouldn't show them. Fetch the
+  // authoritative server doc and ensure a row for every file it lists,
+  // so the checklist always reflects the full current file set.
+  try {
+    const dResp = await fetch('/api/user-doc/full', { credentials: 'include' });
+    if (dResp.ok) {
+      const dJson = await dResp.json();
+      for (const f of (dJson?.userDoc?.files || [])) {
+        if (f?.fileName) ensureFileItem(f.fileName, { isAppleHealth: !!f.isAppleHealth });
+      }
+    }
+  } catch { /* non-fatal: folderAdded/missing rows still show */ }
+
+  // Agent: the rehydrate endpoint returns as soon as the DO *create*
+  // call returns — but a freshly-created agent's deployment takes a few
+  // minutes to actually come online. Reporting "Recreated" immediately
+  // (the old behaviour) is why the first chat hit a 401: the agent
+  // wasn't deployed yet. Poll /api/agent-setup-status until the
+  // endpoint is actually ready, concurrently with KB indexing, and
+  // only then mark the step done. Reused agents usually flip ready on
+  // the first poll.
+  const recreated = data1.rebuilt?.agent === 'created';
+  updateItem('agent', {
+    status: 'running',
+    progress: recreated ? 'Deploying agent…' : 'Verifying agent…'
+  });
+  const agentReadyPromise = (async () => {
+    const agentStart = Date.now();
+    // 200 × 3s = 10 min ceiling (DO agent deploy is typically 1-3 min).
+    for (let i = 0; i < 200; i++) {
+      try {
+        const r = await fetch('/api/agent-setup-status', { credentials: 'include' });
+        if (r.ok) {
+          const s = await r.json();
+          if (s?.endpointReady) {
+            updateItem('agent', {
+              status: 'done',
+              progress: recreated ? 'Recreated' : 'Reused'
+            });
+            logProvisioningEvent({ event: 'agent-deployed', elapsedMs: Date.now() - agentStart });
+            return;
+          }
+        }
+      } catch { /* keep polling */ }
+      const secs = Math.round((Date.now() - agentStart) / 1000);
+      updateItem('agent', { progress: `Deploying agent… (${Math.floor(secs / 60)}m ${secs % 60}s)` });
+      await new Promise(res => setTimeout(res, 3000));
+    }
+    // Timed out — don't block Restore; deployment usually finishes
+    // shortly after. The transparent 401-retry covers the gap.
+    updateItem('agent', { status: 'done', progress: 'Deploying in background' });
+    logProvisioningEvent({ event: 'agent-deploy-timeout', elapsedMs: Date.now() - agentStart });
+  })();
+
+  // Stream missing file bytes back. The server already knows where each
+  // file belongs (its bucketKey was supplied in the userDoc).
+  const missing = Array.isArray(data1.missingFiles) ? data1.missingFiles : [];
+  let filesUploaded = 0;
+  let totalUploadedBytes = 0;
+  if (missing.length > 0) setStatus(`Uploading ${missing.length} file${missing.length === 1 ? '' : 's'} to the cloud…`);
+  for (const m of missing) {
+    const key = `file:${m.fileName}`;
+    setStatus(`Uploading ${m.fileName}…`);
+    updateItem(key, { status: 'running' });
+    try {
+      let file: File | null = null;
+      if (folderNameToHandle[m.fileName]) {
+        file = await folderNameToHandle[m.fileName].getFile();
+      } else if (folderNameToSafariFile[m.fileName]) {
+        file = folderNameToSafariFile[m.fileName];
+      }
+      if (!file) {
+        updateItem(key, { status: 'error', errorMsg: 'Not found in local folder' });
+        continue;
+      }
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('bucketKey', m.bucketKey);
+      const upResp = await fetch('/api/files/restore-bytes', {
+        method: 'POST',
+        credentials: 'include',
+        body: fd
+      });
+      if (!upResp.ok) {
+        const t = await upResp.text().catch(() => '');
+        updateItem(key, { status: 'error', errorMsg: `Upload failed: ${upResp.status} ${t}` });
+        continue;
+      }
+      filesUploaded++;
+      totalUploadedBytes += file.size;
+      updateItem(key, { status: 'done', progress: 'Uploaded' });
+    } catch (e: any) {
+      updateItem(key, { status: 'error', errorMsg: e?.message || 'Upload failed' });
+    }
+  }
+  // For files that were already in S3 (not in `missing`), mark done now.
+  for (const f of (userDoc.files || [])) {
+    if (removedSet.has(f.fileName)) continue; // keep the "Removed" label
+    const k = `file:${f.fileName}`;
+    if (!missing.some((mf: any) => mf.bucketKey === f.bucketKey)) {
+      updateItem(k, { status: 'done', progress: 'Already in cloud' });
+    }
+  }
+
+  if (filesUploaded > 0) {
+    logProvisioningEvent({
+      event: 'files-uploaded',
+      count: filesUploaded,
+      totalKB: Math.round(totalUploadedBytes / 1024),
+      method: 'restore-bytes'
+    });
+  }
+
+  // NOTE: folder-ADDED files need no separate upload path here. The
+  // server (PUT /api/account/rehydrate) already created a userDoc.files
+  // entry for each added file with the correct KB bucketKey, so they
+  // appear in `data1.missingFiles` and were just streamed up by the
+  // missing-bytes loop above (proven /api/files/restore-bytes path,
+  // correct KB folder → update-knowledge-base indexes them). This
+  // removes the old kbName-guessing client upload that left added
+  // files unindexed.
+
+  // Pass 2: now that all bytes are in S3, ask the server to finalize —
+  // ensures KB exists and triggers indexing. This is also where any
+  // newly-needed cloud resources get created.
+  //
+  // IMPORTANT: pass 1 + restore-bytes + /api/files/register have mutated
+  // the SERVER's userDoc (folder-removed files dropped, folder-added
+  // files registered). The client's in-memory `userDoc` is now stale —
+  // sending it back would clobber those server-side changes. Re-fetch
+  // the authoritative server doc and send THAT as the pass-2 body.
+  setStatus('Finalizing cloud account…');
+  let pass2Doc: any = userDoc;
+  try {
+    const fresh = await fetch('/api/user-doc/full', { credentials: 'include' });
+    if (fresh.ok) {
+      const fd = await fresh.json();
+      if (fd && (fd.userDoc || fd.userId)) pass2Doc = fd.userDoc || fd;
+    }
+  } catch (e: any) {
+    console.warn('[Rehydrate] pass-2 doc refetch failed, using client copy:', e?.message);
+  }
+  const r2 = await fetch('/api/account/rehydrate', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({
+      schemaVersion: state.schemaVersion || 2,
+      userDoc: pass2Doc,
+      folderFiles: folderInventory
+    })
+  });
+  if (!r2.ok) {
+    const err = await r2.json().catch(() => ({}));
+    throw new Error(err.error || `rehydrate pass-2 failed: ${r2.status}`);
+  }
+  const data2 = await r2.json();
+
+  // Rebuild + reindex the KB. After a cloud destroy the KB, agent, and
+  // Spaces files are all gone, so this is a full re-index (7+ min for a
+  // typical 2-file set). /api/update-knowledge-base is ASYNC — it kicks
+  // off the indexing job and returns 200 immediately. We MUST poll
+  // /api/kb-indexing-status until the job actually completes, otherwise
+  // the wizard races to "done" in milliseconds and the user is dropped
+  // into a chat with an empty KB (the bug the user hit). This mirrors
+  // the legacy path's polling loop exactly.
+  {
+    setStatus('Indexing your records into the knowledge base… (this is the long step)');
+    updateItem('kb', { status: 'running', progress: 'Creating knowledge base...' });
+    const kbStartTime = Date.now();
+    const kbResp = await fetch('/api/update-knowledge-base', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ userId: uid })
+    });
+    if (!kbResp.ok) {
+      const errData = await kbResp.json().catch(() => ({}));
+      updateItem('kb', { status: 'error', errorMsg: errData.message || `KB update failed: ${kbResp.status}` });
+    } else {
+      const indexData = await kbResp.json();
+      const kbId = indexData.kbId;
+      const jobId = indexData.jobId || kbId;
+      const filesCount = indexData.filesIndexed || indexData.filesCount || 0;
+      const seedTokens = indexData.totalTokens || indexData.tokenCount || 0;
+      if (kbId) {
+        updateItem('kb', { progress: 'Indexing...' });
+        let done = false;
+        let attempts = 0;
+        // 300 × 3s = 15 min ceiling. Typical 2-file set is ~7-8 min.
+        while (!done && attempts < 300) {
+          await new Promise(r => setTimeout(r, 3000));
+          try {
+            const statusResp = await fetch(
+              `/api/kb-indexing-status/${jobId}?userId=${encodeURIComponent(uid)}`,
+              { credentials: 'include' }
+            );
+            if (statusResp.ok) {
+              const sd = await statusResp.json();
+              if (sd.completed || sd.backendCompleted) {
+                done = true;
+                const t = sd.tokens || sd.tokenCount || sd.total_tokens || seedTokens || 0;
+                const f = sd.filesIndexed || filesCount || 0;
+                const parts: string[] = [];
+                if (f) parts.push(`${f} file${f === 1 ? '' : 's'}`);
+                if (t) parts.push(`${Number(t).toLocaleString()} tokens`);
+                updateItem('kb', { status: 'done', progress: parts.join(', ') || 'Indexed' });
+                logProvisioningEvent({
+                  event: 'kb-indexed',
+                  tokens: Number(t) || 0,
+                  fileCount: Number(f) || 0,
+                  elapsedMs: Date.now() - kbStartTime
+                });
+              } else if (sd.status === 'INDEX_JOB_STATUS_FAILED') {
+                throw new Error(sd.error || 'Indexing failed');
+              } else {
+                const t = sd.tokens || sd.tokenCount || 0;
+                const tokenStr = Number(t) > 0 ? ` — ${Number(t).toLocaleString()} tokens` : '';
+                const elapsedSec = attempts * 3;
+                const mins = Math.floor(elapsedSec / 60);
+                const secs = elapsedSec % 60;
+                const timeStr = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+                updateItem('kb', { progress: `Indexing...${tokenStr} (${timeStr})` });
+              }
+            }
+          } catch (pollErr: any) {
+            if (pollErr?.message?.includes('failed')) throw pollErr;
+          }
+          attempts++;
+        }
+        if (!done) {
+          updateItem('kb', { status: 'done', progress: 'Indexing continues in background' });
+          logProvisioningEvent({ event: 'kb-indexed', tokens: 0, fileCount: 0, elapsedMs: Date.now() - kbStartTime });
+        }
+      } else if (seedTokens > 0) {
+        updateItem('kb', { status: 'done', progress: `${filesCount} file${filesCount === 1 ? '' : 's'}, ${Number(seedTokens).toLocaleString()} tokens` });
+        logProvisioningEvent({ event: 'kb-indexed', tokens: Number(seedTokens), fileCount: Number(filesCount), elapsedMs: Date.now() - kbStartTime });
+      } else {
+        updateItem('kb', { status: 'done', progress: 'Created' });
+      }
+    }
+  }
+
+  // Rebuild My Lists categories from the Apple Health PDF (same as the
+  // legacy path). userDoc.files carries the content-detected
+  // isAppleHealth flag through the v2 round-trip, so the fast path
+  // usually hits without re-parsing any PDF.
+  try {
+    // Use the authoritative server doc (pass2Doc), which already
+    // includes any folder-added files with their correct KB
+    // bucketKeys — so a newly-added Apple Health export is
+    // content-detected and its categories built.
+    const filesForRebuild = (pass2Doc?.files && pass2Doc.files.length)
+      ? pass2Doc.files
+      : (userDoc.files || []);
+    const rebuilt = await rebuildAppleHealthCategories(filesForRebuild);
+    if (rebuilt) {
+      updateItem('lists', { status: 'done', progress: 'Restored' });
+      logProvisioningEvent({ event: 'lists-restored' });
+    }
+  } catch (e: any) {
+    console.warn('[Rehydrate] Category rebuild failed (non-fatal):', e?.message);
+  }
+
+  // The metadata items (medications, summary, chats, instructions) are
+  // already part of userDoc, so they're restored as a side effect of
+  // pass 1. Mark them done in the UI and log the same events the legacy
+  // path emitted, so maia-log.pdf reads the same as before.
+  if (userDoc.currentMedications) {
+    updateItem('medications', { status: 'done', progress: 'Restored' });
+    logProvisioningEvent({
+      event: 'medications-restored',
+      lines: String(userDoc.currentMedications).split('\n').filter((l: string) => l.trim()).length
+    });
+  }
+  if (userDoc.patientSummary || userDoc.patientSummaries?.length) {
+    const summaryText = userDoc.patientSummary
+      || (userDoc.patientSummaries && userDoc.patientSummaries[userDoc.patientSummaries.length - 1]?.text)
+      || '';
+    updateItem('summary', { status: 'done', progress: 'Restored' });
+    if (summaryText) {
+      logProvisioningEvent({
+        event: 'summary-restored',
+        lines: summaryText.split('\n').filter((l: string) => l.trim()).length,
+        chars: summaryText.length
+      });
+    }
+  }
+  if (userDoc.agentInstructions) {
+    updateItem('instructions', { status: 'done', progress: 'Applied' });
+    logProvisioningEvent({ event: 'instructions-restored' });
+  }
+  if (Array.isArray(userDoc.savedChats?.chats) && userDoc.savedChats.chats.length > 0) {
+    updateItem('chats', { status: 'done', progress: `${userDoc.savedChats.chats.length} restored` });
+    logProvisioningEvent({ event: 'chats-restored', count: userDoc.savedChats.chats.length });
+  }
+  if (userDoc.listsMarkdown) {
+    updateItem('lists', { status: 'done', progress: 'Restored' });
+    logProvisioningEvent({ event: 'lists-restored' });
+  }
+
+  // Wait for the agent deployment poll (running concurrently with KB
+  // indexing) so we don't declare Restore complete while the Private AI
+  // agent is still coming online — that gap is what produced the
+  // user-visible "Authentication failed" on the first chat.
+  setStatus('Waiting for the Private AI agent to finish deploying…');
+  try { await agentReadyPromise; } catch { /* non-fatal */ }
+
+  await logProvisioningEvent({ event: 'restore-complete' });
+  restoreSummary.value = 'Account restored from local backup.';
+  setStatus('Restore complete.');
+  phase.value = 'complete';
+};
+
 const executeRestore = async () => {
   phase.value = 'execute';
   const uid = props.userId;
   const state = props.localState;
-  const files = state?.files || [];
+  const expectedFiles = state?.files || [];
   let filesUploaded = 0;
   let filesUploadedToKB = 0;
 
@@ -222,12 +776,120 @@ const executeRestore = async () => {
     }
   });
 
+  // Phase 1 of the local-first redesign: if maia-state.json is v2 (carries
+  // a full userDoc backup), take the new rehydrate path. Otherwise fall
+  // through to the legacy per-field reconstruction below. See
+  // Documentation/NewRestore.md for the model.
+  const stateAny = state as any;
+  const hasV2 = !!(stateAny?.schemaVersion && stateAny.schemaVersion >= 2 && stateAny.userDoc);
+  // Always log which path we're taking so the user / support can see it
+  // in maia-log.pdf without inspecting the JSON.
+  logProvisioningEvent({
+    event: 'restore-path-chosen',
+    path: hasV2 ? 'rehydrate-v2' : 'legacy-v1',
+    snapshotSchemaVersion: stateAny?.schemaVersion || 1,
+    hasUserDocInState: !!stateAny?.userDoc
+  });
+  if (hasV2) {
+    rehydratePastNoReturn = false;
+    try {
+      await executeRehydrate();
+      return;
+    } catch (e: any) {
+      if (rehydratePastNoReturn) {
+        // The userDoc was already pushed and (likely) the KB indexed.
+        // Falling back to the legacy path here would run a SECOND full
+        // restore on top of a half-rehydrated account — the "Restore
+        // ran twice / second 7-minute index" bug. Surface the error,
+        // mark complete, and stop. The account is already mostly
+        // restored; a reload + manual retry is safer than auto-rerun.
+        console.error('[RestoreWizard] Rehydrate failed AFTER commit — NOT falling back:', e);
+        logProvisioningEvent({
+          event: 'restore-postcommit-error',
+          reason: e?.message || 'post-commit failure'
+        });
+        restoreSummary.value = 'Account restored (with a post-step warning — see log).';
+        phase.value = 'complete';
+        return;
+      }
+      console.error('[RestoreWizard] Rehydrate failed before commit, falling back to legacy:', e);
+      logProvisioningEvent({
+        event: 'restore-fallback-to-legacy',
+        reason: e?.message || 'rehydrate failed'
+      });
+      // fall through to legacy path (safe — no server mutation yet)
+    }
+  }
+
+  // Folder diff: users can add/remove PDFs in Finder while signed out.
+  // maia-state.json is the snapshot of "what the folder contained at last
+  // sign-off"; the actual folder is the source of truth right now. Detect
+  // both directions and surface them in maia-log.pdf so the user / support
+  // can see why post-restore Saved Files differs from pre-sign-out.
+  const MAIA_GENERATED = new Set(['maia-log.pdf', 'maia-state.json']);
+  const isMaiaGenerated = (name: string) => {
+    const lower = name.toLowerCase();
+    return MAIA_GENERATED.has(lower) || lower.endsWith('.webloc');
+  };
+  let presentFileNames: string[] = [];
+  if (props.localFolderHandle) {
+    try {
+      const { listFolderFiles } = await import('../utils/localFolder');
+      const folderFiles = await listFolderFiles(props.localFolderHandle, { extensions: ['pdf'] });
+      presentFileNames = folderFiles.map(f => f.name).filter(n => !isMaiaGenerated(n));
+    } catch (e: any) {
+      console.warn('[RestoreWizard] Folder scan failed:', e?.message);
+    }
+  } else if (props.safariFolderFiles) {
+    presentFileNames = props.safariFolderFiles.map(f => f.name).filter(n => !isMaiaGenerated(n));
+  }
+
+  const expectedNameSet = new Set(expectedFiles.map(f => f.fileName));
+  const presentNameSet = new Set(presentFileNames);
+  const addedFiles = presentFileNames.filter(n => !expectedNameSet.has(n));
+  const removedFiles = expectedFiles.map(f => f.fileName).filter(n => !presentNameSet.has(n));
+
+  if (presentFileNames.length > 0 && (addedFiles.length > 0 || removedFiles.length > 0)) {
+    if (addedFiles.length > 0) {
+      logProvisioningEvent({
+        event: 'restore-folder-added',
+        count: addedFiles.length,
+        files: addedFiles
+      });
+    }
+    if (removedFiles.length > 0) {
+      logProvisioningEvent({
+        event: 'restore-folder-removed',
+        count: removedFiles.length,
+        files: removedFiles
+      });
+    }
+  }
+
+  // Build the actual upload set. Skip expected files that have been removed
+  // from the folder (would error otherwise); treat folder-added files as new
+  // KB-bound uploads alongside the previously-indexed set.
+  const filesToRestore = expectedFiles.filter(f => presentNameSet.has(f.fileName));
+
+  // Surface gaps in maia-state.json. If the snapshot is missing fields
+  // that a fully-finished setup would have had, the user (or support) needs
+  // to see that on the log so they know why post-restore tabs are empty.
+  const stateGaps: string[] = [];
+  if (!state?.currentMedications) stateGaps.push('Current Medications');
+  if (!state?.patientSummary) stateGaps.push('Patient Summary');
+  if (stateGaps.length > 0) {
+    logProvisioningEvent({
+      event: 'restore-state-incomplete',
+      missing: stateGaps
+    });
+  }
+
   try {
     // Resolve KB name for file uploads
     const kbName = await resolveKbName(uid);
 
     // 1. Upload files — KB-bound files go to KB folder, archived-only files go to root (auto-archived later)
-    const uploadFile = async (file: File, fileName: string, toKB: boolean = true) => {
+    const uploadFile = async (file: File, fileName: string, toKB: boolean = true, isAppleHealth: boolean = false) => {
       const formData = new FormData();
       formData.append('file', file);
       formData.append('userId', uid);
@@ -242,7 +904,11 @@ const executeRestore = async () => {
       });
       if (!resp.ok) throw new Error(`Upload failed: ${resp.status}`);
       const data = await resp.json();
-      // Register file in user doc so KB update can find it
+      // Register file in user doc so KB update can find it. The
+      // isAppleHealth flag rides through the body so the server sets it
+      // correctly on userDoc.files[] — detection is content-based, done
+      // by the caller (either from preserved state, or from a post-upload
+      // first-page parse for files added since last sign-off).
       try {
         const regResp = await fetch('/api/files/register', {
           method: 'POST',
@@ -252,7 +918,8 @@ const executeRestore = async () => {
             userId: uid,
             fileName,
             bucketKey: data.fileInfo?.bucketKey,
-            fileSize: data.fileInfo?.size
+            fileSize: data.fileInfo?.size,
+            ...(isAppleHealth ? { isAppleHealth: true } : {})
           })
         });
         if (!regResp.ok) {
@@ -269,30 +936,35 @@ const executeRestore = async () => {
     const uploadedFileNames: string[] = [];
     let appleHealthCount = 0;
 
-    if (files.length > 0 && props.localFolderHandle) {
-      for (const fileInfo of files) {
+    // Track bucketKeys of folder-added files so we can content-detect them
+    // for AH after upload (we don't have content for them in state).
+    const addedBucketKeys: Array<{ fileName: string; bucketKey: string }> = [];
+
+    if (filesToRestore.length > 0 && props.localFolderHandle) {
+      for (const fileInfo of filesToRestore) {
         const key = `file:${fileInfo.fileName}`;
-        // Only upload to KB folder if the file was previously indexed or pending indexing.
-        // Files that were only in archived/ (not_in_kb) go to root → auto-archived on next Saved Files open.
         const shouldGoToKB = fileInfo.cloudStatus === 'indexed' || fileInfo.cloudStatus === 'pending';
+        // AH flag is preserved from maia-state.json (content-detected at
+        // last Setup). No filename guessing.
+        const stateIsAH = !!(fileInfo as any).isAppleHealth;
         updateItem(key, { status: 'running' });
         try {
           const fileHandle = await props.localFolderHandle.getFileHandle(fileInfo.fileName);
           const file = await fileHandle.getFile();
-          await uploadFile(file, fileInfo.fileName, shouldGoToKB);
+          await uploadFile(file, fileInfo.fileName, shouldGoToKB, stateIsAH);
           filesUploaded++;
           if (shouldGoToKB) filesUploadedToKB++;
           totalUploadedBytes += file.size;
           uploadedFileNames.push(fileInfo.fileName);
-          if (/^apple/i.test(fileInfo.fileName) && /\.pdf$/i.test(fileInfo.fileName)) appleHealthCount++;
+          if (stateIsAH) appleHealthCount++;
           updateItem(key, { status: 'done', progress: shouldGoToKB ? 'Uploaded to KB' : 'Uploaded to archive' });
         } catch (e: any) {
           console.error(`[RestoreWizard] File upload failed: ${fileInfo.fileName}:`, e?.message);
           updateItem(key, { status: 'error', errorMsg: e?.message || 'Upload failed' });
         }
       }
-    } else if (files.length > 0 && props.safariFolderFiles) {
-      for (const fileInfo of files) {
+    } else if (filesToRestore.length > 0 && props.safariFolderFiles) {
+      for (const fileInfo of filesToRestore) {
         const key = `file:${fileInfo.fileName}`;
         const safariFile = props.safariFolderFiles.find(f => f.name === fileInfo.fileName);
         if (!safariFile) {
@@ -300,22 +972,63 @@ const executeRestore = async () => {
           continue;
         }
         const shouldGoToKB = fileInfo.cloudStatus === 'indexed' || fileInfo.cloudStatus === 'pending';
+        const stateIsAH = !!(fileInfo as any).isAppleHealth;
         updateItem(key, { status: 'running' });
         try {
-          await uploadFile(safariFile, fileInfo.fileName, shouldGoToKB);
+          await uploadFile(safariFile, fileInfo.fileName, shouldGoToKB, stateIsAH);
           filesUploaded++;
           if (shouldGoToKB) filesUploadedToKB++;
           totalUploadedBytes += safariFile.size;
           uploadedFileNames.push(fileInfo.fileName);
-          if (/^apple/i.test(fileInfo.fileName) && /\.pdf$/i.test(fileInfo.fileName)) appleHealthCount++;
+          if (stateIsAH) appleHealthCount++;
           updateItem(key, { status: 'done', progress: shouldGoToKB ? 'Uploaded to KB' : 'Uploaded to archive' });
         } catch (e: any) {
           updateItem(key, { status: 'error', errorMsg: e?.message || 'Upload failed' });
         }
       }
-    } else if (files.length > 0) {
-      for (const fileInfo of files) {
+    } else if (expectedFiles.length > 0) {
+      for (const fileInfo of expectedFiles) {
         updateItem(`file:${fileInfo.fileName}`, { status: 'error', errorMsg: 'No local folder connected' });
+      }
+    }
+
+    // Upload folder-added files. We don't have a content-based AH flag for
+    // these yet; we set isAppleHealth=false on register and the category-
+    // rebuild step below content-detects them and re-calls /api/files/
+    // register with isAppleHealth: true for the one that matches.
+    if (addedFiles.length > 0 && props.localFolderHandle) {
+      for (const fileName of addedFiles) {
+        try {
+          const fileHandle = await props.localFolderHandle.getFileHandle(fileName);
+          const file = await fileHandle.getFile();
+          const data = await uploadFile(file, fileName, true, false);
+          filesUploaded++;
+          filesUploadedToKB++;
+          totalUploadedBytes += file.size;
+          uploadedFileNames.push(fileName);
+          if (data?.fileInfo?.bucketKey) {
+            addedBucketKeys.push({ fileName, bucketKey: data.fileInfo.bucketKey });
+          }
+        } catch (e: any) {
+          console.error(`[RestoreWizard] Added-file upload failed: ${fileName}:`, e?.message);
+        }
+      }
+    } else if (addedFiles.length > 0 && props.safariFolderFiles) {
+      for (const fileName of addedFiles) {
+        const safariFile = props.safariFolderFiles.find(f => f.name === fileName);
+        if (!safariFile) continue;
+        try {
+          const data = await uploadFile(safariFile, fileName, true, false);
+          filesUploaded++;
+          filesUploadedToKB++;
+          totalUploadedBytes += safariFile.size;
+          uploadedFileNames.push(fileName);
+          if (data?.fileInfo?.bucketKey) {
+            addedBucketKeys.push({ fileName, bucketKey: data.fileInfo.bucketKey });
+          }
+        } catch (e: any) {
+          console.error(`[RestoreWizard] Added-file upload failed: ${fileName}:`, e?.message);
+        }
       }
     }
 
@@ -581,6 +1294,77 @@ const executeRestore = async () => {
         console.error(`[RestoreWizard] Lists restore failed:`, e?.message);
         updateItem('lists', { status: 'error', errorMsg: e?.message || 'Failed' });
       }
+    }
+
+    // 5. Re-extract Apple Health categories. The lists-restore step above
+    // writes a single restored.md back to S3 but doesn't rebuild the
+    // per-category files (Medications.md, Conditions.md, ...) that
+    // Lists.vue renders from. Without this step, the My Lists tab is
+    // empty after Restore even though "My Lists restored" was logged.
+    //
+    // To find the AH file we read the first page of each restored PDF
+    // looking for the Apple Health export footer (same approach Setup
+    // uses via detectAppleHealthFromBucket). Filename-based detection
+    // is unreliable because the real Apple Health export is named
+    // "Health Records - <Patient Name> - YYYY-MM-DD at HH.MM.SS.pdf"
+    // — it does not start with "apple".
+    try {
+      const APPLE_EXPORT_FOOTER = 'This summary displays certain health information made available to you by your healthcare provider and may not completely';
+      const appleFooterNorm = APPLE_EXPORT_FOOTER.toLowerCase().replace(/\s+/g, ' ').trim();
+      const kbName = await resolveKbName(uid);
+      const kbPrefix = `${uid}/${kbName}`;
+      let appleBucketKey: string | null = null;
+      let appleFileName: string | null = null;
+
+      // Fast path: state.files preserves the AH flag (content-detected at
+      // the original Setup). If we have it, no PDF parsing needed.
+      const stateAH = filesToRestore.find(f => (f as any).isAppleHealth);
+      if (stateAH) {
+        appleBucketKey = `${kbPrefix}/${stateAH.fileName.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
+        appleFileName = stateAH.fileName;
+      } else {
+        // Slow path: content-detect across every PDF we just uploaded.
+        // This covers TWO cases:
+        //   1. maia-state.json was written by an older version that didn't
+        //      preserve isAppleHealth (the field is now in MaiaState but
+        //      pre-fix snapshots have it absent on every file).
+        //   2. Files added in Finder since last sign-off — they have no
+        //      state entry at all.
+        // We iterate ALL uploaded PDFs (state-known + added) rather than
+        // just added ones, so older snapshots heal automatically.
+        const stateKnownCandidates = filesToRestore
+          .filter(f => /\.pdf$/i.test(f.fileName))
+          .map(f => ({ fileName: f.fileName, bucketKey: `${kbPrefix}/${f.fileName.replace(/[^a-zA-Z0-9.-]/g, '_')}` }));
+        const candidates = [...stateKnownCandidates, ...addedBucketKeys];
+        for (const c of candidates) {
+          try {
+            const r = await fetch(`/api/files/parse-pdf-first-page/${encodeURIComponent(c.bucketKey)}`, { credentials: 'include' });
+            if (!r.ok) continue;
+            const data = await r.json();
+            const text = String(data?.firstPageText || '').toLowerCase().replace(/\s+/g, ' ').trim();
+            if (text.includes(appleFooterNorm)) {
+              appleBucketKey = c.bucketKey;
+              appleFileName = c.fileName;
+              break;
+            }
+          } catch { /* try next */ }
+        }
+      }
+      if (appleBucketKey && appleFileName) {
+        // process-initial-file self-heals userDoc.files[].isAppleHealth
+        // when it sees the AH footer in the markdown, so we don't need a
+        // separate /api/files/register call here.
+        await fetch('/api/files/lists/process-initial-file', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ bucketKey: appleBucketKey, fileName: appleFileName })
+        });
+      } else {
+        console.log('[RestoreWizard] No Apple Health file detected — skipping category rebuild');
+      }
+    } catch (e: any) {
+      console.warn('[RestoreWizard] Category rebuild failed (non-fatal):', e?.message);
     }
 
     // Build summary

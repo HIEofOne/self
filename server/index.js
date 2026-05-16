@@ -4,6 +4,7 @@
  */
 
 import express from 'express';
+import multer from 'multer';
 import dotenv from 'dotenv';
 import session from 'express-session';
 import cookieParser from 'cookie-parser';
@@ -3369,15 +3370,12 @@ async function provisionUserAsync(userId, token) {
     updateStatus('Resolving model and project IDs...');
     logProvisioning(userId, `🔍 Resolving model and project IDs...`, 'info');
 
-    // If not in env vars or invalid, try to get from existing agents
-    if (!isValidUUID(modelId) || !isValidUUID(projectId)) {
+    // Project ID may still come from an existing agent
+    if (!isValidUUID(projectId)) {
       try {
         const agents = await doClient.agent.list();
         if (agents.length > 0) {
           const existingAgent = await doClient.agent.get(agents[0].uuid);
-          if (!isValidUUID(modelId) && existingAgent.model?.uuid && isValidUUID(existingAgent.model.uuid)) {
-            modelId = existingAgent.model.uuid;
-          }
           if (!isValidUUID(projectId) && existingAgent.project_id && isValidUUID(existingAgent.project_id)) {
             projectId = existingAgent.project_id;
           }
@@ -3392,19 +3390,47 @@ async function provisionUserAsync(userId, token) {
       projectId = await getProjectIdForGenAI(doClient) || projectId;
     }
 
-    // If still no valid model, try to list models
+    // PREFERRED PATH: look up Deepseek V4 Pro in the DO catalog FIRST.
+    // Only fall back to an existing agent's model if the catalog lookup fails.
     if (!isValidUUID(modelId)) {
       try {
         const modelsResponse = await doClient.request('/v2/gen-ai/models');
         const models = modelsResponse.models || modelsResponse.data?.models || [];
         if (models.length > 0) {
-          const preferredModel = models.find(m => 
-            m.inference_name === 'openai-gpt-oss-120b' || m.name === 'OpenAI GPT-oss-120b'
+          const preferredModel = models.find(m =>
+            m.inference_name === 'deepseek-v4-pro' || m.name === 'Deepseek V4 Pro' || m.id === 'deepseek-v4-pro'
           );
-          const selectedModel = preferredModel || models[0];
-          if (selectedModel && selectedModel.uuid && isValidUUID(selectedModel.uuid)) {
-            modelId = selectedModel.uuid;
+          if (preferredModel && preferredModel.uuid && isValidUUID(preferredModel.uuid)) {
+            modelId = preferredModel.uuid;
           }
+        }
+      } catch (error) {
+        // Continue
+      }
+    }
+
+    // FALLBACK: reuse an existing agent's model UUID
+    if (!isValidUUID(modelId)) {
+      try {
+        const agents = await doClient.agent.list();
+        if (agents.length > 0) {
+          const existingAgent = await doClient.agent.get(agents[0].uuid);
+          if (existingAgent.model?.uuid && isValidUUID(existingAgent.model.uuid)) {
+            modelId = existingAgent.model.uuid;
+          }
+        }
+      } catch (error) {
+        // Continue
+      }
+    }
+
+    // LAST RESORT: first model in the catalog
+    if (!isValidUUID(modelId)) {
+      try {
+        const modelsResponse = await doClient.request('/v2/gen-ai/models');
+        const models = modelsResponse.models || modelsResponse.data?.models || [];
+        if (models.length > 0 && models[0]?.uuid && isValidUUID(models[0].uuid)) {
+          modelId = models[0].uuid;
         }
       } catch (error) {
         // Continue
@@ -4233,7 +4259,7 @@ async function provisionUserAsync(userId, token) {
               const response = await agentProvider.chat(
                 [{ role: 'user', content: prompt }],
                 { 
-                  model: agentModelName || 'openai-gpt-oss-120b',
+                  model: agentModelName || 'deepseek-v4-pro',
                   stream: false
                 }
               );
@@ -4323,7 +4349,7 @@ async function provisionUserAsync(userId, token) {
 
             const summaryResponse = await agentProvider.chat(
               [{ role: 'user', content: summaryPrompt }],
-              { model: agentModelName || 'openai-gpt-oss-120b' }
+              { model: agentModelName || 'deepseek-v4-pro' }
             );
 
             const summary = summaryResponse.content || summaryResponse.text || '';
@@ -7183,25 +7209,30 @@ const runPoll = async () => {
                             currentJobId === activeJobId;
 
           // Token-stable completion: if tokens > 0 and haven't changed for 4+ consecutive
-          // polls (60+ seconds), the DO API job status is unreliable — treat as complete.
-          // This handles the common case where DO reports job as "active" long after
-          // indexing has actually finished.
+          // polls (60+ seconds) AND DO has reported indexed_file_count >= expected files,
+          // treat as complete. The file-count gate prevents firing while DO is still
+          // working through the remaining files (a gap between two file's tokenization
+          // can otherwise look like "stable tokens" and end the poll prematurely).
           if (Number(tokens) > 0 && tokens === lastTokenValue) {
             tokenStableCount++;
           } else {
             tokenStableCount = 0;
           }
           lastTokenValue = tokens;
-          const tokenStableCompleted = Number(tokens) > 0 && tokenStableCount >= 4;
+          const expectedFileCount = indexedFiles.length;
+          const allFilesIndexed = expectedFileCount > 0
+            ? Number(fileCount) >= expectedFileCount
+            : Number(fileCount) > 0;
+          const tokenStableCompleted = Number(tokens) > 0 && tokenStableCount >= 4 && allFilesIndexed;
           if (tokenStableCompleted && !statusCompleted) {
-            console.log(`[KB AUTO] ✅ Token-stable completion for job ${activeJobId}: tokens=${tokens} stable for ${tokenStableCount} polls (status still=${status})`);
+            console.log(`[KB AUTO] ✅ Token-stable completion for job ${activeJobId}: tokens=${tokens} stable for ${tokenStableCount} polls files=${fileCount}/${expectedFileCount} (status still=${status})`);
           }
 
-          // Time-based fallback: if polling for 15+ minutes with no completion signal,
-          // the DO API job status is stuck. Complete with whatever state we have.
-          // This handles the 0-token "no changes" case where the DO API never transitions.
+          // Time-based fallback: if polling for 30+ minutes with no completion signal,
+          // the DO API job status is stuck. Complete with whatever state we have. Raised
+          // from 15→30 min because legitimately large KBs (4-10 PDFs) can take 15-25 min.
           const elapsedPollingMs = Date.now() - startTime;
-          const timeBasedCompleted = !statusCompleted && !tokenStableCompleted && elapsedPollingMs > 15 * 60 * 1000;
+          const timeBasedCompleted = !statusCompleted && !tokenStableCompleted && elapsedPollingMs > 30 * 60 * 1000;
           if (timeBasedCompleted) {
             console.log(`[KB AUTO] ✅ Time-based completion for job ${activeJobId}: elapsed=${Math.floor(elapsedPollingMs / 60000)}m tokens=${tokens} status=${status}`);
           }
@@ -8946,6 +8977,401 @@ app.post('/api/user-status', async (req, res) => {
   }
 });
 
+// Multer for the restore-bytes endpoint. 50 MB matches the limit used by
+// the wizard's /api/files/upload in server/routes/files.js.
+const restoreBytesUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 }
+});
+
+// ── Phase 1 of the local-first redesign (see Documentation/NewRestore.md) ──
+//
+// Three endpoints implement the "maia-state.json is the full backup of
+// userDoc; the cloud is a disposable accelerator" model. The existing
+// per-field /api/restore + RestoreWizard orchestration stays in place
+// during transition; the new path is preferred when MaiaState.schemaVersion
+// >= 2 is present in the snapshot.
+//
+//   GET  /api/user-doc/full         — read the whole userDoc (minus secrets)
+//   PUT  /api/account/rehydrate     — push it back; rebuild missing cloud bits
+//   POST /api/files/restore-bytes   — stream a file to a specific bucketKey
+
+const REGENERABLE_SECRET_FIELDS = ['agentApiKey', 'agentApiKeyId', 'challenge'];
+
+function sanitizeUserDocForExport(userDoc) {
+  if (!userDoc) return null;
+  const clone = { ...userDoc };
+  // Strip CouchDB internals — they'll be reapplied on import.
+  delete clone._rev;
+  // Strip regenerable secrets. The DO API can issue a fresh agent API key
+  // on demand (recreateAgentApiKey), so backing this up is both unnecessary
+  // and a footgun if the local folder leaks.
+  for (const f of REGENERABLE_SECRET_FIELDS) delete clone[f];
+  return clone;
+}
+
+// Full userDoc export. Used by saveLocalSnapshot at sign-out so
+// maia-state.json carries a verbatim copy. Read-only; doesn't mutate.
+app.get('/api/user-doc/full', async (req, res) => {
+  try {
+    const sessionUserId = req.session?.userId || null;
+    if (!sessionUserId) {
+      return res.status(401).json({ success: false, error: 'NOT_AUTHENTICATED' });
+    }
+    const userId = sessionUserId;
+    const userDoc = await cloudant.getDocument('maia_users', userId);
+    if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+    res.json({
+      success: true,
+      schemaVersion: 1,         // userDoc shape version; bump on breaking changes
+      exportedAt: new Date().toISOString(),
+      userDoc: sanitizeUserDocForExport(userDoc)
+    });
+  } catch (error) {
+    console.error('[user-doc/full] Error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Rehydrate the cloud from a local backup. Idempotent: if the cloud is
+// already in sync with the supplied userDoc, this returns success with
+// nothing rebuilt. Otherwise it replaces userDoc, ensures agent+KB exist
+// (regenerating their UUIDs if the DO records are gone), and returns the
+// list of files the client still needs to re-upload via
+// POST /api/files/restore-bytes.
+//
+// Request body: {
+//   schemaVersion: number,
+//   userDoc: { ... full userDoc, no _rev / no secrets ... },
+//   folderFiles?: [{ name, size, mtime, sha256 }, ...]  // optional, for diff
+// }
+//
+// Response: {
+//   success: true,
+//   rebuilt: { agent?: 'created'|'reused', kb?: 'created'|'reused' },
+//   missingFiles: [{ fileName, bucketKey }, ...],
+//   folderDiff?: { added: [...], removed: [...] }
+// }
+app.put('/api/account/rehydrate', async (req, res) => {
+  try {
+    const userId = req.session?.userId;
+    if (!userId) return res.status(401).json({ success: false, error: 'Authentication required' });
+
+    const { schemaVersion, userDoc: incoming, folderFiles } = req.body || {};
+    if (!incoming || typeof incoming !== 'object') {
+      return res.status(400).json({ success: false, error: 'MISSING_USER_DOC' });
+    }
+    if (incoming.userId && incoming.userId !== userId) {
+      return res.status(403).json({ success: false, error: 'USER_ID_MISMATCH' });
+    }
+
+    const rebuilt = {};
+    const errors = [];
+
+    // 1. Replace userDoc. Preserve _id and _rev from any existing doc so
+    // CouchDB accepts the write; otherwise create fresh. Strip the
+    // incoming doc of fields we don't want to round-trip (regenerable
+    // secrets, _rev). The supplied schemaVersion is recorded so future
+    // migrations have a baseline.
+    let existing = null;
+    try {
+      existing = await cloudant.getDocument('maia_users', userId);
+    } catch { /* may not exist */ }
+
+    const docToWrite = {
+      ...incoming,
+      _id: existing?._id || userId,
+      userId,
+      maiaStateSchemaVersionAtRestore: schemaVersion || 1,
+      restoredAt: new Date().toISOString()
+    };
+    // Strip any secrets the client may have included.
+    for (const f of REGENERABLE_SECRET_FIELDS) delete docToWrite[f];
+    if (existing?._rev) docToWrite._rev = existing._rev;
+
+    // assignedAgentId / kbId in the incoming backup are STALE pointers to
+    // resources destroyed by "Destroy Cloud Account". They're hints, not
+    // truth. If a previous rehydrate pass already created live resources
+    // and recorded their IDs on the existing doc, keep those — otherwise
+    // pass 2 would clobber the freshly-created agent's ID with the dead
+    // one and force a redundant agent recreation (leaving orphans).
+    if (existing?.assignedAgentId) {
+      docToWrite.assignedAgentId = existing.assignedAgentId;
+    }
+    if (existing?.kbId) {
+      docToWrite.kbId = existing.kbId;
+    }
+    if (existing?.agentEndpoint && !docToWrite.agentEndpoint) {
+      docToWrite.agentEndpoint = existing.agentEndpoint;
+    }
+
+    // Reconcile folder changes BEFORE the save. The user may have
+    // added or removed files in the local folder (Finder) while signed
+    // out. maia-state.json is the snapshot of "what the folder held at
+    // sign-off"; the folder is the source of truth now.
+    //  - REMOVED: drop the entry from userDoc.files so it is neither
+    //    re-requested as a "missing" file (which would surface a
+    //    "Not found in local folder" error) nor left in the KB.
+    //  - ADDED: the server can't read the user's local disk, but it
+    //    knows the real KB folder name. It creates a userDoc.files
+    //    entry with the correct KB bucketKey so the file (a) registers
+    //    in Saved Files and (b) gets indexed by update-knowledge-base,
+    //    then the existing Spaces-HEAD loop flags it "missing" and the
+    //    client streams the bytes via the proven /api/files/restore-
+    //    bytes path — the SAME path that already works for restored
+    //    files. No separate, kbName-guessing client upload flow.
+    let folderDiff = null;
+    if (Array.isArray(folderFiles)) {
+      // Exclude MAIA-generated artifacts AND OS junk (dotfiles such as
+      // .DS_Store). These are never user content and must not be
+      // ingested or indexed.
+      const MAIA_GENERATED = /^(maia-log\.pdf|maia-state\.json)$/i;
+      const isIgnorable = (n) =>
+        !n ||
+        n.startsWith('.') ||
+        MAIA_GENERATED.test(n) ||
+        /\.webloc$/i.test(n);
+      const presentNames = new Set(
+        folderFiles.map(f => f && f.name).filter(n => !isIgnorable(n))
+      );
+      const docFiles = Array.isArray(docToWrite.files) ? docToWrite.files : [];
+      const expectedNames = new Set(docFiles.map(f => f.fileName));
+      const removed = docFiles
+        .map(f => f.fileName)
+        .filter(n => n && !presentNames.has(n));
+      const added = [...presentNames].filter(n => !expectedNames.has(n));
+      folderDiff = { added, removed };
+      if (removed.length > 0) {
+        const removedSet = new Set(removed);
+        docToWrite.files = docFiles.filter(f => !removedSet.has(f.fileName));
+        console.log(`[rehydrate] Dropped ${removed.length} folder-removed file(s) from userDoc.files: ${removed.join(', ')}`);
+      }
+      if (added.length > 0) {
+        // Resolve the permanent KB name (round-tripped in the backup).
+        const kbName = getKBNameFromUserDoc(docToWrite, userId) || generateKBName(userId);
+        docToWrite.kbName = docToWrite.kbName || kbName;
+        if (!Array.isArray(docToWrite.files)) docToWrite.files = [];
+        const sizeByName = {};
+        for (const f of folderFiles) if (f && f.name) sizeByName[f.name] = f.size || 0;
+        for (const name of added) {
+          const cleanName = name.replace(/[^a-zA-Z0-9.-]/g, '_');
+          const bucketKey = `${userId}/${kbName}/${cleanName}`;
+          if (docToWrite.files.some(f => f.bucketKey === bucketKey)) continue;
+          docToWrite.files.push({
+            fileName: name,
+            bucketKey,
+            fileSize: sizeByName[name] || 0,
+            uploadedAt: new Date().toISOString(),
+            cloudStatus: 'pending'
+          });
+        }
+        console.log(`[rehydrate] Registered ${added.length} folder-added file(s) into KB folder: ${added.join(', ')}`);
+      }
+    }
+
+    // Save with conflict retry.
+    let writeAttempts = 0;
+    while (writeAttempts < 3) {
+      writeAttempts += 1;
+      try {
+        await cloudant.saveDocument('maia_users', docToWrite);
+        break;
+      } catch (err) {
+        if (err.statusCode === 409 && writeAttempts < 3) {
+          const fresh = await cloudant.getDocument('maia_users', userId);
+          if (fresh?._rev) docToWrite._rev = fresh._rev;
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    // 2. Ensure agent exists in DO. If userDoc.assignedAgentId no longer
+    // resolves, ensureUserAgent (called from auth.js's path) creates a
+    // fresh one and updates the doc.
+    let agentResolved = null;
+    if (docToWrite.assignedAgentId) {
+      try {
+        agentResolved = await doClient.agent.get(docToWrite.assignedAgentId);
+        rebuilt.agent = 'reused';
+      } catch (e) {
+        if (e?.status === 404 || e?.statusCode === 404 || /not[_ ]?found/i.test(e?.message || '')) {
+          agentResolved = null; // fall through to recreate
+        } else {
+          errors.push(`agent.get: ${e.message || e}`);
+        }
+      }
+    }
+    if (!agentResolved) {
+      try {
+        const freshDoc = await cloudant.getDocument('maia_users', userId);
+        const { ensureUserAgent } = await import('./routes/auth.js');
+        const updated = await ensureUserAgent(doClient, cloudant, freshDoc);
+        rebuilt.agent = 'created';
+        if (updated?.assignedAgentId) docToWrite.assignedAgentId = updated.assignedAgentId;
+      } catch (e) {
+        errors.push(`ensureUserAgent: ${e.message || e}`);
+      }
+    }
+
+    // 3. Inspect Spaces against userDoc.files. For each entry whose
+    // bucketKey isn't in Spaces, add it to missingFiles. The client
+    // uploads each via POST /api/files/restore-bytes.
+    const missingFiles = [];
+    try {
+      const { S3Client, HeadObjectCommand, ListObjectsV2Command } = await import('@aws-sdk/client-s3');
+      const bucketUrl = getSpacesBucketName();
+      const bucketName = bucketUrl ? (bucketUrl.split('//')[1]?.split('.')[0] || 'maia') : null;
+      if (bucketName) {
+        const s3Client = new S3Client({
+          endpoint: getSpacesEndpoint(),
+          region: 'us-east-1',
+          forcePathStyle: process.env.S3_FORCE_PATH_STYLE === 'true',
+          credentials: {
+            accessKeyId: process.env.DIGITALOCEAN_AWS_ACCESS_KEY_ID || '',
+            secretAccessKey: process.env.DIGITALOCEAN_AWS_SECRET_ACCESS_KEY || ''
+          }
+        });
+        for (const f of (docToWrite.files || [])) {
+          if (!f.bucketKey || !f.fileName) continue;
+          try {
+            await s3Client.send(new HeadObjectCommand({ Bucket: bucketName, Key: f.bucketKey }));
+          } catch (headErr) {
+            if (headErr?.$metadata?.httpStatusCode === 404 || headErr?.name === 'NotFound') {
+              missingFiles.push({ fileName: f.fileName, bucketKey: f.bucketKey });
+            }
+            // Other errors: leave it; client retry will surface them.
+          }
+        }
+      }
+    } catch (e) {
+      errors.push(`spaces inspect: ${e.message || e}`);
+    }
+
+    // 4. KB will be reconciled after the client uploads any missing files
+    // (calling POST /api/account/rehydrate a second time after the file
+    // uploads completes, OR POST /api/update-knowledge-base). We don't
+    // ensure KB here because triggering indexing with a partial file set
+    // is worse than waiting one more round-trip.
+    if (missingFiles.length === 0 && docToWrite.kbId) {
+      try {
+        await doClient.kb.get(docToWrite.kbId);
+        rebuilt.kb = 'reused';
+      } catch (e) {
+        if (e?.status === 404 || e?.statusCode === 404) {
+          // KB gone; rebuild on next pass when client may explicitly
+          // request /api/update-knowledge-base. Mark for follow-up.
+          rebuilt.kb = 'needs-rebuild';
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      rebuilt,
+      missingFiles,
+      folderDiff,
+      errors: errors.length > 0 ? errors : undefined
+    });
+  } catch (error) {
+    console.error('[rehydrate] Error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Restore-only file upload. The rehydrate endpoint returns a list of
+// missingFiles by bucketKey; the client streams each here. Unlike the
+// general /api/files/upload, this writes to an explicit bucketKey
+// (preserving what userDoc.files already says) and does NOT mutate the
+// user doc — the entry already exists from the rehydrate step.
+//
+// multipart/form-data:
+//   file=<bytes>
+//   bucketKey=userId/kbName/filename.ext
+app.post('/api/files/restore-bytes', restoreBytesUpload.single('file'), async (req, res) => {
+  try {
+    const userId = req.session?.userId;
+    if (!userId) return res.status(401).json({ error: 'Authentication required' });
+    if (!req.file) return res.status(400).json({ error: 'No file' });
+    const { bucketKey } = req.body || {};
+    if (typeof bucketKey !== 'string' || !bucketKey.startsWith(`${userId}/`)) {
+      return res.status(400).json({ error: 'INVALID_BUCKET_KEY' });
+    }
+    const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
+    const bucketUrl = getSpacesBucketName();
+    if (!bucketUrl) return res.status(500).json({ error: 'BUCKET_NOT_CONFIGURED' });
+    const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+    const s3Client = new S3Client({
+      endpoint: getSpacesEndpoint(),
+      region: 'us-east-1',
+      forcePathStyle: process.env.S3_FORCE_PATH_STYLE === 'true',
+      credentials: {
+        accessKeyId: process.env.DIGITALOCEAN_AWS_ACCESS_KEY_ID || '',
+        secretAccessKey: process.env.DIGITALOCEAN_AWS_SECRET_ACCESS_KEY || ''
+      }
+    });
+    await s3Client.send(new PutObjectCommand({
+      Bucket: bucketName,
+      Key: bucketKey,
+      Body: req.file.buffer,
+      ContentType: req.file.mimetype || 'application/octet-stream'
+    }));
+    console.log(`[restore-bytes] PUT ${bucketKey} (${req.file.size} bytes)`);
+
+    // Apple Health detection — SINGLE SOURCE OF TRUTH.
+    //
+    // We have the actual PDF bytes right here, at the authoritative
+    // moment. Detect Apple Health from content NOW and stamp
+    // userDoc.files[].isAppleHealth, instead of relying on a fragile
+    // post-restore client rebuild that re-derives it from a stale doc
+    // snapshot. After this, every downstream consumer (Lists.vue,
+    // rebuildAppleHealthCategories' fast path, the wizard badge) just
+    // reads the flag — no re-detection, no ordering hazards.
+    let isAppleHealth = false;
+    try {
+      const isPdf = /\.pdf$/i.test(bucketKey) ||
+        (req.file.mimetype || '').toLowerCase().includes('pdf');
+      if (isPdf) {
+        const { extractPdfWithPages } = await import('./utils/pdf-parser.js');
+        const parsed = await extractPdfWithPages(req.file.buffer);
+        const firstPageText = String(parsed?.pages?.[0]?.text || '')
+          .toLowerCase().replace(/\s+/g, ' ').trim();
+        const AH_FOOTER = 'this summary displays certain health information made available to you by your healthcare provider and may not completely';
+        if (firstPageText.includes(AH_FOOTER)) {
+          isAppleHealth = true;
+          // Persist the flag on the matching files[] entry (conflict-
+          // tolerant; never fail the upload over this).
+          for (let attempt = 0; attempt < 4; attempt++) {
+            try {
+              const doc = await cloudant.getDocument('maia_users', userId);
+              if (!Array.isArray(doc.files)) break;
+              const idx = doc.files.findIndex(f => f?.bucketKey === bucketKey);
+              if (idx < 0) break;
+              if (doc.files[idx].isAppleHealth === true) break;
+              doc.files[idx].isAppleHealth = true;
+              doc.updatedAt = new Date().toISOString();
+              await cloudant.saveDocument('maia_users', doc);
+              console.log(`[restore-bytes] Apple Health detected & flagged: ${bucketKey}`);
+              break;
+            } catch (saveErr) {
+              if (saveErr?.statusCode === 409 && attempt < 3) continue;
+              console.warn(`[restore-bytes] isAppleHealth flag save failed (non-fatal): ${saveErr?.message}`);
+              break;
+            }
+          }
+        }
+      }
+    } catch (ahErr) {
+      console.warn(`[restore-bytes] Apple Health detection skipped (non-fatal): ${ahErr?.message}`);
+    }
+
+    res.json({ success: true, bucketKey, size: req.file.size, isAppleHealth });
+  } catch (error) {
+    console.error('[restore-bytes] Error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Server-side restore coordinator (see Documentation/Wizards.md section 9)
 // Handles agent creation + KB indexing + metadata restore in a single call
 // after the client has uploaded files.
@@ -9155,41 +9581,53 @@ app.post('/api/provisioning-log', async (req, res) => {
       });
     }
 
-    // Build the log entry
-    if (!Array.isArray(userDoc.provisioningLog)) {
-      userDoc.provisioningLog = [];
-    }
-    const maxId = userDoc.provisioningLog.reduce((m, e) => Math.max(m, e.id || 0), 0);
-    const entry = { ...extraFields, event, id: maxId + 1, time: new Date().toISOString() };
-    userDoc.provisioningLog.push(entry);
-    userDoc.updatedAt = new Date().toISOString();
+    // Append the log entry with conflict-tolerant save. The userDoc is
+    // under heavy concurrent mutation during Restore (the rehydrate
+    // endpoint replaces the whole doc while restore events stream in),
+    // so 409s are EXPECTED here, not exceptional. Re-read + re-apply on
+    // every conflict, with backoff, up to a generous attempt count.
+    const isConflict = (err) =>
+      err?.statusCode === 409 ||
+      err?.status === 409 ||
+      err?.error === 'conflict' ||
+      /conflict/i.test(err?.message || '');
 
-    // Save with retry logic for conflicts
-    let retries = 3;
+    const entry = { ...extraFields, event, id: 0, time: new Date().toISOString() };
     let saved = false;
-
-    while (retries > 0 && !saved) {
+    let lastErr = null;
+    const MAX_ATTEMPTS = 8;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS && !saved; attempt++) {
       try {
-        await cloudant.saveDocument('maia_users', userDoc);
+        // Always work from a fresh copy so the _rev is current.
+        const fresh = attempt === 1 ? userDoc : await cloudant.getDocument('maia_users', userId);
+        if (!fresh) break; // user deleted mid-restore — nothing to append to
+        if (!Array.isArray(fresh.provisioningLog)) fresh.provisioningLog = [];
+        entry.id = fresh.provisioningLog.reduce((m, e) => Math.max(m, e.id || 0), 0) + 1;
+        fresh.provisioningLog.push(entry);
+        fresh.updatedAt = new Date().toISOString();
+        await cloudant.saveDocument('maia_users', fresh);
         saved = true;
       } catch (error) {
-        if (error.statusCode === 409 && retries > 1) {
-          // Conflict - re-read and retry
-          userDoc = await cloudant.getDocument('maia_users', userId);
-          if (!Array.isArray(userDoc.provisioningLog)) {
-            userDoc.provisioningLog = [];
-          }
-          const retryMaxId = userDoc.provisioningLog.reduce((m, e) => Math.max(m, e.id || 0), 0);
-          entry.id = retryMaxId + 1;
-          entry.time = new Date().toISOString();
-          userDoc.provisioningLog.push(entry);
-          userDoc.updatedAt = new Date().toISOString();
-          retries--;
-          await new Promise(resolve => setTimeout(resolve, 100));
-        } else {
-          throw error;
+        lastErr = error;
+        if (isConflict(error) && attempt < MAX_ATTEMPTS) {
+          await new Promise(r => setTimeout(r, 80 * attempt)); // linear backoff
+          continue;
         }
+        break;
       }
+    }
+
+    if (!saved) {
+      // A provisioning-log entry is non-essential telemetry. Never 500
+      // the client over it — that just produces an alarming red console
+      // line during Restore and the client buffers the event anyway.
+      // Return 202 so the client's `resp.ok` is false → it buffers the
+      // event locally (maia-log.pdf still shows it) without surfacing a
+      // server error.
+      console.warn(`⚠️ provisioning-log entry not persisted after ${MAX_ATTEMPTS} attempts (event=${event}): ${lastErr?.message || lastErr}`);
+      // 200 (not 4xx/5xx) so the browser logs no error line. The body's
+      // success:false tells the client to buffer the event locally.
+      return res.status(200).json({ success: false, buffered: true, error: 'NOT_PERSISTED' });
     }
 
     // Fire-and-forget: send admin notification on setup-complete or test-completed
@@ -9200,9 +9638,12 @@ app.post('/api/provisioning-log', async (req, res) => {
     res.json({ success: true, id: entry.id });
   } catch (error) {
     console.error('❌ Error saving provisioning log entry:', error);
-    res.status(500).json({
+    // Still don't 500 — non-essential telemetry. 200 + success:false so
+    // the client buffers it instead of logging an Internal Server Error.
+    res.status(200).json({
       success: false,
-      message: `Failed to save provisioning log entry: ${error.message}`,
+      buffered: true,
+      message: `provisioning log not saved: ${error.message}`,
       error: 'SAVE_FAILED'
     });
   }
@@ -9666,7 +10107,7 @@ app.post('/api/generate-patient-summary', async (req, res) => {
     try {
       // chat() method signature: chat(messages, options, onUpdate)
       const chatMessages = [{ role: 'user', content: summaryPrompt }];
-      const chatOptions = { model: userDoc.agentModelName || 'openai-gpt-oss-120b', stream: false };
+      const chatOptions = { model: userDoc.agentModelName || 'deepseek-v4-pro', stream: false };
 
       let summaryResponse;
       try {
@@ -9737,10 +10178,259 @@ app.post('/api/generate-patient-summary', async (req, res) => {
   } catch (error) {
     console.error('Error generating patient summary:', error);
     res.status(500).json({ 
-      success: false, 
+      success: false,
       message: `Failed to generate patient summary: ${error.message}`,
-      error: error.message 
+      error: error.message
     });
+  }
+});
+
+// Generate a DRAFT patient summary against the full KB and store it on userDoc.draftPatientSummary
+// (separate from the committed patientSummaries array). The wizard runs this after indexing
+// completes; the draft is NOT shown to the user until they verify medications and the summary.
+app.post('/api/patient-summary/draft', async (req, res) => {
+  const startedAt = Date.now();
+  try {
+    const userId = resolveUserId(req, res);
+    if (!userId) return;
+
+    let userDoc = await cloudant.getDocument('maia_users', userId);
+    if (!userDoc) {
+      return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+    }
+    if (!userDoc.assignedAgentId || !userDoc.agentEndpoint) {
+      return res.status(400).json({ success: false, error: 'AGENT_NOT_CONFIGURED' });
+    }
+
+    if (userDoc.kbId && userDoc.assignedAgentId) {
+      try {
+        await doClient.agent.attachKB(userDoc.assignedAgentId, userDoc.kbId);
+      } catch (attachError) {
+        if (!attachError.message?.includes('already')) {
+          console.error(`[DRAFT SUMMARY] Failed to attach KB: ${attachError.message}`);
+          return res.status(503).json({ success: false, error: 'KB_NOT_ATTACHED' });
+        }
+      }
+    } else if (!userDoc.kbId) {
+      return res.status(400).json({ success: false, error: 'NO_KB' });
+    }
+
+    if (!userDoc.agentApiKey) {
+      userDoc.agentApiKey = await getOrCreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
+    }
+
+    const { DigitalOceanProvider } = await import('../lib/chat-client/providers/digitalocean.js');
+    const agentProvider = new DigitalOceanProvider(userDoc.agentApiKey, { baseURL: userDoc.agentEndpoint });
+    const chatMessages = [{ role: 'user', content: 'Please generate a patient summary.' }];
+    const chatOptions = { model: userDoc.agentModelName || 'deepseek-v4-pro', stream: false };
+
+    let chatResp;
+    try {
+      chatResp = await agentProvider.chat(chatMessages, chatOptions);
+    } catch (firstError) {
+      const sc = firstError.status || firstError.statusCode || 0;
+      if (sc === 401 && userDoc.assignedAgentId) {
+        const { recreateAgentApiKey } = await import('./utils/agent-helper.js');
+        const newApiKey = await recreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
+        const retry = new DigitalOceanProvider(newApiKey, { baseURL: userDoc.agentEndpoint });
+        chatResp = await retry.chat(chatMessages, chatOptions);
+      } else {
+        throw firstError;
+      }
+    }
+
+    const summary = (chatResp.content || chatResp.text || '').trim();
+    if (!summary) throw new Error('Empty draft from agent');
+    const generationSeconds = Math.round(((Date.now() - startedAt) / 1000) * 10) / 10;
+
+    let saved = false;
+    let attempts = 0;
+    while (!saved && attempts < 3) {
+      attempts += 1;
+      const freshDoc = await cloudant.getDocument('maia_users', userId);
+      if (!freshDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+      freshDoc.draftPatientSummary = {
+        text: summary,
+        draftAt: new Date().toISOString(),
+        generationSeconds
+      };
+      try {
+        await cloudant.saveDocument('maia_users', freshDoc);
+        saved = true;
+      } catch (err) {
+        if (err.statusCode === 409 && attempts < 3) continue;
+        throw err;
+      }
+    }
+
+    const lines = summary.split('\n').filter(l => l.trim()).length;
+    res.json({ success: true, summary, lines, chars: summary.length, generationSeconds });
+  } catch (error) {
+    console.error('Error generating draft patient summary:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Extract a Current Medications list using the user's agent (so their system-prompt
+// hide-rules apply). Two modes:
+//   mode=from-summary   → extract from userDoc.draftPatientSummary.text
+//   mode=apple-health   → extract from the Apple Health markdown in Lists/, optionally
+//                          using `contextMeds` (the result of a prior from-summary call)
+//                          as context so the agent can reconcile/dedupe.
+app.post('/api/medications/extract', async (req, res) => {
+  try {
+    const userId = resolveUserId(req, res);
+    if (!userId) return;
+    const { mode, contextMeds } = req.body || {};
+    if (mode !== 'from-summary' && mode !== 'apple-health') {
+      return res.status(400).json({ success: false, error: 'INVALID_MODE' });
+    }
+
+    let userDoc = await cloudant.getDocument('maia_users', userId);
+    if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+    if (!userDoc.assignedAgentId || !userDoc.agentEndpoint) {
+      return res.status(400).json({ success: false, error: 'AGENT_NOT_CONFIGURED' });
+    }
+    const draftText = userDoc.draftPatientSummary?.text;
+    if (!draftText) {
+      return res.status(400).json({ success: false, error: 'NO_DRAFT_SUMMARY' });
+    }
+
+    let prompt;
+    if (mode === 'from-summary') {
+      prompt = `Below is a patient summary. Extract the Current Medications as a simple list, one medication per line, no commentary. Follow your system instructions for any medications that must be omitted or redacted.\n\n${draftText}`;
+    } else {
+      const appleHealthFile = (userDoc.files || []).find(f => f && f.isAppleHealth);
+      if (!appleHealthFile || !appleHealthFile.fileName) {
+        return res.status(400).json({ success: false, error: 'NO_APPLE_HEALTH_FILE' });
+      }
+      const cleanName = String(appleHealthFile.fileName).replace(/[^a-zA-Z0-9.-]/g, '_');
+      const mdName = cleanName.replace(/\.pdf$/i, '.md');
+      const markdownKey = `${userId}/Lists/${mdName}`;
+
+      const bucketUrl = getSpacesBucketName();
+      if (!bucketUrl) return res.status(500).json({ success: false, error: 'BUCKET_NOT_CONFIGURED' });
+      const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+      const { S3Client, GetObjectCommand } = await import('@aws-sdk/client-s3');
+      const s3Client = new S3Client({
+        endpoint: getSpacesEndpoint(),
+        region: 'us-east-1',
+        forcePathStyle: process.env.S3_FORCE_PATH_STYLE === 'true',
+        credentials: {
+          accessKeyId: process.env.DIGITALOCEAN_AWS_ACCESS_KEY_ID || '',
+          secretAccessKey: process.env.DIGITALOCEAN_AWS_SECRET_ACCESS_KEY || ''
+        }
+      });
+      let appleHealthMd = '';
+      try {
+        const r = await s3Client.send(new GetObjectCommand({ Bucket: bucketName, Key: markdownKey }));
+        const chunks = [];
+        for await (const c of r.Body) chunks.push(c);
+        appleHealthMd = Buffer.concat(chunks).toString('utf-8');
+      } catch (e) {
+        return res.status(404).json({ success: false, error: 'APPLE_HEALTH_MARKDOWN_MISSING', message: e.message });
+      }
+
+      const contextBlock = Array.isArray(contextMeds) && contextMeds.length > 0
+        ? `\n\nFor context, these medications were identified in the patient summary you generated earlier from the full knowledge base:\n${contextMeds.map(m => '- ' + m).join('\n')}\n\nUse this list as a starting point, then reconcile and refine against the Apple Health data below. Apply your system instructions for any medications that must be omitted or redacted.\n`
+        : '';
+      prompt = `Extract the Current Medications from the following Apple Health export. List one medication per line, no commentary.${contextBlock}\n\n${appleHealthMd}`;
+    }
+
+    if (!userDoc.agentApiKey) {
+      userDoc.agentApiKey = await getOrCreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
+    }
+
+    const { DigitalOceanProvider } = await import('../lib/chat-client/providers/digitalocean.js');
+    const agentProvider = new DigitalOceanProvider(userDoc.agentApiKey, { baseURL: userDoc.agentEndpoint });
+    const chatOptions = { model: userDoc.agentModelName || 'deepseek-v4-pro', stream: false };
+
+    let chatResp;
+    try {
+      chatResp = await agentProvider.chat([{ role: 'user', content: prompt }], chatOptions);
+    } catch (firstError) {
+      const sc = firstError.status || firstError.statusCode || 0;
+      if (sc === 401 && userDoc.assignedAgentId) {
+        const { recreateAgentApiKey } = await import('./utils/agent-helper.js');
+        const newApiKey = await recreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
+        const retry = new DigitalOceanProvider(newApiKey, { baseURL: userDoc.agentEndpoint });
+        chatResp = await retry.chat([{ role: 'user', content: prompt }], chatOptions);
+      } else {
+        throw firstError;
+      }
+    }
+
+    const raw = (chatResp.content || chatResp.text || '').trim();
+    const medications = raw.split('\n')
+      .map(l => l.replace(/^\s*[-*••\d.)]+\s*/, '').trim())
+      .filter(l => l.length > 0);
+
+    res.json({
+      success: true,
+      medications,
+      lines: medications.length,
+      source: mode === 'apple-health' ? 'apple health' : 'patient summary',
+      raw
+    });
+  } catch (error) {
+    console.error('Error extracting medications:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Splice the verified Current Medications into the saved draft summary's
+// "Current Medications" section. Pure text edit; no AI call.
+app.patch('/api/patient-summary/medications', async (req, res) => {
+  try {
+    const userId = resolveUserId(req, res);
+    if (!userId) return;
+    const { medications } = req.body || {};
+    if (!Array.isArray(medications)) {
+      return res.status(400).json({ success: false, error: 'MEDICATIONS_ARRAY_REQUIRED' });
+    }
+    const medsBlock = medications.length > 0
+      ? medications.map(m => `- ${m}`).join('\n')
+      : '_No current medications_';
+
+    let attempts = 0;
+    while (attempts < 3) {
+      attempts += 1;
+      const userDoc = await cloudant.getDocument('maia_users', userId);
+      if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+      if (!userDoc.draftPatientSummary?.text) {
+        return res.status(400).json({ success: false, error: 'NO_DRAFT_SUMMARY' });
+      }
+      let text = userDoc.draftPatientSummary.text;
+      const headingRe = /(^|\n)(##?\s*Current\s*Medications[^\n]*\n)([\s\S]*?)(?=\n##?\s|\n*$)/i;
+      if (headingRe.test(text)) {
+        text = text.replace(headingRe, (_m, prefix, heading) => `${prefix}${heading}${medsBlock}\n`);
+      } else {
+        text = `${text.trimEnd()}\n\n## Current Medications\n${medsBlock}\n`;
+      }
+      userDoc.draftPatientSummary = {
+        ...userDoc.draftPatientSummary,
+        text,
+        medicationsSplicedAt: new Date().toISOString(),
+        medicationsCount: medications.length
+      };
+      try {
+        await cloudant.saveDocument('maia_users', userDoc);
+        return res.json({
+          success: true,
+          summary: text,
+          lines: text.split('\n').filter(l => l.trim()).length,
+          chars: text.length,
+          medicationsCount: medications.length
+        });
+      } catch (err) {
+        if (err.statusCode === 409 && attempts < 3) continue;
+        throw err;
+      }
+    }
+    return res.status(500).json({ success: false, error: 'SAVE_RETRIES_EXHAUSTED' });
+  } catch (error) {
+    console.error('Error splicing medications into draft:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
@@ -9875,16 +10565,26 @@ app.get('/api/patient-summary', async (req, res) => {
       }
     }
     const currentSummary = getCurrentSummary(userDoc);
-    
-    res.json({ 
-      success: true, 
+    const draft = userDoc.draftPatientSummary && userDoc.draftPatientSummary.text
+      ? {
+          text: userDoc.draftPatientSummary.text,
+          draftAt: userDoc.draftPatientSummary.draftAt || null,
+          generationSeconds: userDoc.draftPatientSummary.generationSeconds || null,
+          medicationsSplicedAt: userDoc.draftPatientSummary.medicationsSplicedAt || null,
+          medicationsCount: userDoc.draftPatientSummary.medicationsCount || null
+        }
+      : null;
+
+    res.json({
+      success: true,
       summary: currentSummary ? currentSummary.text : '',
       summaries: summaries.map((s, index) => ({
         text: s.text,
         createdAt: s.createdAt,
         updatedAt: s.updatedAt,
         isCurrent: index === summaries.length - 1
-      }))
+      })),
+      draft
     });
   } catch (error) {
     console.error('Error fetching patient summary:', error);
@@ -9949,10 +10649,14 @@ app.post('/api/patient-summary', async (req, res) => {
     } else {
       addNewSummary(userDoc, summary, replaceStrategy || 'newest', replaceIndex);
     }
-    
+
     userDoc.updatedAt = new Date().toISOString();
     userDoc.workflowStage = 'patient_summary';
-    
+    // Committing a summary supersedes any hidden draft from the wizard flow.
+    if (userDoc.draftPatientSummary) {
+      delete userDoc.draftPatientSummary;
+    }
+
     let docToReturn = userDoc;
     let saveErr = await saveWithRetry(userDoc);
     if (saveErr && (saveErr.statusCode === 409 || saveErr.error === 'conflict')) {
@@ -9972,6 +10676,9 @@ app.post('/api/patient-summary', async (req, res) => {
         }
         freshDoc.updatedAt = new Date().toISOString();
         freshDoc.workflowStage = 'patient_summary';
+        if (freshDoc.draftPatientSummary) {
+          delete freshDoc.draftPatientSummary;
+        }
         saveErr = await saveWithRetry(freshDoc);
         if (!saveErr) docToReturn = freshDoc;
       }

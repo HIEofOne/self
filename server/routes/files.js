@@ -483,7 +483,7 @@ Please provide a list of all top-level markdown categories (### headings) and th
 
     // Call the agent (with 401 retry — stale API key auto-heals)
     const chatMessages = [{ role: 'user', content: prompt }];
-    const chatOptions = { model: userDoc.agentModelName || 'openai-gpt-oss-120b', stream: false };
+    const chatOptions = { model: userDoc.agentModelName || 'deepseek-v4-pro', stream: false };
 
     let response;
     try {
@@ -834,8 +834,15 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       const userId = sessionUserId || bodyUserId;
       console.log(`[files/register] Called: userId=${userId}, fileName=${req.body?.fileName}, bucketKey=${req.body?.bucketKey}`);
       if (!userId) return res.status(401).json({ error: 'Authentication required' });
-      const { fileName, bucketKey, fileSize } = req.body;
+      const { fileName, bucketKey, fileSize, isAppleHealth: bodyIsAppleHealth } = req.body;
       if (!fileName || !bucketKey) return res.status(400).json({ error: 'fileName and bucketKey required' });
+      // The Apple Health designation is content-based (PDF first-page
+      // footer), not filename-based — the real export is named
+      // "Health Records - <Patient> - <date>.pdf". Callers should detect
+      // and pass `isAppleHealth: true` in the body; we no longer try to
+      // guess from fileName here (the legacy /^apple/i check missed the
+      // real export and produced silent feature loss on Restore).
+      const isAppleHealth = bodyIsAppleHealth === true;
 
       let saved = false;
       let attempts = 0;
@@ -845,8 +852,8 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         if (!userDoc) return res.status(404).json({ error: 'User not found' });
         if (!Array.isArray(userDoc.files)) userDoc.files = [];
         // Don't duplicate
-        if (!userDoc.files.some(f => f.bucketKey === bucketKey)) {
-          const isAppleHealth = /^apple/i.test(fileName) && /\.pdf$/i.test(fileName);
+        const existingIdx = userDoc.files.findIndex(f => f.bucketKey === bucketKey);
+        if (existingIdx < 0) {
           userDoc.files.push({
             fileName,
             bucketKey,
@@ -854,6 +861,12 @@ export default function setupFileRoutes(app, cloudant, doClient) {
             uploadedAt: new Date().toISOString(),
             ...(isAppleHealth ? { isAppleHealth: true } : {})
           });
+          userDoc.updatedAt = new Date().toISOString();
+        } else if (isAppleHealth && !userDoc.files[existingIdx].isAppleHealth) {
+          // Re-registration of an existing file may carry the AH flag
+          // for the first time (e.g. Restore where the original Setup
+          // detected AH after registration). Self-heal.
+          userDoc.files[existingIdx].isAppleHealth = true;
           userDoc.updatedAt = new Date().toISOString();
         }
         try {
@@ -1863,7 +1876,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         return res.status(401).json({ error: 'Authentication required' });
       }
 
-      const { bucketKey: providedBucketKey, fileName: providedFileName } = req.body || {};
+      const { bucketKey: providedBucketKey, fileName: providedFileName, force: forceRebuild } = req.body || {};
       console.log('[SAVE-RESTORE] process-initial-file request', {
         userId,
         providedBucketKey: providedBucketKey || null,
@@ -2165,13 +2178,60 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         throw new Error(`Failed to save markdown file: ${saveErr.message}`);
       }
 
-      // Extract categories and observations once, only for Apple Health imports
+      // Extract categories and observations only for Apple Health imports.
+      //
+      // We prefer to trust an explicit userDoc.files[].isAppleHealth flag,
+      // but that flag is set by /api/files/register's filename-based check
+      // (/^apple/i) which misses the real Apple Health export naming
+      // ("Health Records - <Patient> - <date>.pdf"). When the flag is
+      // missing, fall back to a content check: the AH export has a
+      // distinctive footer string that won't appear in unrelated PDFs.
+      // This makes process-initial-file self-correct on the Restore path
+      // where the register-time flag was lost.
       let categoryFiles = [];
       const appleHealthSource = Array.isArray(userDoc?.files)
         ? userDoc.files.find(file => file?.bucketKey === initialFileBucketKey && !!file?.isAppleHealth)
         : null;
+      const APPLE_EXPORT_FOOTER_NORM = 'this summary displays certain health information made available to you by your healthcare provider and may not completely';
+      const markdownNorm = String(fullMarkdown || '').toLowerCase().replace(/\s+/g, ' ');
+      const contentLooksLikeAppleHealth = markdownNorm.includes(APPLE_EXPORT_FOOTER_NORM);
+      const isAppleHealth = !!appleHealthSource || contentLooksLikeAppleHealth;
+      // `appleHealthCategoriesBuiltAt` round-trips in the v2 backup, so
+      // on Restore it is set even though the cloud (Spaces category .md
+      // files) was wiped by "Destroy Cloud Account". Treating that as
+      // "already built" used to skip BOTH the rebuild and the
+      // isAppleHealth self-heal — which is why a re-added Apple Health
+      // file came back unrecognized (Lists showed "requires an Apple
+      // Health Export PDF"). Two fixes:
+      //  1. Always self-heal the isAppleHealth flag when AH is detected,
+      //     regardless of alreadyBuilt.
+      //  2. Rebuild categories when forced (Restore passes force:true),
+      //     when not yet built, OR when the source file changed.
       const alreadyBuilt = !!userDoc?.appleHealthCategoriesBuiltAt;
-      if (appleHealthSource && !alreadyBuilt) {
+      const sourceChanged = userDoc?.appleHealthCategoriesSourceKey !== initialFileBucketKey;
+      const shouldBuild = isAppleHealth && (forceRebuild === true || !alreadyBuilt || sourceChanged);
+
+      // Self-heal the file's isAppleHealth flag whenever AH is detected
+      // by content, even if we don't rebuild categories. Lists.vue's
+      // appleHealthFileInfo depends on this flag.
+      if (isAppleHealth && !appleHealthSource) {
+        try {
+          const flagDoc = await cloudant.getDocument('maia_users', userId);
+          if (Array.isArray(flagDoc.files)) {
+            const idx = flagDoc.files.findIndex(f => f?.bucketKey === initialFileBucketKey);
+            if (idx >= 0 && !flagDoc.files[idx].isAppleHealth) {
+              flagDoc.files[idx].isAppleHealth = true;
+              flagDoc.updatedAt = new Date().toISOString();
+              await cloudant.saveDocument('maia_users', flagDoc);
+              console.log(`[VIZ] Self-healed isAppleHealth flag for ${initialFileName} (content footer)`);
+            }
+          }
+        } catch (flagErr) {
+          console.warn('[VIZ] isAppleHealth self-heal conflict (non-fatal):', flagErr?.message);
+        }
+      }
+
+      if (shouldBuild) {
         categoryFiles = await extractAndSaveCategoryFiles(
           fullMarkdown,
           userId,
@@ -2184,11 +2244,15 @@ export default function setupFileRoutes(app, cloudant, doClient) {
           const freshUserDoc = await cloudant.getDocument('maia_users', userId);
           freshUserDoc.appleHealthCategoriesBuiltAt = new Date().toISOString();
           freshUserDoc.appleHealthCategoriesSourceKey = initialFileBucketKey;
+          if (Array.isArray(freshUserDoc.files)) {
+            const idx = freshUserDoc.files.findIndex(f => f?.bucketKey === initialFileBucketKey);
+            if (idx >= 0) freshUserDoc.files[idx].isAppleHealth = true;
+          }
           await cloudant.saveDocument('maia_users', freshUserDoc);
         } catch (catSaveErr) {
           console.warn('[VIZ] Apple Health categories flag save conflict (non-fatal):', catSaveErr?.message);
         }
-        console.log(`[VIZ] Categories built for Apple Health file: ${initialFileName}`);
+        console.log(`[VIZ] Categories built for Apple Health file: ${initialFileName} (detected via ${appleHealthSource ? 'flag' : 'content footer'}, force=${forceRebuild === true}, sourceChanged=${sourceChanged})`);
       }
 
       res.json({
@@ -2882,7 +2946,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
 
       // Call the agent (with 401 retry — stale API key auto-heals)
       const chatMessages = [{ role: 'user', content: prompt }];
-      const chatOptions = { model: userDoc.agentModelName || 'openai-gpt-oss-120b', stream: false };
+      const chatOptions = { model: userDoc.agentModelName || 'deepseek-v4-pro', stream: false };
 
       let response;
       try {

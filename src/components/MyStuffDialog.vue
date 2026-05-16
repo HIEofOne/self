@@ -1277,7 +1277,7 @@ const emit = defineEmits<{
   'messages-filtered': [messages: Message[]]; // Emit filtered messages with pseudonyms
   'diary-posted': [content: string]; // Emit diary content to add to chat
   'reference-file-added': [file: { fileName: string; bucketKey: string; fileSize: number; uploadedAt: string; fileType?: string; fileUrl?: string; isReference: boolean }]; // Emit reference file to add to chat
-  'current-medications-saved': [data: { value: string; edited: boolean }];
+  'current-medications-saved': [data: { value: string; edited: boolean; source?: string }];
   'medications-offered': [data: {
     lines: number;
     source: 'apple-health' | 'patient-summary' | 'manual' | 'user-doc';
@@ -1302,7 +1302,7 @@ const handleShowPatientSummary = () => {
   emit('show-patient-summary');
 };
 
-const handleCurrentMedicationsSaved = (payload: { value: string; edited: boolean }) => {
+const handleCurrentMedicationsSaved = (payload: { value: string; edited: boolean; source?: string }) => {
   emit('current-medications-saved', payload);
 };
 
@@ -5014,10 +5014,20 @@ const loadPatientSummary = async () => {
     }
     
     const result = await response.json();
-    const loadedSummary = result.summary || '';
+    // Prefer a committed summary. If none is committed yet, fall back to the
+    // wizard's hidden draft (userDoc.draftPatientSummary) so updateSummary-
+    // WithVerifiedMeds has text to splice the verified meds into.
+    const committedSummary = result.summary || '';
+    const draftSummary = (result.draft && result.draft.text) ? result.draft.text : '';
+    const loadedSummary = committedSummary || draftSummary;
     patientSummary.value = loadedSummary;
     summaryEditText.value = loadedSummary;
     patientSummaries.value = result.summaries || [];
+    // When we're showing the draft (no commit yet), require the user to verify
+    // it before it appears as the "saved" summary.
+    if (!committedSummary && draftSummary) {
+      summaryNeedsVerify.value = true;
+    }
     if (!loadedSummary) {
       isEditingSummaryTab.value = false;
     }
@@ -5219,19 +5229,29 @@ const replaceMedicationsInSummary = (
 ): string | null => {
   const lines = summaryText.split('\n');
   let headingIdx = -1;
+  // Permissive: match any line where, after stripping markdown decoration
+  // (#, *, _, whitespace), the visible text starts with "current medications".
+  // Catches:  ## Current Medications  /  **Current Medications**  /
+  //   ## **Current Medications**  /  Current Medications:  /
+  //   **Current Medications** (Patient Verified)  /  etc.
+  // The previous regex needed `*` or `#` exclusively at line start which
+  // missed the heading-plus-bold combo agents commonly produce.
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim().toLowerCase();
-    if (
-      line.match(/^#{1,3}\s*current\s+medications/) ||
-      line.match(/^\*{1,2}current\s+medications\*{1,2}/) ||
-      line === 'current medications' ||
-      line === 'current medications:'
-    ) {
+    const stripped = lines[i].toLowerCase().replace(/[#*_`]/g, '').trim();
+    if (stripped.startsWith('current medications')) {
       headingIdx = i;
       break;
     }
   }
-  if (headingIdx < 0) return null;
+  // If no heading was found, fall back to appending a fresh one at the end.
+  // The user's verified meds must always end up in the summary; returning
+  // null here is what caused the "summary has different meds than I saved"
+  // regression.
+  if (headingIdx < 0) {
+    if (!newMedsText || !newMedsText.trim()) return null;
+    const appended = `${summaryText.trimEnd()}\n\n## Current Medications${markVerified ? ' (Patient Verified)' : ''}\n\n${newMedsText}\n`;
+    return appended;
+  }
 
   // Safety: if the caller handed us empty meds, never blank the section body.
   // Just toggle the verification marker on the heading and keep the original body.
