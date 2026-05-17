@@ -1745,6 +1745,18 @@ const getProviderLabelFromKey = (providerKey: string | undefined) => {
   return providerLabels[providerKey] || providerKey.charAt(0).toUpperCase() + providerKey.slice(1);
 };
 
+// Label an assistant message with the SPECIFIC AI that produced it. For
+// Private AI this is the selected profile label (e.g. "Private AI
+// (Deepseek)" vs "Private AI (GPT)") so the transcript shows which
+// agent answered, not a generic "Private AI".
+const assistantLabelForKey = (providerKey: string | undefined) => {
+  if (providerKey === 'digitalocean') {
+    const lbl = normalizeProviderLabel(selectedProvider.value);
+    return isPrivateAiLabel(lbl) ? lbl : providerLabels.digitalocean;
+  }
+  return getProviderLabelFromKey(providerKey);
+};
+
 const getProviderLabel = () => {
   const normalized = normalizeProviderLabel(selectedProvider.value);
   return providerLabels[normalized] || normalized;
@@ -1920,8 +1932,14 @@ const sendMessage = async () => {
     name: userLabel
   };
 
-  // Check if this is a patient summary request
-  const isPatientSummaryRequest = /patient\s+summary/i.test(inputMessage.value);
+  // The stored Patient Summary is returned ONLY when the user pressed
+  // SEND without touching the prefilled default prompt. Any typed
+  // message (even one that mentions "patient summary") runs a fresh
+  // inference on the SELECTED Private AI instead. We still persist the
+  // result as the patient summary for an explicit summary request.
+  const isUntouchedDefault = inputMessage.value.trim() === PRIVATE_AI_DEFAULT_PROMPT.trim();
+  const mentionsSummary = /patient\s+summary/i.test(inputMessage.value);
+  const isPatientSummaryRequest = isUntouchedDefault || mentionsSummary;
   messages.value.push(userMessage);
   originalMessages.value = JSON.parse(JSON.stringify(messages.value)); // Keep original in sync
   // Update trulyOriginalMessages when adding new messages (but not when filtering)
@@ -1934,7 +1952,7 @@ const sendMessage = async () => {
 
   try {
     // If this is a patient summary request, check for existing summary first
-    if (isPatientSummaryRequest && props.user?.userId) {
+    if (isUntouchedDefault && props.user?.userId) {
       try {
         const summaryResponse = await fetch(`/api/patient-summary?userId=${encodeURIComponent(props.user.userId)}`, {
           credentials: 'include'
@@ -1945,7 +1963,7 @@ const sendMessage = async () => {
           if (summaryData.summary && summaryData.summary.trim()) {
             // Use existing summary
             const existingProviderKey = getProviderKey(selectedProvider.value);
-            const existingProviderLabel = getProviderLabelFromKey(existingProviderKey);
+            const existingProviderLabel = assistantLabelForKey(existingProviderKey);
             const summaryMessage: Message = {
               role: 'assistant',
               content: summaryData.summary,
@@ -2028,7 +2046,7 @@ const sendMessage = async () => {
     const decoder = new TextDecoder();
 
     // Create assistant message
-    const providerLabel = getProviderLabelFromKey(providerKey);
+    const providerLabel = assistantLabelForKey(providerKey);
     const assistantMessage: Message = {
       role: 'assistant',
       content: '',
@@ -2112,7 +2130,7 @@ const sendMessage = async () => {
     }
     
     const errorProviderKey = getProviderKey(selectedProvider.value);
-    const errorProviderLabel = getProviderLabelFromKey(errorProviderKey);
+    const errorProviderLabel = assistantLabelForKey(errorProviderKey);
     messages.value.push({
       role: 'assistant',
       content: `Error: ${errorMessage}`,
