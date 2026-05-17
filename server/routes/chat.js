@@ -5,7 +5,7 @@
 import { ChatClient } from '../../lib/chat-client/index.js';
 import { DigitalOceanProvider } from '../../lib/chat-client/providers/digitalocean.js';
 import { getOrCreateAgentApiKey, recreateAgentApiKey } from '../utils/agent-helper.js';
-import { ensureUserAgent } from './auth.js';
+import { ensureUserAgent, ensureSecondaryAgent } from './auth.js';
 
 const isPlainObject = (value) => value && typeof value === 'object' && !Array.isArray(value);
 
@@ -95,6 +95,15 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
         delete options.shareId;
       }
       const shareIdForRequest = shareIdFromOptions || req.session?.deepLinkShareId || null;
+
+      // Which Private AI the user picked in the dropdown (e.g. 'default'
+      // = Deepseek, 'gpt' = GPT-OSS-120B). Stripped from options so it
+      // is never forwarded to the LLM provider as a model option.
+      const requestedProfileKey = options?.agentProfileKey || req.body?.agentProfileKey || null;
+      if (options?.agentProfileKey) {
+        options = { ...options };
+        delete options.agentProfileKey;
+      }
 
       if (!messages || !Array.isArray(messages)) {
         return res.status(400).json({ error: 'Messages array required' });
@@ -188,6 +197,14 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
           overrideValue = userDoc.deepLinkAgentOverrides[shareIdForRequest];
         }
 
+        // Explicit dropdown selection wins over the deep-link override
+        // and the default. Deep-link visitors (no selector) fall back
+        // to the override / default as before.
+        if (requestedProfileKey && isPlainObject(agentProfiles[requestedProfileKey])) {
+          profileKeyToUse = requestedProfileKey;
+          overrideValue = null;
+        }
+
         if (overrideValue) {
           if (agentProfiles[overrideValue]) {
             profileKeyToUse = overrideValue;
@@ -213,7 +230,7 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
         if (profileAgentId && profileEndpoint && profileAgentName) {
           agentId = profileAgentId;
 
-          const apiKey = await getOrCreateAgentApiKey(doClient, cloudant, userId, agentId);
+          const apiKey = await getOrCreateAgentApiKey(doClient, cloudant, userId, agentId, profileKeyToUse);
 
           userAgentProvider = new DigitalOceanProvider(apiKey, {
             baseURL: profileEndpoint
@@ -225,7 +242,7 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
             options.model = profileAgentName;
           }
 
-          retryCtx = { endpoint: profileEndpoint };
+          retryCtx = { endpoint: profileEndpoint, profileKey: profileKeyToUse };
         } else {
           return res.status(404).json({
             error: 'Private AI agent not provisioned for this user',
@@ -302,7 +319,7 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
         
         try {
           // Recreate the API key (already imported at top of file)
-          const newApiKey = await recreateAgentApiKey(doClient, cloudant, resolvedUserId, resolvedAgentId);
+          const newApiKey = await recreateAgentApiKey(doClient, cloudant, resolvedUserId, resolvedAgentId, retryCtx?.profileKey || null);
           console.log(`✅ Successfully recreated API key for agent ${resolvedAgentId}`);
 
           // Transparently re-run the request with the fresh key. The
@@ -481,8 +498,39 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
    * Private AI (digitalocean) is included when the user (or for deep link, the owner) has agent deployed.
    * For deep link sessions, also requires owner's allowDeepLinkPrivateAI !== false.
    */
+  // Describe which Private AI agents (profiles) are deployed for a doc.
+  // The frontend renders one dropdown entry per ready profile and sends
+  // `agentProfileKey` alongside provider 'digitalocean'.
+  const buildPrivateAiProfiles = (doc) => {
+    if (!doc) return [];
+    const out = [];
+    const profiles = (doc.agentProfiles && typeof doc.agentProfiles === 'object') ? doc.agentProfiles : {};
+    // Primary / Deepseek — also satisfied by the flat fields for
+    // legacy docs that predate agentProfiles.
+    const def = profiles.default || {};
+    const defReady = !!((def.agentId && def.endpoint) || (doc.assignedAgentId && doc.agentEndpoint));
+    if (defReady) {
+      out.push({
+        key: 'default',
+        label: 'Private AI (Deepseek)',
+        model: def.modelName || doc.agentModelName || 'deepseek-v4-pro'
+      });
+    }
+    // Secondary / GPT — only when its own profile is deployed.
+    const gpt = profiles.gpt || {};
+    if (gpt.agentId && gpt.endpoint) {
+      out.push({
+        key: 'gpt',
+        label: 'Private AI (GPT)',
+        model: gpt.modelName || 'openai-gpt-oss-120b'
+      });
+    }
+    return out;
+  };
+
   app.get('/api/chat/providers', async (req, res) => {
     let providers = chatClient.getAvailableProviders();
+    let privateAiProfiles = [];
     const userId = req.session?.userId;
     const isDeepLink = !!req.session?.isDeepLink;
 
@@ -505,7 +553,7 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
               !!(ownerDoc?.assignedAgentId && ownerDoc?.agentEndpoint);
             const ownerAllows = ownerDoc?.allowDeepLinkPrivateAI !== false;
             if (ownerHasAgent && ownerAllows) {
-              res.json({ providers });
+              res.json({ providers, privateAiProfiles: buildPrivateAiProfiles(ownerDoc) });
               return;
             }
           }
@@ -537,6 +585,23 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
             }
           }
           providers = providers.filter((p) => p !== 'digitalocean');
+        } else {
+          // Lazily provision the secondary "Private AI (GPT)" agent
+          // once the primary is up and a KB exists. This is also the
+          // backfill path for existing single-agent accounts: the app
+          // polls /api/chat/providers, so the GPT agent gets created on
+          // a poll and appears in the dropdown once its deployment is
+          // ready (it isn't blocked on here — first poll kicks it off,
+          // a later poll surfaces it). The same user KB is attached
+          // inside ensureSecondaryAgent.
+          if (userDoc?.kbId && !userDoc?.agentProfiles?.gpt?.endpoint) {
+            try {
+              userDoc = await ensureSecondaryAgent(doClient, cloudant, userDoc);
+            } catch (gptErr) {
+              console.warn('[chat/providers] ensureSecondaryAgent failed:', gptErr?.message);
+            }
+          }
+          privateAiProfiles = buildPrivateAiProfiles(userDoc);
         }
       } catch (err) {
         console.warn('[chat/providers] Could not load user doc, excluding Private AI:', err?.message);
@@ -545,6 +610,6 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
     } else {
       providers = providers.filter((p) => p !== 'digitalocean');
     }
-    res.json({ providers });
+    res.json({ providers, privateAiProfiles });
   });
 }

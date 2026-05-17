@@ -406,6 +406,25 @@
 
           <!-- My AI Agent Tab -->
           <q-tab-panel name="agent">
+            <!-- One sub-tab per Private AI agent (Deepseek / GPT). Each
+                 has its own system prompt + KB-attach toggle. -->
+            <q-tabs
+              v-if="agentProfilesList.length > 1"
+              v-model="activeAgentProfile"
+              dense
+              align="left"
+              class="text-grey-7 q-mb-md"
+              active-color="primary"
+              indicator-color="primary"
+            >
+              <q-tab
+                v-for="prof in agentProfilesList"
+                :key="prof.key"
+                :name="prof.key"
+                :label="prof.label"
+              />
+            </q-tabs>
+
             <div class="row items-center justify-between q-mb-md">
               <div class="text-h6">Agent Instructions</div>
               <q-btn
@@ -1327,6 +1346,11 @@ const agentError = ref('');
 const agentInstructions = ref('');
 const editMode = ref(false);
 const editedInstructions = ref('');
+// Private AI agent profiles (Deepseek = 'default', GPT = 'gpt'). The
+// My AI Agent tab shows one sub-tab per profile, each with its own
+// system prompt + KB-attach toggle, all keyed by activeAgentProfile.
+const agentProfilesList = ref<Array<{ key: string; label: string }>>([]);
+const activeAgentProfile = ref<string>('default');
 const savingInstructions = ref(false);
 
 // Deep link Private AI access setting
@@ -1792,9 +1816,24 @@ const loadAgent = async () => {
   agentError.value = '';
 
   try {
-    const response = await fetch(`/api/agent-instructions?userId=${encodeURIComponent(props.userId)}`, {
-      credentials: 'include'
-    });
+    // Discover which Private AI profiles exist (one sub-tab each).
+    try {
+      const provResp = await fetch('/api/chat/providers', { credentials: 'include' });
+      if (provResp.ok) {
+        const pd = await provResp.json();
+        const list = Array.isArray(pd.privateAiProfiles) ? pd.privateAiProfiles : [];
+        agentProfilesList.value = list.map((p: { key: string; label: string }) => ({ key: p.key, label: p.label }));
+        if (agentProfilesList.value.length > 0 &&
+            !agentProfilesList.value.some(p => p.key === activeAgentProfile.value)) {
+          activeAgentProfile.value = agentProfilesList.value[0].key;
+        }
+      }
+    } catch { /* non-fatal — fall back to default profile only */ }
+
+    const response = await fetch(
+      `/api/agent-instructions?userId=${encodeURIComponent(props.userId)}&agentProfileKey=${encodeURIComponent(activeAgentProfile.value)}`,
+      { credentials: 'include' }
+    );
     if (!response.ok) {
       throw new Error(`Failed to fetch agent: ${response.statusText}`);
     }
@@ -1811,6 +1850,13 @@ const loadAgent = async () => {
     loadingAgent.value = false;
   }
 };
+
+// Reload instructions + KB status when the user switches Private AI
+// sub-tab. Exits edit mode so unsaved edits don't bleed across agents.
+watch(activeAgentProfile, () => {
+  editMode.value = false;
+  loadAgent();
+});
 
 const loadDeepLinkPrivateAISetting = async () => {
   try {
@@ -1901,7 +1947,8 @@ const saveInstructions = async () => {
       credentials: 'include',
       body: JSON.stringify({
         userId: props.userId,
-        instructions: editedInstructions.value
+        instructions: editedInstructions.value,
+        agentProfileKey: activeAgentProfile.value
       })
     });
 
@@ -1959,7 +2006,8 @@ const toggleKBConnection = async () => {
       credentials: 'include',
       body: JSON.stringify({
         userId: props.userId,
-        action: action
+        action: action,
+        agentProfileKey: activeAgentProfile.value
       })
     });
 

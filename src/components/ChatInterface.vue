@@ -1628,15 +1628,51 @@ const providerLabels: Record<string, string> = {
   deepseek: 'DeepSeek'
 };
 
-// Computed provider options for dropdown
+// Private AI profiles reported by /api/chat/providers. Each ready
+// profile (e.g. Deepseek, GPT) becomes its own dropdown entry; the
+// chat request carries the profile key so the server picks the agent.
+const privateAiProfiles = ref<Array<{ key: string; label: string; model?: string }>>([]);
+
+// Canonical default Private AI dropdown label (first ready profile =
+// Deepseek; falls back to the generic label for legacy single-agent).
+const defaultPrivateAiLabel = () =>
+  privateAiProfiles.value[0]?.label || providerLabels.digitalocean;
+
+// Computed provider options for dropdown. `digitalocean` expands to one
+// entry per ready Private AI profile.
 const providerOptions = computed(() => {
-  return providers.value.map(p => {
-    const label = providerLabels[p] || p.charAt(0).toUpperCase() + p.slice(1);
-    return {
-      label,
-      value: label
-    };
-  });
+  const opts: Array<{ label: string; value: string }> = [];
+  for (const p of providers.value) {
+    if (p === 'digitalocean') {
+      if (privateAiProfiles.value.length > 0) {
+        for (const prof of privateAiProfiles.value) {
+          opts.push({ label: prof.label, value: prof.label });
+        }
+      } else {
+        opts.push({ label: providerLabels.digitalocean, value: providerLabels.digitalocean });
+      }
+    } else {
+      const label = providerLabels[p] || p.charAt(0).toUpperCase() + p.slice(1);
+      opts.push({ label, value: label });
+    }
+  }
+  return opts;
+});
+
+// True when the given label is any Private AI variant.
+const isPrivateAiLabel = (label: string) =>
+  label === providerLabels.digitalocean ||
+  label.startsWith('Private AI') ||
+  privateAiProfiles.value.some(pr => pr.label === label);
+
+// The agentProfileKey for the current selection (null for non-Private
+// AI). Defaults to 'default' for a Private AI label with no match
+// (legacy single-agent docs).
+const selectedAgentProfileKey = computed(() => {
+  const label = normalizeProviderLabel(selectedProvider.value);
+  if (!isPrivateAiLabel(label)) return null;
+  const match = privateAiProfiles.value.find(pr => pr.label === label);
+  return match?.key || 'default';
 });
 
 // Helper to get provider key from label
@@ -1652,6 +1688,13 @@ const normalizeProviderLabel = (value: unknown) => {
 
 const getProviderKey = (label: unknown) => {
   const normalized = normalizeProviderLabel(label);
+  // Any "Private AI (…)" variant maps to the digitalocean provider;
+  // the specific agent is chosen via agentProfileKey.
+  if (normalized === providerLabels.digitalocean ||
+      normalized.startsWith('Private AI') ||
+      privateAiProfiles.value.some(pr => pr.label === normalized)) {
+    return 'digitalocean';
+  }
   const entry = Object.entries(providerLabels).find(([_, l]) => l === normalized);
   return entry ? entry[0] : normalized.toLowerCase();
 };
@@ -1773,10 +1816,12 @@ const loadProviders = async () => {
     }
     
     providers.value = availableProviders;
-    
+    privateAiProfiles.value = Array.isArray(data.privateAiProfiles) ? data.privateAiProfiles : [];
+
     if (providers.value.length > 0) {
       if (providers.value.includes('digitalocean')) {
-        selectedProvider.value = providerLabels.digitalocean;
+        // Default to the first ready Private AI profile (Deepseek).
+        selectedProvider.value = privateAiProfiles.value[0]?.label || providerLabels.digitalocean;
         showPrivateUnavailableDialog.value = false; // clear in case it was shown before refetch
       } else {
         if (initialLoadComplete.value && !showAgentSetupDialog.value && !props.restoreActive) {
@@ -1794,7 +1839,7 @@ const loadProviders = async () => {
     }
     providers.value = fallbackProviders;
     if (providers.value.includes('digitalocean')) {
-      selectedProvider.value = providerLabels.digitalocean;
+      selectedProvider.value = defaultPrivateAiLabel();
       showPrivateUnavailableDialog.value = false;
     } else {
       if (initialLoadComplete.value && !showAgentSetupDialog.value && !props.restoreActive) {
@@ -1825,7 +1870,7 @@ watch(
   (available) => {
     if (!available.length) return;
     if (available.includes('digitalocean')) {
-      selectedProvider.value = providerLabels.digitalocean;
+      selectedProvider.value = defaultPrivateAiLabel();
       showPrivateUnavailableDialog.value = false; // Private AI is available
       return;
     }
@@ -1953,6 +1998,10 @@ const sendMessage = async () => {
     };
     if (shareIdForRequest) {
       requestOptions.shareId = shareIdForRequest;
+    }
+    // Tell the server which Private AI agent (Deepseek vs GPT) to use.
+    if (providerKey === 'digitalocean' && selectedAgentProfileKey.value) {
+      requestOptions.agentProfileKey = selectedAgentProfileKey.value;
     }
     const response = await fetch(
       `/api/chat/${providerKey}`,

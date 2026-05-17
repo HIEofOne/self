@@ -19,9 +19,36 @@ function getClientInfo(req) {
   };
 }
 
-function buildAgentName(userId) {
+function buildAgentName(userId, suffix = '') {
   const timestamp = new Date().toISOString().replace(/[-:]/g, '').split('.')[0];
-  return `${userId}-agent-${timestamp}`;
+  return `${userId}-agent-${suffix ? suffix + '-' : ''}${timestamp}`;
+}
+
+export const PROFILE_DEFAULT = 'default';
+export const PROFILE_GPT = 'gpt';
+
+// Merge an agent profile into userDoc.agentProfiles[key] without
+// clobbering an existing per-profile apiKey. Used by both the primary
+// (default / Deepseek) and secondary (gpt) provisioners so the chat
+// router and My Agent UI can select by profile key.
+function setAgentProfile(userDoc, key, fields) {
+  if (!userDoc.agentProfiles || typeof userDoc.agentProfiles !== 'object') {
+    userDoc.agentProfiles = {};
+  }
+  const now = new Date().toISOString();
+  const prev = (userDoc.agentProfiles[key] && typeof userDoc.agentProfiles[key] === 'object')
+    ? userDoc.agentProfiles[key]
+    : {};
+  userDoc.agentProfiles[key] = {
+    ...prev,
+    ...Object.fromEntries(Object.entries(fields).filter(([, v]) => v != null && v !== '')),
+    createdAt: prev.createdAt || now,
+    updatedAt: now
+  };
+  if (!userDoc.agentProfileDefaultKey) userDoc.agentProfileDefaultKey = PROFILE_DEFAULT;
+  if (!userDoc.deepLinkAgentOverrides || typeof userDoc.deepLinkAgentOverrides !== 'object') {
+    userDoc.deepLinkAgentOverrides = {};
+  }
 }
 
 async function saveUserDocWithRetry(cloudant, userId, mutateDoc, maxAttempts = 3) {
@@ -54,8 +81,23 @@ function isValidUUID(value) {
   return uuidRegex.test(value.trim());
 }
 
-async function resolveModelAndProject(doClient) {
-  let modelId = process.env.DO_MODEL_ID;
+// Model identifiers for the two Private AI agents. Matched against the
+// DO catalog by inference_name / name / id. The primary (Deepseek) is
+// the default; the secondary (GPT-OSS-120B) backs "Private AI (GPT)".
+export const MODEL_DEEPSEEK = { inference_name: 'deepseek-v4-pro', name: 'Deepseek V4 Pro', id: 'deepseek-v4-pro' };
+export const MODEL_GPT = { inference_name: 'openai-gpt-oss-120b', name: 'OpenAI GPT-oss-120b', id: 'openai-gpt-oss-120b' };
+
+const matchesModel = (m, spec) =>
+  m.inference_name === spec.inference_name ||
+  m.name === spec.name ||
+  (spec.id && m.id === spec.id);
+
+// `modelSpec` selects which catalog model to resolve (default Deepseek).
+// `process.env.DO_MODEL_ID` only applies to the primary/Deepseek agent —
+// the GPT agent must always resolve its own model from the catalog.
+async function resolveModelAndProject(doClient, modelSpec = MODEL_DEEPSEEK) {
+  const isPrimary = modelSpec === MODEL_DEEPSEEK;
+  let modelId = isPrimary ? process.env.DO_MODEL_ID : undefined;
   let projectId = process.env.DO_PROJECT_ID;
 
   // Project ID may still come from an existing agent
@@ -73,16 +115,15 @@ async function resolveModelAndProject(doClient) {
     }
   }
 
-  // PREFERRED PATH: look up Deepseek V4 Pro in the DO catalog FIRST.
-  // Only fall back to an existing agent's model if the catalog lookup fails.
+  // PREFERRED PATH: look up the requested model in the DO catalog FIRST.
+  // Only fall back to an existing agent's model if the catalog lookup
+  // fails (fallback is primary-only — the GPT agent must use GPT).
   if (!isValidUUID(modelId)) {
     try {
       const modelsResponse = await doClient.request('/v2/gen-ai/models');
       const models = modelsResponse.models || modelsResponse.data?.models || [];
       if (models.length > 0) {
-        const preferredModel = models.find(m =>
-          m.inference_name === 'deepseek-v4-pro' || m.name === 'Deepseek V4 Pro' || m.id === 'deepseek-v4-pro'
-        );
+        const preferredModel = models.find(m => matchesModel(m, modelSpec));
         if (preferredModel && preferredModel.uuid && isValidUUID(preferredModel.uuid)) {
           modelId = preferredModel.uuid;
         }
@@ -92,8 +133,9 @@ async function resolveModelAndProject(doClient) {
     }
   }
 
-  // FALLBACK: reuse an existing agent's model UUID
-  if (!isValidUUID(modelId)) {
+  // FALLBACK: reuse an existing agent's model UUID (primary only —
+  // never silently give the GPT agent a non-GPT model).
+  if (!isValidUUID(modelId) && isPrimary) {
     try {
       const agents = await doClient.agent.list();
       if (agents.length > 0) {
@@ -360,6 +402,14 @@ export async function ensureUserAgent(doClient, cloudant, userDoc) {
   userDoc.workflowStage = endpoint ? 'agent_deployed' : 'agent_named';
   userDoc.agentSetupInProgress = !endpoint;
   userDoc.updatedAt = new Date().toISOString();
+  // Mirror the primary agent into the 'default' profile so the chat
+  // router / My Agent UI can address it by profile key uniformly.
+  setAgentProfile(userDoc, PROFILE_DEFAULT, {
+    agentId: userDoc.assignedAgentId,
+    agentName: userDoc.assignedAgentName,
+    endpoint: userDoc.agentEndpoint,
+    modelName: userDoc.agentModelName
+  });
 
   // Save with conflict retry
   let saved = false;
@@ -379,6 +429,12 @@ export async function ensureUserAgent(doClient, cloudant, userDoc) {
         userDoc.workflowStage = endpoint ? 'agent_deployed' : 'agent_named';
         userDoc.agentSetupInProgress = !endpoint;
         userDoc.updatedAt = new Date().toISOString();
+        setAgentProfile(userDoc, PROFILE_DEFAULT, {
+          agentId: userDoc.assignedAgentId,
+          agentName: userDoc.assignedAgentName,
+          endpoint: userDoc.agentEndpoint,
+          modelName: userDoc.agentModelName
+        });
       } else {
         throw error;
       }
@@ -388,6 +444,115 @@ export async function ensureUserAgent(doClient, cloudant, userDoc) {
   // Release lock so waiting callers pick up the saved agent
   if (needsCreation && lockResolve) {
     agentCreationLocks.delete(userId);
+    lockResolve();
+  }
+  return userDoc;
+}
+
+// Ensure the SECONDARY "Private AI (GPT)" agent exists, recorded under
+// userDoc.agentProfiles.gpt. Idempotent: reuses the agent if its id
+// still resolves in DO, otherwise creates one. The GPT agent's initial
+// system prompt is a ONE-TIME COPY of the primary agent's current
+// instruction (falling back to NEW-AGENT.txt); the two then diverge.
+// The same user KB is attached (DO KB→agent is many-to-many). This is
+// called from the same places that ensure the primary agent (Setup
+// completion, rehydrate, sign-in backfill) so existing accounts get
+// the GPT agent the next time round.
+export async function ensureSecondaryAgent(doClient, cloudant, userDoc) {
+  if (!userDoc) return userDoc;
+  const userId = userDoc.userId;
+  if (!userId) return userDoc;
+
+  const lockKey = `${userId}:${PROFILE_GPT}`;
+  if (agentCreationLocks.has(lockKey)) {
+    try { await agentCreationLocks.get(lockKey); } catch { /* re-read below */ }
+    const freshDoc = await cloudant.getDocument('maia_users', userId);
+    if (freshDoc?.agentProfiles?.[PROFILE_GPT]?.agentId) {
+      Object.assign(userDoc, freshDoc);
+      return userDoc;
+    }
+  }
+
+  const existingGptId = userDoc.agentProfiles?.[PROFILE_GPT]?.agentId || null;
+  let agent = null;
+  if (existingGptId) {
+    try { agent = await doClient.agent.get(existingGptId); } catch { agent = null; }
+  }
+
+  let lockResolve = null;
+  const needsCreation = !agent;
+  if (needsCreation) {
+    let lockReject;
+    const lockPromise = new Promise((resolve, reject) => { lockResolve = resolve; lockReject = reject; });
+    agentCreationLocks.set(lockKey, lockPromise);
+    try {
+      const { modelId, projectId } = await resolveModelAndProject(doClient, MODEL_GPT);
+      if (!isValidUUID(modelId) || !isValidUUID(projectId)) {
+        throw new Error('Unable to resolve GPT model or project ID for secondary agent creation');
+      }
+      // One-time copy of the primary agent's instruction.
+      let instruction = '';
+      if (userDoc.assignedAgentId) {
+        try {
+          const primary = await doClient.agent.get(userDoc.assignedAgentId);
+          instruction = primary?.instruction || '';
+        } catch { /* fall back below */ }
+      }
+      if (!instruction) instruction = getMaiaInstructionText();
+      agent = await doClient.agent.create({
+        name: buildAgentName(userId, 'gpt'),
+        instruction,
+        modelId: modelId.trim(),
+        projectId: projectId.trim(),
+        region: getDoRegion(),
+        maxTokens: 16384,
+        topP: 1,
+        temperature: 0.1,
+        k: 10,
+        retrievalMethod: 'RETRIEVAL_METHOD_NONE'
+      });
+    } catch (err) {
+      agentCreationLocks.delete(lockKey);
+      lockReject(err);
+      throw err;
+    }
+  }
+
+  const resolved = await doClient.agent.get(agent.uuid || agent.id);
+  const endpoint = resolved?.deployment?.url ? `${resolved.deployment.url}/api/v1` : null;
+  const gptAgentId = resolved.uuid || resolved.id;
+
+  // Attach the same user KB to the GPT agent (best-effort, idempotent).
+  if (userDoc.kbId) {
+    try { await doClient.agent.attachKB(gptAgentId, userDoc.kbId); } catch { /* may already be attached */ }
+  }
+
+  let saved = false;
+  let retries = 3;
+  while (!saved && retries > 0) {
+    setAgentProfile(userDoc, PROFILE_GPT, {
+      agentId: gptAgentId,
+      agentName: resolved.name,
+      endpoint,
+      modelName: resolved.model?.inference_name || resolved.model?.name || MODEL_GPT.inference_name
+    });
+    userDoc.updatedAt = new Date().toISOString();
+    try {
+      await cloudant.saveDocument('maia_users', userDoc);
+      saved = true;
+    } catch (error) {
+      if ((error.statusCode === 409 || error.error === 'conflict') && retries > 1) {
+        retries -= 1;
+        userDoc = await cloudant.getDocument('maia_users', userId);
+      } else {
+        if (needsCreation && lockResolve) { agentCreationLocks.delete(lockKey); lockResolve(); }
+        throw error;
+      }
+    }
+  }
+
+  if (needsCreation && lockResolve) {
+    agentCreationLocks.delete(lockKey);
     lockResolve();
   }
   return userDoc;
