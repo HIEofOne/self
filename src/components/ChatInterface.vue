@@ -790,6 +790,32 @@
         </q-card-actions>
       </q-card>
     </q-dialog>
+
+    <!-- Shown after a manual "patient summary" chat request completes -->
+    <q-dialog v-model="showNewSummaryDialog" persistent>
+      <q-card style="min-width: 420px; max-width: 540px">
+        <q-card-section>
+          <div class="text-h6">New Patient Summary detected</div>
+        </q-card-section>
+        <q-card-section class="q-pt-none text-body2">
+          A new Patient Summary was generated and saved. Would you like to:
+        </q-card-section>
+        <q-card-actions align="right" class="q-gutter-sm">
+          <q-btn
+            flat
+            label="Continue with chat only"
+            color="grey-8"
+            @click="showNewSummaryDialog = false"
+          />
+          <q-btn
+            unelevated
+            label="Open Patient Summary tab"
+            color="primary"
+            @click="showNewSummaryDialog = false; myStuffInitialTab = 'summary'; showMyStuffDialog = true;"
+          />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
   </div>
 </template>
 
@@ -947,6 +973,10 @@ const loadingUserFiles = ref(false);
 const showAgentSetupDialog = ref(false);
 const showNeedsIndexingPrompt = ref(false);
 const showPostIndexingSummaryPrompt = ref(false);
+// Shown after a MANUAL "patient summary" chat request completes (not
+// the prefilled-default SEND), offering to jump to the Patient Summary
+// tab where the freshly-generated summary was just saved.
+const showNewSummaryDialog = ref(false);
 /** Once the user dismisses the post-indexing "Update Patient Summary?" prompt, do not show again this session. */
 const postIndexingSummaryDismissedThisSession = ref(false);
 /** Once the user dismisses "Index your records" with NOT YET, do not show it again this session. */
@@ -2082,9 +2112,13 @@ const sendMessage = async () => {
 
               // Save patient summary if this was a summary request
               if (isPatientSummaryRequest && props.user?.userId && assistantMessage.content) {
-                savePatientSummary(assistantMessage.content);
+                await savePatientSummary(assistantMessage.content);
+                // Manual (typed) request — offer to jump to the tab.
+                if (mentionsSummary && !isUntouchedDefault) {
+                  showNewSummaryDialog.value = true;
+                }
               }
-              
+
               // Update originalMessages AFTER streaming completes with full content
               originalMessages.value = JSON.parse(JSON.stringify(messages.value));
               // Update trulyOriginalMessages when assistant response completes (new message added)
@@ -2103,9 +2137,12 @@ const sendMessage = async () => {
 
     // Save patient summary if this was a summary request
     if (isPatientSummaryRequest && props.user?.userId && assistantMessage.content) {
-      savePatientSummary(assistantMessage.content);
+      await savePatientSummary(assistantMessage.content);
+      if (mentionsSummary && !isUntouchedDefault) {
+        showNewSummaryDialog.value = true;
+      }
     }
-    
+
     // Update originalMessages AFTER streaming completes with full content
     originalMessages.value = JSON.parse(JSON.stringify(messages.value));
     // Update trulyOriginalMessages when assistant response completes (new message added)
