@@ -3350,6 +3350,8 @@ const generateSetupLogPdf = async () => {
             const outcome = evt.outcome && evt.outcome !== 'success' ? ` [${evt.outcome}]` : '';
             return `[${t}] Medications offered for verification (${evt.lines || 0} lines)${src}${outcome}`;
           }
+          case 'medications-extract-skipped':
+            return `[${t}] AI medication extraction skipped (${evt.reason || 'unknown'}) — used patient-summary medications instead`;
           case 'medications-dismissed': return `[${t}] Medications step dismissed without verification`;
           case 'current-medications-recovery-failed': return `[${t}] Current Medications recovery FAILED — fell through ${Array.isArray(evt.pathsTried) ? evt.pathsTried.join(' -> ') : 'all paths'}`;
           case 'medications-saved': {

@@ -10627,14 +10627,33 @@ app.post('/api/medications/extract', async (req, res) => {
       return res.status(400).json({ success: false, error: 'INVALID_MODE' });
     }
 
+    // Soft-skip helper: this AH-extract is an OPTIONAL enhancement —
+    // Lists.vue already falls back to the patient-summary meds. So
+    // instead of a hard 4xx (red console error the user keeps seeing,
+    // and invisible in maia-log.pdf), return 200 with skipped:true and
+    // record the reason as a provisioning event so it shows in the log.
+    const softSkip = async (reason) => {
+      try {
+        await appendUserProvisioningEvent(userId, {
+          event: 'medications-extract-skipped', mode: mode || null, reason
+        });
+      } catch { /* non-fatal */ }
+      return res.json({ success: true, skipped: true, reason, medications: [] });
+    };
+
+    // Resolve the user doc, tolerating a resolved-id miss by trying the
+    // explicit body userId (covers temp/local-only id edge cases).
     let userDoc = await cloudant.getDocument('maia_users', userId);
-    if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+    if (!userDoc && req.body?.userId && req.body.userId !== userId) {
+      userDoc = await cloudant.getDocument('maia_users', req.body.userId);
+    }
+    if (!userDoc) return softSkip('USER_NOT_FOUND');
     if (!userDoc.assignedAgentId || !userDoc.agentEndpoint) {
-      return res.status(400).json({ success: false, error: 'AGENT_NOT_CONFIGURED' });
+      return softSkip('AGENT_NOT_CONFIGURED');
     }
     const draftText = userDoc.draftPatientSummary?.text;
     if (!draftText) {
-      return res.status(400).json({ success: false, error: 'NO_DRAFT_SUMMARY' });
+      return softSkip('NO_DRAFT_SUMMARY');
     }
 
     let prompt;
