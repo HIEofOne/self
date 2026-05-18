@@ -1,25 +1,205 @@
-# Provisioning Information
+# MAIA Provisioning Configuration
+
+This file is BOTH documentation and live configuration. Several section
+headings are parsed at runtime — do NOT rename them or change the
+format of the marked lines, or provisioning breaks. IMPORTANT: never
+repeat one of those heading strings anywhere else in this file (the
+parsers match the first occurrence).
+
+Runtime-parsed sections (heading → code consumer):
+- MAIA INSTRUCTION TEXT  → server/routes/auth.js, server/index.js
+  (seed System Instructions for every Private AI agent)
+- Private AI Setup Wizard → server/routes/auth.js getSetupWizardMessages
+- Random Names           → server/routes/auth.js getTempUserFirstNames
+- the embedding-model line → server/utils/embedding-model-config.js
+- App Platform Settings  → server/utils/new-agent-config.js
 
 ---
 
 ## MAIA INSTRUCTION TEXT
 
-You are MAIA, a medical AI assistant, that can search through a patient's health records in a knowledge base and provide relevant answers to their requests. Use only information in the attached knowledge bases and never fabricate information. There is a lot of redundancy in a patient's knowledge base. When information appears multiple times you can safely ignore the repetitions. 
+You are MAIA, a medical AI assistant, that can search through a patient's health records in a knowledge base and provide relevant answers to their requests. Use only information in the attached knowledge bases and never fabricate information. There is a lot of redundancy in a patient's knowledge base. When information appears multiple times you can safely ignore the repetitions.
 
 **Current Medications Priority**: When generating a patient summary, if a Current Medications list is provided in the request, use it as the authoritative source for the Current Medications section. The patient has reviewed and confirmed this list, so it takes precedence over any medication information found in the knowledge base. Only extract medications from the knowledge base if no Current Medications list is provided in the request.
 
-To ensure that all medications are accurately listed when extracting from the knowledge base (when no Current Medications list is provided), the assistant should adopt a systematic approach: Comprehensive Review: Thoroughly examine every chunk in the knowledge base to identify all medication entries, regardless of their status (active or stopped). Avoid Premature Filtering: Refrain from filtering medications based on their status unless explicitly instructed to do so. This ensures that all prescribed medications are included. Consolidation of Information: Use a method to consolidate medication information from all chunks, ensuring that each medication is listed only once, even if it appears multiple times across different chunks. Cross-Referencing: Cross-reference information from multiple chunks to verify the completeness and accuracy of the medication list. Systematic Extraction: Implement a systematic process or algorithm to extract medication information, reducing the likelihood of human error or oversight. 
+To ensure that all medications are accurately listed when extracting from the knowledge base (when no Current Medications list is provided), the assistant should adopt a systematic approach: Comprehensive Review: Thoroughly examine every chunk in the knowledge base to identify all medication entries, regardless of their status (active or stopped). Avoid Premature Filtering: Refrain from filtering medications based on their status unless explicitly instructed to do so. This ensures that all prescribed medications are included. Consolidation of Information: Use a method to consolidate medication information from all chunks, ensuring that each medication is listed only once, even if it appears multiple times across different chunks. Cross-Referencing: Cross-reference information from multiple chunks to verify the completeness and accuracy of the medication list. Systematic Extraction: Implement a systematic process or algorithm to extract medication information, reducing the likelihood of human error or oversight.
 
 If you are asked for a patient summary, use the following categories and format: Highlight the label and category headings. Display the patient's name followed by their age and sex. A concise medical history; including surgical history -- Doctors seen recently (say, within a year) and diagnoses of those visits -- Current Medications -- Stopped or Inactive Medications --Allergies --Brief social history: employment (or school) status; living situation; use of tobacco, alcohol, drugs --Radiology in the past year --Other testing in the past year (PFTs, EKGs, etc)
 
 **Agent's Perspective**
 Write from the perspective of a physician creating a summary for an on-call physician who has never seen the patient.
 
-**Errors and Redactions** 
+**Errors and Redactions**
 Remove any mention of problems or medications for sexual function.
 
 **Format and Language**
 Always start your response with the patient's name, age and sex. Do not show your reasoning. Provide the response in English. Format section headings so they are not too large.
+
+---
+
+## Private AI Agents
+
+Each MAIA account provisions **two** DigitalOcean GenAI agents, both
+attached to the same user knowledge base. They appear in the chat
+provider dropdown as "Private AI (Deepseek)" and "Private AI (GPT)".
+
+### Primary — Private AI (Deepseek)
+- Profile key: `default`
+- Model: **Deepseek V4 Pro** (`inference_name: deepseek-v4-pro`),
+  resolved to a model UUID at runtime from the DO GenAI models catalog.
+  Optional env override: `DO_MODEL_ID` (primary only).
+- System Instructions: seeded from `## MAIA INSTRUCTION TEXT` above.
+- Agent name pattern: `{userId}-agent-{YYYYMMDDThhmmss}`.
+- This is the agent used by the Setup/Restore wizard automation and the
+  default chat selection.
+
+### Alternate — Private AI (GPT)
+- Profile key: `gpt`
+- Model: **OpenAI GPT-oss-120b** (`inference_name: openai-gpt-oss-120b`),
+  resolved from the DO catalog (never falls back to a non-GPT model).
+- System Instructions: a **one-time copy** of the primary agent's
+  instruction at creation time; the two then diverge.
+- Agent name pattern: `{userId}-agent-gpt-{YYYYMMDDThhmmss}`.
+
+### Independent System Instructions
+After creation, each agent's System Instructions are stored per profile
+in `userDoc.agentProfiles[<key>]` and are independently editable in
+**My Stuff → My AI Agent** (one sub-tab per agent). Editing one does
+not affect the other. `## MAIA INSTRUCTION TEXT` is only the initial
+seed, not a live link.
+
+### Shared resources
+Both agents attach the same OpenSearch-backed knowledge base (DO KB →
+agent is many-to-many). Destroying the cloud account deletes both
+agents; Restore rebuilds both.
+
+---
+
+## Knowledge Bases
+
+Parameters used when MAIA creates a new knowledge base. One OpenSearch
+cluster per DO account is shared by all knowledge bases.
+
+```
+embedding_model: GTE Large EN v1.5
+reranking_model: BGE Reranker v2 m3
+chunking_strategy: semantic
+semantic_similarity_threshold: 0.5
+semantic_max_chunk_size: 750
+hierarchical_max_parent_chunk_size: 750
+hierarchical_max_child_chunk_size: 375
+opensearch_database: genai1-driftwood
+```
+
+Parameter reference:
+
+- **embedding_model** *(parsed by code — keep the exact `embedding_model:`
+  line above)* = `GTE Large EN v1.5`. Resolved to a model UUID at
+  runtime via the DO GenAI models API. Optional env override:
+  `DO_EMBEDDING_MODEL_ID`.
+- **reranking_model** = `BGE Reranker v2 m3`.
+- **chunking_strategy** = `semantic` (default) or `hierarchical`.
+  - Semantic chunking:
+    - **semantic_similarity_threshold**: 0 – 1 (default `0.5`)
+    - **semantic_max_chunk_size**: 100 – 8192 (default `750`)
+  - Hierarchical chunking:
+    - **hierarchical_max_parent_chunk_size**: 100 – 8192 (default `750`)
+    - **hierarchical_max_child_chunk_size**: 100 – 750 (default `375`)
+- **opensearch_database** = `genai1-driftwood`. **Never create a new
+  OpenSearch cluster if one already exists for the account.** The
+  database UUID is auto-discovered via the DO API and cached in CouchDB;
+  one cluster per account is enforced.
+
+DigitalOcean uses an S3-compatible Spaces bucket (named `maia`,
+subfoldered by `userId`) to pass files to OpenSearch for indexing into
+the knowledge base attached to the user's Private AI agent.
+
+The actual parameters used for each KB creation are recorded in the
+user's `maia-log.pdf` (the `Knowledge base created` entry).
+
+---
+
+## Agent API Specification (reference)
+
+The exact DigitalOcean GenAI calls MAIA makes. All examples use the
+GradientAI Platform API:
+https://docs.digitalocean.com/reference/api/digitalocean/#tag/GradientAI-Platform
+
+### Create agent
+`POST /v2/gen-ai/agents`
+
+Example request body (values MAIA actually sends):
+```
+{
+  "name": "{userId}-agent-{YYYYMMDDThhmmss}",
+  "instruction": "<seed from ## MAIA INSTRUCTION TEXT>",
+  "model": { "uuid": "{model_uuid}" },
+  "project_id": "{project_id}",
+  "region": "tor1",
+  "max_tokens": 16384,
+  "top_p": 1,
+  "temperature": 0.1,
+  "k": 10,
+  "retrieval_method": "RETRIEVAL_METHOD_NONE"
+}
+```
+Required: `name`, `model.uuid`, `project_id`. The response's
+`deployment.status` starts `STATUS_PENDING`.
+
+### Update agent instruction
+`PUT /v2/gen-ai/agents/{agent_uuid}`
+
+Example request body (only `instruction` is changed by MAIA):
+```
+{ "instruction": "<updated System Instructions>" }
+```
+`name`, `model`, and `project_id` cannot change after creation.
+
+### Poll deployment
+`GET /v2/gen-ai/agents/{agent_uuid}`
+
+Poll until `deployment.status === "STATUS_RUNNING"` (typical 1–3 min),
+then read `deployment.url` as the agent's inference endpoint.
+
+### Create agent API key
+`POST /v2/gen-ai/agents/{agent_uuid}/api_keys`
+
+Key name `agent-{agent_uuid}-api-key`; the returned secret is stored
+per profile in `userDoc.agentProfiles[<key>].apiKey` (the flat
+`agentApiKey` is the primary agent's key only).
+
+### Knowledge base
+`POST /v2/gen-ai/knowledge_bases` (create, see Knowledge Bases section),
+`GET /v2/gen-ai/knowledge_bases/{kb_uuid}/indexing_jobs` (indexing
+status), `…/data_sources` (per-file data sources).
+
+### Resolution rules
+- **Model UUID**: primary → `DO_MODEL_ID` env, else DO catalog match for
+  `deepseek-v4-pro`, else an existing agent's model, else first catalog
+  model. Alternate → DO catalog match for `openai-gpt-oss-120b` only.
+- **Project ID**: `DO_PROJECT_ID` env, else discovered from an existing
+  agent / the account's default project.
+- Deployment status transitions: `STATUS_PENDING` → `STATUS_RUNNING`
+  (ready) or `STATUS_FAILED`.
+
+---
+
+## CouchDB Droplet (optional)
+
+Set `USE_COUCHDB_DROPLET=true` to enable. At startup the droplet is
+found or created as `ubuntu-s-1vcpu-1gb-tor1-01` on the default VPC.
+`CLOUDANT_URL` = `http://<droplet-ip>:5984`. Username is fixed
+(`admin`); password is generated (`openssl rand -base64 24`) and passed
+via `COUCHDB_USER`/`COUCHDB_PASSWORD`. Credentials are stored in Spaces
+at `couchdb/credentials.json` (and locally at
+`.couchdb-droplet-credentials`), Spaces first then local.
+
+---
+
+## App Platform Settings
+
+DO_REGION=tor1
+PORT=3001
 
 ---
 
@@ -32,7 +212,9 @@ Always start your response with the patient's name, age and sex. Do not show you
 and verify your Current Medications and a Patient Summary.
 * Feel free to browse the other pages in this wizard for details on how to get an Apple Health Export PDF file and what to expect as you are using MAIA.
 
-## Welcome Page Video Caption
+---
+
+## Welcome Page
 
 **Privacy Note:** This demo will not share your health records or chats with anyone unless you choose to share a chat with a public AI like ChatGPT or via a deep link. The demo host (agropper.xyz, me) could access your records and chats but you will be registered under a pseudonym and I have no reason to fish through anybody's records without a written request. For privacy from me as open source code and cloud hosting administrator, you should get your own copy of the open source code and a Digital Ocean account. Since I don't want to see your records, MAIA creates a maia-setup-log.pdf log file that you can email or post for help. The file has no personal information other than possibly in the file names themselves - if concerned, edit the file names of your records files.
 
@@ -40,13 +222,12 @@ and verify your Current Medications and a Patient Summary.
 
 **Passkeys** (Optional)  Setting a Passkey when you sign-out of a No Password account allows you to access MAIA from another computer, browser, or mobile device.
 
-**The Wizard** Greets you when you start a new MAIA to upload and process your health records into an AI-enhanced knowledge base accessible your Private AI agent. Prepare for the wizard by collecting all the records **for one patient** in a folder on your computer. All health records can be added to start and more can be added or removed at any time. If you have an iPhone or iPad, Apple Health makes it particularly convenient to collect records from most of the patient portals that you have a password for. In the Apple Health app, use "Export PDF" to save the file to your MAIA folder. Your records will be collected in minutes instead of days and MAIA will use them to create a detailed index and will suggest a Current Medications list for you to edit and verify. The Apple Health export PDF records are convenient and well organized, but they don't have the details you get by asking for records from each patient portal and adding them to the folder. 
+**The Wizard** Greets you when you start a new MAIA to upload and process your health records into an AI-enhanced knowledge base accessible your Private AI agent. Prepare for the wizard by collecting all the records **for one patient** in a folder on your computer. All health records can be added to start and more can be added or removed at any time. If you have an iPhone or iPad, Apple Health makes it particularly convenient to collect records from most of the patient portals that you have a password for. In the Apple Health app, use "Export PDF" to save the file to your MAIA folder. Your records will be collected in minutes instead of days and MAIA will use them to create a detailed index and will suggest a Current Medications list for you to edit and verify. The Apple Health export PDF records are convenient and well organized, but they don't have the details you get by asking for records from each patient portal and adding them to the folder.
 
 With MAIA, public AIs like Claude or ChatGPT will not have access to your records except as part of a chat that you see and control. Doctors and other users you invite by sharing a deep link will have access to your records by asking your Private AI questions in the chat. You can disable this option in your My Agent settings.
 
 **AI IS NOT PERFECT** MAIA gives you the opportunity to edit and verify whatever you or others might see in the chats. The Wizard requires verification for Current Medications and the Patient Summary. It is your responsibility to check the responses from Private AI as well as public AIs you choose. MAIA helps you verify by offering direct links to information in the PDF files you imported from your health care providers.
 
----
 ![CC-BY](by.png)
  MAIA by Adrian Gropper, MD
 
@@ -154,233 +335,3 @@ Autumn Franklin
 Cole Lawrence
 Brooke Matthews
 Nathaniel Douglas
-
----
-
-## CouchDB DROPLET
-
-- Set `USE_COUCHDB_DROPLET=true` to enable. At startup, check if the droplet exists and create it as ubuntu-s-1vcpu-1gb-tor1-01 with the default VPC.
-- Put a message in the terminal when the CouchDB is created or found.
-- **URL**: From the droplet API, get the public IP once the droplet is running. Construct `CLOUDANT_URL` as `http://<droplet-ip>:5984`.
-- **Username**: Use a fixed value (e.g. `admin`) for `CLOUDANT_USERNAME` and pass it to CouchDB via `COUCHDB_USER` when starting the container.
-- **Password**: Generate a random password (e.g. `openssl rand -base64 24`) and pass it to CouchDB via `COUCHDB_PASSWORD` when starting the container. Store the same value as `CLOUDANT_PASSWORD` for the app.
-- **Credentials storage**: Store credentials in Spaces at `couchdb/credentials.json` (and locally at `.couchdb-droplet-credentials`). Load from Spaces first, then local file. Requires DIGITALOCEAN_AWS_ACCESS_KEY_ID, DIGITALOCEAN_AWS_SECRET_ACCESS_KEY (bucket name is fixed in code; see "maia" in this file).
-
----
-
-## More
-
-# NEW AGENT SPECIFICATIONS
-# Based on sun6 agent structure and DigitalOcean GenAI API
-# Reference: https://docs.digitalocean.com/reference/api/digitalocean/#tag/GradientAI-Platform
-
-## CURRENT SUN6 AGENT DETAILS (Reference)
-Agent UUID: 53496a40-b8e7-11f0-b074-4e013e2ddde4
-Agent Name: sun6-agent-11032025
-Project ID: 90179b7c-8a42-4a71-a036-b4c2bea2fe59
-Region: tor1
-
-Model Details:
-  UUID: 18bc9b8f-73c5-11f0-b074-4e013e2ddde4
-  Name: OpenAI GPT-oss-120b
-  Inference Name: openai-gpt-oss-120b
-  Version: 1
-  Inference Version: 4294967296
-
-Deployment:
-  Status: STATUS_RUNNING
-  URL: https://sbviwtey3l3setqnghzxj5dj.agents.do-ai.run
-  Visibility: VISIBILITY_PLAYGROUND
-
-Configuration:
-  max_tokens: 16384
-  top_p: 1
-  temperature: 0.0
-  k: 10
-  retrieval_method: RETRIEVAL_METHOD_NONE
-
----
-
-## CREATE AGENT SPECIFICATION
-Endpoint: POST /v2/gen-ai/agents
-Reference: https://docs.digitalocean.com/reference/api/digitalocean/#tag/GradientAI-Platform/operation/genai_create_agent
-
-Request Body:
-{
-  "name": "{userId}-agent-{YYYYMMDD}",
-  "instruction": "<MAIA_INSTRUCTION_TEXT>",
-  "model": {
-    "uuid": "{model_uuid}"
-  },
-  "project_id": "{project_id}",
-  "region": "tor1",
-  "max_tokens": 16384,
-  "top_p": 1,
-  "temperature": 0.1,
-  "k": 10,
-  "retrieval_method": "RETRIEVAL_METHOD_NONE"
-}
-
-Required Fields:
-  - name: String (e.g., "sun7-agent-20241103")
-  - model.uuid: String (UUID of the model to use)
-  - project_id: String (UUID of the project)
-
-Optional Fields:
-  - instruction: String (Agent instruction/prompt)
-  - region: String (Default: "tor1")
-  - max_tokens: Integer (Default: 16384)
-  - top_p: Float (Default: 1)
-  - temperature: Float (Default: 0)
-  - k: Integer (Default: 10, for retrieval if enabled)
-  - retrieval_method: String (e.g., "RETRIEVAL_METHOD_NONE")
-
-Response:
-{
-  "agent": {
-    "uuid": "{agent_uuid}",
-    "name": "{agent_name}",
-    "model": {
-      "uuid": "{model_uuid}",
-      "name": "{model_name}",
-      "inference_name": "{inference_name}"
-    },
-    "project_id": "{project_id}",
-    "deployment": {
-      "uuid": "{deployment_uuid}",
-      "url": "{deployment_url}",
-      "status": "STATUS_PENDING" | "STATUS_RUNNING" | "STATUS_FAILED",
-      "visibility": "VISIBILITY_PLAYGROUND"
-    },
-    "created_at": "ISO8601 timestamp",
-    "updated_at": "ISO8601 timestamp"
-  }
-}
-
----
-
-## UPDATE AGENT SPECIFICATION
-Endpoint: PUT /v2/gen-ai/agents/{agent_uuid}
-Reference: https://docs.digitalocean.com/reference/api/digitalocean/#tag/GradientAI-Platform/operation/genai_update_agent
-
-Request Body (all fields optional):
-{
-  "instruction": "<UPDATED_MAIA_INSTRUCTION_TEXT>",
-  "max_tokens": 16384,
-  "top_p": 1,
-  "temperature": 0,
-  "k": 10,
-  "retrieval_method": "RETRIEVAL_METHOD_NONE"
-}
-
-Updateable Fields:
-  - instruction: String (Agent instruction/prompt)
-  - max_tokens: Integer
-  - top_p: Float
-  - temperature: Float (should be 0)
-  - k: Integer
-  - retrieval_method: String
-
-Note: Cannot update name, model, or project_id after creation.
-
-Response:
-{
-  "agent": {
-    "uuid": "{agent_uuid}",
-    "name": "{agent_name}",
-    "instruction": "{updated_instruction}",
-    "model": {
-      "uuid": "{model_uuid}",
-      "name": "{model_name}",
-      "inference_name": "{inference_name}"
-    },
-    "project_id": "{project_id}",
-    "deployment": {
-      "uuid": "{deployment_uuid}",
-      "url": "{deployment_url}",
-      "status": "STATUS_RUNNING",
-      "visibility": "VISIBILITY_PLAYGROUND"
-    },
-    "max_tokens": 16384,
-    "top_p": 1,
-    "temperature": 0,
-    "k": 10,
-    "retrieval_method": "RETRIEVAL_METHOD_NONE",
-    "updated_at": "ISO8601 timestamp"
-  }
-}
-
-
-
-## AGENT DEPLOYMENT STATUS
-After creation, agent deployment status transitions:
-1. STATUS_PENDING - Agent is being created/deployed
-2. STATUS_RUNNING - Agent is ready to use
-3. STATUS_FAILED - Agent deployment failed
-
-Wait for deployment:
-- Poll GET /v2/gen-ai/agents/{agent_uuid} until deployment.status === "STATUS_RUNNING"
-- Typical deployment time: 1-3 minutes
-- Check deployment.url availability once STATUS_RUNNING
-
----
-
-## GET AGENT DETAILS (for reference)
-Endpoint: GET /v2/gen-ai/agents/{agent_uuid}
-
-Use this to:
-- Check deployment status after creation
-- Verify agent configuration before update
-- Get deployment URL for API endpoint configuration
-
----
-
-## NOTES FOR IMPLEMENTATION
-
-1. Model UUID Resolution:
-   - Try: DO_MODEL_ID environment variable
-   - Fallback: Get from existing agents (list agents, get first, extract model.uuid)
-   - Fallback: List models, prefer "openai-gpt-oss-120b" (inference_name), else first available
-   - Must be valid UUID format
-
-2. Project ID Resolution:
-   - Try: DO_PROJECT_ID environment variable
-   - Fallback: Get from existing agents (list agents, get first, extract project_id)
-   - Must be valid UUID format
-
-3. Agent Name Format:
-   - Pattern: "{userId}-agent-{YYYYMMDD}"
-   - Example: "sun7-agent-20241103"
-   - Must be unique within project
-
-4. Deployment Wait:
-   - After create, wait 2-5 seconds before first status check
-   - Poll every 5-10 seconds until STATUS_RUNNING
-   - Maximum wait: 5 minutes (60 attempts @ 5s interval)
-   - Once STATUS_RUNNING, deployment.url is available
-
-5. Update Agent:
-   - Only update if instruction or configuration needs changing
-   - Cannot change: name, model, project_id after creation
-   - Update should be done after deployment is STATUS_RUNNING
-
-6. API Key Creation:
-   - After agent creation, create API key: POST /v2/gen-ai/agents/{agent_uuid}/api_keys
-   - Key name: "agent-{agent_uuid}-api-key"
-   - Store secret_key in user document
-
-GET /v2/gen-ai/knowledge_bases/{knowledge_base_uuid}/indexing_jobs
-
-DigitalOcean uses an S3-compatible Spaces bucket to pass files to the OpenSearch database for indexing into a Knowledge Base that is attached to the user's private AI agent. 
-We call this bucket "maia" and the subfolders are named by userId.
-
-## OpenSearch (DO-managed)
-OpenSearch is created as part of provisioning; one cluster per account, shared by all knowledge bases. The app uses only the database UUID (for KB creation). The database UUID is auto-discovered via the DO API and cached in CouchDB. No env var required.
-
-## Embedding model (Knowledge base)
-embedding_model: GTE Large EN v1.5
-The app resolves this display name to a model UUID at runtime via the DigitalOcean GenAI models API (DIGITALOCEAN_TOKEN). Used when creating new knowledge bases. Optional env override: DO_EMBEDDING_MODEL_ID.
-
-## App Platform Settings
-DO_REGION=tor1
-PORT=3001

@@ -3312,6 +3312,18 @@ const generateSetupLogPdf = async () => {
             if (evt.elapsedMs) parts.push(formatElapsed(evt.elapsedMs));
             return `[${t}] KB indexed: ${parts.join(', ')}`;
           }
+          case 'kb-created': {
+            const lines = [`[${t}] Knowledge base created: ${evt.kbName || ''}`];
+            const add = (label: string, v: unknown) => { if (v) lines.push(`        ${label}: ${v}`); };
+            add('KB id', evt.kbId);
+            add('Embedding model', evt.embeddingModelName || evt.embeddingModelId);
+            add('OpenSearch database id', evt.databaseId);
+            add('Project id', evt.projectId);
+            add('Region', evt.region);
+            add('Bucket', evt.bucketName);
+            add('Data source path', evt.itemPath);
+            return lines.join('\n');
+          }
           case 'summary-generated': return `[${t}] Patient Summary generated (${evt.lines || 0} lines, ${Number(evt.chars || 0).toLocaleString()} chars)`;
           case 'draft-summary-generated': {
             const secs = typeof evt.generationSeconds === 'number' ? ` in ${evt.generationSeconds}s` : '';

@@ -25,7 +25,7 @@ import { findUserAgent, getOrCreateAgentApiKey } from './utils/agent-helper.js';
 import { normalizeStorageEnv, getSpacesEndpoint, getSpacesBucketName, getSpacesRegion } from './utils/storage-config.js';
 import { getDoRegion, getPort } from './utils/new-agent-config.js';
 import { getOrCreateOpenSearchDatabaseId } from './utils/opensearch-config.js';
-import { getEmbeddingModelIdForKb } from './utils/embedding-model-config.js';
+import { getEmbeddingModelIdForKb, getEmbeddingModelNameFromNewAgent } from './utils/embedding-model-config.js';
 import { getProjectIdForGenAI } from './utils/project-config.js';
 import setupAuthRoutes from './routes/auth.js';
 import setupChatRoutes from './routes/chat.js';
@@ -766,6 +766,29 @@ const logProvisioning = (userId, message, level = 'info') => {
   }
   // Do not log provisioning messages to console
 };
+
+// Append a structured event to the user's PERSISTENT provisioningLog
+// (the array the client reads to render maia-log.pdf). Conflict-tolerant
+// and never throws — telemetry must not break provisioning.
+async function appendUserProvisioningEvent(userId, evt) {
+  if (!userId || !evt) return;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const fresh = await cloudant.getDocument('maia_users', userId);
+      if (!fresh) return;
+      if (!Array.isArray(fresh.provisioningLog)) fresh.provisioningLog = [];
+      const maxId = fresh.provisioningLog.reduce((m, e) => Math.max(m, e.id || 0), 0);
+      fresh.provisioningLog.push({ id: maxId + 1, time: new Date().toISOString(), ...evt });
+      fresh.updatedAt = new Date().toISOString();
+      await cloudant.saveDocument('maia_users', fresh);
+      return;
+    } catch (err) {
+      if (err?.statusCode === 409 && attempt < 2) continue;
+      console.warn(`[provisioning-log] could not append ${evt.event} for ${userId}: ${err?.message || err}`);
+      return;
+    }
+  }
+}
 
 async function runStartupUserValidation() {
   try {
@@ -6526,7 +6549,23 @@ async function setupKnowledgeBase(userId, kbName, filesInKB, bucketName, existin
       
       kbId = kbResult.uuid || kbResult.id;
       console.log(`✅ Created new KB: ${kbName} (${kbId})`);
-      
+
+      // Record the ACTUAL parameters used to create this KB so they
+      // appear in the user's maia-log.pdf (rendered by the
+      // 'kb-created' case in generateSetupLogPdf).
+      await appendUserProvisioningEvent(userId, {
+        event: 'kb-created',
+        kbName,
+        kbId,
+        projectId,
+        databaseId,
+        embeddingModelId: embeddingModelId || null,
+        embeddingModelName: getEmbeddingModelNameFromNewAgent() || null,
+        bucketName,
+        itemPath: datasources?.[0]?.spaces_data_source?.item_path || null,
+        region: getDoRegion()
+      });
+
       // Get KB details
       kbDetails = await doClient.kb.get(kbId);
       
