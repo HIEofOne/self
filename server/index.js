@@ -26,7 +26,7 @@ import { normalizeStorageEnv, getSpacesEndpoint, getSpacesBucketName, getSpacesR
 import { getDoRegion, getPort } from './utils/new-agent-config.js';
 import { getOrCreateOpenSearchDatabaseId } from './utils/opensearch-config.js';
 import { getEmbeddingModelIdForKb, getEmbeddingModelNameFromNewAgent } from './utils/embedding-model-config.js';
-import { getKbConfig, getChunkingForDataSource, getRerankingModelName } from './utils/kb-config.js';
+import { getChunkingForDataSource, getRerankingModelName } from './utils/kb-config.js';
 import { getProjectIdForGenAI } from './utils/project-config.js';
 import setupAuthRoutes from './routes/auth.js';
 import setupChatRoutes from './routes/chat.js';
@@ -6520,8 +6520,8 @@ async function setupKnowledgeBase(userId, kbName, filesInKB, bucketName, existin
     try {
       console.log(`📝 Creating new KB in DO: ${kbName}`);
     // KB tuning from NEW-AGENT.txt "## Knowledge Bases": chunking is
-    // per-datasource; reranking is top-level on the KB.
-    const kbConfig = getKbConfig();
+    // per-datasource; reranking is top-level on the KB. (OpenSearch DB
+    // is NOT configured here — always the existing account cluster.)
     const chunking = getChunkingForDataSource();
     const datasources = [
       {
@@ -6579,7 +6579,6 @@ async function setupKnowledgeBase(userId, kbName, filesInKB, bucketName, existin
         rerankingModel: rerankingConfig?.model || null,
         chunkingAlgorithm: chunking.chunking_algorithm,
         chunkingOptions: chunking.chunking_options,
-        opensearchDatabase: kbConfig.opensearch_database || null,
         bucketName,
         itemPath: datasources?.[0]?.spaces_data_source?.item_path || null,
         region: getDoRegion()

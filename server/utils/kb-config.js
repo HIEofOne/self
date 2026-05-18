@@ -6,8 +6,11 @@
  *   - chunking_strategy      -> per-datasource chunking_algorithm
  *   - semantic_*             -> chunking_options (semantic)
  *   - hierarchical_*         -> chunking_options (hierarchical)
- * (embedding_model is resolved separately in embedding-model-config.js;
- *  opensearch_database is documentation-only — discovery is unchanged.)
+ * (embedding_model is resolved separately in embedding-model-config.js.
+ *  The OpenSearch database is intentionally NOT a parameter here: the
+ *  code always reuses the existing account cluster — see
+ *  opensearch-config.js and the "OpenSearch database" note in
+ *  NEW-AGENT.txt.)
  */
 
 import fs from 'fs';
@@ -26,8 +29,7 @@ const DEFAULTS = {
   semantic_similarity_threshold: 0.5,
   semantic_max_chunk_size: 750,
   hierarchical_max_parent_chunk_size: 750,
-  hierarchical_max_child_chunk_size: 375,
-  opensearch_database: null
+  hierarchical_max_child_chunk_size: 375
 };
 
 /**

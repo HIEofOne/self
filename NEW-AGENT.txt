@@ -90,8 +90,11 @@ semantic_similarity_threshold: 0.5
 semantic_max_chunk_size: 750
 hierarchical_max_parent_chunk_size: 750
 hierarchical_max_child_chunk_size: 375
-opensearch_database: genai1-driftwood
 ```
+
+(The fenced block above is only the knowledge-base knobs that are
+actually sent to DigitalOcean. The OpenSearch database is deliberately
+NOT a knob here — see below.)
 
 Parameter reference:
 
@@ -107,10 +110,28 @@ Parameter reference:
   - Hierarchical chunking:
     - **hierarchical_max_parent_chunk_size**: 100 – 8192 (default `750`)
     - **hierarchical_max_child_chunk_size**: 100 – 750 (default `375`)
-- **opensearch_database** = `genai1-driftwood`. **Never create a new
-  OpenSearch cluster if one already exists for the account.** The
-  database UUID is auto-discovered via the DO API and cached in CouchDB;
-  one cluster per account is enforced.
+### OpenSearch database (NOT a configurable parameter)
+
+The OpenSearch database is **not** selected by name and the name is
+**never honored** as configuration. The rule is absolute:
+
+> **Always use the existing OpenSearch database for the account. Only
+> create a new one if the account has none.**
+
+Resolution order (server/utils/opensearch-config.js): env
+`OPENSEARCH_DATABASE_ID` → CouchDB cache `maia_config/opensearch_database_id`
+→ the existing cluster returned by `GET /v2/databases?engine=opensearch`
+→ create one only if the account has zero. One cluster per account; it
+is shared by every knowledge base.
+
+The account's current cluster happens to be named `genai1-driftwood`
+(reference only — not used by the code). The **resolved database UUID**
+of whatever existing cluster was used is recorded in `maia-log.pdf`
+(the `OpenSearch database id` line of the `Knowledge base created`
+entry) for transparency. Renaming the cluster here, or pointing at a
+different name, has **no effect**: MAIA always reuses whatever existing
+database the account already has and never creates a second one when
+one exists.
 
 DigitalOcean uses an S3-compatible Spaces bucket (named `maia`,
 subfoldered by `userId`) to pass files to OpenSearch for indexing into

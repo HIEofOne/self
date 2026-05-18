@@ -3325,7 +3325,6 @@ const generateSetupLogPdf = async () => {
                 : '';
               lines.push(`        Chunking: ${algo}${opts ? ` (${opts})` : ''}`);
             }
-            add('OpenSearch database', evt.opensearchDatabase);
             add('OpenSearch database id', evt.databaseId);
             add('Project id', evt.projectId);
             add('Region', evt.region);
