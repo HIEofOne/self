@@ -25,8 +25,11 @@
         <div v-if="balanceLoading" class="text-body2 text-grey-7">
           Loading customer balance...
         </div>
-        <div v-else-if="balanceError" class="text-body2 text-negative">
-          {{ balanceError }}
+        <div v-else-if="balanceError">
+          <div class="text-body2 text-negative">{{ balanceError }}</div>
+          <div v-if="balanceHint" class="text-caption text-orange-9 q-mt-xs">
+            {{ balanceHint }}
+          </div>
         </div>
         <div v-else>
           <div v-for="entry in balanceEntries" :key="entry.key" class="text-body2">
@@ -195,6 +198,7 @@ const recoveringUsers = ref(new Set<string>());
 const signingOut = ref(false);
 const balanceLoading = ref(false);
 const balanceError = ref('');
+const balanceHint = ref('');
 const balanceData = ref<any | null>(null);
 
 const columns = [
@@ -321,13 +325,17 @@ const balanceEntries = computed(() => {
 const loadCustomerBalance = async () => {
   balanceLoading.value = true;
   balanceError.value = '';
+  balanceHint.value = '';
   try {
     const response = await fetch('/api/billing/balance', {
       credentials: 'include'
     });
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.error || errorData.message || `HTTP ${response.status}`);
+      const status = errorData.status || response.status;
+      const msg = errorData.error || errorData.message || 'Unknown error';
+      balanceHint.value = errorData.hint || '';
+      throw new Error(`HTTP ${status} — ${msg}`);
     }
     balanceData.value = await response.json();
   } catch (err) {

@@ -9609,12 +9609,23 @@ app.get('/api/billing/balance', async (_req, res) => {
           errorMessage = text;
         }
       }
-      return res.status(response.status).json({ error: errorMessage });
+      // Self-diagnosing hint: the DO balance endpoint needs a token
+      // with billing read scope. A rotated/expired or granular-scope
+      // PAT works everywhere else but 401/403s here.
+      let hint = null;
+      if (response.status === 401) {
+        hint = 'DIGITALOCEAN_TOKEN appears invalid or expired (rotated?). Update it in the App Platform env and redeploy.';
+      } else if (response.status === 403) {
+        hint = 'DIGITALOCEAN_TOKEN lacks billing read scope. Regenerate the PAT with billing access (or use a legacy full-access token).';
+      }
+      console.log(`[DO] billing/balance failed: HTTP ${response.status} — ${errorMessage}`);
+      return res.status(response.status).json({ error: errorMessage, status: response.status, hint });
     }
     const data = await response.json();
     res.json(data);
   } catch (error) {
-    res.status(500).json({ error: error.message || 'Failed to fetch customer balance' });
+    console.log(`[DO] billing/balance threw: ${error.message}`);
+    res.status(500).json({ error: error.message || 'Failed to fetch customer balance', status: 500, hint: null });
   }
 });
 
