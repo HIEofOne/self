@@ -117,12 +117,18 @@ export async function getRerankingModelName(doClient) {
       const want = display.toLowerCase().replace(/\s+/g, ' ').trim();
       const match = models.find(m => {
         const name = (m.name || '').toLowerCase().trim();
+        const id = (m.id || '').toLowerCase().trim();
         const inf = (m.inference_name || '').toLowerCase().trim();
-        return name === want || inf === slug ||
+        return name === want || id === slug || inf === slug ||
           name.includes(want) || want.includes(name) ||
-          inf.includes(slug) || slug.includes(inf);
+          (id && (id.includes(slug) || slug.includes(id))) ||
+          (inf && (inf.includes(slug) || slug.includes(inf)));
       });
-      const resolved = match?.inference_name || match?.name;
+      // The DO reranking_config.model wants the model's API `id`
+      // (e.g. "bge-reranker-v2-m3"), NOT its display name (which has
+      // spaces and is rejected as "invalid reranking model"). For these
+      // models inference_name is null, so id is the authoritative slug.
+      const resolved = match?.id || match?.inference_name;
       if (resolved) {
         cachedRerankModel = String(resolved).trim();
         console.log(`[DO] Reranking model: "${cachedRerankModel}" (resolved from NEW-AGENT.txt "${display}")`);
