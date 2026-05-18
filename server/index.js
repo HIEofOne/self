@@ -26,6 +26,7 @@ import { normalizeStorageEnv, getSpacesEndpoint, getSpacesBucketName, getSpacesR
 import { getDoRegion, getPort } from './utils/new-agent-config.js';
 import { getOrCreateOpenSearchDatabaseId } from './utils/opensearch-config.js';
 import { getEmbeddingModelIdForKb, getEmbeddingModelNameFromNewAgent } from './utils/embedding-model-config.js';
+import { getKbConfig, getChunkingForDataSource, getRerankingModelName } from './utils/kb-config.js';
 import { getProjectIdForGenAI } from './utils/project-config.js';
 import setupAuthRoutes from './routes/auth.js';
 import setupChatRoutes from './routes/chat.js';
@@ -6518,15 +6519,28 @@ async function setupKnowledgeBase(userId, kbName, filesInKB, bucketName, existin
     
     try {
       console.log(`📝 Creating new KB in DO: ${kbName}`);
+    // KB tuning from NEW-AGENT.txt "## Knowledge Bases": chunking is
+    // per-datasource; reranking is top-level on the KB.
+    const kbConfig = getKbConfig();
+    const chunking = getChunkingForDataSource();
     const datasources = [
       {
         spaces_data_source: {
           bucket_name: bucketName,
           item_path: buildKbDataSourcePath(userId, kbName, null, useEphemeralSpaces),
           region: getDoRegion()
-        }
+        },
+        ...chunking
       }
     ];
+
+      let rerankingConfig = null;
+      try {
+        const rerankModel = await getRerankingModelName(doClient);
+        if (rerankModel) rerankingConfig = { enabled: true, model: rerankModel };
+      } catch (e) {
+        console.warn('[KB Setup] reranking model resolution failed (non-fatal):', e?.message);
+      }
 
       const kbCreateOptions = {
         name: kbName,
@@ -6535,16 +6549,17 @@ async function setupKnowledgeBase(userId, kbName, filesInKB, bucketName, existin
         databaseId: databaseId,
         bucketName: bucketName,
         datasources,
-        region: getDoRegion()
+        region: getDoRegion(),
+        ...(rerankingConfig ? { rerankingConfig } : {})
       };
-      
+
       // Add embedding model ID if provided
       if (embeddingModelId && isValidUUID(embeddingModelId)) {
         kbCreateOptions.embeddingModelId = embeddingModelId;
         console.log(`[KB Setup] Using embedding model ID: ${embeddingModelId}`);
       }
-      
-      console.log(`[KB AUTO] Calling doClient.kb.create() with name: ${kbName}, projectId: ${projectId}, databaseId: ${databaseId}, bucketName: ${bucketName}, itemPath: ${kbCreateOptions.itemPath}${embeddingModelId ? `, embeddingModelId: ${embeddingModelId}` : ''}`);
+
+      console.log(`[KB AUTO] Calling doClient.kb.create() name=${kbName} project=${projectId} database=${databaseId} bucket=${bucketName} embedding=${embeddingModelId || 'default'} chunking=${chunking.chunking_algorithm} reranking=${rerankingConfig?.model || 'none'}`);
       const kbResult = await doClient.kb.create(kbCreateOptions);
       
       kbId = kbResult.uuid || kbResult.id;
@@ -6561,6 +6576,10 @@ async function setupKnowledgeBase(userId, kbName, filesInKB, bucketName, existin
         databaseId,
         embeddingModelId: embeddingModelId || null,
         embeddingModelName: getEmbeddingModelNameFromNewAgent() || null,
+        rerankingModel: rerankingConfig?.model || null,
+        chunkingAlgorithm: chunking.chunking_algorithm,
+        chunkingOptions: chunking.chunking_options,
+        opensearchDatabase: kbConfig.opensearch_database || null,
         bucketName,
         itemPath: datasources?.[0]?.spaces_data_source?.item_path || null,
         region: getDoRegion()

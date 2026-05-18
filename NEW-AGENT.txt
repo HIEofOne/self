@@ -12,6 +12,8 @@ Runtime-parsed sections (heading → code consumer):
 - Private AI Setup Wizard → server/routes/auth.js getSetupWizardMessages
 - Random Names           → server/routes/auth.js getTempUserFirstNames
 - the embedding-model line → server/utils/embedding-model-config.js
+- Knowledge Bases        → server/utils/kb-config.js (reranking +
+  chunking params in the fenced key:value block)
 - App Platform Settings  → server/utils/new-agent-config.js
 
 ---
@@ -210,7 +212,7 @@ PORT=3001
 * An Apple Health "PDF Export" file is particularly useful but not mandatory.
 * Once your files are indexed into your private knowledge base, I will help you create
 and verify your Current Medications and a Patient Summary.
-* Feel free to browse the other pages in this wizard for details on how to get an Apple Health Export PDF file and what to expect as you are using MAIA.
+
 
 ---
 

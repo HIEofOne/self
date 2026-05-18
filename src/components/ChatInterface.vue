@@ -3317,6 +3317,15 @@ const generateSetupLogPdf = async () => {
             const add = (label: string, v: unknown) => { if (v) lines.push(`        ${label}: ${v}`); };
             add('KB id', evt.kbId);
             add('Embedding model', evt.embeddingModelName || evt.embeddingModelId);
+            add('Reranking model', evt.rerankingModel);
+            if (evt.chunkingAlgorithm) {
+              const algo = String(evt.chunkingAlgorithm).replace('CHUNKING_ALGORITHM_', '').toLowerCase();
+              const opts = evt.chunkingOptions
+                ? Object.entries(evt.chunkingOptions).map(([k, v]) => `${k}=${v}`).join(', ')
+                : '';
+              lines.push(`        Chunking: ${algo}${opts ? ` (${opts})` : ''}`);
+            }
+            add('OpenSearch database', evt.opensearchDatabase);
             add('OpenSearch database id', evt.databaseId);
             add('Project id', evt.projectId);
             add('Region', evt.region);
