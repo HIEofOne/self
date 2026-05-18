@@ -311,24 +311,47 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
       
       let errorMessage = error.message || 'Chat request failed';
       
-      // Handle 401 Unauthorized on agent endpoints - recreate the API key
+      // Handle 401/403 on a Private AI agent endpoint by REPAIRING the
+      // agent, not just its key. After a Restore the selected profile
+      // (esp. the secondary "gpt" agent) can point at a destroyed agent
+      // — that returns 403, and recreating only the API key can't fix a
+      // dead endpoint. So: re-ensure the agent for the active profile
+      // (recreates it + refreshes endpoint/agentId), recreate the key
+      // for the resolved agent, then transparently retry against the
+      // FRESH endpoint.
       const resolvedUserId = agentOwnerId || userId || bodyUserId;
       const resolvedAgentId = agentId;
-      if (statusCode === 401 && userAgentProvider && resolvedUserId && resolvedAgentId && cloudant && doClient) {
-        console.error(`401 Unauthorized on agent endpoint for agent ${resolvedAgentId}. Attempting to recreate API key...`);
-        
-        try {
-          // Recreate the API key (already imported at top of file)
-          const newApiKey = await recreateAgentApiKey(doClient, cloudant, resolvedUserId, resolvedAgentId, retryCtx?.profileKey || null);
-          console.log(`✅ Successfully recreated API key for agent ${resolvedAgentId}`);
+      const isAuthFail = statusCode === 401 || statusCode === 403;
+      if (isAuthFail && userAgentProvider && resolvedUserId && resolvedAgentId && cloudant && doClient) {
+        const profileKey = retryCtx?.profileKey || 'default';
+        console.error(`${statusCode} on agent endpoint for agent ${resolvedAgentId} (profile ${profileKey}). Repairing agent + key...`);
 
-          // Transparently re-run the request with the fresh key. The
-          // user should never see the auth failure if we can self-heal.
-          // Only possible if we haven't already started writing the
-          // response (a 401 fails before any body is sent).
-          if (retryCtx && !res.headersSent) {
+        try {
+          let freshEndpoint = retryCtx?.endpoint || null;
+          let freshAgentId = resolvedAgentId;
+          try {
+            let udoc = await cloudant.getDocument('maia_users', resolvedUserId);
+            if (udoc) {
+              udoc = (profileKey === 'gpt')
+                ? await ensureSecondaryAgent(doClient, cloudant, udoc)
+                : await ensureUserAgent(doClient, cloudant, udoc);
+              const prof = udoc?.agentProfiles?.[profileKey];
+              if (prof?.endpoint) freshEndpoint = prof.endpoint;
+              if (prof?.agentId) freshAgentId = prof.agentId;
+              else if (profileKey !== 'gpt' && udoc?.assignedAgentId) freshAgentId = udoc.assignedAgentId;
+            }
+          } catch (ensureErr) {
+            console.error(`Agent re-ensure failed (profile ${profileKey}):`, ensureErr.message);
+          }
+
+          const newApiKey = await recreateAgentApiKey(doClient, cloudant, resolvedUserId, freshAgentId, profileKey);
+          console.log(`✅ Repaired agent ${freshAgentId} (profile ${profileKey}); endpoint=${freshEndpoint ? 'fresh' : 'unknown'}`);
+
+          // Transparently re-run the request against the fresh endpoint
+          // + key, as long as no body has been sent yet.
+          if (retryCtx && freshEndpoint && !res.headersSent) {
             try {
-              const freshProvider = new DigitalOceanProvider(newApiKey, { baseURL: retryCtx.endpoint });
+              const freshProvider = new DigitalOceanProvider(newApiKey, { baseURL: freshEndpoint });
               const reqMessages = req.body?.messages;
               const reqOptions = req.body?.options || {};
               if (reqOptions.model == null && options?.model != null) reqOptions.model = options.model;
@@ -345,22 +368,22 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
                 const retryResponse = await freshProvider.chat(reqMessages, reqOptions);
                 res.json({ ...retryResponse, _meta: { provider, recovered: true } });
               }
-              console.log(`✅ Auto-retried chat after key recreation for agent ${resolvedAgentId} (no user-visible error)`);
+              console.log(`✅ Auto-retried chat after repairing agent ${freshAgentId} (no user-visible error)`);
               return;
             } catch (retryError) {
-              console.error(`Auto-retry after key recreation failed for agent ${resolvedAgentId}:`, retryError.message);
+              console.error(`Auto-retry after repair failed for agent ${freshAgentId}:`, retryError.message);
               // Fall through to the user-facing message below.
             }
           }
 
-          errorMessage = 'Authentication failed for your Private AI agent. The API key has been automatically recreated. Please try your request again.';
+          errorMessage = 'Your Private AI agent was repaired automatically. Please try your request again.';
         } catch (recreateError) {
-          console.error(`Failed to recreate API key for agent ${resolvedAgentId}:`, recreateError.message);
-          errorMessage = 'Authentication failed for your Private AI agent. Please contact support if this issue persists.';
+          console.error(`Failed to repair agent ${resolvedAgentId}:`, recreateError.message);
+          errorMessage = 'Your Private AI agent could not be reached. Please try again shortly or contact support if this persists.';
         }
-      } else if (statusCode === 401 && userAgentProvider) {
-        errorMessage = 'Authentication failed for your Private AI agent. The API key may need to be recreated.';
-        console.error('401 Unauthorized on agent endpoint (could not recreate key - missing info)');
+      } else if (isAuthFail && userAgentProvider) {
+        errorMessage = 'Authentication failed for your Private AI agent. It may need to be recreated.';
+        console.error(`${statusCode} on agent endpoint (could not repair - missing info)`);
       }
       
       // Enhance error messages for token limit errors (400 status with token limit message)
