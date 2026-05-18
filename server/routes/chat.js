@@ -521,15 +521,39 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
    * Private AI (digitalocean) is included when the user (or for deep link, the owner) has agent deployed.
    * For deep link sessions, also requires owner's allowDeepLinkPrivateAI !== false.
    */
+  // Verify an agent is actually LIVE in DigitalOcean (resolves and has
+  // a deployment URL) before we advertise it in the dropdown. A profile
+  // can carry a stale agentId/endpoint round-tripped from a maia-state
+  // backup that points at a destroyed agent — listing it produced the
+  // "selected GPT, got 403" bug. Cached briefly so the frequently-
+  // polled /api/chat/providers doesn't hammer the DO API.
+  const agentLiveCache = new Map(); // agentId -> { live, ts }
+  const AGENT_LIVE_TTL_MS = 30000;
+  const verifyAgentLive = async (agentId) => {
+    if (!agentId || !doClient) return false;
+    const cached = agentLiveCache.get(agentId);
+    if (cached && (Date.now() - cached.ts) < AGENT_LIVE_TTL_MS) return cached.live;
+    let live = false;
+    try {
+      const a = await doClient.agent.get(agentId);
+      live = !!(a?.deployment?.url);
+    } catch {
+      live = false; // 404 / destroyed / unreachable → not live
+    }
+    agentLiveCache.set(agentId, { live, ts: Date.now() });
+    return live;
+  };
+
   // Describe which Private AI agents (profiles) are deployed for a doc.
   // The frontend renders one dropdown entry per ready profile and sends
   // `agentProfileKey` alongside provider 'digitalocean'.
-  const buildPrivateAiProfiles = (doc) => {
+  const buildPrivateAiProfiles = async (doc) => {
     if (!doc) return [];
     const out = [];
     const profiles = (doc.agentProfiles && typeof doc.agentProfiles === 'object') ? doc.agentProfiles : {};
     // Primary / Deepseek — also satisfied by the flat fields for
-    // legacy docs that predate agentProfiles.
+    // legacy docs that predate agentProfiles. (The primary is already
+    // gated upstream by workflowStage / ensureUserAgent.)
     const def = profiles.default || {};
     const defReady = !!((def.agentId && def.endpoint) || (doc.assignedAgentId && doc.agentEndpoint));
     if (defReady) {
@@ -539,9 +563,10 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
         model: def.modelName || doc.agentModelName || 'deepseek-v4-pro'
       });
     }
-    // Secondary / GPT — only when its own profile is deployed.
+    // Secondary / GPT — only when its agent is verified LIVE in DO, not
+    // merely present in the (possibly stale) profile.
     const gpt = profiles.gpt || {};
-    if (gpt.agentId && gpt.endpoint) {
+    if (gpt.agentId && gpt.endpoint && await verifyAgentLive(gpt.agentId)) {
       out.push({
         key: 'gpt',
         label: 'Private AI (GPT)',
@@ -576,7 +601,7 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
               !!(ownerDoc?.assignedAgentId && ownerDoc?.agentEndpoint);
             const ownerAllows = ownerDoc?.allowDeepLinkPrivateAI !== false;
             if (ownerHasAgent && ownerAllows) {
-              res.json({ providers, privateAiProfiles: buildPrivateAiProfiles(ownerDoc) });
+              res.json({ providers, privateAiProfiles: await buildPrivateAiProfiles(ownerDoc) });
               return;
             }
           }
@@ -609,22 +634,28 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
           }
           providers = providers.filter((p) => p !== 'digitalocean');
         } else {
-          // Lazily provision the secondary "Private AI (GPT)" agent
-          // once the primary is up and a KB exists. This is also the
-          // backfill path for existing single-agent accounts: the app
-          // polls /api/chat/providers, so the GPT agent gets created on
-          // a poll and appears in the dropdown once its deployment is
-          // ready (it isn't blocked on here — first poll kicks it off,
-          // a later poll surfaces it). The same user KB is attached
-          // inside ensureSecondaryAgent.
-          if (userDoc?.kbId && !userDoc?.agentProfiles?.gpt?.endpoint) {
-            try {
-              userDoc = await ensureSecondaryAgent(doClient, cloudant, userDoc);
-            } catch (gptErr) {
-              console.warn('[chat/providers] ensureSecondaryAgent failed:', gptErr?.message);
+          // Lazily provision (or REPAIR) the secondary "Private AI
+          // (GPT)" agent once the primary is up and a KB exists. This
+          // also backfills existing single-agent accounts and self-
+          // heals a stale gpt profile after a Restore: re-ensure when
+          // there is no gpt endpoint yet OR the recorded gpt agent is
+          // not actually live in DO (destroyed agent → stale profile).
+          // The dropdown only lists GPT once verifyAgentLive passes, so
+          // the user never selects a dead agent (no more 403s).
+          if (userDoc?.kbId) {
+            const gptProf = userDoc?.agentProfiles?.gpt;
+            const gptLive = gptProf?.agentId ? await verifyAgentLive(gptProf.agentId) : false;
+            if (!gptProf?.endpoint || !gptLive) {
+              try {
+                userDoc = await ensureSecondaryAgent(doClient, cloudant, userDoc);
+                const newId = userDoc?.agentProfiles?.gpt?.agentId;
+                if (newId) agentLiveCache.delete(newId); // re-check fresh
+              } catch (gptErr) {
+                console.warn('[chat/providers] ensureSecondaryAgent failed:', gptErr?.message);
+              }
             }
           }
-          privateAiProfiles = buildPrivateAiProfiles(userDoc);
+          privateAiProfiles = await buildPrivateAiProfiles(userDoc);
         }
       } catch (err) {
         console.warn('[chat/providers] Could not load user doc, excluding Private AI:', err?.message);
