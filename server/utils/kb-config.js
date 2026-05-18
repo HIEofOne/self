@@ -72,10 +72,9 @@ export function getKbConfig() {
  * Returns `{ chunking_algorithm, chunking_options }` to spread onto a
  * datasource entry (sibling of spaces_data_source).
  */
-export function getChunkingForDataSource() {
+export function getChunkingForStrategy(strategy) {
   const c = getKbConfig();
-  const strategy = String(c.chunking_strategy || 'semantic').toLowerCase();
-  if (strategy === 'hierarchical') {
+  if (String(strategy || '').toLowerCase() === 'hierarchical') {
     return {
       chunking_algorithm: 'CHUNKING_ALGORITHM_HIERARCHICAL',
       chunking_options: {
@@ -92,6 +91,11 @@ export function getChunkingForDataSource() {
       semantic_threshold: Number(c.semantic_similarity_threshold) || 0.5
     }
   };
+}
+
+// Primary KB-1 uses the configured strategy (semantic by default).
+export function getChunkingForDataSource() {
+  return getChunkingForStrategy(getKbConfig().chunking_strategy || 'semantic');
 }
 
 /**

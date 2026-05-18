@@ -478,30 +478,43 @@
                 </div>
               </div>
 
-              <!-- Agent Knowledge Base Section -->
-              <div v-if="kbInfo" class="q-mt-lg" style="border-top: 1px solid #e0e0e0; padding-top: 16px;">
-                <div class="text-h6 q-mb-md">Agent Knowledge Base</div>
-                
-                <div class="row items-center q-mb-sm">
+              <!-- Agent Knowledge Bases (per this agent) -->
+              <div v-if="agentKbs.length" class="q-mt-lg" style="border-top: 1px solid #e0e0e0; padding-top: 16px;">
+                <div class="text-h6 q-mb-md">Knowledge Bases</div>
+
+                <div
+                  v-for="kb in agentKbs"
+                  :key="kb.key"
+                  class="row items-center q-mb-sm"
+                >
                   <div class="col">
-                    <div class="text-weight-medium">{{ kbInfo.name }}</div>
+                    <div class="text-weight-medium">{{ kb.label }}</div>
                     <div class="text-caption text-grey-7 q-mt-xs">
-                      Last indexed: {{ formatRelativeTime(kbInfo.lastIndexedAt || null) }}
+                      {{ kb.name || (kb.key === 'kb2' ? 'Created on first connect' : '—') }}
                     </div>
                   </div>
                   <div class="col-auto">
                     <q-chip
-                      :color="kbInfo.connected ? 'green' : 'amber'"
+                      :color="kb.connected ? 'green' : 'amber'"
                       text-color="white"
-                      :label="kbInfo.connected ? 'Connected' : 'Not Connected'"
+                      :label="kbBusyKey === kb.key
+                        ? 'Working…'
+                        : (kb.connected ? 'Connected' : 'Not Connected')"
                       clickable
-                      @click="toggleKBConnection"
-                      :disable="togglingKB"
-                      :loading="togglingKB"
+                      @click="toggleKB(kb)"
+                      :disable="!!kbBusyKey"
+                      :loading="kbBusyKey === kb.key"
                     />
                   </div>
                 </div>
-                
+                <div v-if="kb2JustIndexing" class="text-caption text-orange-9 q-mb-sm">
+                  Alternate KB created — it will finish indexing in the background (5–60 min); answers improve once indexing completes.
+                </div>
+              </div>
+
+              <!-- Indexed-files detail for the primary KB -->
+              <div v-if="kbInfo" class="q-mt-md">
+
                 <div class="q-mt-md">
                   <div class="text-caption text-grey-7 q-mb-xs">Indexed Files:</div>
                   <div 
@@ -1365,7 +1378,14 @@ const kbInfo = ref<{
   indexedDataSourceCount?: number | null;
   lastIndexedAt?: string | null;
 } | null>(null);
-const togglingKB = ref(false);
+// Per-agent KB connection state (kb1 = primary/semantic,
+// kb2 = alternate/hierarchical) for the active My-Agent sub-tab.
+const agentKbs = ref<Array<{
+  key: string; label: string; name: string | null;
+  kbId: string | null; exists: boolean; connected: boolean;
+}>>([]);
+const kbBusyKey = ref<string | null>(null);
+const kb2JustIndexing = ref(false);
 
 const loadingChats = ref(false);
 const chatsError = ref('');
@@ -1841,7 +1861,9 @@ const loadAgent = async () => {
     agentInstructions.value = result.instructions || '';
     editedInstructions.value = result.instructions || '';
     kbInfo.value = result.kbInfo || null;
-    
+    agentKbs.value = Array.isArray(result.kbs) ? result.kbs : [];
+    kb2JustIndexing.value = false;
+
     // Load deep link Private AI access setting
     await loadDeepLinkPrivateAISetting();
   } catch (err) {
@@ -1970,82 +1992,47 @@ const cancelEdit = () => {
   editMode.value = false;
 };
 
-// Format relative time (minutes, hours, days ago)
-const formatRelativeTime = (dateString: string | null): string => {
-  if (!dateString) return 'Never';
-  
-  const date = new Date(dateString);
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffMins = Math.floor(diffMs / 60000);
-  const diffHours = Math.floor(diffMs / 3600000);
-  const diffDays = Math.floor(diffMs / 86400000);
-  
-  if (diffMins < 1) return 'Just now';
-  if (diffMins < 60) return `${diffMins} minute${diffMins !== 1 ? 's' : ''} ago`;
-  if (diffHours < 24) return `${diffHours} hour${diffHours !== 1 ? 's' : ''} ago`;
-  return `${diffDays} day${diffDays !== 1 ? 's' : ''} ago`;
-};
 
 // Toggle KB connection
-const toggleKBConnection = async () => {
-  if (!kbInfo.value || togglingKB.value) return;
-  
-  togglingKB.value = true;
-  
-  // Store the current state for rollback on error
-  const wasConnected = kbInfo.value.connected;
-  
+// Connect/disconnect a specific KB (kb1 = primary/semantic,
+// kb2 = alternate/hierarchical) for the CURRENT agent sub-tab.
+// kb2's first connect lazily creates + indexes it server-side.
+const toggleKB = async (kb: { key: string; connected: boolean; label: string }) => {
+  if (kbBusyKey.value) return;
+  kbBusyKey.value = kb.key;
+  const action = kb.connected ? 'detach' : 'attach';
   try {
-    const action = wasConnected ? 'detach' : 'attach';
     const response = await fetch('/api/toggle-kb-connection', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
+      headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
       body: JSON.stringify({
         userId: props.userId,
-        action: action,
+        action,
+        kbKey: kb.key,
         agentProfileKey: activeAgentProfile.value
       })
     });
-
-    if (!response.ok) {
-      throw new Error('Failed to toggle KB connection');
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || result.success === false) {
+      throw new Error(result.message || result.error || 'Failed to change KB connection');
     }
-
-    const result = await response.json();
-    
-    // Use the response directly - it's the source of truth from the backend
-    // No need to call loadAgent() which goes through a cache
-    if (kbInfo.value && typeof result.connected === 'boolean') {
-      kbInfo.value.connected = result.connected;
-    }
-    
-    // Show notification
-    if ($q && typeof $q.notify === 'function') {
+    // Reflect new state from the backend (source of truth).
+    const idx = agentKbs.value.findIndex(k => k.key === kb.key);
+    if (idx >= 0) agentKbs.value[idx].connected = !!result.connected;
+    if (kb.key === 'kb2' && result.indexing) kb2JustIndexing.value = true;
+    if ($q?.notify) {
       $q.notify({
         type: 'positive',
-        message: result.message || `KB ${action === 'attach' ? 'attached' : 'detached'} successfully`,
+        message: `${kb.label} ${result.connected ? 'connected' : 'disconnected'}`,
         timeout: 3000
       });
     }
   } catch (err) {
-    // Revert on error
-    if (kbInfo.value) {
-      kbInfo.value.connected = wasConnected;
-    }
-    const errorMsg = err instanceof Error ? err.message : 'Failed to toggle KB connection';
-    if ($q && typeof $q.notify === 'function') {
-      $q.notify({
-        type: 'negative',
-        message: errorMsg,
-        timeout: 5000
-      });
-    }
+    const msg = err instanceof Error ? err.message : 'Failed to change KB connection';
+    if ($q?.notify) $q.notify({ type: 'negative', message: msg, timeout: 5000 });
   } finally {
-    togglingKB.value = false;
+    kbBusyKey.value = null;
   }
 };
 

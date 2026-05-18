@@ -3330,7 +3330,15 @@ const generateSetupLogPdf = async () => {
             add('Region', evt.region);
             add('Bucket', evt.bucketName);
             add('Data source path', evt.itemPath);
+            if (evt.role) lines.push(`        Role: ${evt.role}`);
             return lines.join('\n');
+          }
+          case 'kb-connection-changed': {
+            const verb = evt.action === 'connected' ? 'Connected' : 'Disconnected';
+            const prep = evt.action === 'connected' ? 'to' : 'from';
+            const agent = evt.agentProfileKey === 'gpt' ? 'Private AI (GPT)' : 'Private AI (Deepseek)';
+            const role = evt.kbRole ? ` [${evt.kbRole}]` : '';
+            return `[${t}] ${verb} ${evt.kbName || evt.kbKey}${role} ${prep} ${agent}`;
           }
           case 'summary-generated': return `[${t}] Patient Summary generated (${evt.lines || 0} lines, ${Number(evt.chars || 0).toLocaleString()} chars)`;
           case 'draft-summary-generated': {

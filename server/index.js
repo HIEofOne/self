@@ -26,7 +26,7 @@ import { normalizeStorageEnv, getSpacesEndpoint, getSpacesBucketName, getSpacesR
 import { getDoRegion, getPort } from './utils/new-agent-config.js';
 import { getOrCreateOpenSearchDatabaseId } from './utils/opensearch-config.js';
 import { getEmbeddingModelIdForKb, getEmbeddingModelNameFromNewAgent } from './utils/embedding-model-config.js';
-import { getChunkingForDataSource, getRerankingModelName } from './utils/kb-config.js';
+import { getChunkingForDataSource, getChunkingForStrategy, getRerankingModelName } from './utils/kb-config.js';
 import { getProjectIdForGenAI } from './utils/project-config.js';
 import setupAuthRoutes from './routes/auth.js';
 import setupChatRoutes from './routes/chat.js';
@@ -423,7 +423,17 @@ function generateAgentName(userId) {
  */
 function generateKBName(userId) {
   const timestamp = new Date().toISOString().replace(/[-:]/g, '').split('T')[0]; // YYYYMMDD
-  return `${userId}-kb-${timestamp}${Date.now().toString().slice(-6)}`;
+  // New KBs are the PRIMARY (semantic) KB → "-1" suffix. The alternate
+  // hierarchical KB is "-2" (see deriveKb2Name). Existing accounts keep
+  // their original (suffix-less) name and are adopted as KB-1.
+  return `${userId}-kb-${timestamp}${Date.now().toString().slice(-6)}-1`;
+}
+
+// Derive the alternate (KB-2) name from the primary KB name. Replaces a
+// trailing "-1" with "-2"; legacy names with no suffix just get "-2".
+function deriveKb2Name(kb1Name) {
+  if (!kb1Name) return null;
+  return /-1$/.test(kb1Name) ? kb1Name.replace(/-1$/, '-2') : `${kb1Name}-2`;
 }
 
 /**
@@ -5983,10 +5993,39 @@ app.get('/api/agent-instructions', async (req, res) => {
       };
     }
 
+    // Per-agent connection state for BOTH knowledge bases (so the My
+    // Agent sub-tab can show independent KB-1 / KB-2 toggles).
+    const attachedSet = new Set(
+      (agent.knowledge_bases || agent.connected_knowledge_bases ||
+       agent.knowledge_base_ids || agent.knowledge_base_uuids || agent.kbs || [])
+        .map(kb => (typeof kb === 'string' ? kb : (kb?.uuid || kb?.id || kb?.knowledge_base_uuid)))
+        .filter(Boolean)
+    );
+    const kb2 = userDoc.kb2 || null;
+    const kbs = [
+      {
+        key: 'kb1',
+        label: 'Primary KB — semantic',
+        name: userDoc.kbId ? getKBNameFromUserDoc(userDoc, userId) : null,
+        kbId: userDoc.kbId || null,
+        exists: !!userDoc.kbId,
+        connected: !!(userDoc.kbId && attachedSet.has(userDoc.kbId))
+      },
+      {
+        key: 'kb2',
+        label: 'Alternate KB — hierarchical',
+        name: kb2?.kbName || null,
+        kbId: kb2?.kbId || null,
+        exists: !!kb2?.kbId,
+        connected: !!(kb2?.kbId && attachedSet.has(kb2.kbId))
+      }
+    ];
+
     res.json({
       success: true,
       instructions: agent.instruction || '',
-      kbInfo: kbInfo
+      kbInfo: kbInfo,
+      kbs
     });
   } catch (error) {
     console.error('❌ Error fetching agent instructions:', error);
@@ -6606,6 +6645,111 @@ async function setupKnowledgeBase(userId, kbName, filesInKB, bucketName, existin
     kbId: kbId,
     kbDetails: kbDetails
   };
+}
+
+// Lazily create the ALTERNATE knowledge base (KB-2): HIERARCHICAL
+// chunking over the SAME Spaces folder KB-1 already indexes (no file
+// duplication). Idempotent: returns the existing KB-2 if it resolves.
+// Stored on userDoc.kb2 = { kbId, kbName, createdAt }. KB-1 is left
+// untouched (userDoc.kbId/kbName remain the primary).
+const kb2CreationLocks = new Map();
+async function ensureKb2(userId) {
+  if (!userId) return { error: 'NO_USER' };
+  const existingDoc = await cloudant.getDocument('maia_users', userId);
+  if (!existingDoc) return { error: 'USER_NOT_FOUND' };
+
+  // Reuse if already created and still resolves in DO.
+  const existingKb2Id = existingDoc.kb2?.kbId || null;
+  if (existingKb2Id) {
+    try {
+      await doClient.kb.get(existingKb2Id);
+      return { kbId: existingKb2Id, kbName: existingDoc.kb2.kbName, reused: true };
+    } catch { /* gone — recreate below */ }
+  }
+
+  if (kb2CreationLocks.has(userId)) {
+    try { await kb2CreationLocks.get(userId); } catch { /* ignore */ }
+    const fresh = await cloudant.getDocument('maia_users', userId);
+    if (fresh?.kb2?.kbId) return { kbId: fresh.kb2.kbId, kbName: fresh.kb2.kbName, reused: true };
+  }
+
+  let release;
+  kb2CreationLocks.set(userId, new Promise(r => { release = r; }));
+  try {
+    const kb1Name = getKBNameFromUserDoc(existingDoc, userId);
+    if (!kb1Name) return { error: 'NO_PRIMARY_KB', message: 'Primary knowledge base must exist before the alternate KB can be created.' };
+    const kb2Name = deriveKb2Name(kb1Name);
+
+    const projectId = await getProjectIdForGenAI(doClient);
+    const databaseId = await getOrCreateOpenSearchDatabaseId(doClient, cloudant);
+    const embeddingModelId = await getEmbeddingModelIdForKb(doClient) || null;
+    const isUUID = (s) => typeof s === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s.trim());
+    if (!isUUID(projectId) || !isUUID(databaseId)) {
+      return { error: 'KB2_CONFIG', message: 'Project/Database not configured for KB-2 creation.' };
+    }
+
+    const bucketUrl = getSpacesBucketName();
+    const bucketName = bucketUrl ? (bucketUrl.split('//')[1]?.split('.')[0] || 'maia') : 'maia';
+    // KB-2 indexes the SAME folder KB-1 uses → no duplicate uploads.
+    const itemPath = `${userId}/${kb1Name}/`;
+    const chunking = getChunkingForStrategy('hierarchical');
+
+    let rerankingConfig = null;
+    try {
+      const rerankModel = await getRerankingModelName(doClient);
+      if (rerankModel) rerankingConfig = { enabled: true, model: rerankModel };
+    } catch { /* non-fatal */ }
+
+    console.log(`[KB-2] Creating alternate KB ${kb2Name} (hierarchical) over ${itemPath} for ${userId}`);
+    const kbResult = await doClient.kb.create({
+      name: kb2Name,
+      description: `Alternate (hierarchical) knowledge base for ${userId}`,
+      projectId,
+      databaseId,
+      bucketName,
+      region: getDoRegion(),
+      datasources: [
+        { spaces_data_source: { bucket_name: bucketName, item_path: itemPath, region: getDoRegion() }, ...chunking }
+      ],
+      ...(isUUID(embeddingModelId) ? { embeddingModelId } : {}),
+      ...(rerankingConfig ? { rerankingConfig } : {})
+    });
+    const kb2Id = kbResult.uuid || kbResult.id;
+
+    // Persist on userDoc.kb2 (conflict-tolerant). KB-1 untouched.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const doc = await cloudant.getDocument('maia_users', userId);
+        doc.kb2 = { kbId: kb2Id, kbName: kb2Name, chunking: 'hierarchical', createdAt: new Date().toISOString() };
+        doc.updatedAt = new Date().toISOString();
+        await cloudant.saveDocument('maia_users', doc);
+        break;
+      } catch (e) {
+        if (e?.statusCode === 409 && attempt < 2) continue;
+        console.warn(`[KB-2] could not persist kb2 for ${userId}: ${e?.message || e}`);
+        break;
+      }
+    }
+    await appendUserProvisioningEvent(userId, {
+      event: 'kb-created',
+      kbName: kb2Name,
+      kbId: kb2Id,
+      role: 'alternate',
+      chunkingAlgorithm: chunking.chunking_algorithm,
+      chunkingOptions: chunking.chunking_options,
+      rerankingModel: rerankingConfig?.model || null,
+      itemPath
+    });
+    invalidateResourceCache(userId);
+    console.log(`✅ [KB-2] Created alternate KB ${kb2Name} (${kb2Id})`);
+    return { kbId: kb2Id, kbName: kb2Name, created: true };
+  } catch (error) {
+    console.error(`[KB-2] creation failed for ${userId}:`, error.message);
+    return { error: 'KB2_CREATE_FAILED', message: error.message };
+  } finally {
+    kb2CreationLocks.delete(userId);
+    if (release) release();
+  }
 }
 
 // Update knowledge base - setup KB and trigger indexing (files already moved by checkboxes)
@@ -8343,19 +8487,23 @@ async function deleteUserAndResources(userId, options = {}) {
 
   // 2. Delete Knowledge Base
   try {
-    console.log(`[DESTROY] Deleting knowledge base for ${userId}`);
-    const kbId = userDoc.kbId;
-    if (kbId) {
-      try {
-        await doClient.kb.delete(kbId);
-        deletionDetails.kbDeleted = true;
-      } catch (error) {
-        if (error.statusCode === 404 || error.message?.includes('not found')) {
-          deletionDetails.kbDeleted = true; // Already deleted, consider it success
-        } else {
-          throw error;
+    console.log(`[DESTROY] Deleting knowledge base(s) for ${userId}`);
+    // Delete BOTH the primary (KB-1) and the alternate (KB-2) if present.
+    const kbIds = [userDoc.kbId, userDoc.kb2?.kbId].filter(Boolean);
+    if (kbIds.length > 0) {
+      for (const kbId of kbIds) {
+        try {
+          await doClient.kb.delete(kbId);
+          console.log(`[DESTROY] Deleted KB ${kbId}`);
+        } catch (error) {
+          if (error.statusCode === 404 || error.message?.includes('not found')) {
+            console.log(`[DESTROY] KB not found (already gone): ${kbId}`);
+          } else {
+            throw error;
+          }
         }
       }
+      deletionDetails.kbDeleted = true;
     } else {
       deletionDetails.kbDeleted = true; // No KB to delete
     }
@@ -9347,6 +9495,46 @@ app.put('/api/account/rehydrate', async (req, res) => {
       errors.push(`ensureSecondaryAgent: ${e.message || e}`);
     }
 
+    // Alternate KB-2: the backup may show KB-2 was connected to one or
+    // more agents, but the DO KB itself was destroyed. The stale pointer
+    // is dropped; if any saved per-agent connection had kb2, recreate
+    // KB-2 (hierarchical, over KB-1's folder) and reattach it to those
+    // agents. KB-1 reattachment is handled by the normal flow /
+    // ensureSecondaryAgent. Best-effort — never fail the restore.
+    try {
+      const conns = (docToWrite.kbConnections && typeof docToWrite.kbConnections === 'object')
+        ? docToWrite.kbConnections : {};
+      const profilesWantingKb2 = Object.entries(conns)
+        .filter(([, v]) => v && v.kb2 === true)
+        .map(([pk]) => pk);
+      // Stale KB-2 id from the backup points at a destroyed KB.
+      if (docToWrite.kb2) docToWrite.kb2 = null;
+      if (profilesWantingKb2.length > 0) {
+        const kb2res = await ensureKb2(userId); // recreate over KB-1 folder
+        if (kb2res?.kbId) {
+          const freshDoc = await cloudant.getDocument('maia_users', userId);
+          for (const pk of profilesWantingKb2) {
+            const aId = resolveAgentIdForProfile(freshDoc, pk);
+            if (!aId) continue;
+            try {
+              await doClient.agent.attachKB(aId, kb2res.kbId);
+              await appendUserProvisioningEvent(userId, {
+                event: 'kb-connection-changed',
+                kbKey: 'kb2', kbName: kb2res.kbName,
+                kbRole: 'alternate (hierarchical)',
+                agentProfileKey: pk, action: 'connected'
+              });
+            } catch (attErr) {
+              errors.push(`kb2 reattach ${pk}: ${attErr.message || attErr}`);
+            }
+          }
+          rebuilt.kb2 = 'recreated';
+        }
+      }
+    } catch (e) {
+      errors.push(`kb2 restore: ${e.message || e}`);
+    }
+
     // 3. Inspect Spaces against userDoc.files. For each entry whose
     // bucketKey isn't in Spaces, add it to missingFiles. The client
     // uploads each via POST /api/files/restore-bytes.
@@ -9912,127 +10100,121 @@ app.get('/api/provisioning-log', async (req, res) => {
 });
 
 // Toggle KB connection to Agent endpoint (attach/detach)
+// Persist the per-agent KB attachment state so Restore can reattach.
+// userDoc.kbConnections = { [profileKey]: { kb1?: bool, kb2?: bool } }
+async function recordKbConnection(userId, profileKey, kbKey, connected) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const doc = await cloudant.getDocument('maia_users', userId);
+      if (!doc) return;
+      if (!doc.kbConnections || typeof doc.kbConnections !== 'object') doc.kbConnections = {};
+      const pk = profileKey || 'default';
+      if (!doc.kbConnections[pk] || typeof doc.kbConnections[pk] !== 'object') doc.kbConnections[pk] = {};
+      doc.kbConnections[pk][kbKey] = !!connected;
+      doc.updatedAt = new Date().toISOString();
+      await cloudant.saveDocument('maia_users', doc);
+      return;
+    } catch (e) {
+      if (e?.statusCode === 409 && attempt < 2) continue;
+      console.warn(`[kbConnections] could not persist ${kbKey}=${connected} for ${userId}: ${e?.message || e}`);
+      return;
+    }
+  }
+}
+
 app.post('/api/toggle-kb-connection', async (req, res) => {
   try {
-    const { userId, action, agentProfileKey } = req.body; // action: 'attach' | 'detach'
+    // action: 'attach'|'detach'; kbKey: 'kb1' (primary/semantic, default)
+    // | 'kb2' (alternate/hierarchical); agentProfileKey: 'default'|'gpt'
+    const { userId, action, agentProfileKey } = req.body;
+    const kbKey = req.body.kbKey === 'kb2' ? 'kb2' : 'kb1';
+    const profileKey = agentProfileKey || 'default';
 
     if (!userId) {
-      return res.status(400).json({
-        success: false,
-        message: 'User ID is required',
-        error: 'MISSING_USER_ID'
-      });
+      return res.status(400).json({ success: false, message: 'User ID is required', error: 'MISSING_USER_ID' });
     }
-
     if (!action || (action !== 'attach' && action !== 'detach')) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Action must be "attach" or "detach"',
-        error: 'INVALID_ACTION'
-      });
+      return res.status(400).json({ success: false, message: 'Action must be "attach" or "detach"', error: 'INVALID_ACTION' });
     }
 
-    // Get user document
     const userDoc = await cloudant.getDocument('maia_users', userId);
-    
     if (!userDoc) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'User not found',
-        error: 'USER_NOT_FOUND'
-      });
+      return res.status(404).json({ success: false, message: 'User not found', error: 'USER_NOT_FOUND' });
     }
 
-    const targetAgentId = resolveAgentIdForProfile(userDoc, agentProfileKey);
+    const targetAgentId = resolveAgentIdForProfile(userDoc, profileKey);
     if (!targetAgentId) {
-      return res.status(400).json({
-        success: false,
-        message: 'User has no assigned agent',
-        error: 'NO_AGENT'
-      });
+      return res.status(400).json({ success: false, message: 'User has no assigned agent', error: 'NO_AGENT' });
     }
 
-    if (!userDoc.kbId) {
-      return res.status(400).json({
-        success: false,
-        message: 'User has no knowledge base',
-        error: 'NO_KB'
-      });
+    // Resolve the KB id for the requested KB. KB-2 is created lazily on
+    // its first attach (hierarchical, over KB-1's folder).
+    let kbId = null;
+    let kbName = null;
+    let justCreatedKb2 = false;
+    if (kbKey === 'kb1') {
+      if (!userDoc.kbId) {
+        return res.status(400).json({ success: false, message: 'User has no primary knowledge base', error: 'NO_KB' });
+      }
+      kbId = userDoc.kbId;
+      kbName = getKBNameFromUserDoc(userDoc, userId);
+    } else {
+      if (action === 'attach') {
+        const r = await ensureKb2(userId); // create or reuse
+        if (r.error) {
+          return res.status(400).json({ success: false, message: r.message || 'Could not create the alternate knowledge base', error: r.error });
+        }
+        kbId = r.kbId; kbName = r.kbName; justCreatedKb2 = !!r.created;
+      } else {
+        if (!userDoc.kb2?.kbId) {
+          // Nothing to detach — treat as success (already disconnected).
+          await recordKbConnection(userId, profileKey, 'kb2', false);
+          return res.json({ success: true, connected: false, kbKey, agentProfileKey: profileKey, alreadyDetached: true });
+        }
+        kbId = userDoc.kb2.kbId; kbName = userDoc.kb2.kbName;
+      }
     }
+
+    const finish = async (connected, extra = {}) => {
+      invalidateResourceCache(userId);
+      await recordKbConnection(userId, profileKey, kbKey, connected);
+      await appendUserProvisioningEvent(userId, {
+        event: 'kb-connection-changed',
+        kbKey,
+        kbName,
+        kbRole: kbKey === 'kb1' ? 'primary (semantic)' : 'alternate (hierarchical)',
+        agentProfileKey: profileKey,
+        action: connected ? 'connected' : 'disconnected'
+      });
+      res.json({ success: true, connected, kbKey, kbId, kbName, agentId: targetAgentId, agentProfileKey: profileKey, indexing: justCreatedKb2, ...extra });
+    };
 
     try {
       if (action === 'attach') {
-        // Attach KB to agent
-        await doClient.agent.attachKB(targetAgentId, userDoc.kbId);
-        console.log(`✅ Attached KB ${userDoc.kbId} to agent ${targetAgentId} (profile ${agentProfileKey || 'default'})`);
-
-        // Invalidate cache so subsequent calls get fresh connection status
-        invalidateResourceCache(userId);
-
-        res.json({
-          success: true,
-          message: 'Knowledge base attached to agent successfully',
-          agentId: targetAgentId,
-          kbId: userDoc.kbId,
-          connected: true
-        });
+        await doClient.agent.attachKB(targetAgentId, kbId);
+        console.log(`✅ Attached ${kbKey} (${kbId}) to agent ${targetAgentId} (profile ${profileKey})`);
+        await finish(true);
       } else {
-        // Detach KB from agent
-        await doClient.agent.detachKB(targetAgentId, userDoc.kbId);
-        console.log(`✅ Detached KB ${userDoc.kbId} from agent ${targetAgentId} (profile ${agentProfileKey || 'default'})`);
-
-        // Invalidate cache so subsequent calls get fresh connection status
-        invalidateResourceCache(userId);
-
-        res.json({
-          success: true,
-          message: 'Knowledge base detached from agent successfully',
-          agentId: targetAgentId,
-          kbId: userDoc.kbId,
-          connected: false
-        });
+        await doClient.agent.detachKB(targetAgentId, kbId);
+        console.log(`✅ Detached ${kbKey} (${kbId}) from agent ${targetAgentId} (profile ${profileKey})`);
+        await finish(false);
       }
     } catch (error) {
-      console.error(`❌ Error ${action}ing KB:`, error);
-      // Check if KB is already in the desired state (might return 409 or 404)
-      if (error.message && (error.message.includes('already') || error.message.includes('409'))) {
-        if (action === 'attach') {
-          console.log('ℹ️ KB already attached to agent');
-          res.json({ 
-            success: true, 
-            message: 'Knowledge base is already attached to agent',
-            agentId: targetAgentId,
-            kbId: userDoc.kbId,
-            connected: true,
-            alreadyAttached: true
-          });
-        } else {
-          throw error; // Can't detach if already attached means something's wrong
-        }
-      } else if (error.message && error.message.includes('404')) {
-        if (action === 'detach') {
-          console.log('ℹ️ KB already detached from agent');
-          res.json({ 
-            success: true, 
-            message: 'Knowledge base is already detached from agent',
-            agentId: targetAgentId,
-            kbId: userDoc.kbId,
-            connected: false,
-            alreadyDetached: true
-          });
-        } else {
-          throw error;
-        }
+      const msg = error?.message || '';
+      if ((msg.includes('already') || msg.includes('409')) && action === 'attach') {
+        await finish(true, { alreadyAttached: true });
+      } else if (msg.includes('404') && action === 'detach') {
+        await finish(false, { alreadyDetached: true });
       } else {
         throw error;
       }
     }
   } catch (error) {
     console.error('Error toggling KB connection:', error);
-    res.status(500).json({ 
-      success: false, 
+    res.status(500).json({
+      success: false,
       message: `Failed to ${req.body.action || 'toggle'} KB connection: ${error.message}`,
-      error: error.message 
+      error: error.message
     });
   }
 });
