@@ -43,6 +43,16 @@ import {
 } from '@aws-sdk/client-s3';
 
 dotenv.config();
+
+// Defense-in-depth: a stray unhandled promise rejection (e.g. a DO API
+// timeout in a fire-and-forget path) must NEVER take down the whole
+// server — that turns one failed call into every endpoint returning
+// 500. Log it loudly and keep running.
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection] (non-fatal, server kept alive):',
+    reason instanceof Error ? `${reason.name}: ${reason.message}` : reason);
+});
+
 const storageConfig = normalizeStorageEnv();
 
 /**

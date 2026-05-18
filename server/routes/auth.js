@@ -364,6 +364,11 @@ export async function ensureUserAgent(doClient, cloudant, userDoc) {
   if (needsCreation) {
     let lockReject;
     const lockPromise = new Promise((resolve, reject) => { lockResolve = resolve; lockReject = reject; });
+    // Always consume a rejection so a creation failure (e.g. a DO API
+    // timeout) can never become an unhandled rejection that crashes the
+    // whole Node process. Waiters still await this same promise and
+    // catch the rejection themselves.
+    lockPromise.catch(() => {});
     agentCreationLocks.set(userId, lockPromise);
 
     try {
@@ -484,6 +489,9 @@ export async function ensureSecondaryAgent(doClient, cloudant, userDoc) {
   if (needsCreation) {
     let lockReject;
     const lockPromise = new Promise((resolve, reject) => { lockResolve = resolve; lockReject = reject; });
+    // Never let a creation failure become an unhandled rejection (would
+    // crash the whole process — every endpoint then 500s).
+    lockPromise.catch(() => {});
     agentCreationLocks.set(lockKey, lockPromise);
     try {
       const { modelId, projectId } = await resolveModelAndProject(doClient, MODEL_GPT);
