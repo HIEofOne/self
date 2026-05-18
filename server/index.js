@@ -10186,7 +10186,21 @@ app.post('/api/toggle-kb-connection', async (req, res) => {
         agentProfileKey: profileKey,
         action: connected ? 'connected' : 'disconnected'
       });
-      res.json({ success: true, connected, kbKey, kbId, kbName, agentId: targetAgentId, agentProfileKey: profileKey, indexing: justCreatedKb2, ...extra });
+      // When KB-2 is freshly created, DO auto-starts an indexing job
+      // over KB-1's folder. Surface its job id so the client can show
+      // progress in the Saved Files panel (no /api/update-knowledge-base
+      // call, so the per-file badges are NOT touched).
+      let indexJobId = null;
+      if (kbKey === 'kb2' && connected && justCreatedKb2 && kbId) {
+        try {
+          const jobs = await doClient.indexing.listForKB(kbId);
+          const latest = Array.isArray(jobs) && jobs.length > 0 ? jobs[0] : null;
+          indexJobId = latest?.uuid || latest?.id || latest?.indexing_job_uuid || null;
+        } catch (e) {
+          console.warn(`[KB-2] could not list indexing jobs for ${kbId}: ${e?.message || e}`);
+        }
+      }
+      res.json({ success: true, connected, kbKey, kbId, kbName, agentId: targetAgentId, agentProfileKey: profileKey, indexing: justCreatedKb2, indexJobId, ...extra });
     };
 
     try {
