@@ -5,7 +5,7 @@
 import { ChatClient } from '../../lib/chat-client/index.js';
 import { DigitalOceanProvider } from '../../lib/chat-client/providers/digitalocean.js';
 import { getOrCreateAgentApiKey, recreateAgentApiKey } from '../utils/agent-helper.js';
-import { ensureUserAgent } from './auth.js';
+import { ensureUserAgent, ensureSecondaryAgent } from './auth.js';
 
 const isPlainObject = (value) => value && typeof value === 'object' && !Array.isArray(value);
 
@@ -95,6 +95,15 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
         delete options.shareId;
       }
       const shareIdForRequest = shareIdFromOptions || req.session?.deepLinkShareId || null;
+
+      // Which Private AI the user picked in the dropdown (e.g. 'default'
+      // = Deepseek, 'gpt' = GPT-OSS-120B). Stripped from options so it
+      // is never forwarded to the LLM provider as a model option.
+      const requestedProfileKey = options?.agentProfileKey || req.body?.agentProfileKey || null;
+      if (options?.agentProfileKey) {
+        options = { ...options };
+        delete options.agentProfileKey;
+      }
 
       if (!messages || !Array.isArray(messages)) {
         return res.status(400).json({ error: 'Messages array required' });
@@ -188,6 +197,14 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
           overrideValue = userDoc.deepLinkAgentOverrides[shareIdForRequest];
         }
 
+        // Explicit dropdown selection wins over the deep-link override
+        // and the default. Deep-link visitors (no selector) fall back
+        // to the override / default as before.
+        if (requestedProfileKey && isPlainObject(agentProfiles[requestedProfileKey])) {
+          profileKeyToUse = requestedProfileKey;
+          overrideValue = null;
+        }
+
         if (overrideValue) {
           if (agentProfiles[overrideValue]) {
             profileKeyToUse = overrideValue;
@@ -213,7 +230,7 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
         if (profileAgentId && profileEndpoint && profileAgentName) {
           agentId = profileAgentId;
 
-          const apiKey = await getOrCreateAgentApiKey(doClient, cloudant, userId, agentId);
+          const apiKey = await getOrCreateAgentApiKey(doClient, cloudant, userId, agentId, profileKeyToUse);
 
           userAgentProvider = new DigitalOceanProvider(apiKey, {
             baseURL: profileEndpoint
@@ -225,7 +242,7 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
             options.model = profileAgentName;
           }
 
-          retryCtx = { endpoint: profileEndpoint };
+          retryCtx = { endpoint: profileEndpoint, profileKey: profileKeyToUse };
         } else {
           return res.status(404).json({
             error: 'Private AI agent not provisioned for this user',
@@ -294,24 +311,47 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
       
       let errorMessage = error.message || 'Chat request failed';
       
-      // Handle 401 Unauthorized on agent endpoints - recreate the API key
+      // Handle 401/403 on a Private AI agent endpoint by REPAIRING the
+      // agent, not just its key. After a Restore the selected profile
+      // (esp. the secondary "gpt" agent) can point at a destroyed agent
+      // — that returns 403, and recreating only the API key can't fix a
+      // dead endpoint. So: re-ensure the agent for the active profile
+      // (recreates it + refreshes endpoint/agentId), recreate the key
+      // for the resolved agent, then transparently retry against the
+      // FRESH endpoint.
       const resolvedUserId = agentOwnerId || userId || bodyUserId;
       const resolvedAgentId = agentId;
-      if (statusCode === 401 && userAgentProvider && resolvedUserId && resolvedAgentId && cloudant && doClient) {
-        console.error(`401 Unauthorized on agent endpoint for agent ${resolvedAgentId}. Attempting to recreate API key...`);
-        
-        try {
-          // Recreate the API key (already imported at top of file)
-          const newApiKey = await recreateAgentApiKey(doClient, cloudant, resolvedUserId, resolvedAgentId);
-          console.log(`✅ Successfully recreated API key for agent ${resolvedAgentId}`);
+      const isAuthFail = statusCode === 401 || statusCode === 403;
+      if (isAuthFail && userAgentProvider && resolvedUserId && resolvedAgentId && cloudant && doClient) {
+        const profileKey = retryCtx?.profileKey || 'default';
+        console.error(`${statusCode} on agent endpoint for agent ${resolvedAgentId} (profile ${profileKey}). Repairing agent + key...`);
 
-          // Transparently re-run the request with the fresh key. The
-          // user should never see the auth failure if we can self-heal.
-          // Only possible if we haven't already started writing the
-          // response (a 401 fails before any body is sent).
-          if (retryCtx && !res.headersSent) {
+        try {
+          let freshEndpoint = retryCtx?.endpoint || null;
+          let freshAgentId = resolvedAgentId;
+          try {
+            let udoc = await cloudant.getDocument('maia_users', resolvedUserId);
+            if (udoc) {
+              udoc = (profileKey === 'gpt')
+                ? await ensureSecondaryAgent(doClient, cloudant, udoc)
+                : await ensureUserAgent(doClient, cloudant, udoc);
+              const prof = udoc?.agentProfiles?.[profileKey];
+              if (prof?.endpoint) freshEndpoint = prof.endpoint;
+              if (prof?.agentId) freshAgentId = prof.agentId;
+              else if (profileKey !== 'gpt' && udoc?.assignedAgentId) freshAgentId = udoc.assignedAgentId;
+            }
+          } catch (ensureErr) {
+            console.error(`Agent re-ensure failed (profile ${profileKey}):`, ensureErr.message);
+          }
+
+          const newApiKey = await recreateAgentApiKey(doClient, cloudant, resolvedUserId, freshAgentId, profileKey);
+          console.log(`✅ Repaired agent ${freshAgentId} (profile ${profileKey}); endpoint=${freshEndpoint ? 'fresh' : 'unknown'}`);
+
+          // Transparently re-run the request against the fresh endpoint
+          // + key, as long as no body has been sent yet.
+          if (retryCtx && freshEndpoint && !res.headersSent) {
             try {
-              const freshProvider = new DigitalOceanProvider(newApiKey, { baseURL: retryCtx.endpoint });
+              const freshProvider = new DigitalOceanProvider(newApiKey, { baseURL: freshEndpoint });
               const reqMessages = req.body?.messages;
               const reqOptions = req.body?.options || {};
               if (reqOptions.model == null && options?.model != null) reqOptions.model = options.model;
@@ -328,22 +368,22 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
                 const retryResponse = await freshProvider.chat(reqMessages, reqOptions);
                 res.json({ ...retryResponse, _meta: { provider, recovered: true } });
               }
-              console.log(`✅ Auto-retried chat after key recreation for agent ${resolvedAgentId} (no user-visible error)`);
+              console.log(`✅ Auto-retried chat after repairing agent ${freshAgentId} (no user-visible error)`);
               return;
             } catch (retryError) {
-              console.error(`Auto-retry after key recreation failed for agent ${resolvedAgentId}:`, retryError.message);
+              console.error(`Auto-retry after repair failed for agent ${freshAgentId}:`, retryError.message);
               // Fall through to the user-facing message below.
             }
           }
 
-          errorMessage = 'Authentication failed for your Private AI agent. The API key has been automatically recreated. Please try your request again.';
+          errorMessage = 'Your Private AI agent was repaired automatically. Please try your request again.';
         } catch (recreateError) {
-          console.error(`Failed to recreate API key for agent ${resolvedAgentId}:`, recreateError.message);
-          errorMessage = 'Authentication failed for your Private AI agent. Please contact support if this issue persists.';
+          console.error(`Failed to repair agent ${resolvedAgentId}:`, recreateError.message);
+          errorMessage = 'Your Private AI agent could not be reached. Please try again shortly or contact support if this persists.';
         }
-      } else if (statusCode === 401 && userAgentProvider) {
-        errorMessage = 'Authentication failed for your Private AI agent. The API key may need to be recreated.';
-        console.error('401 Unauthorized on agent endpoint (could not recreate key - missing info)');
+      } else if (isAuthFail && userAgentProvider) {
+        errorMessage = 'Authentication failed for your Private AI agent. It may need to be recreated.';
+        console.error(`${statusCode} on agent endpoint (could not repair - missing info)`);
       }
       
       // Enhance error messages for token limit errors (400 status with token limit message)
@@ -481,8 +521,64 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
    * Private AI (digitalocean) is included when the user (or for deep link, the owner) has agent deployed.
    * For deep link sessions, also requires owner's allowDeepLinkPrivateAI !== false.
    */
+  // Verify an agent is actually LIVE in DigitalOcean (resolves and has
+  // a deployment URL) before we advertise it in the dropdown. A profile
+  // can carry a stale agentId/endpoint round-tripped from a maia-state
+  // backup that points at a destroyed agent — listing it produced the
+  // "selected GPT, got 403" bug. Cached briefly so the frequently-
+  // polled /api/chat/providers doesn't hammer the DO API.
+  const agentLiveCache = new Map(); // agentId -> { live, ts }
+  const AGENT_LIVE_TTL_MS = 30000;
+  const verifyAgentLive = async (agentId) => {
+    if (!agentId || !doClient) return false;
+    const cached = agentLiveCache.get(agentId);
+    if (cached && (Date.now() - cached.ts) < AGENT_LIVE_TTL_MS) return cached.live;
+    let live = false;
+    try {
+      const a = await doClient.agent.get(agentId);
+      live = !!(a?.deployment?.url);
+    } catch {
+      live = false; // 404 / destroyed / unreachable → not live
+    }
+    agentLiveCache.set(agentId, { live, ts: Date.now() });
+    return live;
+  };
+
+  // Describe which Private AI agents (profiles) are deployed for a doc.
+  // The frontend renders one dropdown entry per ready profile and sends
+  // `agentProfileKey` alongside provider 'digitalocean'.
+  const buildPrivateAiProfiles = async (doc) => {
+    if (!doc) return [];
+    const out = [];
+    const profiles = (doc.agentProfiles && typeof doc.agentProfiles === 'object') ? doc.agentProfiles : {};
+    // Primary / Deepseek — also satisfied by the flat fields for
+    // legacy docs that predate agentProfiles. (The primary is already
+    // gated upstream by workflowStage / ensureUserAgent.)
+    const def = profiles.default || {};
+    const defReady = !!((def.agentId && def.endpoint) || (doc.assignedAgentId && doc.agentEndpoint));
+    if (defReady) {
+      out.push({
+        key: 'default',
+        label: 'Private AI (Deepseek)',
+        model: def.modelName || doc.agentModelName || 'deepseek-v4-pro'
+      });
+    }
+    // Secondary / GPT — only when its agent is verified LIVE in DO, not
+    // merely present in the (possibly stale) profile.
+    const gpt = profiles.gpt || {};
+    if (gpt.agentId && gpt.endpoint && await verifyAgentLive(gpt.agentId)) {
+      out.push({
+        key: 'gpt',
+        label: 'Private AI (GPT)',
+        model: gpt.modelName || 'openai-gpt-oss-120b'
+      });
+    }
+    return out;
+  };
+
   app.get('/api/chat/providers', async (req, res) => {
     let providers = chatClient.getAvailableProviders();
+    let privateAiProfiles = [];
     const userId = req.session?.userId;
     const isDeepLink = !!req.session?.isDeepLink;
 
@@ -505,7 +601,7 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
               !!(ownerDoc?.assignedAgentId && ownerDoc?.agentEndpoint);
             const ownerAllows = ownerDoc?.allowDeepLinkPrivateAI !== false;
             if (ownerHasAgent && ownerAllows) {
-              res.json({ providers });
+              res.json({ providers, privateAiProfiles: await buildPrivateAiProfiles(ownerDoc) });
               return;
             }
           }
@@ -537,6 +633,29 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
             }
           }
           providers = providers.filter((p) => p !== 'digitalocean');
+        } else {
+          // Lazily provision (or REPAIR) the secondary "Private AI
+          // (GPT)" agent once the primary is up and a KB exists. This
+          // also backfills existing single-agent accounts and self-
+          // heals a stale gpt profile after a Restore: re-ensure when
+          // there is no gpt endpoint yet OR the recorded gpt agent is
+          // not actually live in DO (destroyed agent → stale profile).
+          // The dropdown only lists GPT once verifyAgentLive passes, so
+          // the user never selects a dead agent (no more 403s).
+          if (userDoc?.kbId) {
+            const gptProf = userDoc?.agentProfiles?.gpt;
+            const gptLive = gptProf?.agentId ? await verifyAgentLive(gptProf.agentId) : false;
+            if (!gptProf?.endpoint || !gptLive) {
+              try {
+                userDoc = await ensureSecondaryAgent(doClient, cloudant, userDoc);
+                const newId = userDoc?.agentProfiles?.gpt?.agentId;
+                if (newId) agentLiveCache.delete(newId); // re-check fresh
+              } catch (gptErr) {
+                console.warn('[chat/providers] ensureSecondaryAgent failed:', gptErr?.message);
+              }
+            }
+          }
+          privateAiProfiles = await buildPrivateAiProfiles(userDoc);
         }
       } catch (err) {
         console.warn('[chat/providers] Could not load user doc, excluding Private AI:', err?.message);
@@ -545,6 +664,6 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
     } else {
       providers = providers.filter((p) => p !== 'digitalocean');
     }
-    res.json({ providers });
+    res.json({ providers, privateAiProfiles });
   });
 }

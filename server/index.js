@@ -43,6 +43,16 @@ import {
 } from '@aws-sdk/client-s3';
 
 dotenv.config();
+
+// Defense-in-depth: a stray unhandled promise rejection (e.g. a DO API
+// timeout in a fire-and-forget path) must NEVER take down the whole
+// server — that turns one failed call into every endpoint returning
+// 500. Log it loudly and keep running.
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection] (non-fatal, server kept alive):',
+    reason instanceof Error ? `${reason.name}: ${reason.message}` : reason);
+});
+
 const storageConfig = normalizeStorageEnv();
 
 /**
@@ -5874,9 +5884,18 @@ app.post('/api/toggle-file-knowledge-base', async (req, res) => {
 });
 
 // Get agent instructions
+// Resolve which DO agent id an instructions/KB request targets. With
+// two Private AI agents the caller passes agentProfileKey ('default' =
+// Deepseek, 'gpt' = GPT). Falls back to the primary for legacy callers.
+function resolveAgentIdForProfile(userDoc, profileKey) {
+  const profiles = (userDoc && typeof userDoc.agentProfiles === 'object') ? userDoc.agentProfiles : {};
+  if (profileKey && profiles[profileKey]?.agentId) return profiles[profileKey].agentId;
+  return userDoc?.assignedAgentId || profiles.default?.agentId || null;
+}
+
 app.get('/api/agent-instructions', async (req, res) => {
   try {
-    const { userId } = req.query;
+    const { userId, agentProfileKey } = req.query;
     
     if (!userId) {
       return res.status(400).json({ 
@@ -5888,21 +5907,22 @@ app.get('/api/agent-instructions', async (req, res) => {
 
     // Get the user document
     const userDoc = await cloudant.getDocument('maia_users', userId);
-    
-    if (!userDoc || !userDoc.assignedAgentId) {
-      return res.status(404).json({ 
-        success: false, 
+    const targetAgentId = resolveAgentIdForProfile(userDoc, agentProfileKey);
+
+    if (!userDoc || !targetAgentId) {
+      return res.status(404).json({
+        success: false,
         message: 'User agent not found',
         error: 'AGENT_NOT_FOUND'
       });
     }
 
     // Get agent from DigitalOcean
-    const agent = await doClient.agent.get(userDoc.assignedAgentId);
-    
+    const agent = await doClient.agent.get(targetAgentId);
+
     if (!agent) {
-      return res.status(404).json({ 
-        success: false, 
+      return res.status(404).json({
+        success: false,
         message: 'Agent not found in DigitalOcean',
         error: 'AGENT_NOT_FOUND'
       });
@@ -5912,7 +5932,7 @@ app.get('/api/agent-instructions', async (req, res) => {
     let kbInfo = null;
     const resolvedKb = await resolveKbForUserFromDo(userId, { forceRefresh: true });
     if (resolvedKb?.id) {
-      const agentDetails = await doClient.agent.get(userDoc.assignedAgentId);
+      const agentDetails = await doClient.agent.get(targetAgentId);
       const attachedKBs = agentDetails.knowledge_bases || 
                           agentDetails.connected_knowledge_bases ||
                           agentDetails.knowledge_base_ids ||
@@ -5957,11 +5977,11 @@ app.get('/api/agent-instructions', async (req, res) => {
 // Update agent instructions
 app.put('/api/agent-instructions', async (req, res) => {
   try {
-    const { userId, instructions } = req.body;
-    
+    const { userId, instructions, agentProfileKey } = req.body;
+
     if (!userId || typeof instructions !== 'string') {
-      return res.status(400).json({ 
-        success: false, 
+      return res.status(400).json({
+        success: false,
         message: 'User ID and instructions are required',
         error: 'MISSING_REQUIRED_FIELDS'
       });
@@ -5969,28 +5989,29 @@ app.put('/api/agent-instructions', async (req, res) => {
 
     // Get the user document
     const userDoc = await cloudant.getDocument('maia_users', userId);
-    
-    if (!userDoc || !userDoc.assignedAgentId) {
-      return res.status(404).json({ 
-        success: false, 
+    const targetAgentId = resolveAgentIdForProfile(userDoc, agentProfileKey);
+
+    if (!userDoc || !targetAgentId) {
+      return res.status(404).json({
+        success: false,
         message: 'User agent not found',
         error: 'AGENT_NOT_FOUND'
       });
     }
 
-    console.log(`📝 Updating agent instructions for user ${userId}, agent ${userDoc.assignedAgentId}`);
+    console.log(`📝 Updating agent instructions for user ${userId}, agent ${targetAgentId} (profile ${agentProfileKey || 'default'})`);
 
     // Update agent instructions via DigitalOcean API
-    const updatedAgent = await doClient.agent.update(userDoc.assignedAgentId, {
+    const updatedAgent = await doClient.agent.update(targetAgentId, {
       instruction: instructions
     });
 
-    console.log(`✅ Agent instructions updated successfully for agent ${userDoc.assignedAgentId}`);
-    
+    console.log(`✅ Agent instructions updated successfully for agent ${targetAgentId}`);
+
     res.json({
       success: true,
       message: 'Agent instructions updated',
-      agentId: userDoc.assignedAgentId
+      agentId: targetAgentId
     });
   } catch (error) {
     console.error('❌ Error updating agent instructions:', error);
@@ -8305,6 +8326,24 @@ async function deleteUserAndResources(userId, options = {}) {
           }
         }
       }
+      // Explicitly delete the secondary "Private AI (GPT)" agent. (It
+      // is also caught by the orphan scan below since its name matches
+      // `${userId}-agent-`, but delete it directly so it goes even if
+      // the naming convention ever changes.)
+      const gptAgentId = userDoc.agentProfiles?.gpt?.agentId;
+      if (gptAgentId && gptAgentId !== storedAgentId) {
+        try {
+          await doClient.agent.delete(gptAgentId);
+          deletedCount++;
+          console.log(`[DESTROY] Deleted GPT agent ${gptAgentId}`);
+        } catch (error) {
+          if (error.statusCode === 404 || error.message?.includes('not found')) {
+            console.log(`[DESTROY] GPT agent not found: ${gptAgentId}`);
+          } else {
+            throw error;
+          }
+        }
+      }
       // Then scan for any orphaned agents matching the naming pattern
       try {
         const { AgentClient } = await import('../lib/do-client/agent.js');
@@ -9007,6 +9046,20 @@ function sanitizeUserDocForExport(userDoc) {
   // on demand (recreateAgentApiKey), so backing this up is both unnecessary
   // and a footgun if the local folder leaks.
   for (const f of REGENERABLE_SECRET_FIELDS) delete clone[f];
+  // Per-profile API keys are also regenerable (recreated against the
+  // live DO agent on rehydrate). Strip them from every agent profile.
+  if (clone.agentProfiles && typeof clone.agentProfiles === 'object') {
+    const sanitizedProfiles = {};
+    for (const [k, prof] of Object.entries(clone.agentProfiles)) {
+      if (prof && typeof prof === 'object') {
+        const { apiKey, ...rest } = prof;
+        sanitizedProfiles[k] = rest;
+      } else {
+        sanitizedProfiles[k] = prof;
+      }
+    }
+    clone.agentProfiles = sanitizedProfiles;
+  }
   return clone;
 }
 
@@ -9212,6 +9265,29 @@ app.put('/api/account/rehydrate', async (req, res) => {
       } catch (e) {
         errors.push(`ensureUserAgent: ${e.message || e}`);
       }
+    }
+
+    // Rebuild the SECONDARY "Private AI (GPT)" agent too if its backed-up
+    // id no longer resolves (Destroy Cloud Account removed it). Its KB is
+    // re-attached by the post-restore /api/chat/providers poll once the
+    // KB exists. Best-effort — never fail the whole restore over it.
+    try {
+      const gptId = docToWrite.agentProfiles?.gpt?.agentId;
+      let gptLive = false;
+      if (gptId) {
+        try { await doClient.agent.get(gptId); gptLive = true; } catch { gptLive = false; }
+      }
+      if (!gptLive) {
+        const freshDoc = await cloudant.getDocument('maia_users', userId);
+        const { ensureSecondaryAgent } = await import('./routes/auth.js');
+        const updated = await ensureSecondaryAgent(doClient, cloudant, freshDoc);
+        rebuilt.gptAgent = gptId ? 'recreated' : 'created';
+        if (updated?.agentProfiles?.gpt) docToWrite.agentProfiles = updated.agentProfiles;
+      } else {
+        rebuilt.gptAgent = 'reused';
+      }
+    } catch (e) {
+      errors.push(`ensureSecondaryAgent: ${e.message || e}`);
     }
 
     // 3. Inspect Spaces against userDoc.files. For each entry whose
@@ -9533,12 +9609,23 @@ app.get('/api/billing/balance', async (_req, res) => {
           errorMessage = text;
         }
       }
-      return res.status(response.status).json({ error: errorMessage });
+      // Self-diagnosing hint: the DO balance endpoint needs a token
+      // with billing read scope. A rotated/expired or granular-scope
+      // PAT works everywhere else but 401/403s here.
+      let hint = null;
+      if (response.status === 401) {
+        hint = 'DIGITALOCEAN_TOKEN appears invalid or expired (rotated?). Update it in the App Platform env and redeploy.';
+      } else if (response.status === 403) {
+        hint = 'DIGITALOCEAN_TOKEN lacks billing read scope. Regenerate the PAT with billing access (or use a legacy full-access token).';
+      }
+      console.log(`[DO] billing/balance failed: HTTP ${response.status} — ${errorMessage}`);
+      return res.status(response.status).json({ error: errorMessage, status: response.status, hint });
     }
     const data = await response.json();
     res.json(data);
   } catch (error) {
-    res.status(500).json({ error: error.message || 'Failed to fetch customer balance' });
+    console.log(`[DO] billing/balance threw: ${error.message}`);
+    res.status(500).json({ error: error.message || 'Failed to fetch customer balance', status: 500, hint: null });
   }
 });
 
@@ -9770,11 +9857,11 @@ app.get('/api/provisioning-log', async (req, res) => {
 // Toggle KB connection to Agent endpoint (attach/detach)
 app.post('/api/toggle-kb-connection', async (req, res) => {
   try {
-    const { userId, action } = req.body; // action: 'attach' | 'detach'
-    
+    const { userId, action, agentProfileKey } = req.body; // action: 'attach' | 'detach'
+
     if (!userId) {
-      return res.status(400).json({ 
-        success: false, 
+      return res.status(400).json({
+        success: false,
         message: 'User ID is required',
         error: 'MISSING_USER_ID'
       });
@@ -9799,17 +9886,18 @@ app.post('/api/toggle-kb-connection', async (req, res) => {
       });
     }
 
-    if (!userDoc.assignedAgentId) {
-      return res.status(400).json({ 
-        success: false, 
+    const targetAgentId = resolveAgentIdForProfile(userDoc, agentProfileKey);
+    if (!targetAgentId) {
+      return res.status(400).json({
+        success: false,
         message: 'User has no assigned agent',
         error: 'NO_AGENT'
       });
     }
 
     if (!userDoc.kbId) {
-      return res.status(400).json({ 
-        success: false, 
+      return res.status(400).json({
+        success: false,
         message: 'User has no knowledge base',
         error: 'NO_KB'
       });
@@ -9818,31 +9906,31 @@ app.post('/api/toggle-kb-connection', async (req, res) => {
     try {
       if (action === 'attach') {
         // Attach KB to agent
-        await doClient.agent.attachKB(userDoc.assignedAgentId, userDoc.kbId);
-        console.log(`✅ Attached KB ${userDoc.kbId} to agent ${userDoc.assignedAgentId}`);
-        
+        await doClient.agent.attachKB(targetAgentId, userDoc.kbId);
+        console.log(`✅ Attached KB ${userDoc.kbId} to agent ${targetAgentId} (profile ${agentProfileKey || 'default'})`);
+
         // Invalidate cache so subsequent calls get fresh connection status
         invalidateResourceCache(userId);
-        
-        res.json({ 
-          success: true, 
+
+        res.json({
+          success: true,
           message: 'Knowledge base attached to agent successfully',
-          agentId: userDoc.assignedAgentId,
+          agentId: targetAgentId,
           kbId: userDoc.kbId,
           connected: true
         });
       } else {
         // Detach KB from agent
-        await doClient.agent.detachKB(userDoc.assignedAgentId, userDoc.kbId);
-        console.log(`✅ Detached KB ${userDoc.kbId} from agent ${userDoc.assignedAgentId}`);
-        
+        await doClient.agent.detachKB(targetAgentId, userDoc.kbId);
+        console.log(`✅ Detached KB ${userDoc.kbId} from agent ${targetAgentId} (profile ${agentProfileKey || 'default'})`);
+
         // Invalidate cache so subsequent calls get fresh connection status
         invalidateResourceCache(userId);
-        
-        res.json({ 
-          success: true, 
+
+        res.json({
+          success: true,
           message: 'Knowledge base detached from agent successfully',
-          agentId: userDoc.assignedAgentId,
+          agentId: targetAgentId,
           kbId: userDoc.kbId,
           connected: false
         });
@@ -9856,7 +9944,7 @@ app.post('/api/toggle-kb-connection', async (req, res) => {
           res.json({ 
             success: true, 
             message: 'Knowledge base is already attached to agent',
-            agentId: userDoc.assignedAgentId,
+            agentId: targetAgentId,
             kbId: userDoc.kbId,
             connected: true,
             alreadyAttached: true
@@ -9870,7 +9958,7 @@ app.post('/api/toggle-kb-connection', async (req, res) => {
           res.json({ 
             success: true, 
             message: 'Knowledge base is already detached from agent',
-            agentId: userDoc.assignedAgentId,
+            agentId: targetAgentId,
             kbId: userDoc.kbId,
             connected: false,
             alreadyDetached: true

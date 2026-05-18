@@ -492,12 +492,8 @@
               </q-item-section>
             </q-item>
           </q-list>
-
-          <!-- Active phase status -->
-          <div v-if="localFolderAutoRunActive" class="text-caption text-primary q-mt-md">
-            <q-spinner size="14px" class="q-mr-xs" />
-            {{ localFolderAutoRunPhase }}
-          </div>
+          <!-- (Old transient "Active phase status" line removed — the
+               persistent footer below now covers the whole flow.) -->
         </q-card-section>
 
         <!-- Test results panel (localhost only, shown below wizard progress) -->
@@ -511,6 +507,29 @@
               {{ line.ok ? '\u2713' : '\u2717' }} {{ line.text }}
             </div>
             <pre v-if="testFinalOutput" class="q-mt-sm text-caption" style="white-space: pre-wrap; max-height: 300px; overflow-y: auto; background: #fff; padding: 6px; border-radius: 4px; font-family: monospace; font-size: 11px;">{{ testFinalOutput }}</pre>
+          </div>
+        </q-card-section>
+
+        <!-- Persistent running-status footer (mirrors the Restore wizard).
+             Driven by a computed so it stays accurate through upload,
+             agent deploy, KB indexing and the verify steps — instead of
+             the old localFolderAutoRunActive line that vanished the
+             moment indexing was kicked off. -->
+        <q-card-section v-if="setupFolderConnected" class="q-pt-none">
+          <div
+            class="row items-center text-caption text-grey-7"
+            style="border-top: 1px solid #ececec; padding-top: 8px"
+          >
+            <q-icon
+              v-if="setupAllComplete"
+              name="check_circle" color="green" size="14px" class="q-mr-sm"
+            />
+            <q-icon
+              v-else-if="agentSetupTimedOut && !wizardStage1Complete"
+              name="error" color="negative" size="14px" class="q-mr-sm"
+            />
+            <q-spinner v-else size="14px" color="primary" class="q-mr-sm" />
+            <span>{{ wizardStatusLine }}</span>
           </div>
         </q-card-section>
 
@@ -771,6 +790,32 @@
         </q-card-actions>
       </q-card>
     </q-dialog>
+
+    <!-- Shown after a manual "patient summary" chat request completes -->
+    <q-dialog v-model="showNewSummaryDialog" persistent>
+      <q-card style="min-width: 420px; max-width: 540px">
+        <q-card-section>
+          <div class="text-h6">New Patient Summary detected</div>
+        </q-card-section>
+        <q-card-section class="q-pt-none text-body2">
+          A new Patient Summary was generated and saved. Would you like to:
+        </q-card-section>
+        <q-card-actions align="right" class="q-gutter-sm">
+          <q-btn
+            flat
+            label="Continue with chat only"
+            color="grey-8"
+            @click="showNewSummaryDialog = false"
+          />
+          <q-btn
+            unelevated
+            label="Open Patient Summary tab"
+            color="primary"
+            @click="showNewSummaryDialog = false; myStuffInitialTab = 'summary'; showMyStuffDialog = true;"
+          />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
   </div>
 </template>
 
@@ -928,6 +973,10 @@ const loadingUserFiles = ref(false);
 const showAgentSetupDialog = ref(false);
 const showNeedsIndexingPrompt = ref(false);
 const showPostIndexingSummaryPrompt = ref(false);
+// Shown after a MANUAL "patient summary" chat request completes (not
+// the prefilled-default SEND), offering to jump to the Patient Summary
+// tab where the freshly-generated summary was just saved.
+const showNewSummaryDialog = ref(false);
 /** Once the user dismisses the post-indexing "Update Patient Summary?" prompt, do not show again this session. */
 const postIndexingSummaryDismissedThisSession = ref(false);
 /** Once the user dismisses "Index your records" with NOT YET, do not show it again this session. */
@@ -1609,15 +1658,51 @@ const providerLabels: Record<string, string> = {
   deepseek: 'DeepSeek'
 };
 
-// Computed provider options for dropdown
+// Private AI profiles reported by /api/chat/providers. Each ready
+// profile (e.g. Deepseek, GPT) becomes its own dropdown entry; the
+// chat request carries the profile key so the server picks the agent.
+const privateAiProfiles = ref<Array<{ key: string; label: string; model?: string }>>([]);
+
+// Canonical default Private AI dropdown label (first ready profile =
+// Deepseek; falls back to the generic label for legacy single-agent).
+const defaultPrivateAiLabel = () =>
+  privateAiProfiles.value[0]?.label || providerLabels.digitalocean;
+
+// Computed provider options for dropdown. `digitalocean` expands to one
+// entry per ready Private AI profile.
 const providerOptions = computed(() => {
-  return providers.value.map(p => {
-    const label = providerLabels[p] || p.charAt(0).toUpperCase() + p.slice(1);
-    return {
-      label,
-      value: label
-    };
-  });
+  const opts: Array<{ label: string; value: string }> = [];
+  for (const p of providers.value) {
+    if (p === 'digitalocean') {
+      if (privateAiProfiles.value.length > 0) {
+        for (const prof of privateAiProfiles.value) {
+          opts.push({ label: prof.label, value: prof.label });
+        }
+      } else {
+        opts.push({ label: providerLabels.digitalocean, value: providerLabels.digitalocean });
+      }
+    } else {
+      const label = providerLabels[p] || p.charAt(0).toUpperCase() + p.slice(1);
+      opts.push({ label, value: label });
+    }
+  }
+  return opts;
+});
+
+// True when the given label is any Private AI variant.
+const isPrivateAiLabel = (label: string) =>
+  label === providerLabels.digitalocean ||
+  label.startsWith('Private AI') ||
+  privateAiProfiles.value.some(pr => pr.label === label);
+
+// The agentProfileKey for the current selection (null for non-Private
+// AI). Defaults to 'default' for a Private AI label with no match
+// (legacy single-agent docs).
+const selectedAgentProfileKey = computed(() => {
+  const label = normalizeProviderLabel(selectedProvider.value);
+  if (!isPrivateAiLabel(label)) return null;
+  const match = privateAiProfiles.value.find(pr => pr.label === label);
+  return match?.key || 'default';
 });
 
 // Helper to get provider key from label
@@ -1633,6 +1718,13 @@ const normalizeProviderLabel = (value: unknown) => {
 
 const getProviderKey = (label: unknown) => {
   const normalized = normalizeProviderLabel(label);
+  // Any "Private AI (…)" variant maps to the digitalocean provider;
+  // the specific agent is chosen via agentProfileKey.
+  if (normalized === providerLabels.digitalocean ||
+      normalized.startsWith('Private AI') ||
+      privateAiProfiles.value.some(pr => pr.label === normalized)) {
+    return 'digitalocean';
+  }
   const entry = Object.entries(providerLabels).find(([_, l]) => l === normalized);
   return entry ? entry[0] : normalized.toLowerCase();
 };
@@ -1681,6 +1773,18 @@ const getUserLabel = () => {
 const getProviderLabelFromKey = (providerKey: string | undefined) => {
   if (!providerKey) return 'Assistant';
   return providerLabels[providerKey] || providerKey.charAt(0).toUpperCase() + providerKey.slice(1);
+};
+
+// Label an assistant message with the SPECIFIC AI that produced it. For
+// Private AI this is the selected profile label (e.g. "Private AI
+// (Deepseek)" vs "Private AI (GPT)") so the transcript shows which
+// agent answered, not a generic "Private AI".
+const assistantLabelForKey = (providerKey: string | undefined) => {
+  if (providerKey === 'digitalocean') {
+    const lbl = normalizeProviderLabel(selectedProvider.value);
+    return isPrivateAiLabel(lbl) ? lbl : providerLabels.digitalocean;
+  }
+  return getProviderLabelFromKey(providerKey);
 };
 
 const getProviderLabel = () => {
@@ -1754,10 +1858,12 @@ const loadProviders = async () => {
     }
     
     providers.value = availableProviders;
-    
+    privateAiProfiles.value = Array.isArray(data.privateAiProfiles) ? data.privateAiProfiles : [];
+
     if (providers.value.length > 0) {
       if (providers.value.includes('digitalocean')) {
-        selectedProvider.value = providerLabels.digitalocean;
+        // Default to the first ready Private AI profile (Deepseek).
+        selectedProvider.value = privateAiProfiles.value[0]?.label || providerLabels.digitalocean;
         showPrivateUnavailableDialog.value = false; // clear in case it was shown before refetch
       } else {
         if (initialLoadComplete.value && !showAgentSetupDialog.value && !props.restoreActive) {
@@ -1775,7 +1881,7 @@ const loadProviders = async () => {
     }
     providers.value = fallbackProviders;
     if (providers.value.includes('digitalocean')) {
-      selectedProvider.value = providerLabels.digitalocean;
+      selectedProvider.value = defaultPrivateAiLabel();
       showPrivateUnavailableDialog.value = false;
     } else {
       if (initialLoadComplete.value && !showAgentSetupDialog.value && !props.restoreActive) {
@@ -1806,7 +1912,7 @@ watch(
   (available) => {
     if (!available.length) return;
     if (available.includes('digitalocean')) {
-      selectedProvider.value = providerLabels.digitalocean;
+      selectedProvider.value = defaultPrivateAiLabel();
       showPrivateUnavailableDialog.value = false; // Private AI is available
       return;
     }
@@ -1856,8 +1962,14 @@ const sendMessage = async () => {
     name: userLabel
   };
 
-  // Check if this is a patient summary request
-  const isPatientSummaryRequest = /patient\s+summary/i.test(inputMessage.value);
+  // The stored Patient Summary is returned ONLY when the user pressed
+  // SEND without touching the prefilled default prompt. Any typed
+  // message (even one that mentions "patient summary") runs a fresh
+  // inference on the SELECTED Private AI instead. We still persist the
+  // result as the patient summary for an explicit summary request.
+  const isUntouchedDefault = inputMessage.value.trim() === PRIVATE_AI_DEFAULT_PROMPT.trim();
+  const mentionsSummary = /patient\s+summary/i.test(inputMessage.value);
+  const isPatientSummaryRequest = isUntouchedDefault || mentionsSummary;
   messages.value.push(userMessage);
   originalMessages.value = JSON.parse(JSON.stringify(messages.value)); // Keep original in sync
   // Update trulyOriginalMessages when adding new messages (but not when filtering)
@@ -1870,7 +1982,7 @@ const sendMessage = async () => {
 
   try {
     // If this is a patient summary request, check for existing summary first
-    if (isPatientSummaryRequest && props.user?.userId) {
+    if (isUntouchedDefault && props.user?.userId) {
       try {
         const summaryResponse = await fetch(`/api/patient-summary?userId=${encodeURIComponent(props.user.userId)}`, {
           credentials: 'include'
@@ -1881,7 +1993,7 @@ const sendMessage = async () => {
           if (summaryData.summary && summaryData.summary.trim()) {
             // Use existing summary
             const existingProviderKey = getProviderKey(selectedProvider.value);
-            const existingProviderLabel = getProviderLabelFromKey(existingProviderKey);
+            const existingProviderLabel = assistantLabelForKey(existingProviderKey);
             const summaryMessage: Message = {
               role: 'assistant',
               content: summaryData.summary,
@@ -1935,6 +2047,10 @@ const sendMessage = async () => {
     if (shareIdForRequest) {
       requestOptions.shareId = shareIdForRequest;
     }
+    // Tell the server which Private AI agent (Deepseek vs GPT) to use.
+    if (providerKey === 'digitalocean' && selectedAgentProfileKey.value) {
+      requestOptions.agentProfileKey = selectedAgentProfileKey.value;
+    }
     const response = await fetch(
       `/api/chat/${providerKey}`,
       {
@@ -1960,7 +2076,7 @@ const sendMessage = async () => {
     const decoder = new TextDecoder();
 
     // Create assistant message
-    const providerLabel = getProviderLabelFromKey(providerKey);
+    const providerLabel = assistantLabelForKey(providerKey);
     const assistantMessage: Message = {
       role: 'assistant',
       content: '',
@@ -1996,9 +2112,13 @@ const sendMessage = async () => {
 
               // Save patient summary if this was a summary request
               if (isPatientSummaryRequest && props.user?.userId && assistantMessage.content) {
-                savePatientSummary(assistantMessage.content);
+                await savePatientSummary(assistantMessage.content);
+                // Manual (typed) request — offer to jump to the tab.
+                if (mentionsSummary && !isUntouchedDefault) {
+                  showNewSummaryDialog.value = true;
+                }
               }
-              
+
               // Update originalMessages AFTER streaming completes with full content
               originalMessages.value = JSON.parse(JSON.stringify(messages.value));
               // Update trulyOriginalMessages when assistant response completes (new message added)
@@ -2017,9 +2137,12 @@ const sendMessage = async () => {
 
     // Save patient summary if this was a summary request
     if (isPatientSummaryRequest && props.user?.userId && assistantMessage.content) {
-      savePatientSummary(assistantMessage.content);
+      await savePatientSummary(assistantMessage.content);
+      if (mentionsSummary && !isUntouchedDefault) {
+        showNewSummaryDialog.value = true;
+      }
     }
-    
+
     // Update originalMessages AFTER streaming completes with full content
     originalMessages.value = JSON.parse(JSON.stringify(messages.value));
     // Update trulyOriginalMessages when assistant response completes (new message added)
@@ -2044,7 +2167,7 @@ const sendMessage = async () => {
     }
     
     const errorProviderKey = getProviderKey(selectedProvider.value);
-    const errorProviderLabel = getProviderLabelFromKey(errorProviderKey);
+    const errorProviderLabel = assistantLabelForKey(errorProviderKey);
     messages.value.push({
       role: 'assistant',
       content: `Error: ${errorMessage}`,
@@ -6140,6 +6263,51 @@ const setupChecklistFiles = computed(() => {
   }
 
   return items;
+});
+
+// True once every Setup stage the user is waiting on has finished.
+const setupAllComplete = computed(() => {
+  const agentReady = wizardStage1Complete.value;
+  const kbDone = indexingStatus.value?.phase === 'complete' || !stage3HasFiles.value;
+  const recordsDone = !stage3HasFiles.value
+    || (wizardCurrentMedications.value && wizardPatientSummary.value);
+  return agentReady && kbDone && recordsDone && !wizardPreparingRecords.value;
+});
+
+// Persistent bottom status line for the Setup wizard. Derived from the
+// existing reactive state (not a flag that gets cleared early), so it
+// stays accurate through upload → agent deploy → KB indexing → verify,
+// in both local and cloud environments.
+const wizardStatusLine = computed(() => {
+  if (setupAllComplete.value) return 'Setup complete.';
+  if (wizardPreparingRecords.value) {
+    return wizardPreparingMessage.value || 'Preparing your health records…';
+  }
+  if (localFolderAutoRunActive.value && localFolderAutoRunPhase.value) {
+    return localFolderAutoRunPhase.value;
+  }
+  if (agentSetupTimedOut.value && !wizardStage1Complete.value) {
+    return 'AI agent deployment timed out — see maia-log.pdf';
+  }
+  if (stage3IndexingActive.value) {
+    const n = Number(stage2StatusDisplay.value.tokens);
+    const tok = Number.isFinite(n) && n > 0 ? `${n.toLocaleString()} tokens` : 'indexing';
+    return `Indexing knowledge base… (${tok}) — can take 5 to 60 minutes`;
+  }
+  if (!wizardStage1Complete.value && agentSetupPollingActive.value) {
+    const s = agentSetupElapsed.value;
+    return s
+      ? `Deploying AI agent… (${Math.floor(s / 60)}m ${s % 60}s)`
+      : 'Deploying AI agent…';
+  }
+  if (stage2StatusDisplay.value.completed && !wizardCurrentMedications.value) {
+    return 'Verify your Current Medications to continue.';
+  }
+  if (wizardCurrentMedications.value && !wizardPatientSummary.value
+      && stage2StatusDisplay.value.completed) {
+    return 'Verify your Patient Summary to continue.';
+  }
+  return 'Working…';
 });
 
 // Log when indexing completes (watch indexingStatus phase transition to 'complete')
