@@ -2134,12 +2134,17 @@ const applyKbChanges = async () => {
       $q.notify({ type: 'positive', message: 'Knowledge base changes applied', timeout: 3000 });
     }
 
+    // A KB-connection change never moves files, so the Saved Files
+    // indexed state is unchanged — but it must be refreshed from the
+    // server (and its dirty baseline reset) so the tab doesn't keep a
+    // STALE "no file in KB / you changed files" view after the switch.
+    await loadFiles();
+    await loadAgent(); // refresh per-agent KB connection badges
+
     // If KB-2 was just created it is indexing — show progress INLINE in
     // this My Agent tab (its own DO job poll). We deliberately do NOT
-    // switch to Saved Files or touch the Saved Files indexing panel /
-    // per-file badges.
+    // switch to Saved Files or touch the Saved Files indexing panel.
     if (kb2IndexJobId) startKb2Poll();
-    else await loadAgent(); // refresh connection badges
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Failed to apply KB changes';
     if ($q?.notify) $q.notify({ type: 'negative', message: msg, timeout: 5000 });
