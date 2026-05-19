@@ -530,8 +530,30 @@
                     Applies the staged connect/disconnect and indexes if needed.
                   </span>
                 </div>
-                <div v-if="kb2JustIndexing" class="text-caption text-orange-9 q-mt-sm">
-                  Alternate KB indexing started — progress shows on the Saved Files tab; it can take 5–60 min.
+                <!-- Inline KB-2 indexing progress (own job; does not
+                     affect Saved Files) -->
+                <div
+                  v-if="kb2Index.active || kb2Index.done || kb2Index.failed"
+                  class="q-mt-sm q-pa-sm"
+                  style="background:#f5f5f5;border-radius:4px"
+                >
+                  <template v-if="kb2Index.active">
+                    <q-linear-progress indeterminate color="primary" class="q-mb-xs" />
+                    <div class="text-caption text-grey-8">
+                      Indexing alternate KB —
+                      {{ Number(kb2Index.tokens).toLocaleString() }} tokens,
+                      {{ kb2Index.filesIndexed }} file(s),
+                      {{ Math.floor(kb2Index.elapsedSec / 60) }}m {{ kb2Index.elapsedSec % 60 }}s
+                      (5–60 min typical)
+                    </div>
+                  </template>
+                  <div v-else-if="kb2Index.done" class="text-caption text-green-8">
+                    ✓ Alternate KB indexed — {{ Number(kb2Index.tokens).toLocaleString() }} tokens,
+                    {{ kb2Index.filesIndexed }} file(s)
+                  </div>
+                  <div v-else class="text-caption text-negative">
+                    Alternate KB indexing failed — try Index Now again.
+                  </div>
                 </div>
               </div>
 
@@ -1411,10 +1433,51 @@ const agentKbs = ref<Array<{
 // change is only applied when the user presses "Index Now".
 const pendingKb = ref<Record<string, boolean>>({});
 const kbApplyBusy = ref(false);
-const kb2JustIndexing = ref(false);
 const kbHasStagedChanges = computed(() =>
   agentKbs.value.some(kb => !!pendingKb.value[kb.key] !== !!kb.connected)
 );
+
+// Inline KB-2 indexing progress (its OWN DO job poll — independent of
+// the Saved Files indexing panel). Shown in the My Agent tab only.
+const kb2Index = ref<{
+  active: boolean; tokens: string; filesIndexed: number;
+  elapsedSec: number; done: boolean; failed: boolean;
+}>({ active: false, tokens: '0', filesIndexed: 0, elapsedSec: 0, done: false, failed: false });
+let kb2PollTimer: ReturnType<typeof setInterval> | null = null;
+let kb2ElapsedTimer: ReturnType<typeof setInterval> | null = null;
+let kb2StartedAt = 0;
+
+const stopKb2Poll = () => {
+  if (kb2PollTimer) { clearInterval(kb2PollTimer); kb2PollTimer = null; }
+  if (kb2ElapsedTimer) { clearInterval(kb2ElapsedTimer); kb2ElapsedTimer = null; }
+};
+
+const startKb2Poll = () => {
+  stopKb2Poll();
+  kb2StartedAt = Date.now();
+  kb2Index.value = { active: true, tokens: '0', filesIndexed: 0, elapsedSec: 0, done: false, failed: false };
+  kb2ElapsedTimer = setInterval(() => {
+    if (kb2Index.value.active) kb2Index.value.elapsedSec = Math.round((Date.now() - kb2StartedAt) / 1000);
+  }, 1000);
+  const poll = async () => {
+    try {
+      const r = await fetch(`/api/kb2-indexing-status?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
+      const d = await r.json().catch(() => ({}));
+      if (d && d.exists) {
+        kb2Index.value.tokens = String(d.tokens ?? kb2Index.value.tokens);
+        kb2Index.value.filesIndexed = Number(d.filesIndexed ?? kb2Index.value.filesIndexed) || 0;
+        if (d.completed || d.failed) {
+          kb2Index.value.active = false;
+          kb2Index.value.done = !!d.completed;
+          kb2Index.value.failed = !!d.failed;
+          stopKb2Poll();
+        }
+      }
+    } catch { /* keep polling */ }
+  };
+  poll();
+  kb2PollTimer = setInterval(poll, 10000);
+};
 
 const loadingChats = ref(false);
 const chatsError = ref('');
@@ -1895,7 +1958,6 @@ const loadAgent = async () => {
     const seeded: Record<string, boolean> = {};
     for (const kb of agentKbs.value) seeded[kb.key] = !!kb.connected;
     pendingKb.value = seeded;
-    kb2JustIndexing.value = false;
 
     // Load deep link Private AI access setting
     await loadDeepLinkPrivateAISetting();
@@ -1910,6 +1972,8 @@ const loadAgent = async () => {
 // sub-tab. Exits edit mode so unsaved edits don't bleed across agents.
 watch(activeAgentProfile, () => {
   editMode.value = false;
+  stopKb2Poll();
+  kb2Index.value = { active: false, tokens: '0', filesIndexed: 0, elapsedSec: 0, done: false, failed: false };
   loadAgent();
 });
 
@@ -2070,20 +2134,12 @@ const applyKbChanges = async () => {
       $q.notify({ type: 'positive', message: 'Knowledge base changes applied', timeout: 3000 });
     }
 
-    // If KB-2 was just created it is indexing — show that on the Saved
-    // Files tab using the existing progress panel (no file-badge churn).
-    if (kb2IndexJobId) {
-      kb2JustIndexing.value = true;
-      currentTab.value = 'files';
-      currentIndexingJobId.value = kb2IndexJobId;
-      indexingKB.value = true;
-      indexingStatus.value = {
-        phase: 'indexing_started',
-        message: 'Indexing the alternate knowledge base… This may take several minutes.',
-        kb: '', tokens: '', filesIndexed: 0, progress: 0, error: ''
-      };
-      pollIndexingProgress(kb2IndexJobId);
-    }
+    // If KB-2 was just created it is indexing — show progress INLINE in
+    // this My Agent tab (its own DO job poll). We deliberately do NOT
+    // switch to Saved Files or touch the Saved Files indexing panel /
+    // per-file badges.
+    if (kb2IndexJobId) startKb2Poll();
+    else await loadAgent(); // refresh connection badges
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Failed to apply KB changes';
     if ($q?.notify) $q.notify({ type: 'negative', message: msg, timeout: 5000 });
@@ -5940,6 +5996,7 @@ onUnmounted(() => {
     clearInterval(elapsedTimeInterval.value);
     elapsedTimeInterval.value = null;
   }
+  stopKb2Poll();
 });
 </script>
 

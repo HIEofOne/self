@@ -7647,6 +7647,53 @@ app.get('/api/kb-indexing-status/:jobId', async (req, res) => {
   }
 });
 
+// Live indexing status for the ALTERNATE KB (KB-2). Reads the DO
+// indexing job directly (not userDoc.kbIndexingStatus, which tracks
+// KB-1's Setup job). Polled inline by the My Agent tab so KB-2
+// progress never touches the Saved Files panel/badges.
+app.get('/api/kb2-indexing-status', async (req, res) => {
+  try {
+    const userId = resolveUserId(req, res);
+    if (!userId) return;
+    const userDoc = await cloudant.getDocument('maia_users', userId);
+    const kb2Id = userDoc?.kb2?.kbId || null;
+    if (!kb2Id) {
+      return res.json({ success: true, exists: false, completed: false });
+    }
+    let jobs = [];
+    try {
+      jobs = await doClient.indexing.listForKB(kb2Id);
+    } catch (e) {
+      return res.json({ success: true, exists: true, completed: false, error: e?.message || 'list failed' });
+    }
+    const job = Array.isArray(jobs) && jobs.length > 0 ? jobs[0] : null;
+    if (!job) {
+      return res.json({ success: true, exists: true, completed: false, phase: 'pending', tokens: '0', filesIndexed: 0 });
+    }
+    const status = String(job.status || job.phase || '').toUpperCase();
+    const completed = /COMPLET|SUCCEED|DONE/.test(status);
+    const failed = /FAIL|ERROR|CANCEL/.test(status);
+    const tokens = String(job.tokens || job.total_tokens || job.tokenized_tokens || 0);
+    const filesIndexed = job.data_source_jobs?.[0]?.indexed_file_count
+      || job.completed_datasources || 0;
+    return res.json({
+      success: !failed,
+      exists: true,
+      kbName: userDoc.kb2?.kbName || null,
+      jobId: job.uuid || job.id || null,
+      phase: completed ? 'complete' : (failed ? 'error' : 'indexing'),
+      status,
+      tokens,
+      filesIndexed,
+      completed,
+      failed
+    });
+  } catch (error) {
+    console.error('❌ kb2-indexing-status error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Cancel KB indexing and restore files to archived folder
 app.post('/api/cancel-kb-indexing', async (req, res) => {
   try {
