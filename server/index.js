@@ -10709,7 +10709,7 @@ app.post('/api/medications/extract', async (req, res) => {
     } else {
       const appleHealthFile = (userDoc.files || []).find(f => f && f.isAppleHealth);
       if (!appleHealthFile || !appleHealthFile.fileName) {
-        return res.status(400).json({ success: false, error: 'NO_APPLE_HEALTH_FILE' });
+        return softSkip('NO_APPLE_HEALTH_FILE');
       }
       const cleanName = String(appleHealthFile.fileName).replace(/[^a-zA-Z0-9.-]/g, '_');
       const mdName = cleanName.replace(/\.pdf$/i, '.md');
@@ -10735,7 +10735,10 @@ app.post('/api/medications/extract', async (req, res) => {
         for await (const c of r.Body) chunks.push(c);
         appleHealthMd = Buffer.concat(chunks).toString('utf-8');
       } catch (e) {
-        return res.status(404).json({ success: false, error: 'APPLE_HEALTH_MARKDOWN_MISSING', message: e.message });
+        // Lists/*.md not written yet (race with process-initial-file).
+        // Optional enhancement — soft-skip so Lists.vue cleanly uses
+        // the patient-summary meds and the log records it.
+        return softSkip('APPLE_HEALTH_MARKDOWN_MISSING');
       }
 
       const contextBlock = Array.isArray(contextMeds) && contextMeds.length > 0
