@@ -5541,7 +5541,14 @@ app.get('/api/user-files', async (req, res) => {
     }
 
     const kbInfo = await resolveKbForUserFromDo(userId, { forceRefresh: true });
-    const kbName = kbInfo?.name || userDoc.kbName || null;
+    // File "in KB" membership is the CANONICAL primary KB-1 folder —
+    // the folder files are physically moved into by
+    // update-knowledge-base (getKBNameFromUserDoc). It must NOT follow
+    // resolveKbForUserFromDo, which returns whichever KB is attached to
+    // the agent: when the user connects KB-2 (which has no folder of
+    // its own — it indexes KB-1's folder) that would flip the prefix to
+    // `<kb>-2/` and report every file as not-in-KB.
+    const kbName = getKBNameFromUserDoc(userDoc, userId) || kbInfo?.name || null;
     const kbFolderPrefix = kbName ? `${userId}/${kbName}/` : null;
 
     if (source === 'wizard') {
