@@ -999,6 +999,9 @@ const wizardIntroLines = ref<string[]>([]);
 const wizardIntroContainer = ref<HTMLElement | null>(null);
 const wizardInlineDots = ref<HTMLElement | null>(null);
 const wizardDismissed = ref(false);
+// Userid for which a 'setup-started' provisioning event has already
+// been logged this session (dedupe; see the showAgentSetupDialog watch).
+const setupStartedLoggedForUser = ref<string | null>(null);
 /** Counts how many times the user has dismissed (closed) MyStuff during a guided flow phase.
  *  After 2 dismissals in the same phase, the phase is skipped and the wizard advances. */
 const guidedFlowDismissCount = ref(0);
@@ -1370,17 +1373,25 @@ watch(
   () => showAgentSetupDialog.value,
   (isOpen, wasOpen) => {
     if (isOpen) {
-      logProvisioningEvent({
-        event: 'setup-started',
-        test: testMode.value || undefined,
-        method: 'setup',
-        client: {
-          browser: parseUserAgent(),
-          appUrl: window.location.origin,
-          folder: localFolderName.value || 'unknown',
-          version: packageJson.version
-        }
-      });
+      // Only log a NEW "Setup started" the first time the wizard opens
+      // for this user this session. Re-opens (e.g. the agent-status
+      // poll re-showing it, or returning from My Stuff) are the SAME
+      // continuous setup — logging again fragmented maia-log.pdf into
+      // duplicate "--- Setup ---" sections.
+      if (setupStartedLoggedForUser.value !== (props.user?.userId || '')) {
+        setupStartedLoggedForUser.value = props.user?.userId || '';
+        logProvisioningEvent({
+          event: 'setup-started',
+          test: testMode.value || undefined,
+          method: 'setup',
+          client: {
+            browser: parseUserAgent(),
+            appUrl: window.location.origin,
+            folder: localFolderName.value || 'unknown',
+            version: packageJson.version
+          }
+        });
+      }
       wizardSlideIndex.value = 0;
       void loadWizardMessages();
       void positionWizardInlineDots();
@@ -6153,7 +6164,7 @@ const startSetupWizardPolling = () => {
         }
       }
 
-      if (!shouldHideSetupWizard.value && !showAgentSetupDialog.value && !wizardDismissed.value) {
+      if (!shouldHideSetupWizard.value && !showAgentSetupDialog.value && !wizardDismissed.value && !showMyStuffDialog.value) {
         showAgentSetupDialog.value = true;
         stopAgentSetupTimer();
         agentSetupTimer = setInterval(() => {
@@ -6209,7 +6220,7 @@ const startSetupWizardPolling = () => {
         return;
       }
 
-      if (!shouldHideSetupWizard.value && !showAgentSetupDialog.value && !wizardDismissed.value) {
+      if (!shouldHideSetupWizard.value && !showAgentSetupDialog.value && !wizardDismissed.value && !showMyStuffDialog.value) {
         showAgentSetupDialog.value = true;
         stopAgentSetupTimer();
         agentSetupTimer = setInterval(() => {
