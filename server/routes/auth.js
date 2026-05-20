@@ -389,7 +389,7 @@ export async function ensureUserAgent(doClient, cloudant, userDoc) {
         topP: 1,
         temperature: 0.1,
         k: 10,
-        retrievalMethod: 'RETRIEVAL_METHOD_NONE'
+        retrievalMethod: 'RETRIEVAL_METHOD_REWRITE'
       });
     } catch (err) {
       agentCreationLocks.delete(userId);
@@ -517,7 +517,7 @@ export async function ensureSecondaryAgent(doClient, cloudant, userDoc) {
         topP: 1,
         temperature: 0.1,
         k: 10,
-        retrievalMethod: 'RETRIEVAL_METHOD_NONE'
+        retrievalMethod: 'RETRIEVAL_METHOD_REWRITE'
       });
     } catch (err) {
       agentCreationLocks.delete(lockKey);

@@ -3286,7 +3286,7 @@ const generateSetupLogPdf = async () => {
             return `[${t}] Files uploaded: ${parts.join(', ')}`;
           }
           case 'apple-health-detected': return `[${t}] Apple Health detected: ${evt.fileName || ''}`;
-          case 'agent-deployed': return `[${t}] Agent deployed${evt.elapsedMs ? ` (${formatElapsed(evt.elapsedMs)})` : ''}`;
+          case 'agent-deployed': return `[${t}] Private AI (Deepseek) deployed and available${evt.elapsedMs ? ` (${formatElapsed(evt.elapsedMs)})` : ''}`;
           case 'kb-indexed': {
             const parts = [];
             if (evt.fileCount) parts.push(`${evt.fileCount} files`);
@@ -3340,7 +3340,7 @@ const generateSetupLogPdf = async () => {
             const files = evt.fileCount ? `, ${evt.fileCount} source file(s)` : '';
             return `[${t}] Current Medications Worksheet generated — ${agent}${model}${files}`;
           }
-          case 'gpt-agent-ready': return `[${t}] Private AI (GPT) provisioned and ready`;
+          case 'gpt-agent-ready': return `[${t}] Private AI (GPT) deployed and available`;
           case 'medications-dismissed': return `[${t}] Medications step dismissed without verification`;
           case 'current-medications-recovery-failed': return `[${t}] Current Medications recovery FAILED — fell through ${Array.isArray(evt.pathsTried) ? evt.pathsTried.join(' -> ') : 'all paths'}`;
           case 'medications-saved': {
@@ -6530,10 +6530,25 @@ watch(
  * reports an endpoint (ready) or the timeout elapses. Sets gptAgentReady.
  * Returns true if GPT is ready. Never throws.
  */
-const ensureGptProvisioned = async (maxMs = 240000): Promise<boolean> => {
-  if (!props.user?.userId) return false;
-  if (gptAgentReady.value) return true;
-  const userId = props.user.userId;
+let gptProvisioningInflight: Promise<boolean> | null = null;
+const ensureGptProvisioned = (maxMs = 240000): Promise<boolean> => {
+  if (!props.user?.userId) return Promise.resolve(false);
+  if (gptAgentReady.value) return Promise.resolve(true);
+  // Dedupe: an early kickoff and the completion-gate must share one poll
+  // (and one toast), not run two concurrently.
+  if (gptProvisioningInflight) return gptProvisioningInflight;
+  gptProvisioningInflight = (async () => {
+    try {
+      return await runEnsureGptProvisioned(maxMs);
+    } finally {
+      gptProvisioningInflight = null;
+    }
+  })();
+  return gptProvisioningInflight;
+};
+
+const runEnsureGptProvisioned = async (maxMs: number): Promise<boolean> => {
+  const userId = props.user!.userId;
   gptProvisioningActive.value = true;
   const startedAt = Date.now();
   let notif: ((props?: any) => void) | null = null;
@@ -6541,8 +6556,7 @@ const ensureGptProvisioned = async (maxMs = 240000): Promise<boolean> => {
     notif = $q.notify({
       type: 'ongoing',
       message: 'Provisioning your second Private AI (GPT)…',
-      timeout: 0,
-      group: 'gpt-provisioning'
+      timeout: 0
     });
   }
   try {

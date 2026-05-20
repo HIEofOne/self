@@ -158,11 +158,20 @@ Example request body (values MAIA actually sends):
   "top_p": 1,
   "temperature": 0.1,
   "k": 10,
-  "retrieval_method": "RETRIEVAL_METHOD_NONE"
+  "retrieval_method": "RETRIEVAL_METHOD_REWRITE"
 }
 ```
 Required: `name`, `model.uuid`, `project_id`. The response's
 `deployment.status` starts `STATUS_PENDING`.
+
+> **retrieval_method MUST NOT be `RETRIEVAL_METHOD_NONE`.** `NONE`
+> disables knowledge-base retrieval entirely — the agent ignores its
+> attached KB and every answer comes back "no records found" (this
+> caused blank Patient Summaries and blank Medication Worksheets). MAIA
+> creates agents with `RETRIEVAL_METHOD_REWRITE` and self-heals any
+> existing agent still set to `NONE` (see `ensureAgentRetrieval` in
+> server/index.js, called from the worksheet, draft-summary, and
+> attach-KB endpoints).
 
 ### Update agent instruction
 `PUT /v2/gen-ai/agents/{agent_uuid}`

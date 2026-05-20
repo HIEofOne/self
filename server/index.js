@@ -3811,7 +3811,7 @@ async function provisionUserAsync(userId, token) {
       topP: 1,
       temperature: 0.1,
       k: 10,
-      retrievalMethod: 'RETRIEVAL_METHOD_NONE'
+      retrievalMethod: 'RETRIEVAL_METHOD_REWRITE'
     });
 
     if (!newAgent || !newAgent.uuid) {
@@ -4019,7 +4019,7 @@ async function provisionUserAsync(userId, token) {
       top_p: 1,
       temperature: 0.1,
       k: 10,
-      retrieval_method: 'RETRIEVAL_METHOD_NONE'
+      retrieval_method: 'RETRIEVAL_METHOD_REWRITE'
     });
 
     // Verify temperature was actually set to 0.1
@@ -10331,8 +10331,10 @@ app.post('/api/attach-kb-to-agent', async (req, res) => {
       // Attach KB to agent
       await doClient.agent.attachKB(userDoc.assignedAgentId, userDoc.kbId);
       console.log(`✅ Attached KB ${userDoc.kbId} to agent ${userDoc.assignedAgentId}`);
-      
-      res.json({ 
+      // Ensure the agent actually retrieves from its KB (heal legacy NONE).
+      await ensureAgentRetrieval(userDoc.assignedAgentId);
+
+      res.json({
         success: true, 
         message: 'Knowledge base attached to agent successfully',
         agentId: userDoc.assignedAgentId,
@@ -10606,6 +10608,8 @@ app.post('/api/patient-summary/draft', async (req, res) => {
           return res.status(503).json({ success: false, error: 'KB_NOT_ATTACHED' });
         }
       }
+      // Ensure the agent actually retrieves from its KB (heal legacy NONE).
+      await ensureAgentRetrieval(userDoc.assignedAgentId);
     } else if (!userDoc.kbId) {
       return res.status(400).json({ success: false, error: 'NO_KB' });
     }
@@ -10803,6 +10807,26 @@ app.post('/api/medications/extract', async (req, res) => {
 // the SERVER supplies (so numbering is consistent across both agents
 // and the model can't invent file names). Result is persisted to
 // userDoc.medsWorksheets[profile] and rendered in My Lists.
+
+// Self-heal: agents created before v1.3.85 used retrieval_method
+// RETRIEVAL_METHOD_NONE, which makes the agent IGNORE its attached
+// knowledge base (every answer comes back "no records found"). Flip any
+// such agent to RETRIEVAL_METHOD_REWRITE so KB retrieval actually runs.
+// Idempotent and best-effort — never throws.
+async function ensureAgentRetrieval(agentId) {
+  if (!agentId) return;
+  try {
+    const agent = await doClient.agent.get(agentId);
+    const method = agent?.retrieval_method;
+    if (!method || method === 'RETRIEVAL_METHOD_NONE') {
+      await doClient.agent.update(agentId, { retrieval_method: 'RETRIEVAL_METHOD_REWRITE' });
+      console.log(`[retrieval] healed agent ${agentId}: ${method || 'unset'} -> RETRIEVAL_METHOD_REWRITE`);
+    }
+  } catch (e) {
+    console.warn(`[retrieval] ensureAgentRetrieval(${agentId}) failed: ${e?.message || e}`);
+  }
+}
+
 function buildWorksheetPrompt(legendLines) {
   return `You are building a Current Medications Worksheet from this patient's records in your knowledge base. Use ONLY information found in your knowledge base; never infer, assume, or add a medication that is not present. Include EVERY medication you find.
 
@@ -10896,6 +10920,8 @@ app.post('/api/medications/worksheet', async (req, res) => {
         }
       }
     }
+    // Ensure the agent actually retrieves from its KB (heal legacy NONE).
+    await ensureAgentRetrieval(agentId);
 
     const apiKey = await getOrCreateAgentApiKey(doClient, cloudant, userId, agentId, profileKey);
     const { DigitalOceanProvider } = await import('../lib/chat-client/providers/digitalocean.js');
