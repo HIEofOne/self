@@ -245,6 +245,46 @@ at chat time.
 
 ---
 
+## 2.5 Current Medications Worksheets (Deepseek + GPT)
+
+As of v1.3.83 the Setup wizard **no longer runs** the old Current
+Medications extract → verify → splice step (§2). Instead, each of the
+two Private AIs builds its own **Current Medications Worksheet** by
+retrieving directly from the knowledge base.
+
+- **Endpoint**: `POST /api/medications/worksheet`
+  (`agentProfileKey: 'default'|'gpt'`). The endpoint **attaches the KB to
+  the chosen agent** before calling (mirrors `/api/patient-summary/draft`)
+  — without this the agent answers from an empty context and returns a
+  table with only the header row. Reads back via `GET
+  /api/medications/worksheet`. Result persists to
+  `userDoc.medsWorksheets[profileKey] = {table, legend, model,
+  generatedAt}`.
+- **GPT auto-provisioning**: for `gpt`, the endpoint calls
+  `ensureSecondaryAgent`; if the agent isn't deployed yet it returns
+  `202 {pending:true}` and the client (My Lists REFRESH) retries.
+- **Prompt** (`buildWorksheetPrompt`): one GFM table, columns
+  `Medication | Status | Last date prescribed | Source`. Status is
+  exactly one of Current / Discontinued / Inpatient. **Source** cites a
+  short `File N` tag (not the full filename); the server supplies the
+  `File N = <filename>` legend so numbering is stable across both agents
+  and the model can't invent names. The full legend is rendered as a
+  footnote under each worksheet in `Lists.vue`.
+- **UI**: two cards in My Lists — "Current Medications Worksheet
+  (Deepseek)" and "(GPT)" — each with a Generate/Refresh button. The
+  Apple Health categories block is labeled "Categories from Apple
+  Health".
+- **Setup**: when KB indexing completes, the wizard generates the draft
+  Patient Summary, fires `triggerSetupWorksheets()` for both profiles,
+  kicks off GPT provisioning, then opens the Patient Summary tab. Setup
+  completion is **gated on both Private AIs being provisioned**
+  (`ensureGptProvisioned` polls `POST /api/agents/ensure-secondary`).
+- **Log**: `meds-worksheet-generated` and `gpt-agent-ready` events are
+  rendered in `maia-log.pdf`, which also carries a static "How the My
+  Lists tab works" reference page.
+
+---
+
 ## 3. Reference: Agents and Knowledge Bases
 
 For the canonical parameters, see **`NEW-AGENT.txt`** at the repo root.
@@ -289,3 +329,9 @@ The actual parameters used at each KB creation are logged to
 - *2026-05-19* — Initial version. Documents My Lists Categories and
   Current Medications as of v1.3.81 (multi-KB, soft-skip extraction,
   primary/alternate Private AI agents).
+- *2026-05-20* — v1.3.83. Added §2.5 Current Medications Worksheets
+  (Deepseek + GPT). Setup now bypasses the old extract/verify/splice
+  meds step, generates both worksheets, and gates completion on both
+  Private AIs being provisioned. Worksheet endpoint attaches the KB
+  before calling (fixes blank-table bug). maia-log.pdf gained a "How
+  the My Lists tab works" reference page.

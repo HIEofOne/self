@@ -10881,6 +10881,22 @@ app.post('/api/medications/worksheet', async (req, res) => {
     const legendLines = legend.map(l => `${l.tag} = ${l.fileName}`).join('\n');
     const prompt = buildWorksheetPrompt(legendLines);
 
+    // Ensure the KB is attached to THIS agent before calling, so retrieval
+    // returns the patient's records. Without this the agent answers from an
+    // empty context and produces a table with only the header row (the bug
+    // that made both worksheets come back blank). Mirrors the
+    // /api/patient-summary/draft endpoint, which attaches before calling.
+    const worksheetKbId = userDoc.kbId;
+    if (worksheetKbId && agentId) {
+      try {
+        await doClient.agent.attachKB(agentId, worksheetKbId);
+      } catch (attachError) {
+        if (!attachError.message?.includes('already')) {
+          console.warn(`[worksheet] attachKB(${profileKey}) failed (continuing): ${attachError.message}`);
+        }
+      }
+    }
+
     const apiKey = await getOrCreateAgentApiKey(doClient, cloudant, userId, agentId, profileKey);
     const { DigitalOceanProvider } = await import('../lib/chat-client/providers/digitalocean.js');
     const chatOptions = { model, stream: false };
@@ -10942,6 +10958,69 @@ app.get('/api/medications/worksheet', async (req, res) => {
     const userDoc = await cloudant.getDocument('maia_users', userId);
     if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
     res.json({ success: true, worksheets: userDoc.medsWorksheets || {} });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Ensure the secondary "Private AI (GPT)" agent is provisioned and report
+// whether it has finished deploying (endpoint resolved). The Setup wizard
+// calls this and polls until ready:true so BOTH Private AIs exist before
+// Setup completes. Safe to call repeatedly (ensureSecondaryAgent is
+// idempotent and mutex-guarded).
+app.post('/api/agents/ensure-secondary', async (req, res) => {
+  try {
+    const userId = resolveUserId(req, res);
+    if (!userId) return;
+    let userDoc = await cloudant.getDocument('maia_users', userId);
+    if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+
+    const { ensureSecondaryAgent } = await import('./routes/auth.js');
+    try {
+      userDoc = await ensureSecondaryAgent(doClient, cloudant, userDoc);
+    } catch (e) {
+      // Creation may still be in-flight under the mutex — report not-ready
+      // rather than 500 so the client keeps polling.
+      return res.json({ success: true, ready: false, provisioning: true, reason: e?.message || 'provisioning' });
+    }
+
+    let gpt = userDoc.agentProfiles?.gpt || {};
+    let endpoint = gpt.endpoint || null;
+
+    // Freshly created agents start STATUS_PENDING (endpoint null). Poll the
+    // live agent once for an up-to-date deployment URL and persist it.
+    if (!endpoint && gpt.agentId) {
+      try {
+        const live = await doClient.agent.get(gpt.agentId);
+        endpoint = live?.deployment?.url ? `${live.deployment.url}/api/v1` : null;
+        if (endpoint) {
+          for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+              const doc = await cloudant.getDocument('maia_users', userId);
+              if (!doc) break;
+              if (!doc.agentProfiles) doc.agentProfiles = {};
+              doc.agentProfiles.gpt = { ...(doc.agentProfiles.gpt || {}), endpoint };
+              doc.updatedAt = new Date().toISOString();
+              await cloudant.saveDocument('maia_users', doc);
+              break;
+            } catch (err) {
+              if (err?.statusCode === 409 && attempt < 2) continue;
+              break;
+            }
+          }
+        }
+      } catch { /* still deploying */ }
+    }
+
+    if (endpoint) {
+      try {
+        await appendUserProvisioningEvent(userId, {
+          event: 'gpt-agent-ready', agentId: gpt.agentId || null
+        });
+      } catch { /* non-fatal */ }
+    }
+
+    res.json({ success: true, ready: !!endpoint, agentId: gpt.agentId || null, endpoint });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }

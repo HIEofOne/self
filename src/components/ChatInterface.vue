@@ -987,6 +987,10 @@ const wizardCurrentMedications = ref(false);
 const wizardPatientSummary = ref(false);
 const wizardAgentReady = ref(false);
 const wizardStage1Complete = ref(false);
+// Secondary "Private AI (GPT)" provisioning state. Setup gates completion on
+// this so BOTH Private AIs exist before the wizard finishes.
+const gptAgentReady = ref(false);
+const gptProvisioningActive = ref(false);
 const wizardUploadIntent = ref<'other' | 'restore' | null>(null);
 const wizardMessages = ref<Record<number, string>>({});
 const wizardIntroLines = ref<string[]>([]);
@@ -3177,13 +3181,13 @@ const generateSetupLogPdf = async () => {
   const totalFiles = wizardStage3Files.value.length;
   const hasIndexing = indexingStatus.value?.phase === 'complete';
   const indexTokens = indexingStatus.value?.tokens || '0';
-  const hasMeds = wizardCurrentMedications.value;
   const hasSummary = wizardPatientSummary.value;
   const summaryItems = [
     `Files uploaded: ${totalFiles}`,
-    `Agent ready: ${wizardStage1Complete.value ? 'Yes' : 'No'}`,
+    `Private AI (Deepseek) ready: ${wizardStage1Complete.value ? 'Yes' : 'No'}`,
+    `Private AI (GPT) ready: ${gptAgentReady.value ? 'Yes' : 'Pending'}`,
     `KB indexed: ${hasIndexing ? 'Yes' : 'Pending'} (${indexTokens} tokens)`,
-    `Current Medications: ${hasMeds ? 'Yes' : 'No'}`,
+    `Medication Worksheets: see My Lists (Deepseek + GPT)`,
     `Patient Summary: ${hasSummary ? 'Yes' : 'No'}`
   ];
   for (const item of summaryItems) {
@@ -3330,6 +3334,13 @@ const generateSetupLogPdf = async () => {
           }
           case 'medications-extract-skipped':
             return `[${t}] AI medication extraction skipped (${evt.reason || 'unknown'}) — used patient-summary medications instead`;
+          case 'meds-worksheet-generated': {
+            const agent = evt.agentProfileKey === 'gpt' ? 'Private AI (GPT)' : 'Private AI (Deepseek)';
+            const model = evt.model ? ` [${evt.model}]` : '';
+            const files = evt.fileCount ? `, ${evt.fileCount} source file(s)` : '';
+            return `[${t}] Current Medications Worksheet generated — ${agent}${model}${files}`;
+          }
+          case 'gpt-agent-ready': return `[${t}] Private AI (GPT) provisioned and ready`;
           case 'medications-dismissed': return `[${t}] Medications step dismissed without verification`;
           case 'current-medications-recovery-failed': return `[${t}] Current Medications recovery FAILED — fell through ${Array.isArray(evt.pathsTried) ? evt.pathsTried.join(' -> ') : 'all paths'}`;
           case 'medications-saved': {
@@ -3477,6 +3488,67 @@ const generateSetupLogPdf = async () => {
   } catch (err) {
     doc.text('Error loading provisioning log.', margin, y);
     y += 6;
+  }
+
+  // ── Reference: How the My Lists tab works ───────────────────────────
+  // A static explainer so anyone reading maia-log.pdf understands what
+  // the My Lists tab produces and how. Kept in sync with
+  // Documentation/Clinical.md.
+  {
+    doc.addPage();
+    y = 20;
+    doc.setFontSize(13);
+    doc.setFont('helvetica', 'bold');
+    doc.text('How the My Lists tab works', margin, y);
+    doc.setFont('helvetica', 'normal');
+    y += 8;
+    doc.setFontSize(9);
+
+    const para = (heading: string, body: string) => {
+      if (y > 265) { doc.addPage(); y = 20; }
+      doc.setFont('helvetica', 'bold');
+      doc.text(heading, margin, y);
+      doc.setFont('helvetica', 'normal');
+      y += 5;
+      for (const sl of doc.splitTextToSize(body, maxWidth)) {
+        if (y > 272) { doc.addPage(); y = 20; }
+        doc.text(sl, margin, y);
+        y += 4.5;
+      }
+      y += 4;
+    };
+
+    para(
+      'Categories from Apple Health',
+      'If an Apple Health "Health Records" export PDF is among your files, MAIA converts it to ' +
+      'Markdown and splits it into one Markdown list per "### Category" heading it finds ' +
+      '(Medications, Conditions, Allergies, Procedures, Immunizations, Lab Results, Vital Signs, ' +
+      'etc.). These are saved under your account and shown here for viewing and download. If you ' +
+      'have no Apple Health export, this block reads "No Apple Health file categories are available."'
+    );
+    para(
+      'Patient Summary draft',
+      'During Setup, MAIA asks your primary Private AI (Deepseek) to generate a draft Patient ' +
+      'Summary from your full indexed knowledge base. The draft is stored privately and is not ' +
+      'committed until you review and Verify it on the Patient Summary tab.'
+    );
+    para(
+      'Current Medications Worksheets (Deepseek and GPT)',
+      'Each of your two Private AIs (Deepseek and GPT) independently builds a medication worksheet ' +
+      'by retrieving from your knowledge base. Each worksheet is a table with one row per ' +
+      'medication: the drug name, a Status of Current / Discontinued / Inpatient, the Last date ' +
+      'prescribed, and a Source. To avoid repeating long file names on every row, the Source cites ' +
+      'a short "File N" tag whose full filenames are listed as a legend at the bottom of each ' +
+      'worksheet. The two AIs are run separately so you can compare their results; use REFRESH on a ' +
+      'card to regenerate that worksheet. These worksheets replace the older single Current ' +
+      'Medications extract/verify step.'
+    );
+    para(
+      'Why two AIs',
+      'MAIA provisions two private agents per account (Deepseek and GPT), both attached to the same ' +
+      'knowledge base. Setup waits for BOTH to finish provisioning before completing, so both ' +
+      'worksheets can be generated and compared.'
+    );
   }
 
   const pdfBlob = doc.output('blob');
@@ -6415,6 +6487,10 @@ watch(
       // server-side if it isn't ready yet (the POST returns 202 and the user
       // can Refresh the worksheet later from My Lists).
       wizardPreparingMessage.value = 'Generating medication worksheets from your records...';
+      // Kick off provisioning of the second Private AI (GPT) now so it is
+      // deploying while the user reviews the summary. Setup completion is
+      // gated on this finishing (see handlePatientSummaryVerified/Saved).
+      void ensureGptProvisioned();
       triggerSetupWorksheets();
       // Mark the (now bypassed) Current Medications step as satisfied so the
       // checklist and completion gating don't wait on a verification that no
@@ -6448,6 +6524,57 @@ watch(
  * refreshes them in My Lists. GPT may return 202 (provisioning/deploying) — that
  * is expected and non-fatal; the user can Refresh it later.
  */
+/**
+ * Ensure the secondary "Private AI (GPT)" agent is provisioned and deployed.
+ * POSTs /api/agents/ensure-secondary (idempotent) and polls until the agent
+ * reports an endpoint (ready) or the timeout elapses. Sets gptAgentReady.
+ * Returns true if GPT is ready. Never throws.
+ */
+const ensureGptProvisioned = async (maxMs = 240000): Promise<boolean> => {
+  if (!props.user?.userId) return false;
+  if (gptAgentReady.value) return true;
+  const userId = props.user.userId;
+  gptProvisioningActive.value = true;
+  const startedAt = Date.now();
+  let notif: ((props?: any) => void) | null = null;
+  if ($q?.notify) {
+    notif = $q.notify({
+      type: 'ongoing',
+      message: 'Provisioning your second Private AI (GPT)…',
+      timeout: 0,
+      group: 'gpt-provisioning'
+    });
+  }
+  try {
+    while (Date.now() - startedAt < maxMs) {
+      try {
+        const res = await fetch('/api/agents/ensure-secondary', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ userId })
+        });
+        const d = await res.json().catch(() => ({}));
+        if (res.ok && d.ready) {
+          gptAgentReady.value = true;
+          return true;
+        }
+      } catch { /* keep polling */ }
+      await new Promise(r => setTimeout(r, 8000));
+    }
+    return false;
+  } finally {
+    gptProvisioningActive.value = false;
+    if (notif) {
+      if (gptAgentReady.value) {
+        notif({ type: 'positive', message: 'Private AI (GPT) is ready.', timeout: 2500 });
+      } else {
+        notif({ type: 'warning', message: 'Private AI (GPT) is still deploying — you can use it from My Lists / the chat shortly.', timeout: 5000 });
+      }
+    }
+  }
+};
+
 const triggerSetupWorksheets = () => {
   if (!props.user?.userId) return;
   const userId = props.user.userId;
@@ -6920,6 +7047,14 @@ const handlePatientSummarySaved = async (payload?: { userId?: string; summary?: 
   await refreshWizardState();
   // Guided flow: saving summary also completes the flow
   if (wizardFlowPhase.value === 'summary') {
+    // Gate completion on BOTH Private AIs being provisioned (Deepseek is
+    // already up; wait for GPT to finish deploying).
+    if (!gptAgentReady.value) {
+      wizardPreparingRecords.value = true;
+      wizardPreparingMessage.value = 'Finishing setup — provisioning Private AI (GPT)…';
+      await ensureGptProvisioned();
+      wizardPreparingRecords.value = false;
+    }
     wizardFlowPhase.value = 'done';
     logProvisioningEvent({ event: 'setup-complete' });
     persistWizardCompletion();
@@ -6950,6 +7085,14 @@ const handlePatientSummaryVerified = async (payload?: { userId?: string; summary
   await refreshWizardState();
   // Guided flow: verifying summary completes the flow
   if (wizardFlowPhase.value === 'summary') {
+    // Gate completion on BOTH Private AIs being provisioned (Deepseek is
+    // already up; wait for GPT to finish deploying).
+    if (!gptAgentReady.value) {
+      wizardPreparingRecords.value = true;
+      wizardPreparingMessage.value = 'Finishing setup — provisioning Private AI (GPT)…';
+      await ensureGptProvisioned();
+      wizardPreparingRecords.value = false;
+    }
     wizardFlowPhase.value = 'done';
     logProvisioningEvent({ event: 'setup-complete' });
     void generateSetupLogPdf();
