@@ -10827,7 +10827,7 @@ async function ensureAgentRetrieval(agentId) {
   }
 }
 
-function buildWorksheetPrompt(legendLines) {
+function buildWorksheetPrompt(legendLines, cutoffDate) {
   return `You are building a Current Medications Worksheet from this patient's records in your knowledge base. Use ONLY information found in your knowledge base; never infer, assume, or add a medication that is not present. Include EVERY medication you find.
 
 Output a GitHub-flavored Markdown table with EXACTLY these columns — no title, no notes, no text before or after the table:
@@ -10837,10 +10837,10 @@ Output a GitHub-flavored Markdown table with EXACTLY these columns — no title,
 Rules per column:
 - Medication: the drug name with the strength/form FROM ITS MOST RECENT entry (e.g. "atorvastatin 20 MG tablet"). One row per drug — see de-duplication below.
 - Status: exactly one of —
-    Current — this drug's most recent entry is actively prescribed, not marked stopped, held, or discontinued.
-    Discontinued — this drug's most recent entry is explicitly stopped, inactive, held, or discontinued.
+    Current — this drug's most recent entry is actively prescribed (not stopped/held/discontinued) AND its Last date prescribed is on or after ${cutoffDate} (within the last 18 months).
+    Discontinued — this drug's most recent entry is explicitly stopped/inactive/held, OR its Last date prescribed is BEFORE ${cutoffDate} (more than 18 months ago). A medication not prescribed in over 18 months is NOT current.
     Inpatient — administered during a hospital/inpatient encounter, not an outpatient take-home prescription.
-  Base the status on the most recent entry for that drug. Do not invent a status.
+  A drug can only be Current if its Last date prescribed is on or after ${cutoffDate}. Do not invent a status.
 - Last date prescribed: the most recent date the drug was prescribed or ordered, as YYYY-MM-DD (use what is given if only a month/year is present; "—" if no date is found).
 - Source: cite the entry that established the Last date prescribed, formatted as "File N p.<page>" using the file tags below. Do NOT write full file names in the table — use only the "File N" tag. If you cannot determine a page, use just "File N".
 
@@ -10858,7 +10858,7 @@ ${legendLines}`;
 // over a large multi-hundred-page record — the agent sees every entry,
 // so both Deepseek and GPT produce complete tables. `ahFileTag` is the
 // "File N" legend tag for the Apple Health source file.
-function buildWorksheetPromptFromMarkdown(ahFileTag, medMarkdown, legendLines) {
+function buildWorksheetPromptFromMarkdown(ahFileTag, medMarkdown, legendLines, cutoffDate) {
   return `Below are this patient's medication records, extracted directly from their Apple Health export (${ahFileTag}). Each entry shows a date, the medication name and strength, and the page number it appears on.
 
 Build a GitHub-flavored Markdown table with EXACTLY these columns — no title, no notes, no text before or after the table:
@@ -10868,10 +10868,10 @@ Build a GitHub-flavored Markdown table with EXACTLY these columns — no title, 
 Rules per column:
 - Medication: the drug name with the strength/form FROM ITS MOST RECENT entry (e.g. "atorvastatin 20 MG tablet"). One row per drug — see de-duplication below.
 - Status: exactly one of —
-    Current — this drug's most recent entry is a recent outpatient prescription, not marked stopped/held/discontinued.
-    Discontinued — this drug's most recent entry is explicitly stopped/inactive/held.
+    Current — this drug's most recent entry is an outpatient prescription (not stopped/held/discontinued) AND its Last date prescribed is on or after ${cutoffDate} (within the last 18 months).
+    Discontinued — this drug's most recent entry is explicitly stopped/inactive/held, OR its Last date prescribed is BEFORE ${cutoffDate} (more than 18 months ago). A medication not prescribed in over 18 months is NOT current.
     Inpatient — administered during a hospital/inpatient encounter (e.g. anesthesia agents like propofol/fentanyl, IV infusions), not an outpatient take-home prescription.
-  Base status on the most recent entry. Do not invent a status. If unsure, use Current.
+  A drug can only be Current if its Last date prescribed is on or after ${cutoffDate}. Do not invent a status.
 - Last date prescribed: the most recent date for that drug, as YYYY-MM-DD.
 - Source: "${ahFileTag} p.<page>" using the page number of that most-recent entry. If no page is shown, use just "${ahFileTag}".
 
@@ -11001,6 +11001,14 @@ app.post('/api/medications/worksheet', async (req, res) => {
     // record routinely misses the medication pages (especially Deepseek),
     // producing blank worksheets. Fall back to KB retrieval when no Apple
     // Health medication markdown exists.
+    // 18-month "Current" cutoff (YYYY-MM-DD): any medication whose most
+    // recent prescription predates this is Discontinued/Inpatient, never
+    // Current. Computed server-side so it doesn't depend on the model
+    // knowing today's date.
+    const cutoff = new Date();
+    cutoff.setMonth(cutoff.getMonth() - 18);
+    const cutoffDate = cutoff.toISOString().slice(0, 10);
+
     let prompt;
     let worksheetSourceMode = 'kb-retrieval';
     const ahFileIdx = kbFiles.findIndex(f => f.isAppleHealth);
@@ -11008,12 +11016,12 @@ app.post('/api/medications/worksheet', async (req, res) => {
       const medMd = await findMedicationRecordsMarkdown(userId);
       if (medMd?.text) {
         const ahFileTag = `File ${ahFileIdx + 1}`;
-        prompt = buildWorksheetPromptFromMarkdown(ahFileTag, medMd.text, legendLines);
+        prompt = buildWorksheetPromptFromMarkdown(ahFileTag, medMd.text, legendLines, cutoffDate);
         worksheetSourceMode = 'apple-health-markdown';
       }
     }
     if (!prompt) {
-      prompt = buildWorksheetPrompt(legendLines);
+      prompt = buildWorksheetPrompt(legendLines, cutoffDate);
     }
 
     // Ensure the KB is attached to THIS agent before calling, so retrieval
