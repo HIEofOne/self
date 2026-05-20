@@ -457,15 +457,9 @@
               </q-item-section>
               <q-item-section>
                 <q-item-label :class="{ 'text-grey-5': !wizardCurrentMedications && !stage2StatusDisplay.completed && !wizardPreparingRecords }">
-                  Current Medications
-                  <span v-if="wizardCurrentMedications" class="text-green text-caption q-ml-sm">Verified</span>
+                  Medication Worksheets
+                  <span v-if="wizardCurrentMedications" class="text-green text-caption q-ml-sm">Generating in My Lists</span>
                   <span v-else-if="wizardPreparingRecords" class="text-primary text-caption q-ml-sm">Preparing...</span>
-                  <q-btn
-                    v-else-if="stage2StatusDisplay.completed && wizardStage1Complete"
-                    flat dense size="sm" color="orange-8" label="Verify"
-                    class="q-ml-sm"
-                    @click="handleWizardMedsAction"
-                  />
                 </q-item-label>
               </q-item-section>
             </q-item>
@@ -483,7 +477,7 @@
                   <span v-if="wizardPatientSummary" class="text-green text-caption q-ml-sm">Verified</span>
                   <span v-else-if="wizardPreparingRecords" class="text-primary text-caption q-ml-sm">Preparing...</span>
                   <q-btn
-                    v-else-if="stage2StatusDisplay.completed && wizardStage1Complete && (!wizardHasAppleHealthFile || wizardCurrentMedications)"
+                    v-else-if="stage2StatusDisplay.completed && wizardStage1Complete"
                     flat dense size="sm" color="orange-8" label="Verify"
                     class="q-ml-sm"
                     @click="handleWizardSummaryAction"
@@ -1200,7 +1194,6 @@ const wizardStage3Files = ref<Array<{ name: string; isAppleHealth?: boolean; inK
 const wizardKbIndexedKeys = ref<string[]>([]);
 const wizardKbTogglePending = ref<Set<string>>(new Set());
 const wizardAutoCheckedKeys = ref<Set<string>>(new Set());
-const wizardHasAppleHealthFile = computed(() => stage3DisplayFiles.value.some(file => !!file.isAppleHealth));
 const stage2StatusDisplay = computed(() => {
   const isIndexing = indexingStatus.value?.phase === 'indexing' || indexingStatus.value?.phase === 'indexing_started';
   const files = indexingStatus.value?.filesIndexed ?? stage3DisplayFiles.value.length;
@@ -2645,32 +2638,6 @@ const toggleWizardKbCheckbox = async (file: { bucketKey?: string | null; inKnowl
     console.error('Failed to toggle KB selection:', error);
   } finally {
     wizardKbTogglePending.value.delete(bucketKey);
-  }
-};
-
-const handleWizardMedsAction = () => {
-  if (!props.user?.userId) return;
-  const appleFile = stage3DisplayFiles.value.find(file => file.isAppleHealth && file.bucketKey);
-  try {
-    sessionStorage.setItem('autoProcessInitialFile', 'true');
-    sessionStorage.setItem('wizardMyListsAuto', 'true');
-  } catch (error) {
-    // ignore storage errors
-  }
-  myStuffInitialTab.value = 'lists';
-  showMyStuffDialog.value = true;
-  if (appleFile?.bucketKey) {
-    void fetch('/api/files/lists/process-initial-file', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      credentials: 'include',
-      body: JSON.stringify({
-        bucketKey: appleFile.bucketKey,
-        fileName: appleFile.name
-      })
-    });
   }
 };
 
@@ -6135,8 +6102,11 @@ const startSetupWizardPolling = () => {
     .then(() => {
       // ── Safari/basic reload recovery: resume guided flow if indexing already done ──
       // On reload wizardFlowPhase resets to 'done'. If the server shows indexing
-      // complete + agent ready but medications or summary are still pending, the
+      // complete + agent ready but the Patient Summary is still unverified, the
       // user was mid-guided-flow. Resume it so the wizard doesn't get stuck.
+      // The Current Medications extract/verify step is no longer part of the
+      // flow (replaced by background Worksheet generation), so we resume
+      // directly at the summary verification phase.
       // Skip entirely during the post-Restore grace window — otherwise this
       // generates a fresh draft summary and overwrites what Restore restored.
       if (
@@ -6144,24 +6114,13 @@ const startSetupWizardPolling = () => {
         wizardFlowPhase.value === 'done' &&
         (safariFolderName.value || localFolderHandle.value) &&
         indexingStatus.value?.phase === 'complete' &&
-        wizardStage1Complete.value
+        wizardStage1Complete.value &&
+        !wizardPatientSummary.value
       ) {
-        if (!wizardPatientSummary.value && wizardCurrentMedications.value) {
-          // Meds done, summary pending → resume at summary phase
-          wizardFlowPhase.value = 'summary';
-          myStuffInitialTab.value = 'summary';
-          requestMyStuffSummaryAction('generate-summary');
-          showMyStuffDialog.value = true;
-        } else if (!wizardCurrentMedications.value) {
-          // Meds still pending → resume at medications phase
-          wizardFlowPhase.value = 'medications';
-          try {
-            sessionStorage.setItem('autoProcessInitialFile', 'true');
-            sessionStorage.setItem('wizardMyListsAuto', 'true');
-          } catch { /* ignore */ }
-          myStuffInitialTab.value = 'lists';
-          showMyStuffDialog.value = true;
-        }
+        // Summary pending → resume at summary phase (loads the existing draft).
+        wizardFlowPhase.value = 'summary';
+        myStuffInitialTab.value = 'summary';
+        showMyStuffDialog.value = true;
       }
 
       if (!shouldHideSetupWizard.value && !showAgentSetupDialog.value && !wizardDismissed.value && !showMyStuffDialog.value) {
@@ -6402,14 +6361,9 @@ watch(
         clearTimeout(wizardTimeoutTimer);
         wizardTimeoutTimer = null;
       }
-      wizardFlowPhase.value = 'medications';
       guidedFlowDismissCount.value = 0;
-      // Note: 'medications-offered' event is logged by Lists.vue after extraction
-      // completes, so we have an accurate line count for the offered meds.
 
-      // Step 1: Generate and save the draft Patient Summary BEFORE opening My
-      // Lists, so the summary text is available when Lists.vue needs to extract
-      // medications.
+      // Step 1: Generate and save the draft Patient Summary.
       //
       // No client-side KB-attached poll here: the server's /api/patient-summary/
       // draft endpoint force-attaches the KB to the agent before calling the
@@ -6454,21 +6408,69 @@ watch(
         }
       }
 
-      // Step 2: Open My Lists tab FIRST, then close wizard dialog.
-      // Opening My Stuff before closing the wizard prevents a flash of the empty chat.
-      wizardPreparingMessage.value = 'Opening Current Medications for review...';
+      // Step 2: Trigger generation of both Current Medications Worksheets
+      // (Deepseek + GPT) in the background. This REPLACES the old extract /
+      // verify / splice Current Medications step — the worksheets are produced
+      // by direct KB retrieval and shown in My Lists. GPT is auto-provisioned
+      // server-side if it isn't ready yet (the POST returns 202 and the user
+      // can Refresh the worksheet later from My Lists).
+      wizardPreparingMessage.value = 'Generating medication worksheets from your records...';
+      triggerSetupWorksheets();
+      // Mark the (now bypassed) Current Medications step as satisfied so the
+      // checklist and completion gating don't wait on a verification that no
+      // longer happens.
+      wizardCurrentMedications.value = true;
+      wizardStage2Complete.value = true;
+      wizardStage2Pending.value = false;
+      wizardStage2NoDevice.value = false;
+
+      // Step 3: Open the Patient Summary tab for verification. The draft was
+      // generated above and is loaded from userDoc.draftPatientSummary by
+      // MyStuffDialog's loadPatientSummary (no second AI call). Opening My Stuff
+      // before closing the wizard prevents a flash of the empty chat.
+      wizardFlowPhase.value = 'summary';
+      wizardPreparingMessage.value = 'Opening Patient Summary for review...';
       wizardPreparingRecords.value = false;
       try {
         sessionStorage.setItem('autoProcessInitialFile', 'true');
-        sessionStorage.setItem('wizardMyListsAuto', 'true');
       } catch { /* ignore */ }
-      myStuffInitialTab.value = 'lists';
+      myStuffInitialTab.value = 'summary';
       showMyStuffDialog.value = true;
       // Close wizard dialog after My Stuff is open (My Stuff dialog covers the screen)
       showAgentSetupDialog.value = false;
     }
   }
 );
+
+/**
+ * Fire-and-forget generation of both Current Medications Worksheets at Setup.
+ * Persists server-side (userDoc.medsWorksheets[profileKey]); the user views /
+ * refreshes them in My Lists. GPT may return 202 (provisioning/deploying) — that
+ * is expected and non-fatal; the user can Refresh it later.
+ */
+const triggerSetupWorksheets = () => {
+  if (!props.user?.userId) return;
+  const userId = props.user.userId;
+  for (const profileKey of ['default', 'gpt'] as const) {
+    void (async () => {
+      try {
+        const res = await fetch('/api/medications/worksheet', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ userId, agentProfileKey: profileKey })
+        });
+        if (res.status === 202) {
+          console.log(`[Wizard] Worksheet (${profileKey}) deferred — agent still provisioning`);
+        } else if (!res.ok) {
+          console.warn(`[Wizard] Worksheet (${profileKey}) failed: HTTP ${res.status}`);
+        }
+      } catch (err) {
+        console.warn(`[Wizard] Worksheet (${profileKey}) generation error:`, err);
+      }
+    })();
+  }
+};
 
 // ── TEST MODE: Auto-verify watchers ──────────────────────────────
 // In testMode, automatically verify medications and summary when the wizard
