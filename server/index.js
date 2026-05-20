@@ -10795,6 +10795,158 @@ app.post('/api/medications/extract', async (req, res) => {
   }
 });
 
+// Current Medications Worksheet — a structured medication table built by
+// a specific Private AI agent (profile 'default' = Deepseek, 'gpt' =
+// GPT) using its attached knowledge base (retrieval). One row per
+// medication: Status (Current/Discontinued/Inpatient), Last date
+// prescribed, and a Source cited as "File N p.#" against a file legend
+// the SERVER supplies (so numbering is consistent across both agents
+// and the model can't invent file names). Result is persisted to
+// userDoc.medsWorksheets[profile] and rendered in My Lists.
+function buildWorksheetPrompt(legendLines) {
+  return `You are building a Current Medications Worksheet from this patient's records in your knowledge base. Use ONLY information found in your knowledge base; never infer, assume, or add a medication that is not present. Include EVERY medication you find.
+
+Output a GitHub-flavored Markdown table with EXACTLY these columns — no title, no notes, no text before or after the table:
+
+| Medication | Status | Last date prescribed | Source |
+
+Rules per column:
+- Medication: the drug name with strength/form if stated (e.g. "atorvastatin 20 MG tablet"). One medication per row.
+- Status: exactly one of —
+    Current — on the active medication list / actively prescribed, not marked stopped, held, or discontinued.
+    Discontinued — explicitly stopped, inactive, held, or discontinued in the record.
+    Inpatient — administered during a hospital/inpatient encounter, not an outpatient take-home prescription.
+  Base the status on the most recent entry for that medication. Do not invent a status.
+- Last date prescribed: the most recent date the medication was prescribed or ordered, as YYYY-MM-DD (use what is given if only a month/year is present; "—" if no date is found).
+- Source: cite the SINGLE entry that established the Last date prescribed, formatted as "File N p.<page>" using the file tags below. Do NOT write full file names in the table — use only the "File N" tag. If you cannot determine a page, use just "File N".
+
+De-duplication: if the same medication (same name and strength) appears more than once, output ONE row, using the occurrence with the most recent Last date prescribed, and cite that occurrence's File tag and page.
+
+Apply your system instructions for any medications that must be omitted or redacted.
+
+Source file tags (use only these in the Source column):
+${legendLines}`;
+}
+
+app.post('/api/medications/worksheet', async (req, res) => {
+  try {
+    const userId = resolveUserId(req, res);
+    if (!userId) return;
+    const profileKey = req.body?.agentProfileKey === 'gpt' ? 'gpt' : 'default';
+
+    let userDoc = await cloudant.getDocument('maia_users', userId);
+    if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+
+    // Resolve the agent endpoint/id/key/model for the requested profile.
+    let agentId, endpoint, model;
+    if (profileKey === 'gpt') {
+      let gpt = userDoc.agentProfiles?.gpt;
+      // Auto-provision GPT on demand if missing/not yet deployed.
+      if (!gpt?.agentId || !gpt?.endpoint) {
+        try {
+          const { ensureSecondaryAgent } = await import('./routes/auth.js');
+          userDoc = await ensureSecondaryAgent(doClient, cloudant, userDoc);
+          gpt = userDoc.agentProfiles?.gpt;
+        } catch (e) {
+          return res.status(202).json({ success: false, pending: true, reason: 'GPT_PROVISIONING', message: 'Provisioning Private AI (GPT)…' });
+        }
+        if (!gpt?.endpoint) {
+          // Created but still deploying — caller should retry shortly.
+          return res.status(202).json({ success: false, pending: true, reason: 'GPT_DEPLOYING', message: 'Private AI (GPT) is deploying — try Refresh in a few minutes.' });
+        }
+      }
+      agentId = gpt.agentId;
+      endpoint = gpt.endpoint;
+      model = gpt.modelName || 'openai-gpt-oss-120b';
+    } else {
+      if (!userDoc.assignedAgentId || !userDoc.agentEndpoint) {
+        return res.status(400).json({ success: false, error: 'AGENT_NOT_CONFIGURED' });
+      }
+      agentId = userDoc.assignedAgentId;
+      endpoint = userDoc.agentEndpoint;
+      model = userDoc.agentModelName || 'deepseek-v4-pro';
+    }
+
+    // File legend from the indexed KB files (File 1..N). Server-supplied
+    // so the table's "File N" tags are stable across both agents.
+    const kbName = getKBNameFromUserDoc(userDoc, userId);
+    const kbPrefix = kbName ? `${userId}/${kbName}/` : null;
+    const kbFiles = (userDoc.files || []).filter(f =>
+      f?.fileName && (!kbPrefix || (f.bucketKey || '').startsWith(kbPrefix))
+    );
+    if (kbFiles.length === 0) {
+      return res.status(400).json({ success: false, error: 'NO_INDEXED_FILES', message: 'No indexed files to build a worksheet from.' });
+    }
+    const legend = kbFiles.map((f, i) => ({ tag: `File ${i + 1}`, fileName: f.fileName }));
+    const legendLines = legend.map(l => `${l.tag} = ${l.fileName}`).join('\n');
+    const prompt = buildWorksheetPrompt(legendLines);
+
+    const apiKey = await getOrCreateAgentApiKey(doClient, cloudant, userId, agentId, profileKey);
+    const { DigitalOceanProvider } = await import('../lib/chat-client/providers/digitalocean.js');
+    const chatOptions = { model, stream: false };
+
+    let chatResp;
+    try {
+      chatResp = await new DigitalOceanProvider(apiKey, { baseURL: endpoint }).chat([{ role: 'user', content: prompt }], chatOptions);
+    } catch (firstError) {
+      const sc = firstError.status || firstError.statusCode || 0;
+      if ((sc === 401 || sc === 403) && agentId) {
+        const { recreateAgentApiKey } = await import('./utils/agent-helper.js');
+        const newApiKey = await recreateAgentApiKey(doClient, cloudant, userId, agentId, profileKey);
+        chatResp = await new DigitalOceanProvider(newApiKey, { baseURL: endpoint }).chat([{ role: 'user', content: prompt }], chatOptions);
+      } else {
+        throw firstError;
+      }
+    }
+
+    const table = (chatResp.content || chatResp.text || '').trim();
+    const generatedAt = new Date().toISOString();
+    const entry = { table, legend, model, generatedAt };
+
+    // Persist (conflict-tolerant). Non-fatal if it can't save.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const doc = await cloudant.getDocument('maia_users', userId);
+        if (!doc) break;
+        if (!doc.medsWorksheets || typeof doc.medsWorksheets !== 'object') doc.medsWorksheets = {};
+        doc.medsWorksheets[profileKey] = entry;
+        doc.updatedAt = new Date().toISOString();
+        await cloudant.saveDocument('maia_users', doc);
+        break;
+      } catch (e) {
+        if (e?.statusCode === 409 && attempt < 2) continue;
+        console.warn(`[worksheet] could not persist ${profileKey} for ${userId}: ${e?.message || e}`);
+        break;
+      }
+    }
+
+    await appendUserProvisioningEvent(userId, {
+      event: 'meds-worksheet-generated',
+      agentProfileKey: profileKey,
+      model,
+      fileCount: legend.length
+    });
+
+    res.json({ success: true, agentProfileKey: profileKey, ...entry });
+  } catch (error) {
+    console.error('Error building medications worksheet:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Read persisted worksheets (no AI call).
+app.get('/api/medications/worksheet', async (req, res) => {
+  try {
+    const userId = resolveUserId(req, res);
+    if (!userId) return;
+    const userDoc = await cloudant.getDocument('maia_users', userId);
+    if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+    res.json({ success: true, worksheets: userDoc.medsWorksheets || {} });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Splice the verified Current Medications into the saved draft summary's
 // "Current Medications" section. Pure text edit; no AI call.
 app.patch('/api/patient-summary/medications', async (req, res) => {

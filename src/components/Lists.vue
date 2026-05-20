@@ -215,14 +215,15 @@
       <!-- Categories Section -->
       <q-card v-if="!hasAppleHealthFile" class="q-mb-md">
         <q-card-section>
+          <div class="text-h6 q-mb-md">Categories from Apple Health</div>
           <div class="text-body2 text-grey-7">
-            Categories index currently requires an Apple Health Export PDF file.
+            No Apple Health file categories are available.
           </div>
         </q-card-section>
       </q-card>
       <q-card v-else-if="categoriesList.length > 0" class="q-mb-md">
         <q-card-section>
-          <div class="text-h6 q-mb-md">Categories</div>
+          <div class="text-h6 q-mb-md">Categories from Apple Health</div>
           <q-list bordered separator>
             <q-expansion-item
               v-for="(category, index) in categoriesList" 
@@ -288,6 +289,55 @@
               </q-card>
             </q-expansion-item>
           </q-list>
+        </q-card-section>
+      </q-card>
+
+      <!-- Current Medications Worksheets (one per Private AI agent) -->
+      <q-card v-for="ws in worksheetSpecs" :key="ws.profileKey" class="q-mb-md">
+        <q-card-section>
+          <div class="row items-center justify-between q-mb-sm">
+            <div class="text-h6">{{ ws.title }}</div>
+            <q-btn
+              :label="worksheets[ws.profileKey] ? 'Refresh' : 'Generate'"
+              color="primary"
+              dense
+              :loading="worksheetBusy === ws.profileKey"
+              :disable="!!worksheetBusy"
+              @click="generateWorksheet(ws.profileKey)"
+            />
+          </div>
+          <div v-if="worksheets[ws.profileKey]" class="text-caption text-grey-7 q-mb-sm">
+            {{ worksheets[ws.profileKey].model }} ·
+            generated {{ formatWorksheetTime(worksheets[ws.profileKey].generatedAt) }}
+          </div>
+
+          <div v-if="!worksheets[ws.profileKey]" class="text-body2 text-grey-7">
+            No worksheet yet. Press <strong>Generate</strong> to build it from this agent's knowledge base.
+          </div>
+
+          <template v-else>
+            <q-markup-table v-if="parseWorksheet(worksheets[ws.profileKey].table).rows.length" flat bordered dense wrap-cells>
+              <thead>
+                <tr>
+                  <th v-for="(h, hi) in parseWorksheet(worksheets[ws.profileKey].table).headers" :key="hi" class="text-left">{{ h }}</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(row, ri) in parseWorksheet(worksheets[ws.profileKey].table).rows" :key="ri">
+                  <td v-for="(cell, ci) in row" :key="ci" class="text-left">{{ cell }}</td>
+                </tr>
+              </tbody>
+            </q-markup-table>
+            <!-- Fallback if the model didn't return a parseable table -->
+            <pre v-else style="white-space: pre-wrap; font-family: monospace; font-size: 12px;">{{ worksheets[ws.profileKey].table }}</pre>
+
+            <!-- File legend footnote -->
+            <div v-if="worksheets[ws.profileKey].legend?.length" class="q-mt-sm text-caption text-grey-7">
+              <div v-for="(l, li) in worksheets[ws.profileKey].legend" :key="li">
+                {{ l.tag }} = {{ l.fileName }}
+              </div>
+            </div>
+          </template>
         </q-card-section>
       </q-card>
 
@@ -496,6 +546,83 @@ const categoriesList = ref<Array<{
   expanded?: boolean;
 }>>([]);
 const expandedCategories = ref<Set<string>>(new Set());
+
+// ── Current Medications Worksheets (one per Private AI agent) ──────────
+interface WorksheetEntry {
+  table: string;
+  legend: Array<{ tag: string; fileName: string }>;
+  model?: string;
+  generatedAt?: string;
+}
+const worksheetSpecs = [
+  { profileKey: 'default', title: 'Current Medications Worksheet (Deepseek)' },
+  { profileKey: 'gpt', title: 'Current Medications Worksheet (GPT)' }
+];
+const worksheets = ref<Record<string, WorksheetEntry>>({});
+const worksheetBusy = ref<string | null>(null);
+
+const loadWorksheets = async () => {
+  if (!props.userId) return;
+  try {
+    const r = await fetch(`/api/medications/worksheet?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
+    if (r.ok) {
+      const d = await r.json();
+      worksheets.value = (d && typeof d.worksheets === 'object' && d.worksheets) || {};
+    }
+  } catch { /* non-fatal */ }
+};
+
+const generateWorksheet = async (profileKey: string) => {
+  if (worksheetBusy.value) return;
+  worksheetBusy.value = profileKey;
+  try {
+    const r = await fetch('/api/medications/worksheet', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ userId: props.userId, agentProfileKey: profileKey })
+    });
+    const d = await r.json().catch(() => ({}));
+    if (r.status === 202 && d.pending) {
+      if ($q?.notify) $q.notify({ type: 'info', message: d.message || 'The agent is being provisioned — try again shortly.', timeout: 5000 });
+      return;
+    }
+    if (!r.ok || d.success === false) {
+      throw new Error(d.message || d.error || 'Failed to generate worksheet');
+    }
+    worksheets.value = {
+      ...worksheets.value,
+      [profileKey]: { table: d.table, legend: d.legend || [], model: d.model, generatedAt: d.generatedAt }
+    };
+    if ($q?.notify) $q.notify({ type: 'positive', message: 'Worksheet generated', timeout: 2500 });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to generate worksheet';
+    if ($q?.notify) $q.notify({ type: 'negative', message: msg, timeout: 5000 });
+  } finally {
+    worksheetBusy.value = null;
+  }
+};
+
+// Parse a GitHub-flavored Markdown table into headers + rows.
+const parseWorksheet = (md: string): { headers: string[]; rows: string[][] } => {
+  if (!md) return { headers: [], rows: [] };
+  const lines = md.split('\n').map(l => l.trim()).filter(l => l.startsWith('|'));
+  if (lines.length < 2) return { headers: [], rows: [] };
+  const splitRow = (l: string) => l.replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+  const headers = splitRow(lines[0]);
+  const rows: string[][] = [];
+  for (let i = 1; i < lines.length; i++) {
+    // Skip the separator row (---|---).
+    if (/^\|?[\s:|-]+\|?$/.test(lines[i]) && lines[i].includes('-')) continue;
+    rows.push(splitRow(lines[i]));
+  }
+  return { headers, rows };
+};
+
+const formatWorksheetTime = (iso?: string): string => {
+  if (!iso) return '';
+  try { return new Date(iso).toLocaleString(); } catch { return iso; }
+};
 const showPdfViewer = ref(false);
 const viewingPdfFile = ref<{ bucketKey?: string; name?: string; fileUrl?: string; originalFile?: File } | undefined>(undefined);
 const pdfInitialPage = ref<number | undefined>(undefined);
@@ -2145,6 +2272,7 @@ onMounted(async () => {
   }
 
   await loadSavedResults();
+  void loadWorksheets();
 
   // Only start auto-processing if no saved results (file not yet processed into lists)
   if (!hasSavedResults.value) {
