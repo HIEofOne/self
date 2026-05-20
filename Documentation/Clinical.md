@@ -1,0 +1,225 @@
+# Clinical Features
+
+A living reference for the clinical-data-handling features of MAIA:
+**My Lists Categories** and **Current Medications**. Update this file as
+clinical features are enhanced.
+
+Companion docs:
+- `NEW-AGENT.txt` — agent and knowledge-base configuration (canonical
+  source for the parameters below).
+- `Documentation/Wizards.md` / `Wizards2.md` — Setup and Restore flow.
+- `Documentation/NewRestore.md` — full-doc backup / rehydrate design.
+
+---
+
+## 1. My Lists Categories
+
+### What they are
+Per-patient, structured lists of clinical information extracted from an
+**Apple Health Export PDF** ("Health Records — \<Name\> — \<date\>.pdf").
+Each category is saved as its own markdown file so the user can view,
+edit, and download structured slices of their record without re-reading
+the whole PDF.
+
+Typical categories (driven entirely by `### Heading` rows in the Apple
+Health export, not a fixed list):
+- `Medications` — see §2 below for how this one is also used to seed
+  Current Medications.
+- `Conditions`
+- `Allergies`
+- `Procedures`
+- `Immunizations`
+- `Lab Results`
+- `Vital Signs`
+- `Care Team` / `Encounters` / others as Apple Health emits them.
+
+### When and how they are created
+
+1. **Apple Health detection.** When a PDF is uploaded (Setup, Restore
+   folder-added, or via the wizard), `POST /api/files/restore-bytes`
+   parses the first page server-side and matches the Apple Health
+   footer text. If matched, `userDoc.files[i].isAppleHealth` is stamped
+   `true` (this is the single source of truth — never filename-based).
+   See `NEW-AGENT.txt` → *Knowledge Bases* and the
+   `restore-bytes` endpoint in `server/index.js`.
+
+2. **PDF → markdown.** `process-initial-file`
+   (`server/routes/files.js`) reads the AH PDF from DigitalOcean
+   Spaces, converts it to markdown, and saves the full markdown to
+   `${userId}/Lists/<sanitised-AH-filename>.md`.
+
+3. **Category extraction.** When the file is confirmed Apple Health
+   (`isAppleHealth: true` OR the AH footer text is present in the
+   generated markdown), `extractAndSaveCategoryFiles`
+   (`server/utils/lists-processor.js`) walks the markdown:
+   - **Each `### <Category Name>` heading** in the AH markdown becomes
+     one category file.
+   - Lines under the heading until the next `### ` or `## ` heading
+     become that category's body.
+   - Each category is written to `${userId}/Lists/<category>.md` in
+     Spaces.
+
+4. **Persistence flags.** After a successful run:
+   - `userDoc.appleHealthCategoriesBuiltAt` = ISO timestamp.
+   - `userDoc.appleHealthCategoriesSourceKey` = bucketKey of the AH
+     PDF the categories were built from.
+   These let later code know "already built", and they round-trip
+   in the v2 backup so Restore knows what to recreate.
+
+5. **Rebuild rules.** `process-initial-file` rebuilds categories when:
+   - `force: true` is passed (used by Restore — the cloud KB and
+     category files were wiped, even though `appleHealthCategoriesBuiltAt`
+     is still set in the round-tripped backup), **or**
+   - not yet built, **or**
+   - the source AH file's bucketKey changed (`appleHealthCategoriesSourceKey
+     !== initialFileBucketKey`).
+
+6. **Self-heal `isAppleHealth`.** If categories are being built because
+   the content footer matches (not the flag), `process-initial-file`
+   also writes `userDoc.files[i].isAppleHealth = true` so downstream
+   consumers (Lists.vue's `appleHealthFileInfo`, the Apple Health badge,
+   the Restore category-rebuild fast path) see it.
+
+### The Lists UI
+`src/components/Lists.vue` lists all `${userId}/Lists/*.md` files except
+the source markdown, lets the user view/download each, and provides the
+**Categories index** entry-point (which requires an Apple Health source —
+hence the "requires an Apple Health Export PDF" message when none is
+configured). The `appleHealthFileInfo` ref is derived from
+`userDoc.files.find(f => f.isAppleHealth)`, which is why correct
+`isAppleHealth` self-healing matters.
+
+### Endpoints involved
+- `POST /api/files/lists/process-initial-file` — generate markdown +
+  categories (called from Setup, Restore, and manual triggers).
+- `GET /api/files/lists/markdown` — list category files.
+- The flags `appleHealthCategoriesBuiltAt` /
+  `appleHealthCategoriesSourceKey` live on `userDoc` and round-trip in
+  `maia-state.json`.
+
+---
+
+## 2. Current Medications
+
+Current Medications is a **user-verified** authoritative medication list
+that supersedes anything an AI pulls out of the knowledge base. The
+Patient Summary uses it as its source of truth (see the **MAIA
+INSTRUCTION TEXT** section of `NEW-AGENT.txt`, which instructs the
+agent: *"if a Current Medications list is provided in the request, use
+it as the authoritative source"*).
+
+### Where the list comes from (in order of preference)
+
+The wizard's Current Medications step (`src/components/ChatInterface.vue`
++ `Lists.vue`) tries the following sources and offers the result for
+**human verification** before saving:
+
+1. **Apple Health (`source: apple-health`).** If the user has an Apple
+   Health Export PDF and the agent endpoint is ready, the client calls
+   `POST /api/medications/extract` with `mode: 'apple-health'`. The
+   server:
+   - reads the AH **markdown** from `${userId}/Lists/<file>.md`,
+   - sends a focused prompt to the user's **primary Private AI agent**
+     (Deepseek; see `NEW-AGENT.txt` → *Private AI Agents*) — *"Extract
+     the Current Medications from the following Apple Health export.
+     List one medication per line, no commentary."* — and uses any
+     `contextMeds` from an earlier `from-summary` extraction as
+     reconciliation context,
+   - returns the parsed list.
+   - **Soft-skip**: if the AH markdown isn't written yet, the user doc
+     isn't found, the agent isn't configured, or there's no AH file,
+     the endpoint returns `200 {success:true, skipped:true, reason}`
+     and emits a `medications-extract-skipped` provisioning event (so
+     the step shows in `maia-log.pdf`). The client cleanly falls back
+     to the next source.
+
+2. **Patient-summary draft (`source: patient-summary`).** The wizard
+   first generates a draft Patient Summary (`/api/patient-summary/draft`)
+   from the full knowledge base, then calls
+   `POST /api/medications/extract` with `mode: 'from-summary'`. The
+   server prompts the agent to extract Current Medications from the
+   draft text.
+
+3. **Existing `userDoc.currentMedications` (`source: user-doc`).** On
+   Restore / resume, if a verified list already exists on the user doc
+   it's offered as-is for re-verification — no AI call.
+
+4. **Manual (`source: manual`).** If every automated path returns
+   nothing, the wizard offers an empty editor for the user to type in.
+
+### Verification → Save
+
+- The wizard logs `medications-offered` with the source and outcome
+  (`success`, `ai-refusal`, `ai-error`, `ai-empty`, `summary-empty`,
+  `no-source`, `agent-not-ready`, `extract-error`) so the path is
+  visible in `maia-log.pdf`.
+- The user edits/accepts in the **My Lists → Current Medications** card
+  and presses **Verify**.
+- On Verify, the list is saved to `userDoc.currentMedications` and
+  emitted as `medications-saved`.
+- The wizard then splices the verified list into the draft Patient
+  Summary at a "Current Medications" heading, regenerates the summary
+  block, and offers it for verification.
+
+### Why the agent matters
+Both extractions run through the **primary Private AI agent** (Deepseek
+V4 Pro by default; see `NEW-AGENT.txt`) so the agent's system
+instructions — especially the "Errors and Redactions" block (e.g.,
+omit sexual-function medications) — apply at extraction time, not just
+at chat time.
+
+### Endpoints involved
+- `POST /api/patient-summary/draft` — draft Patient Summary used as the
+  source for the `from-summary` extraction path.
+- `POST /api/medications/extract` — modes `apple-health` and
+  `from-summary`; soft-skips with `medications-extract-skipped` on
+  expected early-wizard misses.
+- `POST /api/current-medications` (and the `/api/patient-summary` save
+  path) — persist the verified list.
+
+---
+
+## 3. Reference: Agents and Knowledge Bases
+
+For the canonical parameters, see **`NEW-AGENT.txt`** at the repo root.
+Do not duplicate those values here — link to the sections instead.
+
+- **`## MAIA INSTRUCTION TEXT`** — the seed System Instructions used to
+  create both Private AI agents. Encodes the Current Medications
+  priority rule, the patient-summary layout, the redaction policy, and
+  output formatting. Per-agent instructions diverge after creation
+  (editable in My Stuff → My AI Agent sub-tabs).
+- **`## Private AI Agents`** — two agents per user:
+  - **Primary**: Private AI (Deepseek) — `inference_name:
+    deepseek-v4-pro`. The agent used by Setup/Restore wizard automation
+    and by the medication-extraction and summary-draft endpoints
+    described above.
+  - **Alternate**: Private AI (GPT) — `inference_name:
+    openai-gpt-oss-120b`. Optional, manually connectable per agent
+    sub-tab; created lazily on first connect.
+- **`## Knowledge Bases`** — KB-creation parameters actually sent to
+  DigitalOcean:
+  - `embedding_model: GTE Large EN v1.5` (resolved to a UUID at
+    runtime; overrideable via `DO_EMBEDDING_MODEL_ID`)
+  - `reranking_model: BGE Reranker v2 m3` (resolved to model `id`
+    `bge-reranker-v2-m3`)
+  - `chunking_strategy`: `semantic` (KB-1 default) or `hierarchical`
+    (KB-2)
+  - Semantic: `semantic_similarity_threshold`, `semantic_max_chunk_size`
+  - Hierarchical: `hierarchical_max_parent_chunk_size`,
+    `hierarchical_max_child_chunk_size`
+  - **OpenSearch database is NOT configurable** — always reuse the
+    existing account cluster; create only if none exists. See the
+    "OpenSearch database (NOT a configurable parameter)" note in
+    `NEW-AGENT.txt`.
+
+The actual parameters used at each KB creation are logged to
+`maia-log.pdf` in the **"Knowledge base created"** entry.
+
+---
+
+## Change log
+
+- *2026-05-19* — Initial version. Documents My Lists Categories and
+  Current Medications as of v1.3.81 (multi-KB, soft-skip extraction,
+  primary/alternate Private AI agents).
