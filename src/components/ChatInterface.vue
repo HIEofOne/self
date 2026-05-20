@@ -3338,7 +3338,10 @@ const generateSetupLogPdf = async () => {
             const agent = evt.agentProfileKey === 'gpt' ? 'Private AI (GPT)' : 'Private AI (Deepseek)';
             const model = evt.model ? ` [${evt.model}]` : '';
             const files = evt.fileCount ? `, ${evt.fileCount} source file(s)` : '';
-            return `[${t}] Current Medications Worksheet generated — ${agent}${model}${files}`;
+            const src = evt.sourceMode === 'apple-health-markdown'
+              ? ', source: Apple Health medication records'
+              : (evt.sourceMode === 'kb-retrieval' ? ', source: knowledge-base retrieval' : '');
+            return `[${t}] Current Medications Worksheet generated — ${agent}${model}${files}${src}`;
           }
           case 'gpt-agent-ready': return `[${t}] Private AI (GPT) deployed and available`;
           case 'medications-dismissed': return `[${t}] Medications step dismissed without verification`;
@@ -3534,14 +3537,15 @@ const generateSetupLogPdf = async () => {
     );
     para(
       'Current Medications Worksheets (Deepseek and GPT)',
-      'Each of your two Private AIs (Deepseek and GPT) independently builds a medication worksheet ' +
-      'by retrieving from your knowledge base. Each worksheet is a table with one row per ' +
-      'medication: the drug name, a Status of Current / Discontinued / Inpatient, the Last date ' +
-      'prescribed, and a Source. To avoid repeating long file names on every row, the Source cites ' +
-      'a short "File N" tag whose full filenames are listed as a legend at the bottom of each ' +
-      'worksheet. The two AIs are run separately so you can compare their results; use REFRESH on a ' +
-      'card to regenerate that worksheet. These worksheets replace the older single Current ' +
-      'Medications extract/verify step.'
+      'Each of your two Private AIs (Deepseek and GPT) independently builds a medication worksheet. ' +
+      'When an Apple Health export is present, the worksheet is built from the structured "Medication ' +
+      'Records" list (every entry has a date and page number), which is far more reliable than ' +
+      'searching the whole knowledge base; otherwise it falls back to knowledge-base retrieval. Each ' +
+      'worksheet is a table with one row per medication: the drug name, a Status of Current / ' +
+      'Discontinued / Inpatient, the Last date prescribed, and a Source citing a short "File N" tag ' +
+      '(full filenames are listed as a legend at the bottom). The two AIs are run separately so you ' +
+      'can compare their results; use REFRESH on a card to regenerate. These worksheets replace the ' +
+      'older single Current Medications extract/verify step.'
     );
     para(
       'Why two AIs',

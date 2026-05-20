@@ -10722,40 +10722,32 @@ app.post('/api/medications/extract', async (req, res) => {
       if (!appleHealthFile || !appleHealthFile.fileName) {
         return softSkip('NO_APPLE_HEALTH_FILE');
       }
-      const cleanName = String(appleHealthFile.fileName).replace(/[^a-zA-Z0-9.-]/g, '_');
-      const mdName = cleanName.replace(/\.pdf$/i, '.md');
-      const markdownKey = `${userId}/Lists/${mdName}`;
-
-      const bucketUrl = getSpacesBucketName();
-      if (!bucketUrl) return res.status(500).json({ success: false, error: 'BUCKET_NOT_CONFIGURED' });
-      const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
-      const { S3Client, GetObjectCommand } = await import('@aws-sdk/client-s3');
-      const s3Client = new S3Client({
-        endpoint: getSpacesEndpoint(),
-        region: 'us-east-1',
-        forcePathStyle: process.env.S3_FORCE_PATH_STYLE === 'true',
-        credentials: {
-          accessKeyId: process.env.DIGITALOCEAN_AWS_ACCESS_KEY_ID || '',
-          secretAccessKey: process.env.DIGITALOCEAN_AWS_SECRET_ACCESS_KEY || ''
-        }
-      });
+      // Prefer the focused, dated "Medication Records" category markdown —
+      // every entry has a date, so the agent can reliably determine the
+      // patient's CURRENT medications. Fall back to the full Apple Health
+      // markdown only if the medication category isn't present.
       let appleHealthMd = '';
-      try {
-        const r = await s3Client.send(new GetObjectCommand({ Bucket: bucketName, Key: markdownKey }));
-        const chunks = [];
-        for await (const c of r.Body) chunks.push(c);
-        appleHealthMd = Buffer.concat(chunks).toString('utf-8');
-      } catch (e) {
-        // Lists/*.md not written yet (race with process-initial-file).
-        // Optional enhancement — soft-skip so Lists.vue cleanly uses
-        // the patient-summary meds and the log records it.
-        return softSkip('APPLE_HEALTH_MARKDOWN_MISSING');
+      const medMd = await findMedicationRecordsMarkdown(userId);
+      if (medMd?.text) {
+        appleHealthMd = medMd.text;
+      } else {
+        const cleanName = String(appleHealthFile.fileName).replace(/[^a-zA-Z0-9.-]/g, '_');
+        const mdName = cleanName.replace(/\.pdf$/i, '.md');
+        appleHealthMd = await readSpacesTextObject(`${userId}/Lists/${mdName}`) || '';
+        if (!appleHealthMd) {
+          // Lists/*.md not written yet (race with process-initial-file).
+          // Optional enhancement — soft-skip so Lists.vue cleanly uses
+          // the patient-summary meds and the log records it.
+          return softSkip('APPLE_HEALTH_MARKDOWN_MISSING');
+        }
       }
 
       const contextBlock = Array.isArray(contextMeds) && contextMeds.length > 0
-        ? `\n\nFor context, these medications were identified in the patient summary you generated earlier from the full knowledge base:\n${contextMeds.map(m => '- ' + m).join('\n')}\n\nUse this list as a starting point, then reconcile and refine against the Apple Health data below. Apply your system instructions for any medications that must be omitted or redacted.\n`
+        ? `\n\nFor context, these medications were identified in the patient summary you generated earlier from the full knowledge base:\n${contextMeds.map(m => '- ' + m).join('\n')}\n\nUse this list as a starting point, then reconcile and refine against the Apple Health data below.\n`
         : '';
-      prompt = `Extract the Current Medications from the following Apple Health export. List one medication per line, no commentary.${contextBlock}\n\n${appleHealthMd}`;
+      prompt = `Below are this patient's dated medication records from their Apple Health export. Identify the patient's CURRENT medications: for each distinct drug, the most recent dated entry reflects the current prescription (and current strength). Exclude entries that are clearly one-time inpatient/anesthesia administrations (e.g. propofol, fentanyl, IV infusions) and older strengths that have been superseded by a newer one. Apply your system instructions for any medications that must be omitted or redacted (e.g. sexual-function drugs/syringes).
+
+Output ONLY the list of current medications — one medication per line (name and current strength). Do NOT include the patient's name or age, any heading, any dates, any bullets, any bold, any blank lines, or any other commentary.${contextBlock}\n\n${appleHealthMd}`;
     }
 
     if (!userDoc.agentApiKey) {
@@ -10784,7 +10776,15 @@ app.post('/api/medications/extract', async (req, res) => {
     const raw = (chatResp.content || chatResp.text || '').trim();
     const medications = raw.split('\n')
       .map(l => l.replace(/^\s*[-*••\d.)]+\s*/, '').trim())
-      .filter(l => l.length > 0);
+      .map(l => l.replace(/\*\*/g, '').trim()) // drop bold markers
+      .filter(l => l.length > 0)
+      // Drop preamble/heading lines a model might add despite instructions:
+      // markdown headings, a "Current Medications" label, the patient
+      // name/age line, and AI refusals ("no current medications…").
+      .filter(l => !/^#{1,6}\s/.test(l))
+      .filter(l => !/^current medications\b/i.test(l))
+      .filter(l => !/\b(year[- ]old|age\s|sex\s|\bmale\b|\bfemale\b)/i.test(l) || /\d+\s*(mg|mcg|ml|%|unit|tablet|capsule|cream|injection|inhaler|patch|solution|spray)/i.test(l))
+      .filter(l => !/^(based on|there are no|no current medications|the (provided|available))/i.test(l));
 
     res.json({
       success: true,
@@ -10852,6 +10852,97 @@ Source file tags (use only these in the Source column):
 ${legendLines}`;
 }
 
+// Worksheet prompt built from a structured Apple Health "Medication
+// Records" markdown passed INLINE (each entry has a date, the medication,
+// and a page number). This is far more reliable than k=10 KB retrieval
+// over a large multi-hundred-page record — the agent sees every entry,
+// so both Deepseek and GPT produce complete tables. `ahFileTag` is the
+// "File N" legend tag for the Apple Health source file.
+function buildWorksheetPromptFromMarkdown(ahFileTag, medMarkdown, legendLines) {
+  return `Below are this patient's medication records, extracted directly from their Apple Health export (${ahFileTag}). Each entry shows a date, the medication name and strength, and the page number it appears on.
+
+Build a GitHub-flavored Markdown table with EXACTLY these columns — no title, no notes, no text before or after the table:
+
+| Medication | Status | Last date prescribed | Source |
+
+Rules per column:
+- Medication: the drug name with strength/form (e.g. "atorvastatin 20 MG tablet"). One distinct medication+strength per row.
+- Status: exactly one of —
+    Current — the most recent entry for this medication is recent and not marked stopped/held/discontinued.
+    Discontinued — a later record supersedes it (e.g. a dose change) or it is explicitly stopped/inactive.
+    Inpatient — administered during a hospital/inpatient encounter (e.g. anesthesia agents like propofol/fentanyl, IV infusions), not an outpatient take-home prescription.
+  Base status on the dates shown. Do not invent a status. If unsure, use Current.
+- Last date prescribed: the most recent date shown for that medication, as YYYY-MM-DD.
+- Source: "${ahFileTag} p.<page>" using the page number shown for the cited entry. If no page is shown, use just "${ahFileTag}".
+
+De-duplication: if the same medication+strength appears more than once, output ONE row using the most recent date and that entry's page.
+
+Include EVERY medication present in the records below. Apply your system instructions for any medications that must be omitted or redacted (e.g. sexual-function drugs/syringes).
+
+File tags (for the Source column):
+${legendLines}
+
+Medication records:
+${medMarkdown}`;
+}
+
+// Read a UTF-8 text object from the Spaces "maia" bucket. Returns null on
+// any miss/error. Used to pull the Apple Health category markdown.
+async function readSpacesTextObject(key) {
+  const bucketUrl = getSpacesBucketName();
+  if (!bucketUrl) return null;
+  const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+  try {
+    const { S3Client, GetObjectCommand } = await import('@aws-sdk/client-s3');
+    const s3Client = new S3Client({
+      endpoint: getSpacesEndpoint(),
+      region: 'us-east-1',
+      forcePathStyle: process.env.S3_FORCE_PATH_STYLE === 'true',
+      credentials: {
+        accessKeyId: process.env.DIGITALOCEAN_AWS_ACCESS_KEY_ID || process.env.SPACES_AWS_ACCESS_KEY_ID || '',
+        secretAccessKey: process.env.DIGITALOCEAN_AWS_SECRET_ACCESS_KEY || process.env.SPACES_AWS_SECRET_ACCESS_KEY || ''
+      }
+    });
+    const r = await s3Client.send(new GetObjectCommand({ Bucket: bucketName, Key: key }));
+    const chunks = [];
+    for await (const c of r.Body) chunks.push(c);
+    return Buffer.concat(chunks).toString('utf-8');
+  } catch {
+    return null;
+  }
+}
+
+// Locate the Apple Health "Medication Records" category markdown for a
+// user (e.g. `${userId}/Lists/medication_records.md`). Lists the Lists/
+// prefix and returns the first non-source markdown whose name mentions
+// "medication". Returns { key, text } or null.
+async function findMedicationRecordsMarkdown(userId) {
+  const bucketUrl = getSpacesBucketName();
+  if (!bucketUrl) return null;
+  const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+  try {
+    const { S3Client, ListObjectsV2Command } = await import('@aws-sdk/client-s3');
+    const s3Client = new S3Client({
+      endpoint: getSpacesEndpoint(),
+      region: 'us-east-1',
+      forcePathStyle: process.env.S3_FORCE_PATH_STYLE === 'true',
+      credentials: {
+        accessKeyId: process.env.DIGITALOCEAN_AWS_ACCESS_KEY_ID || process.env.SPACES_AWS_ACCESS_KEY_ID || '',
+        secretAccessKey: process.env.DIGITALOCEAN_AWS_SECRET_ACCESS_KEY || process.env.SPACES_AWS_SECRET_ACCESS_KEY || ''
+      }
+    });
+    const list = await s3Client.send(new ListObjectsV2Command({ Bucket: bucketName, Prefix: `${userId}/Lists/` }));
+    const key = (list.Contents || [])
+      .map(o => o.Key)
+      .find(k => /\/medication[^/]*\.md$/i.test(k));
+    if (!key) return null;
+    const text = await readSpacesTextObject(key);
+    return text ? { key, text } : null;
+  } catch {
+    return null;
+  }
+}
+
 app.post('/api/medications/worksheet', async (req, res) => {
   try {
     const userId = resolveUserId(req, res);
@@ -10903,7 +10994,27 @@ app.post('/api/medications/worksheet', async (req, res) => {
     }
     const legend = kbFiles.map((f, i) => ({ tag: `File ${i + 1}`, fileName: f.fileName }));
     const legendLines = legend.map(l => `${l.tag} = ${l.fileName}`).join('\n');
-    const prompt = buildWorksheetPrompt(legendLines);
+
+    // Prefer the structured Apple Health "Medication Records" markdown as
+    // the source (every entry has a date + page number), passed INLINE.
+    // This is reliable across models — k=10 KB retrieval over a large
+    // record routinely misses the medication pages (especially Deepseek),
+    // producing blank worksheets. Fall back to KB retrieval when no Apple
+    // Health medication markdown exists.
+    let prompt;
+    let worksheetSourceMode = 'kb-retrieval';
+    const ahFileIdx = kbFiles.findIndex(f => f.isAppleHealth);
+    if (ahFileIdx !== -1) {
+      const medMd = await findMedicationRecordsMarkdown(userId);
+      if (medMd?.text) {
+        const ahFileTag = `File ${ahFileIdx + 1}`;
+        prompt = buildWorksheetPromptFromMarkdown(ahFileTag, medMd.text, legendLines);
+        worksheetSourceMode = 'apple-health-markdown';
+      }
+    }
+    if (!prompt) {
+      prompt = buildWorksheetPrompt(legendLines);
+    }
 
     // Ensure the KB is attached to THIS agent before calling, so retrieval
     // returns the patient's records. Without this the agent answers from an
@@ -10943,7 +11054,7 @@ app.post('/api/medications/worksheet', async (req, res) => {
 
     const table = (chatResp.content || chatResp.text || '').trim();
     const generatedAt = new Date().toISOString();
-    const entry = { table, legend, model, generatedAt };
+    const entry = { table, legend, model, generatedAt, sourceMode: worksheetSourceMode };
 
     // Persist (conflict-tolerant). Non-fatal if it can't save.
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -10966,7 +11077,8 @@ app.post('/api/medications/worksheet', async (req, res) => {
       event: 'meds-worksheet-generated',
       agentProfileKey: profileKey,
       model,
-      fileCount: legend.length
+      fileCount: legend.length,
+      sourceMode: worksheetSourceMode
     });
 
     res.json({ success: true, agentProfileKey: profileKey, ...entry });

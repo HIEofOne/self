@@ -253,13 +253,21 @@ two Private AIs builds its own **Current Medications Worksheet** by
 retrieving directly from the knowledge base.
 
 - **Endpoint**: `POST /api/medications/worksheet`
-  (`agentProfileKey: 'default'|'gpt'`). The endpoint **attaches the KB to
-  the chosen agent** before calling (mirrors `/api/patient-summary/draft`)
-  — without this the agent answers from an empty context and returns a
-  table with only the header row. Reads back via `GET
+  (`agentProfileKey: 'default'|'gpt'`). Reads back via `GET
   /api/medications/worksheet`. Result persists to
   `userDoc.medsWorksheets[profileKey] = {table, legend, model,
-  generatedAt}`.
+  generatedAt, sourceMode}`.
+- **Source (v1.3.86+)**: when an Apple Health export is present, the
+  worksheet is built from the structured **`${userId}/Lists/medication_records.md`**
+  category markdown **passed inline** (`sourceMode:
+  'apple-health-markdown'`). Every entry has a date and page number, so
+  both Deepseek and GPT produce complete tables. This replaced pure KB
+  retrieval, which with `k=10` over a large multi-hundred-page record
+  routinely missed the medication pages and returned a header-only
+  table (Deepseek was especially affected). KB retrieval
+  (`sourceMode: 'kb-retrieval'`) remains the fallback when no Apple
+  Health medication markdown exists; the endpoint attaches the KB and
+  calls `ensureAgentRetrieval` in that path.
 - **GPT auto-provisioning**: for `gpt`, the endpoint calls
   `ensureSecondaryAgent`; if the agent isn't deployed yet it returns
   `202 {pending:true}` and the client (My Lists REFRESH) retries.
@@ -329,6 +337,13 @@ The actual parameters used at each KB creation are logged to
 - *2026-05-19* — Initial version. Documents My Lists Categories and
   Current Medications as of v1.3.81 (multi-KB, soft-skip extraction,
   primary/alternate Private AI agents).
+- *2026-05-20* — v1.3.86. Worksheets and the legacy Current Medications
+  extract now build from the Apple Health `medication_records.md`
+  (dated, paged) passed inline, instead of unreliable `k=10` KB
+  retrieval — fixes blank worksheets/lists (Deepseek especially). Also
+  fixed the real root cause that agents were created with
+  `retrieval_method: RETRIEVAL_METHOD_NONE` (KB ignored); now
+  `RETRIEVAL_METHOD_REWRITE` + `ensureAgentRetrieval` self-heal.
 - *2026-05-20* — v1.3.83. Added §2.5 Current Medications Worksheets
   (Deepseek + GPT). Setup now bypasses the old extract/verify/splice
   meds step, generates both worksheets, and gates completion on both
