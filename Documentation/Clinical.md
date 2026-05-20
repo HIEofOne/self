@@ -118,14 +118,18 @@ The wizard's Current Medications step (`src/components/ChatInterface.vue`
    Health Export PDF and the agent endpoint is ready, the client calls
    `POST /api/medications/extract` with `mode: 'apple-health'`. The
    server:
-   - reads the AH **markdown** from `${userId}/Lists/<file>.md`,
-   - sends a focused prompt to the user's **primary Private AI agent**
-     (Deepseek; see `NEW-AGENT.txt` → *Private AI Agents*) — *"Extract
-     the Current Medications from the following Apple Health export.
-     List one medication per line, no commentary."* — and uses any
-     `contextMeds` from an earlier `from-summary` extraction as
-     reconciliation context,
-   - returns the parsed list.
+   - reads the focused, dated **`${userId}/Lists/medication_records.md`**
+     category markdown (via `findMedicationRecordsMarkdown`); falls back
+     to the full AH markdown `${userId}/Lists/<file>.md` only if that
+     category file is missing,
+   - sends the prompt below (see *Exact Private AI instructions*) to the
+     user's **primary Private AI agent** (Deepseek; see `NEW-AGENT.txt`
+     → *Private AI Agents*), using any `contextMeds` from an earlier
+     `from-summary` extraction as reconciliation context,
+   - parses the response into one med per line, then **filters out**
+     preamble the model may add (markdown headings, a "Current
+     Medications" label, the patient name/age line, bold markers, and
+     "no current medications…" refusals).
    - **Soft-skip**: if the AH markdown isn't written yet, the user doc
      isn't found, the agent isn't configured, or there's no AH file,
      the endpoint returns `200 {success:true, skipped:true, reason}`
@@ -152,64 +156,60 @@ The wizard's Current Medications step (`src/components/ChatInterface.vue`
 Two layers drive every AI extraction:
 
 **(a) Standing system instructions** — the agent is created with the
-`## MAIA INSTRUCTION TEXT` from `NEW-AGENT.txt`. The clauses that govern
-medication extraction (verbatim):
-
-> **Current Medications Priority**: When generating a patient summary,
-> if a Current Medications list is provided in the request, use it as
-> the authoritative source for the Current Medications section. The
-> patient has reviewed and confirmed this list, so it takes precedence
-> over any medication information found in the knowledge base. Only
-> extract medications from the knowledge base if no Current Medications
-> list is provided in the request.
-
-> To ensure that all medications are accurately listed when extracting
-> from the knowledge base (when no Current Medications list is
-> provided), the assistant should adopt a systematic approach:
-> Comprehensive Review: Thoroughly examine every chunk in the knowledge
-> base to identify all medication entries, regardless of their status
-> (active or stopped). Avoid Premature Filtering: Refrain from filtering
-> medications based on their status unless explicitly instructed to do
-> so. … Consolidation of Information: … ensure that each medication is
-> listed only once … Cross-Referencing: … Systematic Extraction: …
+`## MAIA INSTRUCTION TEXT` from `NEW-AGENT.txt` (editable per agent
+afterward). MAIA does **not** hard-code medication rules into the system
+instructions; the only standing clause that affects medication output is
+the redaction policy, currently:
 
 > **Errors and Redactions** — Remove any mention of problems or
-> medications for sexual function.
+> medications for sexual function including syringes that may be
+> prescribed.
+
+(This is just an example of a redaction-type instruction; whatever a
+user puts in their System Instructions is applied at extraction time.)
+All extraction logic lives in the **per-request prompts** below, so it
+keeps working regardless of how the user edits their System Instructions.
 
 **(b) Per-request prompts** — sent by `POST /api/medications/extract`
 (in `server/index.js`) to the user's **primary Private AI** (Deepseek).
-Verbatim:
+Verbatim as of v1.3.89:
 
-`mode: 'from-summary'` (extract from the draft Patient Summary):
+`mode: 'from-summary'` (extract from the draft Patient Summary;
+`<draftPatientSummary.text>` is interpolated):
 ```
 Below is a patient summary. Extract the Current Medications as a simple list, one medication per line, no commentary. Follow your system instructions for any medications that must be omitted or redacted.
 
 <draftPatientSummary.text>
 ```
 
-`mode: 'apple-health'` (extract from the Apple Health markdown; the
-`<context block>` is included only when a prior `from-summary` call
-supplied `contextMeds`):
+`mode: 'apple-health'` (extract from the dated medication-records
+markdown; `<context block>` is included only when a prior `from-summary`
+call supplied `contextMeds`; `<medication records markdown>` is the
+`medication_records.md` text):
 ```
-Extract the Current Medications from the following Apple Health export. List one medication per line, no commentary.<context block>
+Below are this patient's dated medication records from their Apple Health export. Identify the patient's CURRENT medications: for each distinct drug, the most recent dated entry reflects the current prescription (and current strength). Exclude entries that are clearly one-time inpatient/anesthesia administrations (e.g. propofol, fentanyl, IV infusions) and older strengths that have been superseded by a newer one. Apply your system instructions for any medications that must be omitted or redacted (e.g. sexual-function drugs/syringes).
 
-<Apple Health markdown>
+Output ONLY the list of current medications — one medication per line (name and current strength). Do NOT include the patient's name or age, any heading, any dates, any bullets, any bold, any blank lines, or any other commentary.<context block>
+
+<medication records markdown>
 ```
 
 where `<context block>` is:
 ```
 
+
 For context, these medications were identified in the patient summary you generated earlier from the full knowledge base:
 - <med 1>
 - <med 2>
 
-Use this list as a starting point, then reconcile and refine against the Apple Health data below. Apply your system instructions for any medications that must be omitted or redacted.
+Use this list as a starting point, then reconcile and refine against the Apple Health data below.
 ```
 
-Net effect: a one-medication-per-line list, no commentary; the
-"follow/apply your system instructions for omitted/redacted
-medications" clause defers to the redaction rules at extraction time;
-the apple-health path reconciles against the summary-derived list.
+Net effect: a one-medication-per-line list, no preamble; the "apply your
+system instructions for omitted/redacted medications" clause defers to
+the redaction rules at extraction time; the apple-health path reconciles
+against the summary-derived list and dedups dose changes to the latest
+strength per drug.
 **These prompts must stay in sync with this doc** — if you change the
 strings in `/api/medications/extract`, update them here too.
 
@@ -249,8 +249,9 @@ at chat time.
 
 As of v1.3.83 the Setup wizard **no longer runs** the old Current
 Medications extract → verify → splice step (§2). Instead, each of the
-two Private AIs builds its own **Current Medications Worksheet** by
-retrieving directly from the knowledge base.
+two Private AIs builds its own **Current Medications Worksheet** — from
+the Apple Health medication-records markdown when available, otherwise by
+retrieving from the knowledge base.
 
 - **Endpoint**: `POST /api/medications/worksheet`
   (`agentProfileKey: 'default'|'gpt'`). Reads back via `GET
@@ -271,13 +272,25 @@ retrieving directly from the knowledge base.
 - **GPT auto-provisioning**: for `gpt`, the endpoint calls
   `ensureSecondaryAgent`; if the agent isn't deployed yet it returns
   `202 {pending:true}` and the client (My Lists REFRESH) retries.
-- **Prompt** (`buildWorksheetPrompt`): one GFM table, columns
-  `Medication | Status | Last date prescribed | Source`. Status is
-  exactly one of Current / Discontinued / Inpatient. **Source** cites a
-  short `File N` tag (not the full filename); the server supplies the
-  `File N = <filename>` legend so numbering is stable across both agents
-  and the model can't invent names. The full legend is rendered as a
-  footnote under each worksheet in `Lists.vue`.
+- **Prompt**: one GFM table, columns `Medication | Status | Last date
+  prescribed | Source`. Status is exactly one of Current / Discontinued
+  / Inpatient. Two key rules (see verbatim prompts below):
+  - **De-duplication by drug, not dose** — all entries for the same drug
+    collapse to ONE row using the latest-dated entry's strength; dose
+    changes never create extra rows.
+  - **18-month cutoff** — a drug is **Current** only if its Last date
+    prescribed is on or after a server-computed cutoff (today − 18
+    months, formatted `YYYY-MM-DD` and interpolated as `${cutoffDate}`);
+    anything older is Discontinued (or Inpatient for hospital
+    administrations). The cutoff is computed server-side so it does not
+    depend on the model knowing today's date.
+  - **Source** cites a short `File N` tag with page (e.g. `File 1 p.127`),
+    not the full filename; the server supplies the `File N = <filename>`
+    legend so numbering is stable across both agents and the model can't
+    invent names. The legend renders as a footnote, and each Source cell
+    is a hyperlink that opens the PDF at that page (`Lists.vue`).
+  - **UI sorting**: `Lists.vue` sorts rows so Current appears first, then
+    Inpatient, then Discontinued (`worksheetView`).
 - **UI**: two cards in My Lists — "Current Medications Worksheet
   (Deepseek)" and "(GPT)" — each with a Generate/Refresh button. The
   Apple Health categories block is labeled "Categories from Apple
@@ -287,9 +300,80 @@ retrieving directly from the knowledge base.
   kicks off GPT provisioning, then opens the Patient Summary tab. Setup
   completion is **gated on both Private AIs being provisioned**
   (`ensureGptProvisioned` polls `POST /api/agents/ensure-secondary`).
-- **Log**: `meds-worksheet-generated` and `gpt-agent-ready` events are
-  rendered in `maia-log.pdf`, which also carries a static "How the My
-  Lists tab works" reference page.
+- **Log**: `meds-worksheet-generated` (with `sourceMode`) and
+  `gpt-agent-ready` events are rendered in `maia-log.pdf`, which also
+  carries a static "How the My Lists tab works" reference page.
+
+### Exact worksheet prompts
+
+Built in `server/index.js`. `${cutoffDate}` = today − 18 months
+(`YYYY-MM-DD`); `${ahFileTag}` = the `File N` tag of the Apple Health
+file; `${legendLines}` = the `File N = <filename>` legend;
+`${medMarkdown}` = the `medication_records.md` text. Verbatim as of
+v1.3.89:
+
+**Apple Health source** (`buildWorksheetPromptFromMarkdown`, used when
+an Apple Health medication-records markdown exists →
+`sourceMode: 'apple-health-markdown'`):
+```
+Below are this patient's medication records, extracted directly from their Apple Health export (${ahFileTag}). Each entry shows a date, the medication name and strength, and the page number it appears on.
+
+Build a GitHub-flavored Markdown table with EXACTLY these columns — no title, no notes, no text before or after the table:
+
+| Medication | Status | Last date prescribed | Source |
+
+Rules per column:
+- Medication: the drug name with the strength/form FROM ITS MOST RECENT entry (e.g. "atorvastatin 20 MG tablet"). One row per drug — see de-duplication below.
+- Status: exactly one of —
+    Current — this drug's most recent entry is an outpatient prescription (not stopped/held/discontinued) AND its Last date prescribed is on or after ${cutoffDate} (within the last 18 months).
+    Discontinued — this drug's most recent entry is explicitly stopped/inactive/held, OR its Last date prescribed is BEFORE ${cutoffDate} (more than 18 months ago). A medication not prescribed in over 18 months is NOT current.
+    Inpatient — administered during a hospital/inpatient encounter (e.g. anesthesia agents like propofol/fentanyl, IV infusions), not an outpatient take-home prescription.
+  A drug can only be Current if its Last date prescribed is on or after ${cutoffDate}. Do not invent a status.
+- Last date prescribed: the most recent date for that drug, as YYYY-MM-DD.
+- Source: "${ahFileTag} p.<page>" using the page number of that most-recent entry. If no page is shown, use just "${ahFileTag}".
+
+De-duplication (IMPORTANT): treat all entries for the same drug as ONE medication, regardless of strength or dose. A change in dose/strength over time is NOT a separate medication. Output exactly ONE row per drug, using ONLY the entry with the latest date — that entry's strength, date, and page. Do NOT create extra rows or a "Discontinued" row for older strengths/doses of the same drug; simply drop the older entries. (Different salts/formulations that are clinically distinct may be separate rows.)
+
+Include EVERY distinct drug present in the records below (one row each). Apply your system instructions for any medications that must be omitted or redacted (e.g. sexual-function drugs/syringes).
+
+File tags (for the Source column):
+${legendLines}
+
+Medication records:
+${medMarkdown}
+```
+
+**Knowledge-base fallback** (`buildWorksheetPrompt`, used when no Apple
+Health medication markdown exists → `sourceMode: 'kb-retrieval'`; the
+endpoint attaches the KB and calls `ensureAgentRetrieval` first):
+```
+You are building a Current Medications Worksheet from this patient's records in your knowledge base. Use ONLY information found in your knowledge base; never infer, assume, or add a medication that is not present. Include EVERY medication you find.
+
+Output a GitHub-flavored Markdown table with EXACTLY these columns — no title, no notes, no text before or after the table:
+
+| Medication | Status | Last date prescribed | Source |
+
+Rules per column:
+- Medication: the drug name with the strength/form FROM ITS MOST RECENT entry (e.g. "atorvastatin 20 MG tablet"). One row per drug — see de-duplication below.
+- Status: exactly one of —
+    Current — this drug's most recent entry is actively prescribed (not stopped/held/discontinued) AND its Last date prescribed is on or after ${cutoffDate} (within the last 18 months).
+    Discontinued — this drug's most recent entry is explicitly stopped/inactive/held, OR its Last date prescribed is BEFORE ${cutoffDate} (more than 18 months ago). A medication not prescribed in over 18 months is NOT current.
+    Inpatient — administered during a hospital/inpatient encounter, not an outpatient take-home prescription.
+  A drug can only be Current if its Last date prescribed is on or after ${cutoffDate}. Do not invent a status.
+- Last date prescribed: the most recent date the drug was prescribed or ordered, as YYYY-MM-DD (use what is given if only a month/year is present; "—" if no date is found).
+- Source: cite the entry that established the Last date prescribed, formatted as "File N p.<page>" using the file tags below. Do NOT write full file names in the table — use only the "File N" tag. If you cannot determine a page, use just "File N".
+
+De-duplication (IMPORTANT): treat all entries for the same drug as ONE medication, regardless of strength or dose. A change in dose/strength over time is NOT a separate medication. Output exactly ONE row per drug, using ONLY the entry with the most recent Last date prescribed — its strength, date, and page. Do NOT create extra rows or a "Discontinued" row for older strengths/doses of the same drug; simply drop the older entries.
+
+Apply your system instructions for any medications that must be omitted or redacted.
+
+Source file tags (use only these in the Source column):
+${legendLines}
+```
+
+**These prompts must stay in sync with this doc** — if you change the
+strings in `buildWorksheetPromptFromMarkdown` / `buildWorksheetPrompt`,
+update them here too.
 
 ---
 
@@ -299,10 +383,12 @@ For the canonical parameters, see **`NEW-AGENT.txt`** at the repo root.
 Do not duplicate those values here — link to the sections instead.
 
 - **`## MAIA INSTRUCTION TEXT`** — the seed System Instructions used to
-  create both Private AI agents. Encodes the Current Medications
-  priority rule, the patient-summary layout, the redaction policy, and
-  output formatting. Per-agent instructions diverge after creation
-  (editable in My Stuff → My AI Agent sub-tabs).
+  create both Private AI agents. As currently configured it carries the
+  agent's perspective, the redaction policy (e.g. sexual-function
+  meds/syringes), and output formatting — medication-extraction logic is
+  NOT in the system instructions; it lives in the per-request prompts
+  (§2, §2.5). Per-agent instructions diverge after creation (editable in
+  My Stuff → My AI Agent sub-tabs).
 - **`## Private AI Agents`** — two agents per user:
   - **Primary**: Private AI (Deepseek) — `inference_name:
     deepseek-v4-pro`. The agent used by Setup/Restore wizard automation
@@ -337,6 +423,12 @@ The actual parameters used at each KB creation are logged to
 - *2026-05-19* — Initial version. Documents My Lists Categories and
   Current Medications as of v1.3.81 (multi-KB, soft-skip extraction,
   primary/alternate Private AI agents).
+- *2026-05-20* — v1.3.89. Documented the exact current per-request
+  prompts (Current Medications extract + both worksheet builders),
+  including de-duplication by drug (not dose) and the 18-month "Current"
+  cutoff. Clarified that medication logic lives in the prompts, not the
+  System Instructions, and noted worksheet UI sorting + Source-page
+  hyperlinks.
 - *2026-05-20* — v1.3.86. Worksheets and the legacy Current Medications
   extract now build from the Apple Health `medication_records.md`
   (dated, paged) passed inline, instead of unreliable `k=10` KB
