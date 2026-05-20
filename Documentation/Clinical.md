@@ -147,6 +147,72 @@ The wizard's Current Medications step (`src/components/ChatInterface.vue`
 4. **Manual (`source: manual`).** If every automated path returns
    nothing, the wizard offers an empty editor for the user to type in.
 
+### Exact Private AI instructions
+
+Two layers drive every AI extraction:
+
+**(a) Standing system instructions** — the agent is created with the
+`## MAIA INSTRUCTION TEXT` from `NEW-AGENT.txt`. The clauses that govern
+medication extraction (verbatim):
+
+> **Current Medications Priority**: When generating a patient summary,
+> if a Current Medications list is provided in the request, use it as
+> the authoritative source for the Current Medications section. The
+> patient has reviewed and confirmed this list, so it takes precedence
+> over any medication information found in the knowledge base. Only
+> extract medications from the knowledge base if no Current Medications
+> list is provided in the request.
+
+> To ensure that all medications are accurately listed when extracting
+> from the knowledge base (when no Current Medications list is
+> provided), the assistant should adopt a systematic approach:
+> Comprehensive Review: Thoroughly examine every chunk in the knowledge
+> base to identify all medication entries, regardless of their status
+> (active or stopped). Avoid Premature Filtering: Refrain from filtering
+> medications based on their status unless explicitly instructed to do
+> so. … Consolidation of Information: … ensure that each medication is
+> listed only once … Cross-Referencing: … Systematic Extraction: …
+
+> **Errors and Redactions** — Remove any mention of problems or
+> medications for sexual function.
+
+**(b) Per-request prompts** — sent by `POST /api/medications/extract`
+(in `server/index.js`) to the user's **primary Private AI** (Deepseek).
+Verbatim:
+
+`mode: 'from-summary'` (extract from the draft Patient Summary):
+```
+Below is a patient summary. Extract the Current Medications as a simple list, one medication per line, no commentary. Follow your system instructions for any medications that must be omitted or redacted.
+
+<draftPatientSummary.text>
+```
+
+`mode: 'apple-health'` (extract from the Apple Health markdown; the
+`<context block>` is included only when a prior `from-summary` call
+supplied `contextMeds`):
+```
+Extract the Current Medications from the following Apple Health export. List one medication per line, no commentary.<context block>
+
+<Apple Health markdown>
+```
+
+where `<context block>` is:
+```
+
+For context, these medications were identified in the patient summary you generated earlier from the full knowledge base:
+- <med 1>
+- <med 2>
+
+Use this list as a starting point, then reconcile and refine against the Apple Health data below. Apply your system instructions for any medications that must be omitted or redacted.
+```
+
+Net effect: a one-medication-per-line list, no commentary; the
+"follow/apply your system instructions for omitted/redacted
+medications" clause defers to the redaction rules at extraction time;
+the apple-health path reconciles against the summary-derived list.
+**These prompts must stay in sync with this doc** — if you change the
+strings in `/api/medications/extract`, update them here too.
+
 ### Verification → Save
 
 - The wizard logs `medications-offered` with the source and outcome
