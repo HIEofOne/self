@@ -10835,16 +10835,16 @@ Output a GitHub-flavored Markdown table with EXACTLY these columns — no title,
 | Medication | Status | Last date prescribed | Source |
 
 Rules per column:
-- Medication: the drug name with strength/form if stated (e.g. "atorvastatin 20 MG tablet"). One medication per row.
+- Medication: the drug name with the strength/form FROM ITS MOST RECENT entry (e.g. "atorvastatin 20 MG tablet"). One row per drug — see de-duplication below.
 - Status: exactly one of —
-    Current — on the active medication list / actively prescribed, not marked stopped, held, or discontinued.
-    Discontinued — explicitly stopped, inactive, held, or discontinued in the record.
+    Current — this drug's most recent entry is actively prescribed, not marked stopped, held, or discontinued.
+    Discontinued — this drug's most recent entry is explicitly stopped, inactive, held, or discontinued.
     Inpatient — administered during a hospital/inpatient encounter, not an outpatient take-home prescription.
-  Base the status on the most recent entry for that medication. Do not invent a status.
-- Last date prescribed: the most recent date the medication was prescribed or ordered, as YYYY-MM-DD (use what is given if only a month/year is present; "—" if no date is found).
-- Source: cite the SINGLE entry that established the Last date prescribed, formatted as "File N p.<page>" using the file tags below. Do NOT write full file names in the table — use only the "File N" tag. If you cannot determine a page, use just "File N".
+  Base the status on the most recent entry for that drug. Do not invent a status.
+- Last date prescribed: the most recent date the drug was prescribed or ordered, as YYYY-MM-DD (use what is given if only a month/year is present; "—" if no date is found).
+- Source: cite the entry that established the Last date prescribed, formatted as "File N p.<page>" using the file tags below. Do NOT write full file names in the table — use only the "File N" tag. If you cannot determine a page, use just "File N".
 
-De-duplication: if the same medication (same name and strength) appears more than once, output ONE row, using the occurrence with the most recent Last date prescribed, and cite that occurrence's File tag and page.
+De-duplication (IMPORTANT): treat all entries for the same drug as ONE medication, regardless of strength or dose. A change in dose/strength over time is NOT a separate medication. Output exactly ONE row per drug, using ONLY the entry with the most recent Last date prescribed — its strength, date, and page. Do NOT create extra rows or a "Discontinued" row for older strengths/doses of the same drug; simply drop the older entries.
 
 Apply your system instructions for any medications that must be omitted or redacted.
 
@@ -10866,18 +10866,18 @@ Build a GitHub-flavored Markdown table with EXACTLY these columns — no title, 
 | Medication | Status | Last date prescribed | Source |
 
 Rules per column:
-- Medication: the drug name with strength/form (e.g. "atorvastatin 20 MG tablet"). One distinct medication+strength per row.
+- Medication: the drug name with the strength/form FROM ITS MOST RECENT entry (e.g. "atorvastatin 20 MG tablet"). One row per drug — see de-duplication below.
 - Status: exactly one of —
-    Current — the most recent entry for this medication is recent and not marked stopped/held/discontinued.
-    Discontinued — a later record supersedes it (e.g. a dose change) or it is explicitly stopped/inactive.
+    Current — this drug's most recent entry is a recent outpatient prescription, not marked stopped/held/discontinued.
+    Discontinued — this drug's most recent entry is explicitly stopped/inactive/held.
     Inpatient — administered during a hospital/inpatient encounter (e.g. anesthesia agents like propofol/fentanyl, IV infusions), not an outpatient take-home prescription.
-  Base status on the dates shown. Do not invent a status. If unsure, use Current.
-- Last date prescribed: the most recent date shown for that medication, as YYYY-MM-DD.
-- Source: "${ahFileTag} p.<page>" using the page number shown for the cited entry. If no page is shown, use just "${ahFileTag}".
+  Base status on the most recent entry. Do not invent a status. If unsure, use Current.
+- Last date prescribed: the most recent date for that drug, as YYYY-MM-DD.
+- Source: "${ahFileTag} p.<page>" using the page number of that most-recent entry. If no page is shown, use just "${ahFileTag}".
 
-De-duplication: if the same medication+strength appears more than once, output ONE row using the most recent date and that entry's page.
+De-duplication (IMPORTANT): treat all entries for the same drug as ONE medication, regardless of strength or dose. A change in dose/strength over time is NOT a separate medication. Output exactly ONE row per drug, using ONLY the entry with the latest date — that entry's strength, date, and page. Do NOT create extra rows or a "Discontinued" row for older strengths/doses of the same drug; simply drop the older entries. (Different salts/formulations that are clinically distinct may be separate rows.)
 
-Include EVERY medication present in the records below. Apply your system instructions for any medications that must be omitted or redacted (e.g. sexual-function drugs/syringes).
+Include EVERY distinct drug present in the records below (one row each). Apply your system instructions for any medications that must be omitted or redacted (e.g. sexual-function drugs/syringes).
 
 File tags (for the Source column):
 ${legendLines}
