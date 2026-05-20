@@ -55,6 +55,9 @@
         
         <!-- Display Mode -->
         <div v-else-if="!isEditingCurrentMedications && currentMedications">
+          <div v-if="currentMedicationsSourceLabel" class="text-caption text-grey-7 q-mb-sm">
+            Source: {{ currentMedicationsSourceLabel }}
+          </div>
           <div class="text-body2" style="white-space: pre-wrap;">{{ cleanedCurrentMedications }}</div>
           <div class="text-caption text-grey-7 q-mt-md q-pt-md" style="border-top: 1px solid #e0e0e0;">
             Please edit this AI suggestion to reflect your actual prescription drug use.
@@ -316,15 +319,23 @@
           </div>
 
           <template v-else>
-            <q-markup-table v-if="parseWorksheet(worksheets[ws.profileKey].table).rows.length" flat bordered dense wrap-cells>
+            <q-markup-table v-if="worksheetView(ws.profileKey).rows.length" flat bordered dense wrap-cells>
               <thead>
                 <tr>
-                  <th v-for="(h, hi) in parseWorksheet(worksheets[ws.profileKey].table).headers" :key="hi" class="text-left">{{ h }}</th>
+                  <th v-for="(h, hi) in worksheetView(ws.profileKey).headers" :key="hi" class="text-left">{{ h }}</th>
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="(row, ri) in parseWorksheet(worksheets[ws.profileKey].table).rows" :key="ri">
-                  <td v-for="(cell, ci) in row" :key="ci" class="text-left">{{ cell }}</td>
+                <tr v-for="(row, ri) in worksheetView(ws.profileKey).rows" :key="ri">
+                  <td v-for="(cell, ci) in row" :key="ci" class="text-left">
+                    <a
+                      v-if="ci === worksheetView(ws.profileKey).sourceIdx && parseSourcePage(cell) != null"
+                      href="#"
+                      class="text-primary"
+                      @click.prevent="openWorksheetSource(cell)"
+                    >{{ cell }}</a>
+                    <span v-else>{{ cell }}</span>
+                  </td>
                 </tr>
               </tbody>
             </q-markup-table>
@@ -619,6 +630,41 @@ const parseWorksheet = (md: string): { headers: string[]; rows: string[][] } => 
   return { headers, rows };
 };
 
+// Build a display view of a worksheet: parsed headers/rows, with Current
+// medications sorted to the top (then Inpatient, then Discontinued), plus
+// the index of the Source column for hyperlinking.
+const STATUS_SORT_ORDER: Record<string, number> = { current: 0, inpatient: 1, discontinued: 2 };
+const worksheetView = (profileKey: string): { headers: string[]; rows: string[][]; sourceIdx: number } => {
+  const entry = worksheets.value[profileKey];
+  if (!entry) return { headers: [], rows: [], sourceIdx: -1 };
+  const { headers, rows } = parseWorksheet(entry.table);
+  const statusIdx = headers.findIndex(h => /status/i.test(h));
+  const sourceIdx = headers.findIndex(h => /source/i.test(h));
+  const sorted = statusIdx === -1
+    ? rows
+    : [...rows].sort((a, b) => {
+        const sa = STATUS_SORT_ORDER[(a[statusIdx] || '').trim().toLowerCase()] ?? 3;
+        const sb = STATUS_SORT_ORDER[(b[statusIdx] || '').trim().toLowerCase()] ?? 3;
+        return sa - sb;
+      });
+  return { headers, rows: sorted, sourceIdx };
+};
+
+// Parse a Source cell like "File 1 p.127" → page number (or null).
+const parseSourcePage = (cell: string): number | null => {
+  const m = (cell || '').match(/p\.?\s*(\d+)/i);
+  return m ? parseInt(m[1], 10) : null;
+};
+
+// Open the source page for a worksheet row. The worksheet cites the Apple
+// Health export, which is the initial file — reuse the same page-open path
+// the Categories links use.
+const openWorksheetSource = async (cell: string) => {
+  const page = parseSourcePage(cell);
+  if (page == null) return;
+  await handleCategoryPageClick(page);
+};
+
 const formatWorksheetTime = (iso?: string): string => {
   if (!iso) return '';
   try { return new Date(iso).toLocaleString(); } catch { return iso; }
@@ -640,6 +686,16 @@ const isCurrentMedicationsEdited = ref(false);
 // patient-summary | user-doc) and overridden to 'manual' when the user types
 // or edits in the meds editor.
 const currentMedicationsSource = ref<string>('');
+// Friendly label for where the displayed Current Medications came from.
+const currentMedicationsSourceLabel = computed(() => {
+  switch (currentMedicationsSource.value) {
+    case 'apple-health': return 'Apple Health';
+    case 'patient-summary': return 'Patient Summary';
+    case 'user-doc': return 'Previously verified list';
+    case 'manual': return 'Entered manually';
+    default: return '';
+  }
+});
 const currentMedicationsStatus = ref<'reviewing' | 'consulting' | 'waiting' | 'waiting_summary' | ''>('');
 const wizardAutoFlow = ref(false);
 const wizardAutoFlowStorageKey = 'wizardMyListsAuto';
