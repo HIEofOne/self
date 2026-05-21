@@ -212,6 +212,65 @@
       {{ error }}
     </q-banner>
 
+    <!-- Current Medications Worksheets (one per Private AI agent).
+         Rendered independently of the Apple Health PDF output below, so
+         patients with no Apple Health file (KB-only) still see them. -->
+    <q-card v-for="ws in worksheetSpecs" :key="ws.profileKey" class="q-mb-md">
+      <q-card-section>
+        <div class="row items-center justify-between q-mb-sm">
+          <div class="text-h6">{{ ws.title }}</div>
+          <q-btn
+            :label="worksheets[ws.profileKey] ? 'Refresh' : 'Generate'"
+            color="primary"
+            dense
+            :loading="worksheetBusy === ws.profileKey"
+            :disable="!!worksheetBusy"
+            @click="generateWorksheet(ws.profileKey)"
+          />
+        </div>
+        <div v-if="worksheets[ws.profileKey]" class="text-caption text-grey-7 q-mb-sm">
+          {{ worksheets[ws.profileKey].model }} ·
+          generated {{ formatWorksheetTime(worksheets[ws.profileKey].generatedAt) }}
+        </div>
+
+        <div v-if="!worksheets[ws.profileKey]" class="text-body2 text-grey-7">
+          No worksheet yet. Press <strong>Generate</strong> to build it from this agent's knowledge base.
+        </div>
+
+        <template v-else>
+          <q-markup-table v-if="worksheetView(ws.profileKey).rows.length" flat bordered dense wrap-cells>
+            <thead>
+              <tr>
+                <th v-for="(h, hi) in worksheetView(ws.profileKey).headers" :key="hi" class="text-left">{{ h }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(row, ri) in worksheetView(ws.profileKey).rows" :key="ri">
+                <td v-for="(cell, ci) in row" :key="ci" class="text-left">
+                  <a
+                    v-if="ci === worksheetView(ws.profileKey).sourceIdx && parseSourcePage(cell) != null"
+                    href="#"
+                    class="text-primary"
+                    @click.prevent="openWorksheetSource(cell)"
+                  >{{ cell }}</a>
+                  <span v-else>{{ cell }}</span>
+                </td>
+              </tr>
+            </tbody>
+          </q-markup-table>
+          <!-- Fallback if the model didn't return a parseable table -->
+          <pre v-else style="white-space: pre-wrap; font-family: monospace; font-size: 12px;">{{ worksheets[ws.profileKey].table }}</pre>
+
+          <!-- File legend footnote -->
+          <div v-if="worksheets[ws.profileKey].legend?.length" class="q-mt-sm text-caption text-grey-7">
+            <div v-for="(l, li) in worksheets[ws.profileKey].legend" :key="li">
+              {{ l.tag }} = {{ l.fileName }}
+            </div>
+          </div>
+        </template>
+      </q-card-section>
+    </q-card>
+
     <!-- Results -->
     <div v-if="(pdfData || markdownContent) && !isProcessing">
 
@@ -292,63 +351,6 @@
               </q-card>
             </q-expansion-item>
           </q-list>
-        </q-card-section>
-      </q-card>
-
-      <!-- Current Medications Worksheets (one per Private AI agent) -->
-      <q-card v-for="ws in worksheetSpecs" :key="ws.profileKey" class="q-mb-md">
-        <q-card-section>
-          <div class="row items-center justify-between q-mb-sm">
-            <div class="text-h6">{{ ws.title }}</div>
-            <q-btn
-              :label="worksheets[ws.profileKey] ? 'Refresh' : 'Generate'"
-              color="primary"
-              dense
-              :loading="worksheetBusy === ws.profileKey"
-              :disable="!!worksheetBusy"
-              @click="generateWorksheet(ws.profileKey)"
-            />
-          </div>
-          <div v-if="worksheets[ws.profileKey]" class="text-caption text-grey-7 q-mb-sm">
-            {{ worksheets[ws.profileKey].model }} ·
-            generated {{ formatWorksheetTime(worksheets[ws.profileKey].generatedAt) }}
-          </div>
-
-          <div v-if="!worksheets[ws.profileKey]" class="text-body2 text-grey-7">
-            No worksheet yet. Press <strong>Generate</strong> to build it from this agent's knowledge base.
-          </div>
-
-          <template v-else>
-            <q-markup-table v-if="worksheetView(ws.profileKey).rows.length" flat bordered dense wrap-cells>
-              <thead>
-                <tr>
-                  <th v-for="(h, hi) in worksheetView(ws.profileKey).headers" :key="hi" class="text-left">{{ h }}</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="(row, ri) in worksheetView(ws.profileKey).rows" :key="ri">
-                  <td v-for="(cell, ci) in row" :key="ci" class="text-left">
-                    <a
-                      v-if="ci === worksheetView(ws.profileKey).sourceIdx && parseSourcePage(cell) != null"
-                      href="#"
-                      class="text-primary"
-                      @click.prevent="openWorksheetSource(cell)"
-                    >{{ cell }}</a>
-                    <span v-else>{{ cell }}</span>
-                  </td>
-                </tr>
-              </tbody>
-            </q-markup-table>
-            <!-- Fallback if the model didn't return a parseable table -->
-            <pre v-else style="white-space: pre-wrap; font-family: monospace; font-size: 12px;">{{ worksheets[ws.profileKey].table }}</pre>
-
-            <!-- File legend footnote -->
-            <div v-if="worksheets[ws.profileKey].legend?.length" class="q-mt-sm text-caption text-grey-7">
-              <div v-for="(l, li) in worksheets[ws.profileKey].legend" :key="li">
-                {{ l.tag }} = {{ l.fileName }}
-              </div>
-            </div>
-          </template>
         </q-card-section>
       </q-card>
 
