@@ -10912,6 +10912,32 @@ async function readSpacesTextObject(key) {
   }
 }
 
+// Read a binary object (e.g. a PDF) from the Spaces "maia" bucket as a
+// Buffer. Returns null on any miss/error.
+async function readSpacesObjectBuffer(key) {
+  const bucketUrl = getSpacesBucketName();
+  if (!bucketUrl) return null;
+  const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+  try {
+    const { S3Client, GetObjectCommand } = await import('@aws-sdk/client-s3');
+    const s3Client = new S3Client({
+      endpoint: getSpacesEndpoint(),
+      region: 'us-east-1',
+      forcePathStyle: process.env.S3_FORCE_PATH_STYLE === 'true',
+      credentials: {
+        accessKeyId: process.env.DIGITALOCEAN_AWS_ACCESS_KEY_ID || process.env.SPACES_AWS_ACCESS_KEY_ID || '',
+        secretAccessKey: process.env.DIGITALOCEAN_AWS_SECRET_ACCESS_KEY || process.env.SPACES_AWS_SECRET_ACCESS_KEY || ''
+      }
+    });
+    const r = await s3Client.send(new GetObjectCommand({ Bucket: bucketName, Key: key }));
+    const chunks = [];
+    for await (const c of r.Body) chunks.push(c);
+    return Buffer.concat(chunks);
+  } catch {
+    return null;
+  }
+}
+
 // Locate the Apple Health "Medication Records" category markdown for a
 // user (e.g. `${userId}/Lists/medication_records.md`). Lists the Lists/
 // prefix and returns the first non-source markdown whose name mentions
@@ -11106,6 +11132,100 @@ app.get('/api/medications/worksheet', async (req, res) => {
     const userDoc = await cloudant.getDocument('maia_users', userId);
     if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
     res.json({ success: true, worksheets: userDoc.medsWorksheets || {} });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Encounters worksheet — a reverse-chronological list of clinical
+// encounters across ALL of the patient's source PDFs. Built
+// deterministically (no agent / no KB retrieval): each PDF is parsed,
+// encounter headers are detected (Epic-optimized, generic fallback),
+// merged, deduped, and rendered as a GFM table with "File N p.<page>"
+// Source links. Persisted to userDoc.encountersWorksheet.
+app.post('/api/encounters/worksheet', async (req, res) => {
+  try {
+    const userId = resolveUserId(req, res);
+    if (!userId) return;
+    const userDoc = await cloudant.getDocument('maia_users', userId);
+    if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+
+    // Source files: PDFs in the patient's KB folder.
+    const kbName = getKBNameFromUserDoc(userDoc, userId);
+    const kbPrefix = kbName ? `${userId}/${kbName}/` : null;
+    const pdfFiles = (userDoc.files || []).filter(f =>
+      f?.fileName &&
+      (!kbPrefix || (f.bucketKey || '').startsWith(kbPrefix)) &&
+      (/\.pdf$/i.test(f.fileName) || /pdf/i.test(f.fileType || ''))
+    );
+    if (pdfFiles.length === 0) {
+      return res.status(400).json({ success: false, error: 'NO_PDF_FILES', message: 'No PDF files to build an encounters list from.' });
+    }
+
+    const legend = pdfFiles.map((f, i) => ({ tag: `File ${i + 1}`, fileName: f.fileName, bucketKey: f.bucketKey || null }));
+
+    const { extractEncountersFromText, buildEncountersTable } = await import('./utils/encounters-extractor.js');
+    const pdfParse = (await import('pdf-parse')).default;
+
+    const allEncounters = [];
+    const modes = {};
+    for (let i = 0; i < pdfFiles.length; i++) {
+      const f = pdfFiles[i];
+      const tag = `File ${i + 1}`;
+      if (!f.bucketKey) { modes[tag] = 'missing-key'; continue; }
+      const buf = await readSpacesObjectBuffer(f.bucketKey);
+      if (!buf) { modes[tag] = 'download-failed'; continue; }
+      try {
+        const data = await pdfParse(buf);
+        const { encounters, mode } = extractEncountersFromText(data.text, data.numpages, tag);
+        modes[tag] = mode;
+        allEncounters.push(...encounters);
+      } catch (e) {
+        modes[tag] = 'parse-error';
+        console.warn(`[encounters] parse failed for ${f.fileName}: ${e?.message || e}`);
+      }
+    }
+
+    const { table, count } = buildEncountersTable(allEncounters);
+    const generatedAt = new Date().toISOString();
+    const entry = { table, legend, generatedAt, fileCount: pdfFiles.length, encounterCount: count, modes };
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const doc = await cloudant.getDocument('maia_users', userId);
+        if (!doc) break;
+        doc.encountersWorksheet = entry;
+        doc.updatedAt = new Date().toISOString();
+        await cloudant.saveDocument('maia_users', doc);
+        break;
+      } catch (e) {
+        if (e?.statusCode === 409 && attempt < 2) continue;
+        console.warn(`[encounters] could not persist for ${userId}: ${e?.message || e}`);
+        break;
+      }
+    }
+
+    await appendUserProvisioningEvent(userId, {
+      event: 'encounters-worksheet-generated',
+      fileCount: pdfFiles.length,
+      encounterCount: count
+    });
+
+    res.json({ success: true, ...entry });
+  } catch (error) {
+    console.error('Error building encounters worksheet:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Read the persisted encounters worksheet (no parsing).
+app.get('/api/encounters/worksheet', async (req, res) => {
+  try {
+    const userId = resolveUserId(req, res);
+    if (!userId) return;
+    const userDoc = await cloudant.getDocument('maia_users', userId);
+    if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+    res.json({ success: true, encounters: userDoc.encountersWorksheet || null });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }

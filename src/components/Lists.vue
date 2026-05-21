@@ -271,6 +271,65 @@
       </q-card-section>
     </q-card>
 
+    <!-- Encounters worksheet (reverse-chronological, across all PDFs).
+         Deterministic — built from the source files, not the agent/KB. -->
+    <q-card class="q-mb-md">
+      <q-card-section>
+        <div class="row items-center justify-between q-mb-sm">
+          <div class="text-h6">Encounters</div>
+          <q-btn
+            :label="encountersWorksheet ? 'Refresh' : 'Generate'"
+            color="primary"
+            dense
+            :loading="encountersBusy"
+            @click="generateEncounters"
+          />
+        </div>
+        <div v-if="encountersWorksheet" class="text-caption text-grey-7 q-mb-sm">
+          {{ encountersWorksheet.encounterCount || 0 }} encounters from
+          {{ encountersWorksheet.fileCount || 0 }} file{{ (encountersWorksheet.fileCount || 0) === 1 ? '' : 's' }} ·
+          built {{ formatWorksheetTime(encountersWorksheet.generatedAt) }}
+        </div>
+
+        <div v-if="!encountersWorksheet" class="text-body2 text-grey-7">
+          No encounters list yet. Press <strong>Generate</strong> to build a reverse-chronological list from your PDF files.
+        </div>
+
+        <template v-else>
+          <q-markup-table v-if="encountersView.rows.length" flat bordered dense wrap-cells>
+            <thead>
+              <tr>
+                <th v-for="(h, hi) in encountersView.headers" :key="hi" class="text-left">{{ h }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(row, ri) in encountersView.rows" :key="ri">
+                <td v-for="(cell, ci) in row" :key="ci" class="text-left">
+                  <a
+                    v-if="ci === encountersView.sourceIdx && parseSourcePage(cell) != null"
+                    href="#"
+                    class="text-primary"
+                    @click.prevent="openWorksheetSource(cell, encountersWorksheet.legend)"
+                  >{{ cell }}</a>
+                  <span v-else>{{ cell }}</span>
+                </td>
+              </tr>
+            </tbody>
+          </q-markup-table>
+          <div v-else class="text-body2 text-grey-7">
+            No encounters were detected in your files.
+          </div>
+
+          <!-- File legend footnote -->
+          <div v-if="encountersWorksheet.legend?.length" class="q-mt-sm text-caption text-grey-7">
+            <div v-for="(l, li) in encountersWorksheet.legend" :key="li">
+              {{ l.tag }} = {{ l.fileName }}
+            </div>
+          </div>
+        </template>
+      </q-card-section>
+    </q-card>
+
     <!-- Results -->
     <div v-if="(pdfData || markdownContent) && !isProcessing">
 
@@ -615,6 +674,64 @@ const generateWorksheet = async (profileKey: string) => {
     worksheetBusy.value = null;
   }
 };
+
+// ── Encounters worksheet (deterministic, single, not per-agent) ──────
+interface EncountersEntry {
+  table: string;
+  legend: Array<{ tag: string; fileName: string; bucketKey?: string }>;
+  generatedAt?: string;
+  fileCount?: number;
+  encounterCount?: number;
+}
+const encountersWorksheet = ref<EncountersEntry | null>(null);
+const encountersBusy = ref(false);
+
+const loadEncounters = async () => {
+  if (!props.userId) return;
+  try {
+    const r = await fetch(`/api/encounters/worksheet?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
+    if (r.ok) {
+      const d = await r.json();
+      encountersWorksheet.value = (d && d.encounters) || null;
+    }
+  } catch { /* non-fatal */ }
+};
+
+const generateEncounters = async () => {
+  if (encountersBusy.value) return;
+  encountersBusy.value = true;
+  try {
+    const r = await fetch('/api/encounters/worksheet', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ userId: props.userId })
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || d.success === false) {
+      throw new Error(d.message || d.error || 'Failed to build encounters list');
+    }
+    encountersWorksheet.value = {
+      table: d.table, legend: d.legend || [], generatedAt: d.generatedAt,
+      fileCount: d.fileCount, encounterCount: d.encounterCount
+    };
+    if ($q?.notify) $q.notify({ type: 'positive', message: `Encounters list built (${d.encounterCount || 0})`, timeout: 2500 });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to build encounters list';
+    if ($q?.notify) $q.notify({ type: 'negative', message: msg, timeout: 5000 });
+  } finally {
+    encountersBusy.value = false;
+  }
+};
+
+// View for the encounters table (server already sorts reverse-chronological).
+const encountersView = computed((): { headers: string[]; rows: string[][]; sourceIdx: number } => {
+  const entry = encountersWorksheet.value;
+  if (!entry?.table) return { headers: [], rows: [], sourceIdx: -1 };
+  const { headers, rows } = parseWorksheet(entry.table);
+  const sourceIdx = headers.findIndex(h => /source/i.test(h));
+  return { headers, rows, sourceIdx };
+});
 
 // Parse a GitHub-flavored Markdown table into headers + rows.
 const parseWorksheet = (md: string): { headers: string[]; rows: string[][] } => {
@@ -2353,6 +2470,7 @@ onMounted(async () => {
 
   await loadSavedResults();
   void loadWorksheets();
+  void loadEncounters();
 
   // Only start auto-processing if no saved results (file not yet processed into lists)
   if (!hasSavedResults.value) {

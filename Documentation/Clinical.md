@@ -377,6 +377,52 @@ update them here too.
 
 ---
 
+## 2.6 Encounters Worksheet
+
+A reverse-chronological list of clinical **encounters** across **all** of
+the patient's source PDFs, shown as an "Encounters" card in My Lists.
+Unlike the medication worksheets, it is **deterministic** — built by
+parsing the source files directly, with **no agent call and no KB
+retrieval** — so it is fast, reproducible, and independent of agent
+state.
+
+- **Endpoint**: `POST /api/encounters/worksheet` (build) / `GET` (read).
+  Persists to `userDoc.encountersWorksheet = {table, legend,
+  generatedAt, fileCount, encounterCount, modes}`.
+- **Extraction** (`server/utils/encounters-extractor.js`): each PDF in
+  the KB folder is fetched from Spaces and parsed with `pdf-parse`;
+  `extractEncountersFromText` detects encounter headers and maps each to
+  a page.
+  - **Epic-optimized**: matches the MGB/Epic header
+    `MM/DD/YYYY - <kind> in <location>` (e.g. "08/27/2025 - Telemedicine
+    in Department of Urology"); `(continued)` repeats collapse to the
+    encounter's first page.
+  - **Graceful degradation**: files with no Epic headers fall back to a
+    generic "dated line with encounter-ish context" heuristic; unknown
+    formats contribute nothing rather than erroring. Per-file `mode`
+    (`epic`/`generic`/`none`) is recorded.
+  - **Type** is classified into **Outpatient / Telemedicine /
+    Inpatient** (`classifyEncounterType`): video/phone/e-consult →
+    Telemedicine; admission/ED/discharge → Inpatient; office/OP/procedure/
+    imaging/lab → Outpatient.
+- **Page links**: page numbers come from the printed "… Page N" footers
+  (which match the PDF page index); the Source column renders as
+  `File N p.<page>` and links open that PDF at the page (same
+  `openWorksheetSource` path as the medication worksheets). When a file
+  lacks footers, pages are approximated proportionally.
+- **Multiple files**: encounters from all PDFs are merged, deduped by
+  date+descriptor, and sorted newest-first. The legend lists `File N =
+  <filename>` with bucketKeys for the links.
+- **Footer stripping**: `stripHeadersFooters(text, numPages)` removes
+  repeating page header/footer boilerplate (institution/address, MRN/DOB,
+  "Generated on … Page N"). It is available for cleaner KB indexing; the
+  encounters detector itself runs on raw lines (encounter headers are
+  unique, so they survive). Wiring footer-stripped text into the KB
+  indexing pipeline is a separate, pending change (relevant to the
+  medication-retrieval work).
+
+---
+
 ## 3. Reference: Agents and Knowledge Bases
 
 For the canonical parameters, see **`NEW-AGENT.txt`** at the repo root.
