@@ -251,7 +251,7 @@
                     v-if="ci === worksheetView(ws.profileKey).sourceIdx && parseSourcePage(cell) != null"
                     href="#"
                     class="text-primary"
-                    @click.prevent="openWorksheetSource(cell)"
+                    @click.prevent="openWorksheetSource(cell, worksheets[ws.profileKey].legend)"
                   >{{ cell }}</a>
                   <span v-else>{{ cell }}</span>
                 </td>
@@ -563,7 +563,7 @@ const expandedCategories = ref<Set<string>>(new Set());
 // ── Current Medications Worksheets (one per Private AI agent) ──────────
 interface WorksheetEntry {
   table: string;
-  legend: Array<{ tag: string; fileName: string }>;
+  legend: Array<{ tag: string; fileName: string; bucketKey?: string }>;
   model?: string;
   generatedAt?: string;
 }
@@ -658,13 +658,35 @@ const parseSourcePage = (cell: string): number | null => {
   return m ? parseInt(m[1], 10) : null;
 };
 
-// Open the source page for a worksheet row. The worksheet cites the Apple
-// Health export, which is the initial file — reuse the same page-open path
-// the Categories links use.
-const openWorksheetSource = async (cell: string) => {
+// Open the source page for a worksheet row. The Source cell looks like
+// "File 1 p.127": resolve "File N" to the actual file via the worksheet's
+// legend (which carries the bucketKey) and open that PDF at the page.
+// This works for KB-only patients (no Apple Health initial file). Falls
+// back to the Apple Health initial-file path only if the legend has no
+// bucketKey for the cited tag.
+const openWorksheetSource = async (
+  cell: string,
+  legend?: Array<{ tag: string; fileName: string; bucketKey?: string }>
+) => {
   const page = parseSourcePage(cell);
-  if (page == null) return;
-  await handleCategoryPageClick(page);
+  const tagMatch = (cell || '').match(/File\s+\d+/i);
+  const tag = tagMatch ? tagMatch[0].replace(/\s+/g, ' ') : '';
+  const entry = (legend || []).find(l => l.tag.toLowerCase() === tag.toLowerCase());
+
+  if (entry?.bucketKey) {
+    const fileName = entry.fileName || 'document.pdf';
+    viewingPdfFile.value = {
+      bucketKey: entry.bucketKey,
+      name: fileName.toLowerCase().endsWith('.pdf') ? fileName : `${fileName}.pdf`
+    };
+    pdfInitialPage.value = page ?? undefined;
+    showPdfViewer.value = true;
+    return;
+  }
+
+  // Fallback (e.g. a worksheet generated before the legend carried
+  // bucketKeys): use the Apple Health initial-file page path.
+  if (page != null) await handleCategoryPageClick(page);
 };
 
 const formatWorksheetTime = (iso?: string): string => {

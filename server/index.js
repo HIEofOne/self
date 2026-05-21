@@ -10992,7 +10992,9 @@ app.post('/api/medications/worksheet', async (req, res) => {
     if (kbFiles.length === 0) {
       return res.status(400).json({ success: false, error: 'NO_INDEXED_FILES', message: 'No indexed files to build a worksheet from.' });
     }
-    const legend = kbFiles.map((f, i) => ({ tag: `File ${i + 1}`, fileName: f.fileName }));
+    // legend carries bucketKey so the client's Source links can open the
+    // exact file (not just the Apple Health initial file).
+    const legend = kbFiles.map((f, i) => ({ tag: `File ${i + 1}`, fileName: f.fileName, bucketKey: f.bucketKey || null }));
     const legendLines = legend.map(l => `${l.tag} = ${l.fileName}`).join('\n');
 
     // Prefer the structured Apple Health "Medication Records" markdown as
