@@ -154,6 +154,12 @@ regenerates the sidecars first. If sidecar generation yields nothing
 folder. Existing (pre-v1.3.95) KBs keep indexing raw PDFs until
 re-created.
 
+**Restore** always sets `kbCleanIndex = true` (rehydrate), so a restored
+account's KB is rebuilt/re-indexed against the `_clean/` sidecars — i.e.
+Restore upgrades a pre-v1.3.95 account to clean-index. (A KB that
+literally survived a partial rehydrate and still has its old PDF-folder
+data source is the one exception until it is re-created.)
+
 The actual parameters used for each KB creation are recorded in the
 user's `maia-log.pdf` (the `Knowledge base created` entry; clean-index
 KBs also log `clean-index-built`).

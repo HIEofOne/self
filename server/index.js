@@ -9529,6 +9529,14 @@ app.put('/api/account/rehydrate', async (req, res) => {
     for (const f of REGENERABLE_SECRET_FIELDS) delete docToWrite[f];
     if (existing?._rev) docToWrite._rev = existing._rev;
 
+    // Restore always rebuilds/re-indexes the KB from re-uploaded files, so
+    // make it footer-stripped (clean-index) — the current standard. This
+    // upgrades pre-v1.3.95 accounts to clean-index on restore. The flag is
+    // read by /api/update-knowledge-base (re-index → regenerates `_clean/`
+    // sidecars and points the data source there); a from-scratch rebuild
+    // via setupKnowledgeBase clean-indexes new KBs regardless.
+    docToWrite.kbCleanIndex = true;
+
     // assignedAgentId / kbId in the incoming backup are STALE pointers to
     // resources destroyed by "Destroy Cloud Account". They're hints, not
     // truth. If a previous rehydrate pass already created live resources
