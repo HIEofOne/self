@@ -3277,6 +3277,8 @@ const generateSetupLogPdf = async () => {
         const t = evt.time ? new Date(evt.time).toLocaleTimeString() : '??:??';
         switch (evt.event) {
           case 'setup-started': return `[${t}] Setup started`;
+          case 'setup-resumed':
+            return `[${t}] Setup reopened to finish verification — the Patient Summary from the previous session was still a draft (not verified). This is a resume, not a new setup.`;
           case 'restore-started': return `[${t}] Restore started`;
           case 'setup-complete': return `[${t}] Setup complete`;
           case 'restore-complete': return `[${t}] Restore complete`;
@@ -6217,6 +6219,12 @@ const startSetupWizardPolling = () => {
         wizardFlowPhase.value = 'summary';
         myStuffInitialTab.value = 'summary';
         showMyStuffDialog.value = true;
+        // Explain in maia-log why Setup is opening again (it's a resume to
+        // finish verification, not a fresh/duplicate setup). Common after a
+        // Restore: the restored Patient Summary is a draft until the user
+        // verifies it. Logged once (the phase flips to 'summary' so this
+        // block won't re-enter).
+        logProvisioningEvent({ event: 'setup-resumed', reason: 'patient-summary-not-verified' });
       }
 
       if (!shouldHideSetupWizard.value && !showAgentSetupDialog.value && !wizardDismissed.value && !showMyStuffDialog.value) {
