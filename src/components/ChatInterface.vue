@@ -3318,6 +3318,8 @@ const generateSetupLogPdf = async () => {
             if (evt.role) lines.push(`        Role: ${evt.role}`);
             return lines.join('\n');
           }
+          case 'clean-index-built':
+            return `[${t}] Footer-stripped index built (${evt.fileCount || 0} file(s)) — KB indexes cleaned text`;
           case 'kb-connection-changed': {
             const verb = evt.action === 'connected' ? 'Connected' : 'Disconnected';
             const prep = evt.action === 'connected' ? 'to' : 'from';

@@ -132,8 +132,31 @@ DigitalOcean uses an S3-compatible Spaces bucket (named `maia`,
 subfoldered by `userId`) to pass files to OpenSearch for indexing into
 the knowledge base attached to the user's Private AI agent.
 
+### Footer-stripped indexing (clean-index, v1.3.95+)
+
+KBs created from v1.3.95 on (`userDoc.kbCleanIndex === true`) do NOT
+index the raw PDFs. At KB creation, each PDF is parsed and its repeating
+page header/footer boilerplate — the institution/address block, MRN/DOB,
+and especially the **"Generated on <date> Page N"** footer — is stripped
+deterministically (`generateCleanIndexSidecars` →
+`stripHeadersFooters`). The footer-free text is written to a
+`${userId}/${kbName}/_clean/` sidecar folder, and the DO data source
+`item_path` points at `_clean/` instead of the PDF folder. This keeps the
+repeating generation date/time out of every retrieved chunk (it was being
+mistaken for a prescription date in RAG-based extraction).
+
+The original PDFs remain in the KB folder untouched — viewing, page
+links, file membership, `kbIndexedBucketKeys`, and Restore all continue
+to use them. `isKbFolderDataSourcePath` recognizes both the PDF folder
+and the `_clean/` folder as "the KB's folder data source". Re-index
+regenerates the sidecars first. If sidecar generation yields nothing
+(no PDFs / parse failure), the KB falls back to indexing the raw PDF
+folder. Existing (pre-v1.3.95) KBs keep indexing raw PDFs until
+re-created.
+
 The actual parameters used for each KB creation are recorded in the
-user's `maia-log.pdf` (the `Knowledge base created` entry).
+user's `maia-log.pdf` (the `Knowledge base created` entry; clean-index
+KBs also log `clean-index-built`).
 
 ---
 

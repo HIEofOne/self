@@ -307,9 +307,23 @@ function buildTempKbFolder(userId, kbName) {
   return `${userId}/${kbName}/`;
 }
 
-function buildKbDataSourcePath(userId, kbName, _sourceKey, useEphemeralSpaces) {
+// Clean-index sidecar subfolder. For KBs created with footer-stripped
+// indexing (userDoc.kbCleanIndex === true), the DO data source points at
+// this subfolder (which contains only the cleaned .txt sidecars), NOT the
+// PDF folder — so RAG never sees the repeating "Generated on … Page N"
+// footer dates / boilerplate. The PDFs stay in the KB folder for viewing,
+// page-links, membership, and Restore (all unchanged).
+const CLEAN_INDEX_SUBFOLDER = '_clean';
+function kbCleanIndexFolder(userId, kbName) {
+  return `${userId}/${kbName}/${CLEAN_INDEX_SUBFOLDER}/`;
+}
+
+function buildKbDataSourcePath(userId, kbName, _sourceKey, useEphemeralSpaces, cleanIndex = false) {
   if (useEphemeralSpaces) {
     return buildTempKbFolder(userId, kbName);
+  }
+  if (cleanIndex) {
+    return kbCleanIndexFolder(userId, kbName);
   }
   return `${userId}/${kbName}/`;
 }
@@ -323,7 +337,11 @@ function buildTempKbObjectKey(userId, kbName, sourceKey) {
 function isKbFolderDataSourcePath(path, userId, kbName) {
   const normalizedPath = normalizeDataSourcePath(path);
   if (!normalizedPath) return false;
-  return normalizedPath === `${userId}/${kbName}`;
+  // Accept the PDF folder (legacy/standard) OR the clean-index sidecar
+  // folder (footer-stripped KBs). Both represent "the KB's folder data
+  // source" for membership/dedup/restore purposes.
+  return normalizedPath === `${userId}/${kbName}` ||
+         normalizedPath === `${userId}/${kbName}/${CLEAN_INDEX_SUBFOLDER}`;
 }
 
 async function ensureSingleKbDataSource(kbId, bucketName, folderPath, region, userId, kbName) {
@@ -493,6 +511,66 @@ async function createUserBucketFolders(userId, kbName) {
   } catch (err) {
     throw new Error(`Failed to create bucket folders: ${err.message}`);
   }
+}
+
+/**
+ * Generate footer-stripped text "sidecars" for clean-index KBs.
+ *
+ * For each PDF in the KB folder, extract its text (pdf-parse), strip the
+ * repeating page header/footer boilerplate (including the "Generated on …
+ * Page N" date/time), and upload the result to the KB's `_clean/`
+ * subfolder as `<originalName>.txt`. The DO data source for a clean-index
+ * KB points at `_clean/`, so RAG indexes only this footer-free text. The
+ * original PDFs are untouched (viewing / page-links / membership / Restore
+ * all keep using them). Best-effort: a file that fails to parse is skipped.
+ *
+ * Returns { written, skipped, folder }.
+ */
+async function generateCleanIndexSidecars(userId, kbName, kbFiles) {
+  const bucketUrl = getSpacesBucketName();
+  if (!bucketUrl) return { written: 0, skipped: 0, folder: null };
+  const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+  const folder = kbCleanIndexFolder(userId, kbName);
+  const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
+  const s3Client = new S3Client({
+    endpoint: getSpacesEndpoint(),
+    region: 'us-east-1',
+    forcePathStyle: process.env.S3_FORCE_PATH_STYLE === 'true',
+    credentials: {
+      accessKeyId: process.env.DIGITALOCEAN_AWS_ACCESS_KEY_ID || process.env.SPACES_AWS_ACCESS_KEY_ID || '',
+      secretAccessKey: process.env.DIGITALOCEAN_AWS_SECRET_ACCESS_KEY || process.env.SPACES_AWS_SECRET_ACCESS_KEY || ''
+    }
+  });
+  const pdfParse = (await import('pdf-parse')).default;
+  const { stripHeadersFooters } = await import('./utils/encounters-extractor.js');
+
+  const pdfs = (kbFiles || []).filter(f =>
+    f?.bucketKey && (/\.pdf$/i.test(f.fileName || '') || /pdf/i.test(f.fileType || ''))
+  );
+  let written = 0, skipped = 0;
+  for (const f of pdfs) {
+    try {
+      const buf = await readSpacesObjectBuffer(f.bucketKey);
+      if (!buf) { skipped++; continue; }
+      const data = await pdfParse(buf);
+      const cleaned = stripHeadersFooters(data.text, data.numpages);
+      const base = (f.fileName || f.bucketKey.split('/').pop() || 'document.pdf')
+        .replace(/[^a-zA-Z0-9._-]/g, '_')
+        .replace(/\.pdf$/i, '');
+      await s3Client.send(new PutObjectCommand({
+        Bucket: bucketName,
+        Key: `${folder}${base}.txt`,
+        Body: Buffer.from(cleaned, 'utf-8'),
+        ContentType: 'text/plain'
+      }));
+      written++;
+    } catch (e) {
+      skipped++;
+      console.warn(`[clean-index] sidecar failed for ${f.fileName}: ${e?.message || e}`);
+    }
+  }
+  console.log(`[clean-index] ${userId}/${kbName}: wrote ${written} sidecar(s), skipped ${skipped} → ${folder}`);
+  return { written, skipped, folder };
 }
 
 async function deleteKbFolderPlaceholder(userId, kbName) {
@@ -6563,8 +6641,28 @@ async function setupKnowledgeBase(userId, kbName, filesInKB, bucketName, existin
       };
     }
     
+    // Clean-index (footer-stripped) indexing is opt-in for NEW KBs created
+    // via the standard (non-ephemeral) Spaces flow. Generate the cleaned
+    // `_clean/` sidecars first, then point the data source at that folder so
+    // DO indexes footer-free text. Best-effort: if no sidecars are written
+    // (e.g. parse failure / no PDFs), fall back to the raw PDF folder.
+    let cleanIndex = false;
+    if (!useEphemeralSpaces) {
+      try {
+        const sidecar = await generateCleanIndexSidecars(userId, kbName, filesInKB);
+        cleanIndex = (sidecar?.written || 0) > 0;
+        if (cleanIndex) {
+          await appendUserProvisioningEvent(userId, {
+            event: 'clean-index-built', kbName, fileCount: sidecar.written, folder: sidecar.folder
+          });
+        }
+      } catch (e) {
+        console.warn(`[clean-index] generation failed (using raw PDFs): ${e?.message || e}`);
+      }
+    }
+
     try {
-      console.log(`📝 Creating new KB in DO: ${kbName}`);
+      console.log(`📝 Creating new KB in DO: ${kbName} (cleanIndex=${cleanIndex})`);
     // KB tuning from NEW-AGENT.txt "## Knowledge Bases": chunking is
     // per-datasource; reranking is top-level on the KB. (OpenSearch DB
     // is NOT configured here — always the existing account cluster.)
@@ -6573,7 +6671,7 @@ async function setupKnowledgeBase(userId, kbName, filesInKB, bucketName, existin
       {
         spaces_data_source: {
           bucket_name: bucketName,
-          item_path: buildKbDataSourcePath(userId, kbName, null, useEphemeralSpaces),
+          item_path: buildKbDataSourcePath(userId, kbName, null, useEphemeralSpaces, cleanIndex),
           region: getDoRegion()
         },
         ...chunking
@@ -6610,6 +6708,25 @@ async function setupKnowledgeBase(userId, kbName, filesInKB, bucketName, existin
       
       kbId = kbResult.uuid || kbResult.id;
       console.log(`✅ Created new KB: ${kbName} (${kbId})`);
+
+      // Persist the clean-index flag so re-index / restore keep pointing the
+      // data source at the `_clean/` folder for this KB.
+      if (cleanIndex) {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            const doc = await cloudant.getDocument('maia_users', userId);
+            if (!doc) break;
+            doc.kbCleanIndex = true;
+            doc.updatedAt = new Date().toISOString();
+            await cloudant.saveDocument('maia_users', doc);
+            break;
+          } catch (e) {
+            if (e?.statusCode === 409 && attempt < 2) continue;
+            console.warn(`[clean-index] could not persist kbCleanIndex for ${userId}: ${e?.message || e}`);
+            break;
+          }
+        }
+      }
 
       // Record the ACTUAL parameters used to create this KB so they
       // appear in the user's maia-log.pdf (rendered by the
@@ -7099,7 +7216,18 @@ app.post('/api/update-knowledge-base', async (req, res) => {
           // Get current datasources from KB
           let datasources = kbDetails?.datasources || kbDetails?.data_sources || kbDetails?.knowledge_base_data_sources || [];
           const useSingleBucketDatasource = true;
-          const kbFolderPath = buildKbDataSourcePath(userId, kbName, null, useEphemeralSpaces);
+          // Clean-index KBs index the footer-stripped `_clean/` folder.
+          // Regenerate the sidecars first (files may have changed since the
+          // last index) so the re-index picks up current content.
+          const cleanIndex = userDoc?.kbCleanIndex === true && !useEphemeralSpaces;
+          if (cleanIndex) {
+            try {
+              await generateCleanIndexSidecars(userId, kbName, (userDoc.files || []).filter(f => (f.bucketKey || '').startsWith(`${userId}/${kbName}/`) && !(f.bucketKey || '').includes(`/${CLEAN_INDEX_SUBFOLDER}/`)));
+            } catch (e) {
+              console.warn(`[clean-index] re-index sidecar refresh failed: ${e?.message || e}`);
+            }
+          }
+          const kbFolderPath = buildKbDataSourcePath(userId, kbName, null, useEphemeralSpaces, cleanIndex);
           let folderDataSourceUuid = null;
 
           if (useSingleBucketDatasource) {
