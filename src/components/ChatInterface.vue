@@ -3266,6 +3266,9 @@ const generateSetupLogPdf = async () => {
             evt.event === 'summary-verified') return [0, 120, 0];
         if (evt.event === 'medications-offered' && evt.outcome && evt.outcome !== 'success') return [180, 100, 0];
         if (evt.event === 'current-medications-recovery-failed') return [200, 0, 0];
+        if (evt.event === 'draft-summary-failed' || evt.event === 'meds-worksheet-failed') return [200, 0, 0];
+        if (evt.event === 'meds-worksheet-pending') return [180, 100, 0];
+        if (evt.event === 'gpt-agent-created' || evt.event === 'gpt-agent-deployed' || evt.event === 'gpt-agent-ready') return [0, 90, 160];
         return [0, 0, 0];
       };
 
@@ -3343,7 +3346,21 @@ const generateSetupLogPdf = async () => {
               : (evt.sourceMode === 'kb-retrieval' ? ', source: knowledge-base retrieval' : '');
             return `[${t}] Current Medications Worksheet generated — ${agent}${model}${files}${src}`;
           }
+          case 'gpt-agent-created': return `[${t}] Private AI (GPT) agent created — deploying`;
+          case 'gpt-agent-deployed':
           case 'gpt-agent-ready': return `[${t}] Private AI (GPT) deployed and available`;
+          case 'encounters-worksheet-generated':
+            return `[${t}] Encounters list built (${evt.encounterCount || 0} encounters from ${evt.fileCount || 0} file(s))`;
+          case 'draft-summary-failed':
+            return `[${t}] Draft Patient Summary FAILED${evt.status ? ` (HTTP ${evt.status})` : ''}${evt.reason ? ` — ${evt.reason}` : ''}`;
+          case 'meds-worksheet-failed': {
+            const agent = evt.agentProfileKey === 'gpt' ? 'Private AI (GPT)' : 'Private AI (Deepseek)';
+            return `[${t}] Medications Worksheet FAILED — ${agent}${evt.status ? ` (HTTP ${evt.status})` : ''}${evt.reason ? ` — ${evt.reason}` : ''}`;
+          }
+          case 'meds-worksheet-pending': {
+            const agent = evt.agentProfileKey === 'gpt' ? 'Private AI (GPT)' : 'Private AI (Deepseek)';
+            return `[${t}] Medications Worksheet deferred — ${agent} not ready yet${evt.reason ? ` (${evt.reason})` : ''}`;
+          }
           case 'medications-dismissed': return `[${t}] Medications step dismissed without verification`;
           case 'current-medications-recovery-failed': return `[${t}] Current Medications recovery FAILED — fell through ${Array.isArray(evt.pathsTried) ? evt.pathsTried.join(' -> ') : 'all paths'}`;
           case 'medications-saved': {
@@ -6535,15 +6552,15 @@ watch(
  * Returns true if GPT is ready. Never throws.
  */
 let gptProvisioningInflight: Promise<boolean> | null = null;
-const ensureGptProvisioned = (maxMs = 240000): Promise<boolean> => {
+const ensureGptProvisioned = (maxMs = 240000, silent = false, intervalMs = 8000): Promise<boolean> => {
   if (!props.user?.userId) return Promise.resolve(false);
   if (gptAgentReady.value) return Promise.resolve(true);
-  // Dedupe: an early kickoff and the completion-gate must share one poll
-  // (and one toast), not run two concurrently.
+  // Dedupe: the early concurrent kickoff and the completion-gate must share
+  // one poll (and one toast), not run two concurrently.
   if (gptProvisioningInflight) return gptProvisioningInflight;
   gptProvisioningInflight = (async () => {
     try {
-      return await runEnsureGptProvisioned(maxMs);
+      return await runEnsureGptProvisioned(maxMs, silent, intervalMs);
     } finally {
       gptProvisioningInflight = null;
     }
@@ -6551,12 +6568,12 @@ const ensureGptProvisioned = (maxMs = 240000): Promise<boolean> => {
   return gptProvisioningInflight;
 };
 
-const runEnsureGptProvisioned = async (maxMs: number): Promise<boolean> => {
+const runEnsureGptProvisioned = async (maxMs: number, silent: boolean, intervalMs: number): Promise<boolean> => {
   const userId = props.user!.userId;
   gptProvisioningActive.value = true;
   const startedAt = Date.now();
   let notif: ((props?: any) => void) | null = null;
-  if ($q?.notify) {
+  if (!silent && $q?.notify) {
     notif = $q.notify({
       type: 'ongoing',
       message: 'Provisioning your second Private AI (GPT)…',
@@ -6578,7 +6595,7 @@ const runEnsureGptProvisioned = async (maxMs: number): Promise<boolean> => {
           return true;
         }
       } catch { /* keep polling */ }
-      await new Promise(r => setTimeout(r, 8000));
+      await new Promise(r => setTimeout(r, intervalMs));
     }
     return false;
   } finally {
@@ -6755,6 +6772,14 @@ const handleIndexingStarted = (data: { jobId: string; phase: string }) => {
   };
   startStage3ElapsedTimer();
   updateContextualTip();
+  // Concurrency: kick off the second Private AI (GPT) NOW, while the KB
+  // indexes (often many minutes). Both agents then deploy in parallel and
+  // GPT is usually ready by the time indexing finishes — instead of being
+  // created lazily at the end (which left the user waiting on it). Silent
+  // (no toast) and long-polling; the completion gate reuses this result.
+  if (props.user?.userId && (localFolderHandle.value || safariFolderName.value)) {
+    void ensureGptProvisioned(900000, true, 20000); // long, silent, relaxed polling
+  }
 };
 
 const handleIndexingStatusUpdate = (data: { jobId: string; phase: string; tokens: string; filesIndexed: number; progress: number }) => {

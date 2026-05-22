@@ -297,12 +297,28 @@ retrieving from the knowledge base.
   Health".
 - **Setup**: when KB indexing completes, the wizard generates the draft
   Patient Summary, fires `triggerSetupWorksheets()` for both profiles,
-  kicks off GPT provisioning, then opens the Patient Summary tab. Setup
-  completion is **gated on both Private AIs being provisioned**
-  (`ensureGptProvisioned` polls `POST /api/agents/ensure-secondary`).
-- **Log**: `meds-worksheet-generated` (with `sourceMode`) and
-  `gpt-agent-ready` events are rendered in `maia-log.pdf`, which also
-  carries a static "How the My Lists tab works" reference page.
+  then opens the Patient Summary tab. Setup completion is **gated on both
+  Private AIs being provisioned** (`ensureGptProvisioned` polls
+  `POST /api/agents/ensure-secondary`).
+- **Agent readiness (v1.3.93)**: an agent is "ready" only when its DO
+  deployment is `STATUS_RUNNING` — not merely when a `deployment.url`
+  appears (DO populates the URL while still deploying, and the inference
+  endpoint 403s until RUNNING). `/agent-status` and
+  `/api/agents/ensure-secondary` both enforce this; the agent-dependent
+  endpoints (`/patient-summary/draft`, `/medications/extract`,
+  `/medications/worksheet`) retry once on 401/403 and, if still not
+  serving, return a structured **202 `AGENT_NOT_READY`** (or soft-skip)
+  instead of a 500.
+- **Concurrent provisioning (v1.3.93)**: the GPT agent is created as soon
+  as KB **indexing starts** (`ensureGptProvisioned` silent kickoff in
+  `handleIndexingStarted`), so both agents deploy in parallel during the
+  long indexing window instead of GPT being created lazily at the end.
+- **Log**: rendered in `maia-log.pdf` (which also carries a static "How
+  the My Lists tab works" reference page): `meds-worksheet-generated`
+  (with `sourceMode`); the GPT lifecycle `gpt-agent-created` →
+  `gpt-agent-deployed`; and failure events `draft-summary-failed`,
+  `meds-worksheet-failed`, `meds-worksheet-pending` (so the *cause* of a
+  skipped/blank step is visible, not just the symptom).
 
 ### Exact worksheet prompts
 
@@ -475,6 +491,12 @@ The actual parameters used at each KB creation are logged to
   cutoff. Clarified that medication logic lives in the prompts, not the
   System Instructions, and noted worksheet UI sorting + Source-page
   hyperlinks.
+- *2026-05-22* — v1.3.93. Stabilized agent provisioning: readiness now
+  requires `STATUS_RUNNING` (fixes the 403→500 on draft summary /
+  worksheets); agent endpoints retry 401/403 and return 202
+  `AGENT_NOT_READY` instead of 500; GPT is provisioned concurrently with
+  Deepseek at indexing start; added GPT lifecycle + failure events to
+  maia-log.
 - *2026-05-20* — v1.3.86. Worksheets and the legacy Current Medications
   extract now build from the Apple Health `medication_records.md`
   (dated, paged) passed inline, instead of unreliable `k=10` KB

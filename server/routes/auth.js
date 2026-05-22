@@ -1541,6 +1541,13 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       }
       const deploymentStatus = agent?.deployment?.status || agent?.deployment_status || agent?.status || 'unknown';
       const endpoint = agent?.deployment?.url ? `${agent.deployment.url}/api/v1` : null;
+      // CRITICAL: DigitalOcean populates deployment.url while the agent is
+      // still STATUS_DEPLOYING; the inference endpoint returns 403 until the
+      // deployment is actually RUNNING. "Ready" therefore requires BOTH a URL
+      // and STATUS_RUNNING — otherwise the wizard fires the draft summary /
+      // worksheets into a not-yet-serving agent and gets 403 → 500.
+      const isRunning = deploymentStatus === 'STATUS_RUNNING';
+      const endpointReady = !!endpoint && isRunning;
 
       const cacheKey = `${userId}:${agentId}`;
       const previousStatus = agentStatusCache.get(cacheKey);
@@ -1549,19 +1556,25 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
         agentStatusCache.set(cacheKey, deploymentStatus);
       }
 
-      if (endpoint && userDoc.agentEndpoint !== endpoint) {
+      // Only record the endpoint / mark "deployed" once the agent is actually
+      // RUNNING. Persisting agentEndpoint while it is merely DEPLOYING would
+      // also make chat/providers include a Private AI that 403s (it treats
+      // assignedAgentId + agentEndpoint as ready — see server/routes/chat.js).
+      if (endpointReady && (userDoc.agentEndpoint !== endpoint || userDoc.agentSetupInProgress !== false)) {
         await saveUserDocWithRetry(cloudant, userId, (doc) => {
           doc.agentEndpoint = endpoint;
           doc.agentSetupInProgress = false;
           doc.workflowStage = 'agent_deployed';
           doc.updatedAt = new Date().toISOString();
         });
-      } else if (!endpoint && userDoc.agentSetupInProgress !== true) {
+      } else if (!endpointReady && userDoc.agentSetupInProgress !== true) {
+        // Not RUNNING yet (no URL, or URL present but still deploying). Mark
+        // setup in progress but do NOT clobber an existing workflow stage
+        // (e.g. 'indexing'); only backfill the legacy 'agent_named' when the
+        // stage is still unset.
         await saveUserDocWithRetry(cloudant, userId, (doc) => {
           doc.agentSetupInProgress = true;
-          if (doc.workflowStage !== 'agent_named') {
-            doc.workflowStage = 'agent_named';
-          }
+          if (!doc.workflowStage) doc.workflowStage = 'agent_named';
           doc.updatedAt = new Date().toISOString();
         });
       }
@@ -1569,7 +1582,7 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       return res.json({
         success: true,
         status: deploymentStatus,
-        endpointReady: !!endpoint,
+        endpointReady,
         endpoint,
         provisionAttempted
       });

@@ -10628,11 +10628,24 @@ app.post('/api/patient-summary/draft', async (req, res) => {
       chatResp = await agentProvider.chat(chatMessages, chatOptions);
     } catch (firstError) {
       const sc = firstError.status || firstError.statusCode || 0;
-      if (sc === 401 && userDoc.assignedAgentId) {
-        const { recreateAgentApiKey } = await import('./utils/agent-helper.js');
-        const newApiKey = await recreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
-        const retry = new DigitalOceanProvider(newApiKey, { baseURL: userDoc.agentEndpoint });
-        chatResp = await retry.chat(chatMessages, chatOptions);
+      // 401/403 from a DO agent usually means a stale key OR the agent isn't
+      // serving yet (still deploying). Recreate the key and retry once.
+      if ((sc === 401 || sc === 403) && userDoc.assignedAgentId) {
+        try {
+          const { recreateAgentApiKey } = await import('./utils/agent-helper.js');
+          const newApiKey = await recreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
+          const retry = new DigitalOceanProvider(newApiKey, { baseURL: userDoc.agentEndpoint });
+          chatResp = await retry.chat(chatMessages, chatOptions);
+        } catch (retryError) {
+          const rsc = retryError.status || retryError.statusCode || 0;
+          // Still not serving → agent not ready. Return a structured 202 (not
+          // a 500) so the client backs off and retries, and log it.
+          if (rsc === 401 || rsc === 403) {
+            await appendUserProvisioningEvent(userId, { event: 'draft-summary-failed', reason: 'AGENT_NOT_READY', status: rsc });
+            return res.status(202).json({ success: false, pending: true, reason: 'AGENT_NOT_READY', message: 'Private AI is still deploying — try again shortly.' });
+          }
+          throw retryError;
+        }
       } else {
         throw firstError;
       }
@@ -10666,6 +10679,8 @@ app.post('/api/patient-summary/draft', async (req, res) => {
     res.json({ success: true, summary, lines, chars: summary.length, generationSeconds });
   } catch (error) {
     console.error('Error generating draft patient summary:', error);
+    const sc = error.status || error.statusCode || 0;
+    try { await appendUserProvisioningEvent(userId, { event: 'draft-summary-failed', reason: error.message || 'error', status: sc || undefined }); } catch { /* non-fatal */ }
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -10763,11 +10778,19 @@ Output ONLY the list of current medications — one medication per line (name an
       chatResp = await agentProvider.chat([{ role: 'user', content: prompt }], chatOptions);
     } catch (firstError) {
       const sc = firstError.status || firstError.statusCode || 0;
-      if (sc === 401 && userDoc.assignedAgentId) {
-        const { recreateAgentApiKey } = await import('./utils/agent-helper.js');
-        const newApiKey = await recreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
-        const retry = new DigitalOceanProvider(newApiKey, { baseURL: userDoc.agentEndpoint });
-        chatResp = await retry.chat([{ role: 'user', content: prompt }], chatOptions);
+      if ((sc === 401 || sc === 403) && userDoc.assignedAgentId) {
+        try {
+          const { recreateAgentApiKey } = await import('./utils/agent-helper.js');
+          const newApiKey = await recreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
+          const retry = new DigitalOceanProvider(newApiKey, { baseURL: userDoc.agentEndpoint });
+          chatResp = await retry.chat([{ role: 'user', content: prompt }], chatOptions);
+        } catch (retryError) {
+          const rsc = retryError.status || retryError.statusCode || 0;
+          // Agent still not serving → soft-skip (this extract is optional;
+          // Lists.vue falls back). Records the reason in maia-log.
+          if (rsc === 401 || rsc === 403) return softSkip('AGENT_NOT_READY');
+          throw retryError;
+        }
       } else {
         throw firstError;
       }
@@ -11080,9 +11103,20 @@ app.post('/api/medications/worksheet', async (req, res) => {
     } catch (firstError) {
       const sc = firstError.status || firstError.statusCode || 0;
       if ((sc === 401 || sc === 403) && agentId) {
-        const { recreateAgentApiKey } = await import('./utils/agent-helper.js');
-        const newApiKey = await recreateAgentApiKey(doClient, cloudant, userId, agentId, profileKey);
-        chatResp = await new DigitalOceanProvider(newApiKey, { baseURL: endpoint }).chat([{ role: 'user', content: prompt }], chatOptions);
+        try {
+          const { recreateAgentApiKey } = await import('./utils/agent-helper.js');
+          const newApiKey = await recreateAgentApiKey(doClient, cloudant, userId, agentId, profileKey);
+          chatResp = await new DigitalOceanProvider(newApiKey, { baseURL: endpoint }).chat([{ role: 'user', content: prompt }], chatOptions);
+        } catch (retryError) {
+          const rsc = retryError.status || retryError.statusCode || 0;
+          if (rsc === 401 || rsc === 403) {
+            // Agent (e.g. the GPT one) is still deploying — return a structured
+            // pending response, not a 500, and record it.
+            await appendUserProvisioningEvent(userId, { event: 'meds-worksheet-pending', agentProfileKey: profileKey, reason: 'AGENT_NOT_READY', status: rsc });
+            return res.status(202).json({ success: false, pending: true, reason: 'AGENT_NOT_READY', agentProfileKey: profileKey, message: `Private AI (${profileKey === 'gpt' ? 'GPT' : 'Deepseek'}) is still deploying — try Refresh shortly.` });
+          }
+          throw retryError;
+        }
       } else {
         throw firstError;
       }
@@ -11120,6 +11154,11 @@ app.post('/api/medications/worksheet', async (req, res) => {
     res.json({ success: true, agentProfileKey: profileKey, ...entry });
   } catch (error) {
     console.error('Error building medications worksheet:', error);
+    const sc = error.status || error.statusCode || 0;
+    try {
+      const pk = req.body?.agentProfileKey === 'gpt' ? 'gpt' : 'default';
+      await appendUserProvisioningEvent(userId, { event: 'meds-worksheet-failed', agentProfileKey: pk, reason: error.message || 'error', status: sc || undefined });
+    } catch { /* non-fatal */ }
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -11243,6 +11282,8 @@ app.post('/api/agents/ensure-secondary', async (req, res) => {
     let userDoc = await cloudant.getDocument('maia_users', userId);
     if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
 
+    const hadAgentBefore = !!userDoc.agentProfiles?.gpt?.agentId;
+
     const { ensureSecondaryAgent } = await import('./routes/auth.js');
     try {
       userDoc = await ensureSecondaryAgent(doClient, cloudant, userDoc);
@@ -11253,42 +11294,55 @@ app.post('/api/agents/ensure-secondary', async (req, res) => {
     }
 
     let gpt = userDoc.agentProfiles?.gpt || {};
-    let endpoint = gpt.endpoint || null;
 
-    // Freshly created agents start STATUS_PENDING (endpoint null). Poll the
-    // live agent once for an up-to-date deployment URL and persist it.
-    if (!endpoint && gpt.agentId) {
-      try {
-        const live = await doClient.agent.get(gpt.agentId);
-        endpoint = live?.deployment?.url ? `${live.deployment.url}/api/v1` : null;
-        if (endpoint) {
-          for (let attempt = 0; attempt < 3; attempt++) {
-            try {
-              const doc = await cloudant.getDocument('maia_users', userId);
-              if (!doc) break;
-              if (!doc.agentProfiles) doc.agentProfiles = {};
-              doc.agentProfiles.gpt = { ...(doc.agentProfiles.gpt || {}), endpoint };
-              doc.updatedAt = new Date().toISOString();
-              await cloudant.saveDocument('maia_users', doc);
-              break;
-            } catch (err) {
-              if (err?.statusCode === 409 && attempt < 2) continue;
-              break;
-            }
-          }
-        }
-      } catch { /* still deploying */ }
-    }
-
-    if (endpoint) {
+    // Log GPT creation exactly once (when it first appears).
+    if (!hadAgentBefore && gpt.agentId) {
       try {
         await appendUserProvisioningEvent(userId, {
-          event: 'gpt-agent-ready', agentId: gpt.agentId || null
+          event: 'gpt-agent-created', agentId: gpt.agentId, agentName: gpt.agentName || null
         });
       } catch { /* non-fatal */ }
     }
 
-    res.json({ success: true, ready: !!endpoint, agentId: gpt.agentId || null, endpoint });
+    // Readiness mirrors the primary agent: require BOTH a deployment URL and
+    // STATUS_RUNNING (a URL alone 403s while still deploying).
+    let endpoint = null;
+    let isRunning = false;
+    if (gpt.agentId) {
+      try {
+        const live = await doClient.agent.get(gpt.agentId);
+        const status = live?.deployment?.status || live?.deployment_status || 'unknown';
+        isRunning = status === 'STATUS_RUNNING';
+        endpoint = live?.deployment?.url ? `${live.deployment.url}/api/v1` : null;
+      } catch { /* still deploying */ }
+    }
+    const ready = !!endpoint && isRunning;
+
+    if (ready) {
+      // Persist endpoint + log "deployed" exactly once (deployedLoggedAt guard).
+      const alreadyLogged = !!userDoc.agentProfiles?.gpt?.deployedLoggedAt;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const doc = await cloudant.getDocument('maia_users', userId);
+          if (!doc) break;
+          if (!doc.agentProfiles) doc.agentProfiles = {};
+          doc.agentProfiles.gpt = { ...(doc.agentProfiles.gpt || {}), endpoint, deployedLoggedAt: doc.agentProfiles.gpt?.deployedLoggedAt || new Date().toISOString() };
+          doc.updatedAt = new Date().toISOString();
+          await cloudant.saveDocument('maia_users', doc);
+          break;
+        } catch (err) {
+          if (err?.statusCode === 409 && attempt < 2) continue;
+          break;
+        }
+      }
+      if (!alreadyLogged) {
+        try {
+          await appendUserProvisioningEvent(userId, { event: 'gpt-agent-deployed', agentId: gpt.agentId || null });
+        } catch { /* non-fatal */ }
+      }
+    }
+
+    res.json({ success: true, ready, agentId: gpt.agentId || null, endpoint });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
