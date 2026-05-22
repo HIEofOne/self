@@ -3343,7 +3343,8 @@ const generateSetupLogPdf = async () => {
             const files = evt.fileCount ? `, ${evt.fileCount} source file(s)` : '';
             const src = evt.sourceMode === 'apple-health-markdown'
               ? ', source: Apple Health medication records'
-              : (evt.sourceMode === 'kb-retrieval' ? ', source: knowledge-base retrieval' : '');
+              : (evt.sourceMode === 'epic-medication-list' ? ', source: Epic medication list (dated)'
+              : (evt.sourceMode === 'kb-retrieval' ? ', source: knowledge-base retrieval' : ''));
             return `[${t}] Current Medications Worksheet generated — ${agent}${model}${files}${src}`;
           }
           case 'gpt-agent-created': return `[${t}] Private AI (GPT) agent created — deploying`;

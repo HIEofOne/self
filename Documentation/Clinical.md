@@ -258,17 +258,25 @@ retrieving from the knowledge base.
   /api/medications/worksheet`. Result persists to
   `userDoc.medsWorksheets[profileKey] = {table, legend, model,
   generatedAt, sourceMode}`.
-- **Source (v1.3.86+)**: when an Apple Health export is present, the
-  worksheet is built from the structured **`${userId}/Lists/medication_records.md`**
-  category markdown **passed inline** (`sourceMode:
-  'apple-health-markdown'`). Every entry has a date and page number, so
-  both Deepseek and GPT produce complete tables. This replaced pure KB
-  retrieval, which with `k=10` over a large multi-hundred-page record
-  routinely missed the medication pages and returned a header-only
-  table (Deepseek was especially affected). KB retrieval
-  (`sourceMode: 'kb-retrieval'`) remains the fallback when no Apple
-  Health medication markdown exists; the endpoint attaches the KB and
-  calls `ensureAgentRetrieval` in that path.
+- **Source resolution** (most reliable first; recorded as `sourceMode`):
+  1. **Apple Health** (`apple-health-markdown`): the structured
+     `${userId}/Lists/medication_records.md` (dated, paged) passed inline.
+  2. **Epic / MGB** (`epic-medication-list`, v1.3.94): the dated
+     "Medication List" entries are extracted **deterministically** from
+     the PDFs (`server/utils/meds-extractor.js`) — each med's REAL
+     `Ordered on:` / `Discontinued on:` date and its PDF page (via the
+     same footer-based page map the Encounters list uses) — then merged,
+     deduped by drug, and passed inline. **This fixed a bug where KB
+     retrieval reported the document's "Generated on …" footer date as
+     the prescription date.** The footer date is never used.
+  3. **KB retrieval** (`kb-retrieval`): last-resort fallback when no
+     structured source exists; the prompt explicitly tells the agent to
+     ignore "Generated on/Exported on" footer dates. The endpoint
+     attaches the KB and calls `ensureAgentRetrieval` in this path only.
+  In all cases the dated list is passed **inline to each agent**
+  (Deepseek + GPT) so they format/dedupe/redact consistently from clean
+  input — `k=10` retrieval over a large multi-hundred-page record
+  routinely missed the medication pages entirely.
 - **GPT auto-provisioning**: for `gpt`, the endpoint calls
   `ensureSecondaryAgent`; if the agent isn't deployed yet it returns
   `202 {pending:true}` and the client (My Lists REFRESH) retries.
@@ -491,6 +499,12 @@ The actual parameters used at each KB creation are logged to
   cutoff. Clarified that medication logic lives in the prompts, not the
   System Instructions, and noted worksheet UI sorting + Source-page
   hyperlinks.
+- *2026-05-22* — v1.3.94. Medication worksheets now extract the dated
+  Epic "Medication List" deterministically (real Ordered-on/Discontinued-on
+  dates + accurate page links, footer-stripped) and feed it inline to both
+  agents — fixing the bug where the "Generated on" footer date was reported
+  as the prescription date. KB-retrieval fallback now told to ignore footer
+  dates.
 - *2026-05-22* — v1.3.93. Stabilized agent provisioning: readiness now
   requires `STATUS_RUNNING` (fixes the 403→500 on draft summary /
   worksheets); agent endpoints retry 401/403 and return 202

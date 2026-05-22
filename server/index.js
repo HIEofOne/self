@@ -10864,7 +10864,7 @@ Rules per column:
     Discontinued — this drug's most recent entry is explicitly stopped/inactive/held, OR its Last date prescribed is BEFORE ${cutoffDate} (more than 18 months ago). A medication not prescribed in over 18 months is NOT current.
     Inpatient — administered during a hospital/inpatient encounter, not an outpatient take-home prescription.
   A drug can only be Current if its Last date prescribed is on or after ${cutoffDate}. Do not invent a status.
-- Last date prescribed: the most recent date the drug was prescribed or ordered, as YYYY-MM-DD (use what is given if only a month/year is present; "—" if no date is found).
+- Last date prescribed: the most recent date the drug was actually prescribed/ordered (e.g. an "Ordered on" or "Start date"), as YYYY-MM-DD; "—" if none is found. IGNORE document footer dates such as "Generated on <date>" / "Exported on <date>" — those are when the report was printed, NOT when the medication was prescribed.
 - Source: cite the entry that established the Last date prescribed, formatted as "File N p.<page>" using the file tags below. Do NOT write full file names in the table — use only the "File N" tag. If you cannot determine a page, use just "File N".
 
 De-duplication (IMPORTANT): treat all entries for the same drug as ONE medication, regardless of strength or dose. A change in dose/strength over time is NOT a separate medication. Output exactly ONE row per drug, using ONLY the entry with the most recent Last date prescribed — its strength, date, and page. Do NOT create extra rows or a "Discontinued" row for older strengths/doses of the same drug; simply drop the older entries.
@@ -10933,6 +10933,39 @@ async function readSpacesTextObject(key) {
   } catch {
     return null;
   }
+}
+
+// Worksheet prompt built from a deterministically-extracted, dated Epic
+// medication list (name | action+date | File N p.page). The dates here are
+// the REAL Ordered-on / Discontinued-on dates, so the agent must use them
+// verbatim and must NOT pull dates from the document body (in particular
+// the repeating "Generated on …" footer date).
+function buildWorksheetPromptFromMedList(medListText, legendLines, cutoffDate) {
+  return `Below is this patient's medication list, extracted directly from the record. Each line gives the medication (name and strength), its most recent action and date (ordered or discontinued), and the page it appears on. These actions and dates are AUTHORITATIVE.
+
+Build a GitHub-flavored Markdown table with EXACTLY these columns — no title, no notes, no text before or after the table:
+
+| Medication | Status | Last date prescribed | Source |
+
+Rules per column:
+- Medication: the drug name with strength/form exactly as given. One row per drug — see de-duplication.
+- Status: exactly one of —
+    Current — the action is "ordered" AND the date is on or after ${cutoffDate} (within the last 18 months).
+    Discontinued — the action is "discontinued", OR the date is before ${cutoffDate} (more than 18 months ago).
+    Inpatient — a hospital/inpatient administration (e.g. anesthesia agents, IV infusions).
+  A drug can only be Current if its date is on or after ${cutoffDate}.
+- Last date prescribed: the date given for that medication, as YYYY-MM-DD. Use ONLY the date provided on that medication's line. Do NOT use any other date from the documents, and NEVER use a document "Generated on" footer date.
+- Source: the "File N p.<page>" exactly as given on that medication's line.
+
+De-duplication: one row per drug, regardless of strength/dose changes.
+
+Apply your system instructions for any medications that must be omitted or redacted (e.g. sexual-function drugs/syringes).
+
+File tags (for the Source column):
+${legendLines}
+
+Medication list:
+${medListText}`;
 }
 
 // Read a binary object (e.g. a PDF) from the Spaces "maia" bucket as a
@@ -11062,6 +11095,9 @@ app.post('/api/medications/worksheet', async (req, res) => {
 
     let prompt;
     let worksheetSourceMode = 'kb-retrieval';
+
+    // 1) Apple Health: the structured "Medication Records" markdown (dated,
+    //    paged) passed inline.
     const ahFileIdx = kbFiles.findIndex(f => f.isAppleHealth);
     if (ahFileIdx !== -1) {
       const medMd = await findMedicationRecordsMarkdown(userId);
@@ -11071,6 +11107,42 @@ app.post('/api/medications/worksheet', async (req, res) => {
         worksheetSourceMode = 'apple-health-markdown';
       }
     }
+
+    // 2) Epic / MGB: deterministically extract the dated "Medication List"
+    //    entries (real Ordered-on / Discontinued-on dates + page numbers)
+    //    from the PDFs and feed them inline. This avoids KB retrieval, whose
+    //    chunks include the repeating "Generated on …" footer date that the
+    //    model otherwise reports as the prescription date.
+    if (!prompt) {
+      try {
+        const { extractEpicMedications, mergeMedications, buildMedListText } = await import('./utils/meds-extractor.js');
+        const pdfParse = (await import('pdf-parse')).default;
+        const pdfFiles = kbFiles.filter(f => /\.pdf$/i.test(f.fileName) || /pdf/i.test(f.fileType || ''));
+        const allMeds = [];
+        for (let i = 0; i < kbFiles.length; i++) {
+          const f = kbFiles[i];
+          if (!pdfFiles.includes(f) || !f.bucketKey) continue;
+          const buf = await readSpacesObjectBuffer(f.bucketKey);
+          if (!buf) continue;
+          try {
+            const data = await pdfParse(buf);
+            const { meds } = extractEpicMedications(data.text, data.numpages, `File ${i + 1}`);
+            allMeds.push(...meds);
+          } catch (e) {
+            console.warn(`[worksheet] meds parse failed for ${f.fileName}: ${e?.message || e}`);
+          }
+        }
+        if (allMeds.length > 0) {
+          const merged = mergeMedications(allMeds);
+          prompt = buildWorksheetPromptFromMedList(buildMedListText(merged), legendLines, cutoffDate);
+          worksheetSourceMode = 'epic-medication-list';
+        }
+      } catch (e) {
+        console.warn(`[worksheet] Epic medication extraction error: ${e?.message || e}`);
+      }
+    }
+
+    // 3) Fallback: KB retrieval (only when no structured source was found).
     if (!prompt) {
       prompt = buildWorksheetPrompt(legendLines, cutoffDate);
     }

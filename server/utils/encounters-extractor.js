@@ -61,7 +61,7 @@ export function classifyEncounterType(descriptor) {
  * belong to N+1). If too few footers are found relative to numPages,
  * fall back to proportional distribution across numPages.
  */
-function buildLinePageMap(lines, numPages) {
+export function buildLinePageMap(lines, numPages) {
   const footerRe = /\bPage\s+(\d+)\s*$/i;
   const linePage = new Array(lines.length).fill(1);
   let cur = 1;
