@@ -952,6 +952,56 @@
 
           <!-- Patient Summary Tab -->
           <q-tab-panel name="summary">
+            <!-- Dual-AI Summary Chooser: appears above the saved summary when
+                 the user clicks "Request New Summary". Both Private AIs run
+                 the same prompt in parallel; the user picks one. -->
+            <div v-if="loadingPair || summaryPair" class="q-mb-md">
+              <div v-if="loadingPair" class="text-center q-pa-md bg-grey-1 rounded-borders">
+                <q-spinner size="1.5em" color="primary" />
+                <div class="q-mt-sm text-body2">Generating from both Private AIs (this can take 30–90 seconds)…</div>
+              </div>
+              <template v-else-if="summaryPair">
+                <div class="text-caption text-grey-7 q-mb-sm">
+                  Compare the two summaries and choose one. The unchosen one is discarded.
+                </div>
+                <q-card v-for="(cand, idx) in [summaryPair.default, summaryPair.gpt]" :key="idx" flat bordered class="q-mb-sm">
+                  <q-card-section v-if="cand">
+                    <div class="row items-center justify-between q-mb-sm">
+                      <div>
+                        <div class="text-subtitle2">
+                          Private AI ({{ cand.profileKey === 'gpt' ? 'GPT' : 'Deepseek' }})
+                          <span v-if="cand.ok" class="text-caption text-grey-7 q-ml-sm">
+                            {{ cand.model }}{{ cand.generationSeconds ? ` · ${cand.generationSeconds}s` : '' }}
+                          </span>
+                        </div>
+                      </div>
+                      <q-btn
+                        v-if="cand.ok && cand.text"
+                        label="Choose this one"
+                        color="primary"
+                        dense
+                        @click="chooseSummaryCandidate(cand.text)"
+                      />
+                    </div>
+                    <div v-if="cand.ok && cand.text" class="text-body2 q-pa-sm bg-grey-1 rounded-borders">
+                      <vue-markdown :source="cand.text" />
+                    </div>
+                    <div v-else class="text-caption text-orange-9">
+                      Not available: {{ cand.reason || cand.error || 'unknown' }}.
+                      <span v-if="cand.reason === 'AGENT_NOT_READY' || cand.reason === 'GPT_NOT_READY'">
+                        The agent is still deploying — try Refresh in a minute.
+                      </span>
+                    </div>
+                  </q-card-section>
+                </q-card>
+                <div class="row q-gutter-sm q-mt-sm">
+                  <q-btn flat label="Discard both" color="grey-7" @click="dismissSummaryPair" />
+                  <q-space />
+                  <q-btn flat label="Regenerate" color="primary" icon="refresh" @click="requestNewSummaryPair" />
+                </div>
+              </template>
+            </div>
+
             <div v-if="loadingSummary" class="text-center q-pa-md">
               <q-spinner size="2em" />
               <div class="q-mt-sm">Loading patient summary...</div>
@@ -1058,10 +1108,10 @@
                 <q-btn
                   label="Request New Summary"
                   color="primary"
-                  @click="requestNewSummary"
+                  @click="requestNewSummaryPair"
                   icon="refresh"
-                  :disable="isEditingSummaryTab || isSavingSummary"
-                  :loading="loadingSummary"
+                  :disable="isEditingSummaryTab || isSavingSummary || loadingPair"
+                  :loading="loadingPair"
                 />
               </div>
             </div>
@@ -1070,11 +1120,12 @@
               <q-icon name="description" size="3em" />
               <div class="q-mt-sm">No patient summary found</div>
               <div class="q-mt-md">
-                <q-btn 
-                  label="Request Summary" 
-                  color="primary" 
-                  @click="requestNewSummary"
+                <q-btn
+                  label="Request Summary"
+                  color="primary"
+                  @click="requestNewSummaryPair"
                   icon="add"
+                  :loading="loadingPair"
                 />
               </div>
             </div>
@@ -5196,6 +5247,77 @@ const loadPatientSummary = async () => {
   } finally {
     loadingSummary.value = false;
   }
+};
+
+/* ── Dual-AI Patient Summary chooser ──────────────────────────────────
+ * "Request New Summary" runs the prompt against BOTH Private AIs
+ * (Deepseek + GPT) in parallel via /api/patient-summary/generate-pair and
+ * lets the user pick one with "Choose this one". Each candidate carries
+ * the model name + generation time so the comparison is transparent.
+ * Choosing routes through the existing handleReplaceSummary save flow
+ * (auto-saves to an empty slot, or shows the Replace dialog when full).
+ */
+interface SummaryCandidate {
+  ok: boolean; profileKey: string; model: string;
+  text?: string; error?: string; reason?: string; status?: number;
+  generationSeconds?: number;
+}
+const summaryPair = ref<{ generatedAt: string; default: SummaryCandidate | null; gpt: SummaryCandidate | null } | null>(null);
+const loadingPair = ref(false);
+const pairError = ref('');
+
+const requestNewSummaryPair = async () => {
+  if (!props.userId) return;
+  loadingPair.value = true;
+  pairError.value = '';
+  summaryPair.value = null;
+  try {
+    const res = await fetch('/api/patient-summary/generate-pair', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ userId: props.userId })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.success === false) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    summaryPair.value = {
+      generatedAt: data.generatedAt || new Date().toISOString(),
+      default: data.default || null,
+      gpt: data.gpt || null
+    };
+  } catch (err) {
+    pairError.value = err instanceof Error ? err.message : 'Failed to generate summaries';
+    if ($q && typeof $q.notify === 'function') {
+      $q.notify({ type: 'negative', message: pairError.value, timeout: 5000 });
+    }
+  } finally {
+    loadingPair.value = false;
+  }
+};
+
+const chooseSummaryCandidate = async (text: string) => {
+  if (!text || !text.trim()) return;
+  const trimmed = text.trim();
+  // Reuse the existing save path: auto-save to an empty slot if available,
+  // otherwise prompt the user to pick which existing summary to replace.
+  const summaryCount = patientSummaries.value.length;
+  if (summaryCount < 3) {
+    await handleReplaceSummary('newest', trimmed);
+  } else {
+    savedCurrentSummaryForUndo.value = patientSummaries.value[patientSummaries.value.length - 1] || null;
+    newSummaryToReplace.value = trimmed;
+    showReplaceSummaryDialog.value = true;
+  }
+  // Clear the chooser — the chosen summary now lives in patientSummary.
+  summaryPair.value = null;
+  pairError.value = '';
+};
+
+const dismissSummaryPair = () => {
+  summaryPair.value = null;
+  pairError.value = '';
 };
 
 const requestNewSummary = async () => {
