@@ -952,6 +952,68 @@
 
           <!-- Patient Summary Tab -->
           <q-tab-panel name="summary">
+            <!-- Sub-tabs: Summary itself + per-agent Patient Summary
+                 instruction prompt editors. -->
+            <q-tabs
+              v-model="summarySubTab"
+              dense
+              align="left"
+              class="text-grey-7 q-mb-md"
+              active-color="primary"
+              indicator-color="primary"
+            >
+              <q-tab name="summary" label="Summary" />
+              <q-tab name="inst-default" label="Instructions for Deepseek" />
+              <q-tab name="inst-gpt" label="Instructions for GPT" />
+            </q-tabs>
+
+            <!-- Instruction editor (per-agent Patient Summary prompt override) -->
+            <template v-if="summarySubTab === 'inst-default' || summarySubTab === 'inst-gpt'">
+              <div class="text-caption text-grey-7 q-mb-sm">
+                Per-agent Patient Summary instructions. Saved to your account;
+                used by this agent when generating a Patient Summary. The
+                <code>{patientIdentity}</code>, <code>{currentMedications}</code>,
+                <code>{encounters}</code>, and <code>{allergies}</code>
+                placeholders are substituted with the patient's data at request
+                time. Leave empty to revert to the default.
+              </div>
+              <div v-if="summaryInstr.loading" class="text-center q-pa-md">
+                <q-spinner size="1.5em" color="primary" />
+              </div>
+              <template v-else>
+                <q-input
+                  v-model="summaryInstr.text"
+                  type="textarea"
+                  autogrow
+                  filled
+                  class="bg-grey-1 rounded-borders"
+                  placeholder="(using the default Patient Summary prompt)"
+                />
+                <div class="row items-center q-gutter-sm q-mt-sm">
+                  <q-btn
+                    label="Save"
+                    color="primary"
+                    icon="save"
+                    :loading="summaryInstr.saving"
+                    :disable="summaryInstr.saving"
+                    @click="savePatientSummaryInstructions"
+                  />
+                  <q-btn
+                    flat
+                    label="Reset to default"
+                    color="grey-7"
+                    icon="restart_alt"
+                    :disable="summaryInstr.saving"
+                    @click="resetPatientSummaryInstructions"
+                  />
+                  <q-space />
+                  <div v-if="summaryInstr.status" class="text-caption text-grey-7">{{ summaryInstr.status }}</div>
+                </div>
+              </template>
+            </template>
+
+            <!-- Summary sub-tab: existing content unchanged. -->
+            <template v-else>
             <!-- Dual-AI Summary Chooser: appears above the saved summary when
                  the user clicks "Request New Summary". Both Private AIs run
                  the same prompt in parallel; the user picks one. -->
@@ -1129,6 +1191,7 @@
                 />
               </div>
             </div>
+            </template>
           </q-tab-panel>
         </q-tab-panels>
       </q-card-section>
@@ -5265,6 +5328,98 @@ interface SummaryCandidate {
 const summaryPair = ref<{ generatedAt: string; default: SummaryCandidate | null; gpt: SummaryCandidate | null } | null>(null);
 const loadingPair = ref(false);
 const pairError = ref('');
+
+/* ── Patient Summary sub-tabs ─────────────────────────────────────────
+ * "Summary" + "Instructions for Deepseek" + "Instructions for GPT".
+ * Each instruction tab edits the per-agent Patient Summary prompt
+ * (userDoc.agentProfiles[profileKey].patientSummaryPrompt). Empty saves
+ * clear the override and revert to the Layer-2 default.
+ */
+const summarySubTab = ref<'summary' | 'inst-default' | 'inst-gpt'>('summary');
+const summaryInstr = ref<{ loading: boolean; saving: boolean; profileKey: string; text: string; defaultText: string; status: string }>({
+  loading: false, saving: false, profileKey: 'default', text: '', defaultText: '', status: ''
+});
+
+const loadPatientSummaryInstructions = async (profileKey: 'default' | 'gpt') => {
+  if (!props.userId) return;
+  summaryInstr.value = { loading: true, saving: false, profileKey, text: '', defaultText: '', status: '' };
+  try {
+    const r = await fetch(`/api/agent-instructions/patient-summary?userId=${encodeURIComponent(props.userId)}&profileKey=${profileKey}`, { credentials: 'include' });
+    const d = await r.json().catch(() => ({}));
+    if (r.ok && d.success) {
+      summaryInstr.value = {
+        loading: false, saving: false,
+        profileKey,
+        // If no override is set, pre-fill the editor with the default so the
+        // user can see/edit the current template rather than starting blank.
+        text: (d.override && d.override.trim()) ? d.override : (d.default || ''),
+        defaultText: d.default || '',
+        status: d.override ? 'Custom override saved' : 'Using default'
+      };
+    } else {
+      summaryInstr.value = { loading: false, saving: false, profileKey, text: '', defaultText: '', status: d.error || 'Failed to load' };
+    }
+  } catch (err) {
+    summaryInstr.value = { loading: false, saving: false, profileKey, text: '', defaultText: '', status: err instanceof Error ? err.message : 'Failed to load' };
+  }
+};
+
+const savePatientSummaryInstructions = async () => {
+  if (!props.userId) return;
+  const profileKey = summaryInstr.value.profileKey;
+  // If the user left the editor identical to the default, save as a clear
+  // (null) so the override doesn't stick around as redundant noise.
+  const text = summaryInstr.value.text;
+  const isDefault = text.trim() === (summaryInstr.value.defaultText || '').trim();
+  summaryInstr.value.saving = true;
+  summaryInstr.value.status = 'Saving…';
+  try {
+    const r = await fetch('/api/agent-instructions/patient-summary', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ userId: props.userId, profileKey, prompt: isDefault ? '' : text })
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || d.success === false) throw new Error(d.error || `HTTP ${r.status}`);
+    summaryInstr.value.status = d.cleared ? 'Reverted to default' : 'Saved';
+    if ($q?.notify) $q.notify({ type: 'positive', message: d.cleared ? 'Reverted to default Patient Summary prompt' : 'Patient Summary instructions saved', timeout: 2500 });
+  } catch (err) {
+    summaryInstr.value.status = err instanceof Error ? err.message : 'Save failed';
+    if ($q?.notify) $q.notify({ type: 'negative', message: summaryInstr.value.status, timeout: 5000 });
+  } finally {
+    summaryInstr.value.saving = false;
+  }
+};
+
+const resetPatientSummaryInstructions = async () => {
+  if (!props.userId) return;
+  const profileKey = summaryInstr.value.profileKey;
+  summaryInstr.value.saving = true;
+  summaryInstr.value.status = 'Clearing override…';
+  try {
+    const r = await fetch('/api/agent-instructions/patient-summary', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ userId: props.userId, profileKey, prompt: '' })
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || d.success === false) throw new Error(d.error || `HTTP ${r.status}`);
+    // After clearing, reload to pre-fill with the default body again.
+    await loadPatientSummaryInstructions(profileKey === 'gpt' ? 'gpt' : 'default');
+  } catch (err) {
+    summaryInstr.value.status = err instanceof Error ? err.message : 'Reset failed';
+  } finally {
+    summaryInstr.value.saving = false;
+  }
+};
+
+// Switch to an instruction tab → fetch its current override.
+watch(summarySubTab, (tab) => {
+  if (tab === 'inst-default') void loadPatientSummaryInstructions('default');
+  else if (tab === 'inst-gpt') void loadPatientSummaryInstructions('gpt');
+});
 
 const requestNewSummaryPair = async () => {
   if (!props.userId) return;

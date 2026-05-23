@@ -568,6 +568,22 @@ Logged in `maia-log.pdf` as `clean-index-built (N files)`.
   cutoff. Clarified that medication logic lives in the prompts, not the
   System Instructions, and noted worksheet UI sorting + Source-page
   hyperlinks.
+- *2026-05-23* — v1.3.105. Patient Summary improvements:
+  - **{patientIdentity}** placeholder injects deterministically-extracted
+    name / DOB / age / sex from the source PDF header
+    (`server/utils/patient-identity.js`; covers Apple Health "Name:/Date
+    of birth:/Legal sex:" and Epic "LastName, FirstName / DOB:/Legal
+    Sex:" formats). Fixes summaries that said "age and sex not
+    specified" even though the values were in the header.
+  - **Per-agent Patient Summary instructions**: each Private AI can
+    have its own prompt override at
+    `userDoc.agentProfiles[profileKey].patientSummaryPrompt`. Endpoints
+    `GET / POST /api/agent-instructions/patient-summary?profileKey=…`;
+    `generate-pair` uses per-agent overrides; My Stuff → Patient Summary
+    gained sub-tabs **Summary / Instructions for Deepseek / Instructions
+    for GPT** with textarea + Save / Reset to default. The same
+    `{patientIdentity} {currentMedications} {encounters} {allergies}`
+    placeholders are substituted in overrides.
 - *2026-05-23* — v1.3.103. Encounters: AH Clinical Notes (`clinical_notes.md`)
   is now the authoritative encounter source for Apple Health files
   (`parseAppleHealthClinicalNotes`); falls back to PDF parsing if the

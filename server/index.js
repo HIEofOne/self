@@ -10728,11 +10728,49 @@ app.post('/api/generate-patient-summary', async (req, res) => {
  * Returns the substituted prompt string. Falls back to a minimal default
  * if Layer 2 is missing/broken.
  */
-async function buildPatientSummaryPromptForUser(userId, userDoc) {
+/** Substitute `{name}` placeholders. Unknown names pass through unchanged. */
+function substitutePromptPlaceholders(body, vars) {
+  return String(body || '').replace(/\{([A-Za-z0-9_]+)\}/g, (_, name) =>
+    Object.prototype.hasOwnProperty.call(vars, name) ? String(vars[name] ?? '') : `{${name}}`);
+}
+
+async function buildPatientSummaryPromptForUser(userId, userDoc, profileKey = 'default') {
   const verifiedMeds = String(userDoc?.currentMedications || '').trim();
   const currentMedications = verifiedMeds
     ? `**Authoritative Current Medications (verified by the patient):**\n${verifiedMeds}\n\nUse this list AS-IS for the "Current Medications" section above — do NOT replace it with anything from the knowledge base.`
     : '';
+
+  // Patient identity (name / DOB / age / sex) is printed in the header of
+  // every Apple Health and Epic export — extract it deterministically and
+  // pass it AUTHORITATIVELY so the agent never reports "age not specified"
+  // when the value is right there.
+  let patientIdentity = '';
+  try {
+    const { parsePatientIdentityFromText, renderPatientIdentityBlock } = await import('./utils/patient-identity.js');
+    const pdfParse = (await import('pdf-parse')).default;
+    const kbNamePI = getKBNameFromUserDoc(userDoc, userId);
+    const kbPrefixPI = kbNamePI ? `${userId}/${kbNamePI}/` : null;
+    const pdfFilesPI = (userDoc?.files || []).filter(f =>
+      f?.fileName && (!kbPrefixPI || (f.bucketKey || '').startsWith(kbPrefixPI)) &&
+      (/\.pdf$/i.test(f.fileName) || /pdf/i.test(f.fileType || ''))
+    );
+    // First parseable header wins — iterate Apple Health first, then others.
+    pdfFilesPI.sort((a, b) => (b.isAppleHealth ? 1 : 0) - (a.isAppleHealth ? 1 : 0));
+    let id = null;
+    for (const f of pdfFilesPI) {
+      if (!f.bucketKey) continue;
+      const buf = await readSpacesObjectBuffer(f.bucketKey);
+      if (!buf) continue;
+      try {
+        const data = await pdfParse(buf);
+        id = parsePatientIdentityFromText(data.text);
+        if (id && (id.dobIso || id.name || id.sex)) break;
+      } catch { /* try next file */ }
+    }
+    patientIdentity = renderPatientIdentityBlock(id);
+  } catch (e) {
+    console.warn(`[patient-summary] identity extraction failed: ${e?.message || e}`);
+  }
 
   // Encounters context: extract deterministically from PDFs and keep the
   // past 12 months so the agent has authoritative dated visits for the
@@ -10795,7 +10833,16 @@ async function buildPatientSummaryPromptForUser(userId, userDoc) {
     }
   } catch { /* no AH allergies — agent extracts from KB */ }
 
-  return getClinicalPrompt('patient-summary.draft', { currentMedications, encounters, allergies })
+  const vars = { patientIdentity, currentMedications, encounters, allergies };
+  // Per-agent override (My Stuff → Patient Summary → "Instructions for
+  // <Agent>"). When set, takes precedence over the Layer-2 default; the
+  // same `{placeholders}` are substituted so the user can rearrange the
+  // template and still get the injected data.
+  const override = userDoc?.agentProfiles?.[profileKey]?.patientSummaryPrompt;
+  if (override && override.trim()) {
+    return substitutePromptPlaceholders(override, vars);
+  }
+  return getClinicalPrompt('patient-summary.draft', vars)
     || 'Please generate a patient summary.';
 }
 
@@ -10817,9 +10864,12 @@ app.post('/api/patient-summary/generate-pair', async (req, res) => {
       return res.status(400).json({ success: false, error: 'AGENT_NOT_CONFIGURED' });
     }
 
-    // Build the prompt ONCE — both agents get the same input so the
-    // comparison is fair.
-    const prompt = await buildPatientSummaryPromptForUser(userId, userDoc);
+    // Build the prompt PER AGENT — each can have its own "Instructions for
+    // <Agent>" override (My Stuff → Patient Summary sub-tabs). When neither
+    // agent has an override, both get the same Layer-2 default; placeholder
+    // data (identity, meds, encounters, allergies) is the same for both.
+    const defaultPrompt = await buildPatientSummaryPromptForUser(userId, userDoc, 'default');
+    const gptPrompt     = await buildPatientSummaryPromptForUser(userId, userDoc, 'gpt');
 
     // Resolve both agents. GPT may need lazy provisioning; on not-ready
     // we surface a per-agent reason rather than failing the whole call.
@@ -10864,22 +10914,21 @@ app.post('/api/patient-summary/generate-pair', async (req, res) => {
       await ensureAgentRetrieval(gptAgentId);
     }
 
-    const chatMessages = [{ role: 'user', content: prompt }];
-
-    // Run both in parallel. Each call is independently resilient (401/403
-    // recreate-and-retry) and never throws past Promise.allSettled.
-    const callOne = async (apiKey, endpoint, modelName, profileKey, agentId) => {
+    // Each call is independently resilient (401/403 recreate-and-retry) and
+    // never throws past Promise.allSettled.
+    const callOne = async (apiKey, endpoint, modelName, profileKey, agentId, promptText) => {
       const t0 = Date.now();
+      const msgs = [{ role: 'user', content: promptText }];
       try {
         let resp;
         try {
-          resp = await new DigitalOceanProvider(apiKey, { baseURL: endpoint }).chat(chatMessages, { model: modelName, stream: false });
+          resp = await new DigitalOceanProvider(apiKey, { baseURL: endpoint }).chat(msgs, { model: modelName, stream: false });
         } catch (firstError) {
           const sc = firstError.status || firstError.statusCode || 0;
           if ((sc === 401 || sc === 403) && agentId) {
             const { recreateAgentApiKey } = await import('./utils/agent-helper.js');
             const newKey = await recreateAgentApiKey(doClient, cloudant, userId, agentId, profileKey);
-            resp = await new DigitalOceanProvider(newKey, { baseURL: endpoint }).chat(chatMessages, { model: modelName, stream: false });
+            resp = await new DigitalOceanProvider(newKey, { baseURL: endpoint }).chat(msgs, { model: modelName, stream: false });
           } else {
             throw firstError;
           }
@@ -10894,10 +10943,10 @@ app.post('/api/patient-summary/generate-pair', async (req, res) => {
     };
 
     const tasks = [
-      callOne(userDoc.agentApiKey, userDoc.agentEndpoint, userDoc.agentModelName || 'deepseek-v4-pro', 'default', userDoc.assignedAgentId)
+      callOne(userDoc.agentApiKey, userDoc.agentEndpoint, userDoc.agentModelName || 'deepseek-v4-pro', 'default', userDoc.assignedAgentId, defaultPrompt)
     ];
     if (gptAgentId && gptEndpoint && gptApiKey && !gptError) {
-      tasks.push(callOne(gptApiKey, gptEndpoint, gptModel, 'gpt', gptAgentId));
+      tasks.push(callOne(gptApiKey, gptEndpoint, gptModel, 'gpt', gptAgentId, gptPrompt));
     }
     const settled = await Promise.allSettled(tasks);
     const results = settled.map(s => s.status === 'fulfilled' ? s.value : { ok: false, error: String(s.reason?.message || s.reason) });
@@ -10923,6 +10972,71 @@ app.post('/api/patient-summary/generate-pair', async (req, res) => {
   } catch (error) {
     console.error('[patient-summary/generate-pair] error:', error);
     res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * Per-agent Patient Summary prompt (override).
+ *
+ * Each Private AI agent can have its own Patient Summary instruction text
+ * stored at `userDoc.agentProfiles[profileKey].patientSummaryPrompt`. When
+ * set, it replaces the Layer-2 `patient-summary.draft` body for that agent
+ * (the `{patientIdentity} {currentMedications} {encounters} {allergies}`
+ * placeholders are still substituted). Edited from My Stuff → Patient
+ * Summary → "Instructions for <Agent>" sub-tabs.
+ */
+app.get('/api/agent-instructions/patient-summary', async (req, res) => {
+  try {
+    const userId = resolveUserId(req, res);
+    if (!userId) return;
+    const profileKey = req.query?.profileKey === 'gpt' ? 'gpt' : 'default';
+    const userDoc = await cloudant.getDocument('maia_users', userId);
+    if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+    const override = userDoc?.agentProfiles?.[profileKey]?.patientSummaryPrompt || null;
+    const def = getClinicalPrompt('patient-summary.draft', {}) || '';
+    res.json({
+      success: true,
+      profileKey,
+      override,
+      default: def,
+      effective: (override && override.trim()) ? override : def
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+app.post('/api/agent-instructions/patient-summary', async (req, res) => {
+  try {
+    const userId = resolveUserId(req, res);
+    if (!userId) return;
+    const { profileKey: pkRaw, prompt } = req.body || {};
+    const profileKey = pkRaw === 'gpt' ? 'gpt' : 'default';
+    const incoming = typeof prompt === 'string' ? prompt : '';
+    // Empty string clears the override (revert to Layer-2 default).
+    const toStore = incoming.trim() ? incoming : null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const doc = await cloudant.getDocument('maia_users', userId);
+        if (!doc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+        if (!doc.agentProfiles) doc.agentProfiles = {};
+        if (!doc.agentProfiles[profileKey]) doc.agentProfiles[profileKey] = {};
+        if (toStore === null) {
+          delete doc.agentProfiles[profileKey].patientSummaryPrompt;
+        } else {
+          doc.agentProfiles[profileKey].patientSummaryPrompt = toStore;
+        }
+        doc.updatedAt = new Date().toISOString();
+        await cloudant.saveDocument('maia_users', doc);
+        return res.json({ success: true, profileKey, cleared: toStore === null });
+      } catch (e) {
+        if (e?.statusCode === 409 && attempt < 2) continue;
+        throw e;
+      }
+    }
+    res.status(500).json({ success: false, error: 'SAVE_CONFLICT' });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
   }
 });
 

@@ -149,11 +149,13 @@ Output ONLY the list of current medications — one medication per line (name an
 ---
 
 ### prompt: patient-summary.draft
-<!-- placeholders: {currentMedications} {encounters} {allergies} -->
+<!-- placeholders: {patientIdentity} {currentMedications} {encounters} {allergies} -->
 ```text
 You are creating a Patient Summary for an on-call physician who has never seen this patient. Use ONLY information found in this patient's knowledge base; never fabricate. Apply your system instructions for any items that must be omitted or redacted.
 
 Start with the patient's name, age, and sex on the first line.
+
+{patientIdentity}
 
 Then produce the following sections, in this order, each on its own highlighted heading line followed by a concise prose paragraph or short list (do not invent sub-headings, and do not show your reasoning):
 
