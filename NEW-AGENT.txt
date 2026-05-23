@@ -8,13 +8,23 @@ parsers match the first occurrence).
 
 Runtime-parsed sections (heading → code consumer):
 - MAIA INSTRUCTION TEXT  → server/routes/auth.js, server/index.js
-  (seed System Instructions for every Private AI agent)
+  (seed System Instructions for every Private AI agent — the generic
+  *guardrail* prompt; per-deliverable prompts live in clinical-prompts.md)
 - Private AI Setup Wizard → server/routes/auth.js getSetupWizardMessages
 - Random Names           → server/routes/auth.js getTempUserFirstNames
 - the embedding-model line → server/utils/embedding-model-config.js
 - Knowledge Bases        → server/utils/kb-config.js (reranking +
   chunking params in the fenced key:value block)
 - App Platform Settings  → server/utils/new-agent-config.js
+
+Companion files (NOT parsed by this file's loader):
+- `clinical-prompts.md` (repo root) — the editable per-request prompts
+  MAIA sends to a Private AI for each clinical deliverable (medication
+  worksheets, current-medications extract, patient-summary draft).
+  Loaded by `server/utils/clinical-prompts.js`.
+- `Documentation/Clinical.md` — reference docs (architecture, flows,
+  the moved Agent API specification, footer-stripped indexing). Points
+  at this file and at `clinical-prompts.md` by id; no verbatim copies.
 
 ---
 
@@ -132,111 +142,14 @@ DigitalOcean uses an S3-compatible Spaces bucket (named `maia`,
 subfoldered by `userId`) to pass files to OpenSearch for indexing into
 the knowledge base attached to the user's Private AI agent.
 
-### Footer-stripped indexing (clean-index, v1.3.95+)
-
-KBs created from v1.3.95 on (`userDoc.kbCleanIndex === true`) do NOT
-index the raw PDFs. At KB creation, each PDF is parsed and its repeating
-page header/footer boilerplate — the institution/address block, MRN/DOB,
-and especially the **"Generated on <date> Page N"** footer — is stripped
-deterministically (`generateCleanIndexSidecars` →
-`stripHeadersFooters`). The footer-free text is written to a
-`${userId}/${kbName}/_clean/` sidecar folder, and the DO data source
-`item_path` points at `_clean/` instead of the PDF folder. This keeps the
-repeating generation date/time out of every retrieved chunk (it was being
-mistaken for a prescription date in RAG-based extraction).
-
-The original PDFs remain in the KB folder untouched — viewing, page
-links, file membership, `kbIndexedBucketKeys`, and Restore all continue
-to use them. `isKbFolderDataSourcePath` recognizes both the PDF folder
-and the `_clean/` folder as "the KB's folder data source". Re-index
-regenerates the sidecars first. If sidecar generation yields nothing
-(no PDFs / parse failure), the KB falls back to indexing the raw PDF
-folder. Existing (pre-v1.3.95) KBs keep indexing raw PDFs until
-re-created.
-
-**Restore** always sets `kbCleanIndex = true` (rehydrate), so a restored
-account's KB is rebuilt/re-indexed against the `_clean/` sidecars — i.e.
-Restore upgrades a pre-v1.3.95 account to clean-index. (A KB that
-literally survived a partial rehydrate and still has its old PDF-folder
-data source is the one exception until it is re-created.)
-
-The actual parameters used for each KB creation are recorded in the
-user's `maia-log.pdf` (the `Knowledge base created` entry; clean-index
-KBs also log `clean-index-built`).
-
----
-
-## Agent API Specification (reference)
-
-The exact DigitalOcean GenAI calls MAIA makes. All examples use the
-GradientAI Platform API:
-https://docs.digitalocean.com/reference/api/digitalocean/#tag/GradientAI-Platform
-
-### Create agent
-`POST /v2/gen-ai/agents`
-
-Example request body (values MAIA actually sends):
-```
-{
-  "name": "{userId}-agent-{YYYYMMDDThhmmss}",
-  "instruction": "<seed from ## MAIA INSTRUCTION TEXT>",
-  "model": { "uuid": "{model_uuid}" },
-  "project_id": "{project_id}",
-  "region": "tor1",
-  "max_tokens": 16384,
-  "top_p": 1,
-  "temperature": 0.1,
-  "k": 10,
-  "retrieval_method": "RETRIEVAL_METHOD_REWRITE"
-}
-```
-Required: `name`, `model.uuid`, `project_id`. The response's
-`deployment.status` starts `STATUS_PENDING`.
-
-> **retrieval_method MUST NOT be `RETRIEVAL_METHOD_NONE`.** `NONE`
-> disables knowledge-base retrieval entirely — the agent ignores its
-> attached KB and every answer comes back "no records found" (this
-> caused blank Patient Summaries and blank Medication Worksheets). MAIA
-> creates agents with `RETRIEVAL_METHOD_REWRITE` and self-heals any
-> existing agent still set to `NONE` (see `ensureAgentRetrieval` in
-> server/index.js, called from the worksheet, draft-summary, and
-> attach-KB endpoints).
-
-### Update agent instruction
-`PUT /v2/gen-ai/agents/{agent_uuid}`
-
-Example request body (only `instruction` is changed by MAIA):
-```
-{ "instruction": "<updated System Instructions>" }
-```
-`name`, `model`, and `project_id` cannot change after creation.
-
-### Poll deployment
-`GET /v2/gen-ai/agents/{agent_uuid}`
-
-Poll until `deployment.status === "STATUS_RUNNING"` (typical 1–3 min),
-then read `deployment.url` as the agent's inference endpoint.
-
-### Create agent API key
-`POST /v2/gen-ai/agents/{agent_uuid}/api_keys`
-
-Key name `agent-{agent_uuid}-api-key`; the returned secret is stored
-per profile in `userDoc.agentProfiles[<key>].apiKey` (the flat
-`agentApiKey` is the primary agent's key only).
-
-### Knowledge base
-`POST /v2/gen-ai/knowledge_bases` (create, see Knowledge Bases section),
-`GET /v2/gen-ai/knowledge_bases/{kb_uuid}/indexing_jobs` (indexing
-status), `…/data_sources` (per-file data sources).
-
-### Resolution rules
-- **Model UUID**: primary → `DO_MODEL_ID` env, else DO catalog match for
-  `deepseek-v4-pro`, else an existing agent's model, else first catalog
-  model. Alternate → DO catalog match for `openai-gpt-oss-120b` only.
-- **Project ID**: `DO_PROJECT_ID` env, else discovered from an existing
-  agent / the account's default project.
-- Deployment status transitions: `STATUS_PENDING` → `STATUS_RUNNING`
-  (ready) or `STATUS_FAILED`.
+> Reference docs that used to live here — **Footer-stripped (clean-index)
+> indexing** and the **DigitalOcean Agent API Specification** — have moved
+> to `Documentation/Clinical.md` so this file stays focused on what code
+> actually parses at runtime (the system-instruction guardrail, KB
+> parameters, setup-wizard text, random names, app-platform settings).
+> The per-request *clinical prompts* (worksheets, current-medications
+> extract, patient-summary draft) live in **`clinical-prompts.md`** at
+> the repo root.
 
 ---
 
