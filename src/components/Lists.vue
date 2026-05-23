@@ -247,12 +247,12 @@
             <tbody>
               <tr v-for="(row, ri) in worksheetView(ws.profileKey).rows" :key="ri">
                 <td v-for="(cell, ci) in row" :key="ci" class="text-left">
-                  <a
-                    v-if="ci === worksheetView(ws.profileKey).sourceIdx && parseSourcePage(cell) != null"
-                    href="#"
-                    class="text-primary"
-                    @click.prevent="openWorksheetSource(cell, worksheets[ws.profileKey].legend)"
-                  >{{ cell }}</a>
+                  <template v-if="ci === worksheetView(ws.profileKey).sourceIdx && parseSourceTokens(cell).length">
+                    <template v-for="(tok, ti) in parseSourceTokens(cell)" :key="ti">
+                      <span v-if="ti > 0">, </span>
+                      <a href="#" class="text-primary" @click.prevent="openWorksheetSource(tok.raw, worksheets[ws.profileKey].legend)">{{ tok.raw }}</a>
+                    </template>
+                  </template>
                   <span v-else>{{ cell }}</span>
                 </td>
               </tr>
@@ -305,12 +305,12 @@
             <tbody>
               <tr v-for="(row, ri) in encountersView.rows" :key="ri">
                 <td v-for="(cell, ci) in row" :key="ci" class="text-left">
-                  <a
-                    v-if="ci === encountersView.sourceIdx && parseSourcePage(cell) != null"
-                    href="#"
-                    class="text-primary"
-                    @click.prevent="openWorksheetSource(cell, encountersWorksheet.legend)"
-                  >{{ cell }}</a>
+                  <template v-if="ci === encountersView.sourceIdx && parseSourceTokens(cell).length">
+                    <template v-for="(tok, ti) in parseSourceTokens(cell)" :key="ti">
+                      <span v-if="ti > 0">, </span>
+                      <a href="#" class="text-primary" @click.prevent="openWorksheetSource(tok.raw, encountersWorksheet.legend)">{{ tok.raw }}</a>
+                    </template>
+                  </template>
                   <span v-else>{{ cell }}</span>
                 </td>
               </tr>
@@ -773,6 +773,27 @@ const worksheetView = (profileKey: string): { headers: string[]; rows: string[][
 const parseSourcePage = (cell: string): number | null => {
   const m = (cell || '').match(/p\.?\s*(\d+)/i);
   return m ? parseInt(m[1], 10) : null;
+};
+
+/** Parse a Source cell that may carry MULTIPLE "File N p.<page>" tokens
+ *  separated by commas (Encounters: one row per date with all contributing
+ *  sources). Returns the array of tokens; empty when the cell has no
+ *  parseable source. */
+const parseSourceTokens = (cell: string): Array<{ raw: string; tag: string; page: number | null }> => {
+  return String(cell || '')
+    .split(/,\s*/)
+    .map(s => s.trim())
+    .filter(Boolean)
+    .map(raw => {
+      const tagMatch = raw.match(/File\s+\d+/i);
+      const m = raw.match(/p\.?\s*(\d+)/i);
+      return {
+        raw,
+        tag: tagMatch ? tagMatch[0].replace(/\s+/g, ' ') : '',
+        page: m ? parseInt(m[1], 10) : null
+      };
+    })
+    .filter(t => t.tag); // need at least a File N tag
 };
 
 // Open the source page for a worksheet row. The Source cell looks like

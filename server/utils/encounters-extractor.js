@@ -191,20 +191,90 @@ export function stripHeadersFooters(text, numPages) {
 }
 
 /**
- * Merge encounters across files (dedupe by date+description, preferring the
- * first occurrence), sort reverse-chronological, and render a GFM table
- * with the same Source convention ("File N p.<page>") as the medication
- * worksheets so the existing renderer + page-link handler work unchanged.
+ * Parse the Apple Health "Clinical Notes" category markdown into the same
+ * normalized encounter shape used elsewhere. AH Clinical Notes ARE the
+ * encounters for Apple Health exports (in-person visit notes, telephone /
+ * video encounters, patient messages). The category markdown format
+ * mirrors `medication_records.md`:
+ *
+ *   **Date:** May 7, 2026 | **Page:** 1
+ *   May 7, 2026 **Telephone Encounter** by **Wei Lien, MD**
+ *   ---
+ *
+ * The note-type word ("Telephone Encounter", "Progress Notes", "Video
+ * Encounter", "Patient Instructions", …) drives the type classification.
+ */
+export function parseAppleHealthClinicalNotes(text, fileTag) {
+  const out = [];
+  const blocks = String(text || '').split(/\n---\n/);
+  for (const block of blocks) {
+    const head = block.match(/\*\*Date:\*\*\s*([A-Za-z]+\.?\s+\d{1,2},?\s+\d{4})\s*\|\s*\*\*Page:\*\*\s*(\d+)/);
+    if (!head) continue;
+    const isoDate = toIsoDate(head[1]);
+    const page = parseInt(head[2], 10);
+    if (!isoDate || !Number.isFinite(page)) continue;
+    // Bolded tokens after the header: [<note type>, <author>?]
+    const remainder = block.slice(head.index + head[0].length);
+    const bolded = [...remainder.matchAll(/\*\*([^*]+?)\*\*/g)]
+      .map(m => m[1].trim())
+      .filter(s => s && !/^(date|page)\s*:/i.test(s));
+    if (bolded.length < 1) continue;
+    const noteType = bolded[0];
+    const author = bolded[1] || '';
+    const description = author ? `${noteType} by ${author}` : noteType;
+    const type = classifyEncounterType(noteType);
+    out.push({ isoDate, dateRaw: head[1], type, description, encounter: description, page, fileTag });
+  }
+  return out;
+}
+
+/**
+ * Merge encounters across files. Dedupe by ISO **date only** — multiple
+ * sources reporting an encounter on the same date are merged into ONE row
+ * whose Source cell lists every contributing `File N p.<page>` so the user
+ * can click through to any source. Sorted reverse-chronological. Rendered
+ * with the same column convention so the existing client renderer works.
  */
 export function buildEncountersTable(allEncounters) {
-  const byKey = new Map();
+  // Group by ISO date so a visit reported in multiple source files becomes
+  // a single row. The Source cell lists every contributing File N p.<page>.
+  const byDate = new Map();
   for (const e of allEncounters) {
-    const key = `${e.isoDate}|${(e.description || '').toLowerCase()}`;
-    if (!byKey.has(key)) byKey.set(key, e);
+    if (!e?.isoDate) continue;
+    const existing = byDate.get(e.isoDate);
+    if (!existing) {
+      byDate.set(e.isoDate, {
+        isoDate: e.isoDate,
+        type: e.type,
+        // Use the longest descriptor across contributors (it's usually the
+        // most informative — e.g., Epic's "Telemedicine in Dept of Urology"
+        // beats Apple Health's "Telephone Encounter by …").
+        description: e.description || '',
+        sources: [{ fileTag: e.fileTag, page: e.page }]
+      });
+    } else {
+      const incomingDesc = e.description || '';
+      if (incomingDesc.length > (existing.description || '').length) {
+        existing.description = incomingDesc;
+      }
+      // Prefer a non-Outpatient classification if any source said so
+      // (Inpatient / Telemedicine are more specific than the default).
+      if (existing.type === 'Outpatient' && e.type && e.type !== 'Outpatient') {
+        existing.type = e.type;
+      }
+      // Add the source if (fileTag, page) is new.
+      const key = `${e.fileTag}|${e.page}`;
+      if (!existing.sources.some(s => `${s.fileTag}|${s.page}` === key)) {
+        existing.sources.push({ fileTag: e.fileTag, page: e.page });
+      }
+    }
   }
-  const rows = [...byKey.values()].sort((a, b) => (a.isoDate < b.isoDate ? 1 : a.isoDate > b.isoDate ? -1 : 0));
+  const rows = [...byDate.values()].sort((a, b) => (a.isoDate < b.isoDate ? 1 : a.isoDate > b.isoDate ? -1 : 0));
   const esc = (s) => String(s || '').replace(/\|/g, '\\|').replace(/\n/g, ' ').trim();
   const header = '| Date | Type | Encounter | Source |\n| --- | --- | --- | --- |';
-  const body = rows.map(e => `| ${e.isoDate} | ${e.type} | ${esc(e.description)} | ${e.fileTag} p.${e.page} |`).join('\n');
+  const fmtSources = (sources) => sources
+    .map(s => `${s.fileTag} p.${s.page}`)
+    .join(', ');
+  const body = rows.map(e => `| ${e.isoDate} | ${e.type} | ${esc(e.description)} | ${fmtSources(e.sources)} |`).join('\n');
   return { table: rows.length ? `${header}\n${body}` : header, count: rows.length };
 }

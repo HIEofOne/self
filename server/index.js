@@ -10739,7 +10739,7 @@ async function buildPatientSummaryPromptForUser(userId, userDoc) {
   // "Recent Visits (past 12 months)" section.
   let encounters = '';
   try {
-    const { extractEncountersFromText } = await import('./utils/encounters-extractor.js');
+    const { extractEncountersFromText, parseAppleHealthClinicalNotes } = await import('./utils/encounters-extractor.js');
     const pdfParse = (await import('pdf-parse')).default;
     const kbName = getKBNameFromUserDoc(userDoc, userId);
     const kbPrefix = kbName ? `${userId}/${kbName}/` : null;
@@ -10751,6 +10751,14 @@ async function buildPatientSummaryPromptForUser(userId, userDoc) {
     for (let i = 0; i < pdfFiles.length; i++) {
       const f = pdfFiles[i];
       if (!f.bucketKey) continue;
+      // Apple Health: prefer Clinical Notes sidecar (it IS the encounters).
+      if (f.isAppleHealth) {
+        const cn = await readSpacesTextObject(`${userId}/Lists/clinical_notes.md`);
+        if (cn) {
+          const enc = parseAppleHealthClinicalNotes(cn, `File ${i + 1}`);
+          if (enc.length > 0) { collected.push(...enc); continue; }
+        }
+      }
       const buf = await readSpacesObjectBuffer(f.bucketKey);
       if (!buf) continue;
       try {
@@ -10776,7 +10784,18 @@ async function buildPatientSummaryPromptForUser(userId, userDoc) {
     console.warn(`[patient-summary] encounters context build failed: ${e?.message || e}`);
   }
 
-  return getClinicalPrompt('patient-summary.draft', { currentMedications, encounters })
+  // Allergies context: Apple Health's `allergies.md` is the authoritative
+  // structured list. If present, inject it so the agent uses it AS-IS for
+  // the Allergies section.
+  let allergies = '';
+  try {
+    const allergiesMd = await readSpacesTextObject(`${userId}/Lists/allergies.md`);
+    if (allergiesMd && allergiesMd.trim()) {
+      allergies = `**Authoritative Allergies (from Apple Health):**\n${allergiesMd.trim()}\n\nUse this for the "Allergies" section above — do NOT replace it with anything from the knowledge base.`;
+    }
+  } catch { /* no AH allergies — agent extracts from KB */ }
+
+  return getClinicalPrompt('patient-summary.draft', { currentMedications, encounters, allergies })
     || 'Please generate a patient summary.';
 }
 
@@ -11723,7 +11742,7 @@ app.post('/api/encounters/worksheet', async (req, res) => {
 
     const legend = pdfFiles.map((f, i) => ({ tag: `File ${i + 1}`, fileName: f.fileName, bucketKey: f.bucketKey || null }));
 
-    const { extractEncountersFromText, buildEncountersTable } = await import('./utils/encounters-extractor.js');
+    const { extractEncountersFromText, parseAppleHealthClinicalNotes, buildEncountersTable } = await import('./utils/encounters-extractor.js');
     const pdfParse = (await import('pdf-parse')).default;
 
     const allEncounters = [];
@@ -11732,6 +11751,16 @@ app.post('/api/encounters/worksheet', async (req, res) => {
       const f = pdfFiles[i];
       const tag = `File ${i + 1}`;
       if (!f.bucketKey) { modes[tag] = 'missing-key'; continue; }
+      // Apple Health files: prefer the structured Clinical Notes category
+      // sidecar (Lists/clinical_notes.md) — these ARE the encounters. Falls
+      // back to PDF parsing if the sidecar is missing.
+      if (f.isAppleHealth) {
+        const cn = await readSpacesTextObject(`${userId}/Lists/clinical_notes.md`);
+        if (cn) {
+          const enc = parseAppleHealthClinicalNotes(cn, tag);
+          if (enc.length > 0) { modes[tag] = 'apple-health-clinical-notes'; allEncounters.push(...enc); continue; }
+        }
+      }
       const buf = await readSpacesObjectBuffer(f.bucketKey);
       if (!buf) { modes[tag] = 'download-failed'; continue; }
       try {

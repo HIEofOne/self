@@ -568,6 +568,15 @@ Logged in `maia-log.pdf` as `clean-index-built (N files)`.
   cutoff. Clarified that medication logic lives in the prompts, not the
   System Instructions, and noted worksheet UI sorting + Source-page
   hyperlinks.
+- *2026-05-23* — v1.3.103. Encounters: AH Clinical Notes (`clinical_notes.md`)
+  is now the authoritative encounter source for Apple Health files
+  (`parseAppleHealthClinicalNotes`); falls back to PDF parsing if the
+  sidecar is missing. `buildEncountersTable` dedupes by **ISO date only**
+  — same-date encounters across multiple files collapse into one row whose
+  Source cell lists every contributing `File N p.<page>` (rendered as
+  individual links in `Lists.vue`). Patient Summary draft prompt gained
+  `{allergies}`: Apple Health's `allergies.md` is injected as an
+  authoritative Allergies block when present.
 - *2026-05-22* — v1.3.102. "Request New Summary" was using a different
   endpoint with a stub prompt that returned near-empty output. All
   Patient Summary paths now share `buildPatientSummaryPromptForUser`

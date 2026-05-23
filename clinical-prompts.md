@@ -149,7 +149,7 @@ Output ONLY the list of current medications — one medication per line (name an
 ---
 
 ### prompt: patient-summary.draft
-<!-- placeholders: {currentMedications} {encounters} -->
+<!-- placeholders: {currentMedications} {encounters} {allergies} -->
 ```text
 You are creating a Patient Summary for an on-call physician who has never seen this patient. Use ONLY information found in this patient's knowledge base; never fabricate. Apply your system instructions for any items that must be omitted or redacted.
 
@@ -167,6 +167,8 @@ Then produce the following sections, in this order, each on its own highlighted 
 - Other Testing (past 12 months) — labs, PFTs, EKGs, etc.
 
 {encounters}
+
+{allergies}
 
 {currentMedications}
 ```
