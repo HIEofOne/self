@@ -568,6 +568,15 @@ Logged in `maia-log.pdf` as `clean-index-built (N files)`.
   cutoff. Clarified that medication logic lives in the prompts, not the
   System Instructions, and noted worksheet UI sorting + Source-page
   hyperlinks.
+- *2026-05-23* — v1.3.106. Patient Summary gains `{outOfRangeLabs}`
+  placeholder. When the user has an Apple Health PDF, the server slices
+  its Lab Results section (`extractAppleHealthLabSection`) and hands it
+  to the agent as authoritative — the agent lists only entries marked
+  out of range / abnormal / High / Low / critical. With no AH file, the
+  block instructs the agent to write a fixed note: *"Ask the Private AI
+  for lists or graphs of specific lab results."* (User-edited prompt also
+  dropped "(past 12 months)" qualifiers from sections other than Recent
+  Visits.)
 - *2026-05-23* — v1.3.105. Patient Summary improvements:
   - **{patientIdentity}** placeholder injects deterministically-extracted
     name / DOB / age / sex from the source PDF header

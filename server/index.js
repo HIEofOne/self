@@ -10728,6 +10728,40 @@ app.post('/api/generate-patient-summary', async (req, res) => {
  * Returns the substituted prompt string. Falls back to a minimal default
  * if Layer 2 is missing/broken.
  */
+/**
+ * Best-effort extraction of the "Lab Results" section from an Apple Health
+ * PDF text dump. Slices from a Lab Results heading to the next sibling
+ * category heading (or the doc footer). Returns '' when the section can't
+ * be located so the caller can decide what to do.
+ */
+function extractAppleHealthLabSection(pdfText) {
+  const text = String(pdfText || '');
+  // Sibling category headings observed in AH exports — we stop at the first
+  // one that appears AFTER the Lab Results header.
+  const SIBLINGS = [
+    'Vital Signs', 'Clinical Vitals', 'Conditions', 'Allergies', 'Immunizations',
+    'Procedures', 'Medication Records', 'Clinical Notes', 'Care Team',
+    'Encounters', 'Family History', 'Social History'
+  ];
+  // Match "### Lab Results" (markdown) or a bare "Lab Results" line.
+  const startRe = /(?:^|\n)(?:#{1,4}\s*)?Lab Results\b[^\n]*\n/i;
+  const startMatch = startRe.exec(text);
+  if (!startMatch) return '';
+  const startIdx = startMatch.index + startMatch[0].length;
+  // Find the earliest sibling heading after the start.
+  let endIdx = text.length;
+  for (const sib of SIBLINGS) {
+    const re = new RegExp(`(?:^|\\n)(?:#{1,4}\\s*)?${sib}\\b[^\\n]*\\n`, 'i');
+    re.lastIndex = startIdx;
+    const m = re.exec(text.slice(startIdx));
+    if (m) {
+      const at = startIdx + m.index;
+      if (at < endIdx) endIdx = at;
+    }
+  }
+  return text.slice(startIdx, endIdx).trim();
+}
+
 /** Substitute `{name}` placeholders. Unknown names pass through unchanged. */
 function substitutePromptPlaceholders(body, vars) {
   return String(body || '').replace(/\{([A-Za-z0-9_]+)\}/g, (_, name) =>
@@ -10743,8 +10777,12 @@ async function buildPatientSummaryPromptForUser(userId, userDoc, profileKey = 'd
   // Patient identity (name / DOB / age / sex) is printed in the header of
   // every Apple Health and Epic export — extract it deterministically and
   // pass it AUTHORITATIVELY so the agent never reports "age not specified"
-  // when the value is right there.
+  // when the value is right there. Also capture the Apple Health PDF text
+  // (if any) so the {outOfRangeLabs} builder below can read its Lab
+  // Results section without re-parsing.
   let patientIdentity = '';
+  let ahPdfText = null;
+  let hasAppleHealth = false;
   try {
     const { parsePatientIdentityFromText, renderPatientIdentityBlock } = await import('./utils/patient-identity.js');
     const pdfParse = (await import('pdf-parse')).default;
@@ -10754,6 +10792,7 @@ async function buildPatientSummaryPromptForUser(userId, userDoc, profileKey = 'd
       f?.fileName && (!kbPrefixPI || (f.bucketKey || '').startsWith(kbPrefixPI)) &&
       (/\.pdf$/i.test(f.fileName) || /pdf/i.test(f.fileType || ''))
     );
+    hasAppleHealth = pdfFilesPI.some(f => f.isAppleHealth);
     // First parseable header wins — iterate Apple Health first, then others.
     pdfFilesPI.sort((a, b) => (b.isAppleHealth ? 1 : 0) - (a.isAppleHealth ? 1 : 0));
     let id = null;
@@ -10763,13 +10802,33 @@ async function buildPatientSummaryPromptForUser(userId, userDoc, profileKey = 'd
       if (!buf) continue;
       try {
         const data = await pdfParse(buf);
-        id = parsePatientIdentityFromText(data.text);
-        if (id && (id.dobIso || id.name || id.sex)) break;
+        if (f.isAppleHealth && !ahPdfText) ahPdfText = data.text;
+        if (!id) {
+          const parsed = parsePatientIdentityFromText(data.text);
+          if (parsed && (parsed.dobIso || parsed.name || parsed.sex)) id = parsed;
+        }
+        // Stop once we have BOTH identity AND (either captured AH text OR no AH file at all).
+        if (id && (ahPdfText || !hasAppleHealth)) break;
       } catch { /* try next file */ }
     }
     patientIdentity = renderPatientIdentityBlock(id);
   } catch (e) {
     console.warn(`[patient-summary] identity extraction failed: ${e?.message || e}`);
+  }
+
+  // Out-of-Range Labs: when an Apple Health PDF is available, hand its
+  // Lab Results section to the agent as authoritative and ask it to list
+  // ONLY the out-of-range entries. Otherwise emit a fixed note steering
+  // the user to ask the Private AI directly.
+  let outOfRangeLabs = '';
+  if (ahPdfText) {
+    const labSection = extractAppleHealthLabSection(ahPdfText);
+    if (labSection) {
+      const capped = labSection.length > 30000 ? labSection.slice(0, 30000) + '\n…[truncated]…' : labSection;
+      outOfRangeLabs = `**Authoritative Lab Results (from Apple Health):**\n${capped}\n\nFor the "Out of Range Labs" section above, list ONLY the entries explicitly marked out of range / abnormal / High / Low / critical (with the date, test name, value, units, and reference range when given). If none are out of range, write exactly: "No out-of-range labs in the provided records."`;
+    }
+  } else if (hasAppleHealth === false) {
+    outOfRangeLabs = `**For the "Out of Range Labs" section above**, write exactly this and nothing more: "Ask the Private AI for lists or graphs of specific lab results."`;
   }
 
   // Encounters context: extract deterministically from PDFs and keep the
@@ -10833,7 +10892,7 @@ async function buildPatientSummaryPromptForUser(userId, userDoc, profileKey = 'd
     }
   } catch { /* no AH allergies — agent extracts from KB */ }
 
-  const vars = { patientIdentity, currentMedications, encounters, allergies };
+  const vars = { patientIdentity, currentMedications, encounters, allergies, outOfRangeLabs };
   // Per-agent override (My Stuff → Patient Summary → "Instructions for
   // <Agent>"). When set, takes precedence over the Layer-2 default; the
   // same `{placeholders}` are substituted so the user can rearrange the
