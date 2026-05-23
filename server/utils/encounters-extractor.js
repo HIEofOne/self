@@ -223,7 +223,7 @@ export function parseAppleHealthClinicalNotes(text, fileTag) {
     const author = bolded[1] || '';
     const description = author ? `${noteType} by ${author}` : noteType;
     const type = classifyEncounterType(noteType);
-    out.push({ isoDate, dateRaw: head[1], type, description, encounter: description, page, fileTag });
+    out.push({ isoDate, dateRaw: head[1], type, description, encounter: description, page, fileTag, source: 'apple-health' });
   }
   return out;
 }
@@ -237,7 +237,14 @@ export function parseAppleHealthClinicalNotes(text, fileTag) {
  */
 export function buildEncountersTable(allEncounters) {
   // Group by ISO date so a visit reported in multiple source files becomes
-  // a single row. The Source cell lists every contributing File N p.<page>.
+  // a single row. Within a group we PREFER non-Apple-Health contributors
+  // for the displayed descriptor and source link order — Apple Health
+  // entries are summary-only ("Telephone Encounter by Dr X"), while the
+  // original source PDF (e.g. an Epic export) carries the actual note
+  // content. AH contributors are still included in the Source cell so
+  // the user can navigate to them, but they appear after the non-AH
+  // sources.
+  const isAh = (e) => e?.source === 'apple-health';
   const byDate = new Map();
   for (const e of allEncounters) {
     if (!e?.isoDate) continue;
@@ -246,35 +253,48 @@ export function buildEncountersTable(allEncounters) {
       byDate.set(e.isoDate, {
         isoDate: e.isoDate,
         type: e.type,
-        // Use the longest descriptor across contributors (it's usually the
-        // most informative — e.g., Epic's "Telemedicine in Dept of Urology"
-        // beats Apple Health's "Telephone Encounter by …").
-        description: e.description || '',
-        sources: [{ fileTag: e.fileTag, page: e.page }]
+        descriptions: [{ text: e.description || '', isAh: isAh(e) }],
+        sources: [{ fileTag: e.fileTag, page: e.page, isAh: isAh(e) }]
       });
     } else {
-      const incomingDesc = e.description || '';
-      if (incomingDesc.length > (existing.description || '').length) {
-        existing.description = incomingDesc;
-      }
-      // Prefer a non-Outpatient classification if any source said so
-      // (Inpatient / Telemedicine are more specific than the default).
+      existing.descriptions.push({ text: e.description || '', isAh: isAh(e) });
+      // Type promotion: a more specific type from any contributor wins.
       if (existing.type === 'Outpatient' && e.type && e.type !== 'Outpatient') {
         existing.type = e.type;
       }
-      // Add the source if (fileTag, page) is new.
       const key = `${e.fileTag}|${e.page}`;
       if (!existing.sources.some(s => `${s.fileTag}|${s.page}` === key)) {
-        existing.sources.push({ fileTag: e.fileTag, page: e.page });
+        existing.sources.push({ fileTag: e.fileTag, page: e.page, isAh: isAh(e) });
       }
     }
   }
-  const rows = [...byDate.values()].sort((a, b) => (a.isoDate < b.isoDate ? 1 : a.isoDate > b.isoDate ? -1 : 0));
+
+  // Pick the best descriptor: longest non-AH; if no non-AH contributor,
+  // longest AH. Order sources non-AH first.
+  const pickDescription = (descs) => {
+    const nonAh = descs.filter(d => !d.isAh && d.text);
+    const pool = nonAh.length > 0 ? nonAh : descs.filter(d => d.text);
+    if (pool.length === 0) return '';
+    return pool.reduce((best, d) => d.text.length > best.length ? d.text : best, '');
+  };
+  const orderSources = (sources) => {
+    const nonAh = sources.filter(s => !s.isAh);
+    const ah    = sources.filter(s =>  s.isAh);
+    return [...nonAh, ...ah];
+  };
+
+  const rows = [...byDate.values()]
+    .map(g => ({
+      isoDate: g.isoDate,
+      type: g.type,
+      description: pickDescription(g.descriptions),
+      sources: orderSources(g.sources)
+    }))
+    .sort((a, b) => (a.isoDate < b.isoDate ? 1 : a.isoDate > b.isoDate ? -1 : 0));
+
   const esc = (s) => String(s || '').replace(/\|/g, '\\|').replace(/\n/g, ' ').trim();
   const header = '| Date | Type | Encounter | Source |\n| --- | --- | --- | --- |';
-  const fmtSources = (sources) => sources
-    .map(s => `${s.fileTag} p.${s.page}`)
-    .join(', ');
+  const fmtSources = (sources) => sources.map(s => `${s.fileTag} p.${s.page}`).join(', ');
   const body = rows.map(e => `| ${e.isoDate} | ${e.type} | ${esc(e.description)} | ${fmtSources(e.sources)} |`).join('\n');
   return { table: rows.length ? `${header}\n${body}` : header, count: rows.length };
 }
