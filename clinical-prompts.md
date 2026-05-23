@@ -149,7 +149,22 @@ Output ONLY the list of current medications — one medication per line (name an
 ---
 
 ### prompt: patient-summary.draft
-<!-- placeholders: -->
+<!-- placeholders: {currentMedications} -->
 ```text
-Please generate a patient summary.
+You are creating a Patient Summary for an on-call physician who has never seen this patient. Use ONLY information found in this patient's knowledge base; never fabricate. Apply your system instructions for any items that must be omitted or redacted.
+
+Start with the patient's name, age, and sex on the first line.
+
+Then produce the following sections, in this order, each on its own highlighted heading line followed by a concise prose paragraph or short list (do not invent sub-headings, and do not show your reasoning):
+
+- Medical History — a concise narrative including surgical history.
+- Recent Visits (past 12 months) — providers seen and the diagnoses from those visits.
+- Current Medications — the patient's currently-taken medications.
+- Stopped or Inactive Medications — meds explicitly discontinued or clearly no longer current.
+- Allergies
+- Social History — brief: employment/school, living situation, tobacco/alcohol/drug use.
+- Radiology (past 12 months)
+- Other Testing (past 12 months) — labs, PFTs, EKGs, etc.
+
+{currentMedications}
 ```

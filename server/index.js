@@ -10757,7 +10757,20 @@ app.post('/api/patient-summary/draft', async (req, res) => {
 
     const { DigitalOceanProvider } = await import('../lib/chat-client/providers/digitalocean.js');
     const agentProvider = new DigitalOceanProvider(userDoc.agentApiKey, { baseURL: userDoc.agentEndpoint });
-    const draftPrompt = getClinicalPrompt('patient-summary.draft', {}) || 'Please generate a patient summary.';
+
+    // Build the {currentMedications} block for the patient-summary.draft
+    // prompt: when the user has a verified Current Medications list on the
+    // user doc, instruct the agent to use it AS-IS for that section (the
+    // "Current Medications Priority" rule, relocated from the system prompt
+    // into the per-request prompt). When absent, send an empty block so the
+    // agent extracts meds from the knowledge base as usual.
+    const verifiedMeds = String(userDoc.currentMedications || '').trim();
+    const currentMedications = verifiedMeds
+      ? `**Authoritative Current Medications (verified by the patient):**\n${verifiedMeds}\n\nUse this list AS-IS for the "Current Medications" section above — do NOT replace it with anything from the knowledge base.`
+      : '';
+
+    const draftPrompt = getClinicalPrompt('patient-summary.draft', { currentMedications })
+      || 'Please generate a patient summary.';
     const chatMessages = [{ role: 'user', content: draftPrompt }];
     const chatOptions = { model: userDoc.agentModelName || 'deepseek-v4-pro', stream: false };
 

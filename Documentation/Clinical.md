@@ -436,11 +436,19 @@ Private AI (Deepseek) from the indexed knowledge base.
   stores at `userDoc.draftPatientSummary` until the user verifies it
   on **My Stuff → Patient Summary**. On Verify it is promoted into
   `userDoc.patientSummaries` and `wizardPatientSummary` flips true.
-- **Prompt**: `patient-summary.draft` in `clinical-prompts.md` (Step 3
-  will expand this into a full deliverable spec — categories, format,
-  and a `{currentMedications}` placeholder so the verified Current
-  Medications can be injected and the system prompt stays the generic
-  guardrail).
+- **Prompt**: `patient-summary.draft` in `clinical-prompts.md`. The
+  deliverable spec (sections: Medical History incl. surgical; Recent
+  Visits past 12 months with providers + diagnoses; Current Medications;
+  Stopped or Inactive Medications; Allergies; Social History; Radiology
+  past 12 months; Other Testing past 12 months) lives in the prompt
+  body — **not** in the system prompt, which stays generic. A
+  `{currentMedications}` placeholder is injected by the endpoint: when
+  `userDoc.currentMedications` is set (verified by the patient), the
+  prompt instructs the agent to use that list **AS-IS** for the
+  Current Medications section (the "Current Medications Priority" rule,
+  relocated from the system prompt to this per-request prompt). When
+  the verified list is absent, the placeholder is empty and the agent
+  extracts meds from the knowledge base as usual.
 - **Resilience**: on a 401/403 (agent still deploying) the endpoint
   recreates the API key and retries; on persistent not-ready it returns
   `202 AGENT_NOT_READY` and logs `draft-summary-failed`.
