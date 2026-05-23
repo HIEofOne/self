@@ -10769,7 +10769,51 @@ app.post('/api/patient-summary/draft', async (req, res) => {
       ? `**Authoritative Current Medications (verified by the patient):**\n${verifiedMeds}\n\nUse this list AS-IS for the "Current Medications" section above — do NOT replace it with anything from the knowledge base.`
       : '';
 
-    const draftPrompt = getClinicalPrompt('patient-summary.draft', { currentMedications })
+    // Build the {encounters} context block: deterministically extract the
+    // patient's encounters from their PDFs (same path /api/encounters/worksheet
+    // uses) and keep the past 12 months, so the agent can populate the
+    // "Recent Visits (past 12 months)" section from authoritative dated
+    // data instead of fishing for visits in the KB.
+    let encounters = '';
+    try {
+      const { extractEncountersFromText } = await import('./utils/encounters-extractor.js');
+      const pdfParse = (await import('pdf-parse')).default;
+      const kbNameDraft = getKBNameFromUserDoc(userDoc, userId);
+      const kbPrefixDraft = kbNameDraft ? `${userId}/${kbNameDraft}/` : null;
+      const pdfFilesDraft = (userDoc.files || []).filter(f =>
+        f?.fileName && (!kbPrefixDraft || (f.bucketKey || '').startsWith(kbPrefixDraft)) &&
+        (/\.pdf$/i.test(f.fileName) || /pdf/i.test(f.fileType || ''))
+      );
+      const collected = [];
+      for (let i = 0; i < pdfFilesDraft.length; i++) {
+        const f = pdfFilesDraft[i];
+        if (!f.bucketKey) continue;
+        const buf = await readSpacesObjectBuffer(f.bucketKey);
+        if (!buf) continue;
+        try {
+          const data = await pdfParse(buf);
+          const { encounters: enc } = extractEncountersFromText(data.text, data.numpages, `File ${i + 1}`);
+          collected.push(...enc);
+        } catch { /* per-file parse failures are best-effort */ }
+      }
+      const cutoff12 = new Date(); cutoff12.setMonth(cutoff12.getMonth() - 12);
+      const cutoff12Iso = cutoff12.toISOString().slice(0, 10);
+      const seen = new Map();
+      for (const e of collected) {
+        if (!e.isoDate || e.isoDate < cutoff12Iso) continue;
+        const key = `${e.isoDate}|${(e.description || '').toLowerCase()}`;
+        if (!seen.has(key)) seen.set(key, e);
+      }
+      const recent = [...seen.values()].sort((a, b) => (a.isoDate < b.isoDate ? 1 : a.isoDate > b.isoDate ? -1 : 0));
+      if (recent.length > 0) {
+        const lines = recent.map(e => `- ${e.isoDate} (${e.type || 'Visit'}) — ${e.description || ''}`).join('\n');
+        encounters = `**Recent encounters (past 12 months, reverse-chronological)** — extracted deterministically from this patient's records. Use these for the "Recent Visits (past 12 months)" section above and do NOT re-extract visits from the knowledge base for that section:\n${lines}`;
+      }
+    } catch (e) {
+      console.warn(`[draft-summary] encounters context build failed: ${e?.message || e}`);
+    }
+
+    const draftPrompt = getClinicalPrompt('patient-summary.draft', { currentMedications, encounters })
       || 'Please generate a patient summary.';
     const chatMessages = [{ role: 'user', content: draftPrompt }];
     const chatOptions = { model: userDoc.agentModelName || 'deepseek-v4-pro', stream: false };
@@ -11491,7 +11535,14 @@ app.get('/api/medications/current', async (req, res) => {
     // Dedupe by drug (latest entry wins), then keep only current candidates.
     const { mergeMedications } = await import('./utils/meds-extractor.js');
     const merged = mergeMedications(meds);
-    const currentMeds = merged.filter(m => m.status === 'active' && m.isoDate >= cutoffDate);
+    const candidates = merged.filter(m => m.status === 'active' && m.isoDate >= cutoffDate);
+
+    // Apply server-side redaction (mirrors the System Instructions
+    // "remove sexual-function meds" rule). The deterministic pipeline
+    // bypasses the agent, so we apply the rule here before the user sees
+    // the pre-filled list.
+    const { redactMedications } = await import('./utils/medication-redactor.js');
+    const { kept: currentMeds, redacted } = redactMedications(candidates);
     const currentText = currentMeds.map(m => `- ${m.name}`).join('\n');
 
     res.json({
@@ -11501,7 +11552,8 @@ app.get('/api/medications/current', async (req, res) => {
       currentMeds,
       currentText,
       allMeds: merged,
-      legend
+      legend,
+      redactedCount: redacted.length
     });
   } catch (error) {
     console.error('[medications/current] error:', error);

@@ -457,9 +457,10 @@
               </q-item-section>
               <q-item-section>
                 <q-item-label :class="{ 'text-grey-5': !wizardCurrentMedications && !stage2StatusDisplay.completed && !wizardPreparingRecords }">
-                  Medication Worksheets
-                  <span v-if="wizardCurrentMedications" class="text-green text-caption q-ml-sm">Generating in My Lists</span>
+                  Current Medications
+                  <span v-if="wizardCurrentMedications" class="text-green text-caption q-ml-sm">Verified</span>
                   <span v-else-if="wizardPreparingRecords" class="text-primary text-caption q-ml-sm">Preparing...</span>
+                  <span v-else-if="wizardFlowPhase === 'medications'" class="text-primary text-caption q-ml-sm">Verify in My Lists</span>
                 </q-item-label>
               </q-item-section>
             </q-item>
@@ -3187,7 +3188,7 @@ const generateSetupLogPdf = async () => {
     `Private AI (Deepseek) ready: ${wizardStage1Complete.value ? 'Yes' : 'No'}`,
     `Private AI (GPT) ready: ${gptAgentReady.value ? 'Yes' : 'Pending'}`,
     `KB indexed: ${hasIndexing ? 'Yes' : 'Pending'} (${indexTokens} tokens)`,
-    `Medication Worksheets: see My Lists (Deepseek + GPT)`,
+    `Current Medications: ${wizardCurrentMedications.value ? 'Verified' : 'Pending verification'}`,
     `Patient Summary: ${hasSummary ? 'Yes' : 'No'}`
   ];
   for (const item of summaryItems) {
@@ -6199,12 +6200,10 @@ const startSetupWizardPolling = () => {
   refreshWizardState()
     .then(() => {
       // ── Safari/basic reload recovery: resume guided flow if indexing already done ──
-      // On reload wizardFlowPhase resets to 'done'. If the server shows indexing
-      // complete + agent ready but the Patient Summary is still unverified, the
-      // user was mid-guided-flow. Resume it so the wizard doesn't get stuck.
-      // The Current Medications extract/verify step is no longer part of the
-      // flow (replaced by background Worksheet generation), so we resume
-      // directly at the summary verification phase.
+      // On reload wizardFlowPhase resets to 'done'. If the server shows
+      // indexing complete + agent ready but Medications or Patient Summary
+      // are still unverified, the user was mid-guided-flow. Resume at the
+      // earliest unfinished step so the wizard doesn't get stuck.
       // Skip entirely during the post-Restore grace window — otherwise this
       // generates a fresh draft summary and overwrites what Restore restored.
       if (
@@ -6215,16 +6214,23 @@ const startSetupWizardPolling = () => {
         wizardStage1Complete.value &&
         !wizardPatientSummary.value
       ) {
-        // Summary pending → resume at summary phase (loads the existing draft).
-        wizardFlowPhase.value = 'summary';
-        myStuffInitialTab.value = 'summary';
-        showMyStuffDialog.value = true;
-        // Explain in maia-log why Setup is opening again (it's a resume to
-        // finish verification, not a fresh/duplicate setup). Common after a
-        // Restore: the restored Patient Summary is a draft until the user
-        // verifies it. Logged once (the phase flips to 'summary' so this
-        // block won't re-enter).
-        logProvisioningEvent({ event: 'setup-resumed', reason: 'patient-summary-not-verified' });
+        if (!wizardCurrentMedications.value) {
+          // Meds not yet verified → resume at medications phase.
+          wizardFlowPhase.value = 'medications';
+          try {
+            sessionStorage.setItem('autoProcessInitialFile', 'true');
+            sessionStorage.setItem('wizardMyListsAuto', 'true');
+          } catch { /* ignore */ }
+          myStuffInitialTab.value = 'lists';
+          showMyStuffDialog.value = true;
+          logProvisioningEvent({ event: 'setup-resumed', reason: 'current-medications-not-verified' });
+        } else {
+          // Meds verified, summary still a draft → resume at summary phase.
+          wizardFlowPhase.value = 'summary';
+          myStuffInitialTab.value = 'summary';
+          showMyStuffDialog.value = true;
+          logProvisioningEvent({ event: 'setup-resumed', reason: 'patient-summary-not-verified' });
+        }
       }
 
       if (!shouldHideSetupWizard.value && !showAgentSetupDialog.value && !wizardDismissed.value && !showMyStuffDialog.value) {
@@ -6512,39 +6518,28 @@ watch(
         }
       }
 
-      // Step 2: Trigger generation of both Current Medications Worksheets
-      // (Deepseek + GPT) in the background. This REPLACES the old extract /
-      // verify / splice Current Medications step — the worksheets are produced
-      // by direct KB retrieval and shown in My Lists. GPT is auto-provisioned
-      // server-side if it isn't ready yet (the POST returns 202 and the user
-      // can Refresh the worksheet later from My Lists).
+      // Step 2: Trigger background generation of both Medication Worksheets
+      // (Deepseek + GPT) and kick off GPT provisioning so it deploys
+      // concurrently with indexing. Setup completion is gated on GPT.
       wizardPreparingMessage.value = 'Generating medication worksheets from your records...';
-      // Kick off provisioning of the second Private AI (GPT) now so it is
-      // deploying while the user reviews the summary. Setup completion is
-      // gated on this finishing (see handlePatientSummaryVerified/Saved).
       void ensureGptProvisioned();
       triggerSetupWorksheets();
-      // Mark the (now bypassed) Current Medications step as satisfied so the
-      // checklist and completion gating don't wait on a verification that no
-      // longer happens.
-      wizardCurrentMedications.value = true;
-      wizardStage2Complete.value = true;
-      wizardStage2Pending.value = false;
-      wizardStage2NoDevice.value = false;
 
-      // Step 3: Open the Patient Summary tab for verification. The draft was
-      // generated above and is loaded from userDoc.draftPatientSummary by
-      // MyStuffDialog's loadPatientSummary (no second AI call). Opening My Stuff
-      // before closing the wizard prevents a flash of the empty chat.
-      wizardFlowPhase.value = 'summary';
-      wizardPreparingMessage.value = 'Opening Patient Summary for review...';
+      // Step 3 (restored Step-C, v1.3.101+): open My Lists → Current
+      // Medications for the user to VERIFY before the Patient Summary.
+      // The card pre-fills instantly from the unified deterministic source
+      // (GET /api/medications/current — Apple Health md → Epic
+      // Medication List → manual). On Verify, handleCurrentMedicationsSaved
+      // advances the phase to 'summary' and opens the Patient Summary tab.
+      wizardFlowPhase.value = 'medications';
+      wizardPreparingMessage.value = 'Opening Current Medications for review...';
       wizardPreparingRecords.value = false;
       try {
         sessionStorage.setItem('autoProcessInitialFile', 'true');
+        sessionStorage.setItem('wizardMyListsAuto', 'true');
       } catch { /* ignore */ }
-      myStuffInitialTab.value = 'summary';
+      myStuffInitialTab.value = 'lists';
       showMyStuffDialog.value = true;
-      // Close wizard dialog after My Stuff is open (My Stuff dialog covers the screen)
       showAgentSetupDialog.value = false;
     }
   }

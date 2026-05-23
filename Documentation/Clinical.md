@@ -560,6 +560,17 @@ Logged in `maia-log.pdf` as `clean-index-built (N files)`.
   cutoff. Clarified that medication logic lives in the prompts, not the
   System Instructions, and noted worksheet UI sorting + Source-page
   hyperlinks.
+- *2026-05-22* — v1.3.101. Wizard now verifies Current Medications
+  before Patient Summary (restored). The unified `/api/medications/current`
+  pre-fills the verify card instantly from the deterministic source. A
+  server-side redaction filter (`server/utils/medication-redactor.js`,
+  matching the System Instructions "sexual function + syringes" rule)
+  drops obvious matches (sildenafil/tadalafil/vardenafil/avanafil/
+  alprostadil/papaverine/phentolamine/trimix/yohimbine) before the list
+  reaches the user. The Patient Summary draft prompt gained an
+  `{encounters}` placeholder, populated by inline encounters extraction
+  (past 12 months) so the agent has authoritative dated visits for the
+  Recent Visits section.
 - *2026-05-22* — v1.3.100. **Step 4 — unified Current Medications.**
   New `GET /api/medications/current` returns deterministic Current
   candidates via `resolvePatientMedicationSource(userId)` (Apple Health
