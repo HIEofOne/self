@@ -22,6 +22,7 @@ import { moveObjectWithVerify } from './utils/spaces-move.js';
 import { deleteObjectWithLog } from './utils/spaces-ops.js';
 import { ChatClient } from '../lib/chat-client/index.js';
 import { findUserAgent, getOrCreateAgentApiKey } from './utils/agent-helper.js';
+import { getClinicalPrompt } from './utils/clinical-prompts.js';
 import { normalizeStorageEnv, getSpacesEndpoint, getSpacesBucketName, getSpacesRegion } from './utils/storage-config.js';
 import { getDoRegion, getPort } from './utils/new-agent-config.js';
 import { getOrCreateOpenSearchDatabaseId } from './utils/opensearch-config.js';
@@ -10756,7 +10757,8 @@ app.post('/api/patient-summary/draft', async (req, res) => {
 
     const { DigitalOceanProvider } = await import('../lib/chat-client/providers/digitalocean.js');
     const agentProvider = new DigitalOceanProvider(userDoc.agentApiKey, { baseURL: userDoc.agentEndpoint });
-    const chatMessages = [{ role: 'user', content: 'Please generate a patient summary.' }];
+    const draftPrompt = getClinicalPrompt('patient-summary.draft', {}) || 'Please generate a patient summary.';
+    const chatMessages = [{ role: 'user', content: draftPrompt }];
     const chatOptions = { model: userDoc.agentModelName || 'deepseek-v4-pro', stream: false };
 
     let chatResp;
@@ -10867,7 +10869,8 @@ app.post('/api/medications/extract', async (req, res) => {
 
     let prompt;
     if (mode === 'from-summary') {
-      prompt = `Below is a patient summary. Extract the Current Medications as a simple list, one medication per line, no commentary. Follow your system instructions for any medications that must be omitted or redacted.\n\n${draftText}`;
+      prompt = getClinicalPrompt('current-medications.extract.from-summary', { draftText })
+        || `Below is a patient summary. Extract the Current Medications as a simple list, one medication per line, no commentary. Follow your system instructions for any medications that must be omitted or redacted.\n\n${draftText}`;
     } else {
       const appleHealthFile = (userDoc.files || []).find(f => f && f.isAppleHealth);
       if (!appleHealthFile || !appleHealthFile.fileName) {
@@ -10896,7 +10899,8 @@ app.post('/api/medications/extract', async (req, res) => {
       const contextBlock = Array.isArray(contextMeds) && contextMeds.length > 0
         ? `\n\nFor context, these medications were identified in the patient summary you generated earlier from the full knowledge base:\n${contextMeds.map(m => '- ' + m).join('\n')}\n\nUse this list as a starting point, then reconcile and refine against the Apple Health data below.\n`
         : '';
-      prompt = `Below are this patient's dated medication records from their Apple Health export. Identify the patient's CURRENT medications: for each distinct drug, the most recent dated entry reflects the current prescription (and current strength). Exclude entries that are clearly one-time inpatient/anesthesia administrations (e.g. propofol, fentanyl, IV infusions) and older strengths that have been superseded by a newer one. Apply your system instructions for any medications that must be omitted or redacted (e.g. sexual-function drugs/syringes).
+      prompt = getClinicalPrompt('current-medications.extract.apple-health', { appleHealthMd, contextBlock })
+        || `Below are this patient's dated medication records from their Apple Health export. Identify the patient's CURRENT medications: for each distinct drug, the most recent dated entry reflects the current prescription (and current strength). Exclude entries that are clearly one-time inpatient/anesthesia administrations (e.g. propofol, fentanyl, IV infusions) and older strengths that have been superseded by a newer one. Apply your system instructions for any medications that must be omitted or redacted (e.g. sexual-function drugs/syringes).
 
 Output ONLY the list of current medications — one medication per line (name and current strength). Do NOT include the patient's name or age, any heading, any dates, any bullets, any bold, any blank lines, or any other commentary.${contextBlock}\n\n${appleHealthMd}`;
     }
@@ -10987,6 +10991,10 @@ async function ensureAgentRetrieval(agentId) {
 }
 
 function buildWorksheetPrompt(legendLines, cutoffDate) {
+  // Prefer the editable Layer-2 prompt; fall back to the hardcoded text
+  // below if the config file is missing/broken so the flow never breaks.
+  const fromFile = getClinicalPrompt('worksheet.kb-retrieval', { legendLines, cutoffDate });
+  if (fromFile != null) return fromFile;
   return `You are building a Current Medications Worksheet from this patient's records in your knowledge base. Use ONLY information found in your knowledge base; never infer, assume, or add a medication that is not present. Include EVERY medication you find.
 
 Output a GitHub-flavored Markdown table with EXACTLY these columns — no title, no notes, no text before or after the table:
@@ -11018,6 +11026,8 @@ ${legendLines}`;
 // so both Deepseek and GPT produce complete tables. `ahFileTag` is the
 // "File N" legend tag for the Apple Health source file.
 function buildWorksheetPromptFromMarkdown(ahFileTag, medMarkdown, legendLines, cutoffDate) {
+  const fromFile = getClinicalPrompt('worksheet.apple-health-markdown', { ahFileTag, medMarkdown, legendLines, cutoffDate });
+  if (fromFile != null) return fromFile;
   return `Below are this patient's medication records, extracted directly from their Apple Health export (${ahFileTag}). Each entry shows a date, the medication name and strength, and the page number it appears on.
 
 Build a GitHub-flavored Markdown table with EXACTLY these columns — no title, no notes, no text before or after the table:
@@ -11077,6 +11087,8 @@ async function readSpacesTextObject(key) {
 // verbatim and must NOT pull dates from the document body (in particular
 // the repeating "Generated on …" footer date).
 function buildWorksheetPromptFromMedList(medListText, legendLines, cutoffDate) {
+  const fromFile = getClinicalPrompt('worksheet.epic-medication-list', { medListText, legendLines, cutoffDate });
+  if (fromFile != null) return fromFile;
   return `Below is this patient's medication list, extracted directly from the record. Each line gives the medication (name and strength), its most recent action and date (ordered or discontinued), and the page it appears on. These actions and dates are AUTHORITATIVE.
 
 Build a GitHub-flavored Markdown table with EXACTLY these columns — no title, no notes, no text before or after the table:
