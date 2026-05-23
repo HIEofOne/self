@@ -10729,37 +10729,60 @@ app.post('/api/generate-patient-summary', async (req, res) => {
  * if Layer 2 is missing/broken.
  */
 /**
- * Best-effort extraction of the "Lab Results" section from an Apple Health
- * PDF text dump. Slices from a Lab Results heading to the next sibling
- * category heading (or the doc footer). Returns '' when the section can't
- * be located so the caller can decide what to do.
+ * Extract Apple Health "Out of Range" lab observations from the structured
+ * pdfjs markdown of an AH PDF (produced by extractPdfWithPages — pdf-parse
+ * does NOT preserve the red-text "OUT OF RANGE" annotation that AH uses).
+ * The Lab Results section is page-segmented (`## Page N`) and dated lines
+ * like "Apr 8, 2026   Mass General Brigham" head each lab visit; abnormal
+ * results are individual lines ending with "OUT   OF   RANG" (multi-space).
+ * Returns [{ isoDate, page, line }] in document order.
  */
-function extractAppleHealthLabSection(pdfText) {
-  const text = String(pdfText || '');
-  // Sibling category headings observed in AH exports — we stop at the first
-  // one that appears AFTER the Lab Results header.
-  const SIBLINGS = [
-    'Vital Signs', 'Clinical Vitals', 'Conditions', 'Allergies', 'Immunizations',
-    'Procedures', 'Medication Records', 'Clinical Notes', 'Care Team',
-    'Encounters', 'Family History', 'Social History'
-  ];
-  // Match "### Lab Results" (markdown) or a bare "Lab Results" line.
-  const startRe = /(?:^|\n)(?:#{1,4}\s*)?Lab Results\b[^\n]*\n/i;
-  const startMatch = startRe.exec(text);
-  if (!startMatch) return '';
-  const startIdx = startMatch.index + startMatch[0].length;
-  // Find the earliest sibling heading after the start.
-  let endIdx = text.length;
-  for (const sib of SIBLINGS) {
-    const re = new RegExp(`(?:^|\\n)(?:#{1,4}\\s*)?${sib}\\b[^\\n]*\\n`, 'i');
-    re.lastIndex = startIdx;
-    const m = re.exec(text.slice(startIdx));
-    if (m) {
-      const at = startIdx + m.index;
-      if (at < endIdx) endIdx = at;
+function extractAppleHealthOorLabs(fullMarkdown) {
+  const out = [];
+  const lines = String(fullMarkdown || '').split('\n');
+  let currentPage = 1;
+  let currentIso = '';
+  let inLab = false;
+  // Walk the WHOLE document. `## Page N` markers can appear BEFORE the
+  // `### Lab Results` heading on the page where the section starts, so
+  // tracking page+section across the full document is more reliable than
+  // starting at the heading.
+  for (let i = 0; i < lines.length; i++) {
+    const t = (lines[i] || '').trim();
+    const pg = t.match(/^##\s*Page\s+(\d+)/i);
+    if (pg) { currentPage = parseInt(pg[1], 10); continue; }
+    if (/^#{3,4}\s*Lab Results\b/i.test(t)) { inLab = true; continue; }
+    // A sibling `###`-level heading ends the Lab Results section.
+    if (inLab && /^#{3,4}\s+/.test(t) && !/^#{3,4}\s*Lab Results/i.test(t)) {
+      inLab = false;
+      continue;
+    }
+    if (!inLab) continue;
+    const d = t.match(/^([A-Z][a-z]{2,8}\.?\s+\d{1,2},\s+\d{4})\b/);
+    if (d) {
+      const iso = toIsoDateMonthName(d[1]);
+      if (iso) currentIso = iso;
+      continue;
+    }
+    if (/OUT\s+OF\s+RANG/i.test(t)) {
+      // Strip the trailing "OUT OF RANG[E]?" marker (the final E is often
+      // dropped in the pdfjs text extraction) so the cleaned line shows just
+      // the observation.
+      const clean = t.replace(/\s+/g, ' ').replace(/\s*OUT\s+OF\s+RANG[A-Z]*\s*$/i, '').trim();
+      out.push({ isoDate: currentIso, page: currentPage, line: clean });
     }
   }
-  return text.slice(startIdx, endIdx).trim();
+  return out;
+}
+
+/** Lightweight "Mon D, YYYY" → YYYY-MM-DD parser (avoids importing). */
+function toIsoDateMonthName(s) {
+  const MONTHS = { jan:1, feb:2, mar:3, apr:4, may:5, jun:6, jul:7, aug:8, sep:9, oct:10, nov:11, dec:12 };
+  const m = String(s || '').match(/^([A-Za-z]{3,})\.?\s+(\d{1,2}),\s+(\d{4})$/);
+  if (!m) return '';
+  const mo = MONTHS[m[1].slice(0, 3).toLowerCase()];
+  if (!mo) return '';
+  return `${m[3]}-${String(mo).padStart(2,'0')}-${String(m[2]).padStart(2,'0')}`;
 }
 
 /** Substitute `{name}` placeholders. Unknown names pass through unchanged. */
@@ -10774,14 +10797,13 @@ async function buildPatientSummaryPromptForUser(userId, userDoc, profileKey = 'd
     ? `**Authoritative Current Medications (verified by the patient):**\n${verifiedMeds}\n\nUse this list AS-IS for the "Current Medications" section above — do NOT replace it with anything from the knowledge base.`
     : '';
 
-  // Patient identity (name / DOB / age / sex) is printed in the header of
-  // every Apple Health and Epic export — extract it deterministically and
-  // pass it AUTHORITATIVELY so the agent never reports "age not specified"
-  // when the value is right there. Also capture the Apple Health PDF text
-  // (if any) so the {outOfRangeLabs} builder below can read its Lab
-  // Results section without re-parsing.
+  // Patient identity (name / DOB / age / sex) — deterministic from the
+  // PDF header (Apple Health "Date of birth: …" / Epic "DOB: …, Legal
+  // Sex: …"). Also: locate the Apple Health PDF so the {outOfRangeLabs}
+  // builder below can run pdfjs on it (pdf-parse misses the red-text
+  // "OUT OF RANGE" annotation; pdfjs preserves it).
   let patientIdentity = '';
-  let ahPdfText = null;
+  let ahBuf = null;
   let hasAppleHealth = false;
   try {
     const { parsePatientIdentityFromText, renderPatientIdentityBlock } = await import('./utils/patient-identity.js');
@@ -10793,7 +10815,6 @@ async function buildPatientSummaryPromptForUser(userId, userDoc, profileKey = 'd
       (/\.pdf$/i.test(f.fileName) || /pdf/i.test(f.fileType || ''))
     );
     hasAppleHealth = pdfFilesPI.some(f => f.isAppleHealth);
-    // First parseable header wins — iterate Apple Health first, then others.
     pdfFilesPI.sort((a, b) => (b.isAppleHealth ? 1 : 0) - (a.isAppleHealth ? 1 : 0));
     let id = null;
     for (const f of pdfFilesPI) {
@@ -10802,13 +10823,12 @@ async function buildPatientSummaryPromptForUser(userId, userDoc, profileKey = 'd
       if (!buf) continue;
       try {
         const data = await pdfParse(buf);
-        if (f.isAppleHealth && !ahPdfText) ahPdfText = data.text;
+        if (f.isAppleHealth && !ahBuf) ahBuf = buf;
         if (!id) {
           const parsed = parsePatientIdentityFromText(data.text);
           if (parsed && (parsed.dobIso || parsed.name || parsed.sex)) id = parsed;
         }
-        // Stop once we have BOTH identity AND (either captured AH text OR no AH file at all).
-        if (id && (ahPdfText || !hasAppleHealth)) break;
+        if (id && (ahBuf || !hasAppleHealth)) break;
       } catch { /* try next file */ }
     }
     patientIdentity = renderPatientIdentityBlock(id);
@@ -10816,18 +10836,35 @@ async function buildPatientSummaryPromptForUser(userId, userDoc, profileKey = 'd
     console.warn(`[patient-summary] identity extraction failed: ${e?.message || e}`);
   }
 
-  // Out-of-Range Labs: when an Apple Health PDF is available, hand its
-  // Lab Results section to the agent as authoritative and ask it to list
-  // ONLY the out-of-range entries. Otherwise emit a fixed note steering
-  // the user to ask the Private AI directly.
+  // Out-of-Range Labs:
+  //   • With an Apple Health PDF — run pdfjs (extractPdfWithPages) to get
+  //     the structured markdown that preserves the "OUT OF RANGE" annotation
+  //     (pdf-parse drops it). Build a clean per-lab list with date + page
+  //     and inject it AUTHORITATIVELY for the Out of Range Labs section.
+  //   • Without an AH PDF — emit a fixed instruction telling the agent to
+  //     write the standing "Ask the Private AI for lists or graphs of
+  //     specific lab results." note.
   let outOfRangeLabs = '';
-  if (ahPdfText) {
-    const labSection = extractAppleHealthLabSection(ahPdfText);
-    if (labSection) {
-      const capped = labSection.length > 30000 ? labSection.slice(0, 30000) + '\n…[truncated]…' : labSection;
-      outOfRangeLabs = `**Authoritative Lab Results (from Apple Health):**\n${capped}\n\nFor the "Out of Range Labs" section above, list ONLY the entries explicitly marked out of range / abnormal / High / Low / critical (with the date, test name, value, units, and reference range when given). If none are out of range, write exactly: "No out-of-range labs in the provided records."`;
+  if (ahBuf) {
+    try {
+      const { extractPdfWithPages } = await import('./utils/pdf-parser.js');
+      const result = await extractPdfWithPages(ahBuf);
+      const fullMarkdown = (result?.pages || [])
+        .map(p => `## Page ${p.page}\n\n${p.markdown}`)
+        .join('\n\n---\n\n');
+      const oors = extractAppleHealthOorLabs(fullMarkdown);
+      if (oors.length > 0) {
+        const lines = oors.map(o =>
+          `- ${o.isoDate || '(undated)'} (p.${o.page}): ${o.line} [OUT OF RANGE]`
+        ).join('\n');
+        outOfRangeLabs = `**Authoritative Out-of-Range Labs (from Apple Health):**\n${lines}\n\nUse these AS-IS for the "Out of Range Labs" section above (drop the bracketed "[OUT OF RANGE]" flag and the leading dash if you reformat — the data is authoritative). If empty, write exactly: "No out-of-range labs in the provided records."`;
+      } else {
+        outOfRangeLabs = `**For the "Out of Range Labs" section above**, write exactly: "No out-of-range labs in the provided records."`;
+      }
+    } catch (e) {
+      console.warn(`[patient-summary] OOR extraction failed: ${e?.message || e}`);
     }
-  } else if (hasAppleHealth === false) {
+  } else if (!hasAppleHealth) {
     outOfRangeLabs = `**For the "Out of Range Labs" section above**, write exactly this and nothing more: "Ask the Private AI for lists or graphs of specific lab results."`;
   }
 

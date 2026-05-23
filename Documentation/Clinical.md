@@ -568,6 +568,19 @@ Logged in `maia-log.pdf` as `clean-index-built (N files)`.
   cutoff. Clarified that medication logic lives in the prompts, not the
   System Instructions, and noted worksheet UI sorting + Source-page
   hyperlinks.
+- *2026-05-23* — v1.3.107. `{outOfRangeLabs}` extraction fixed for
+  Apple Health. The AH "OUT OF RANGE" annotation is rendered as red
+  text in the PDF and is preserved only by **pdfjs**' structured
+  markdown — `pdf-parse` drops it. `extractAppleHealthOorLabs` now
+  walks the `extractPdfWithPages` fullMarkdown, tracking `## Page N`
+  markers across the whole document (so page numbers stay correct even
+  though the Lab Results heading starts after a page marker), tracks
+  the visit-date line at each lab session, and captures every
+  observation ending in "OUT OF RANG[E]?". Output is a clean
+  per-observation list with date + page injected into
+  `{outOfRangeLabs}`. Verified on natalie86's AH export: 26 OOR rows
+  with accurate dates and pages (Hemoglobin A1c, Potassium, BUN, LDL,
+  Triglycerides, ALT, etc.).
 - *2026-05-23* — v1.3.106. Patient Summary gains `{outOfRangeLabs}`
   placeholder. When the user has an Apple Health PDF, the server slices
   its Lab Results section (`extractAppleHealthLabSection`) and hands it
