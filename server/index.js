@@ -11409,6 +11409,106 @@ app.get('/api/medications/worksheet', async (req, res) => {
   }
 });
 
+/**
+ * Resolve the patient's best dated medication source and return a unified,
+ * normalized medication list. Source priority:
+ *   1. Apple Health  (`Lists/medication_records.md`, parsed deterministically)
+ *   2. Epic / MGB    ("Medication List" entries extracted from PDFs)
+ *   3. none          (KB-only patient — no structured source available)
+ * Each med: { name, status:'active'|'discontinued', isoDate, page, fileTag }.
+ * Returns { mode, meds, legend }.
+ */
+async function resolvePatientMedicationSource(userId, userDoc) {
+  if (!userDoc) userDoc = await cloudant.getDocument('maia_users', userId);
+  if (!userDoc) return { mode: 'none', meds: [], legend: [] };
+
+  const kbName = getKBNameFromUserDoc(userDoc, userId);
+  const kbPrefix = kbName ? `${userId}/${kbName}/` : null;
+  const kbFiles = (userDoc.files || []).filter(f =>
+    f?.fileName && (!kbPrefix || (f.bucketKey || '').startsWith(kbPrefix))
+  );
+  const legend = kbFiles.map((f, i) => ({ tag: `File ${i + 1}`, fileName: f.fileName, bucketKey: f.bucketKey || null, isAppleHealth: !!f.isAppleHealth }));
+
+  // 1) Apple Health medication_records.md
+  const ahFileIdx = kbFiles.findIndex(f => f.isAppleHealth);
+  if (ahFileIdx !== -1) {
+    const medMd = await findMedicationRecordsMarkdown(userId);
+    if (medMd?.text) {
+      const { parseAppleHealthMedRecords } = await import('./utils/meds-extractor.js');
+      const meds = parseAppleHealthMedRecords(medMd.text, `File ${ahFileIdx + 1}`);
+      if (meds.length > 0) return { mode: 'apple-health', meds, legend };
+    }
+  }
+
+  // 2) Epic / MGB structured "Medication List" across PDFs
+  try {
+    const { extractEpicMedications } = await import('./utils/meds-extractor.js');
+    const pdfParse = (await import('pdf-parse')).default;
+    const pdfFiles = kbFiles.filter(f => /\.pdf$/i.test(f.fileName) || /pdf/i.test(f.fileType || ''));
+    const all = [];
+    for (let i = 0; i < kbFiles.length; i++) {
+      const f = kbFiles[i];
+      if (!pdfFiles.includes(f) || !f.bucketKey) continue;
+      const buf = await readSpacesObjectBuffer(f.bucketKey);
+      if (!buf) continue;
+      try {
+        const data = await pdfParse(buf);
+        const { meds } = extractEpicMedications(data.text, data.numpages, `File ${i + 1}`);
+        all.push(...meds);
+      } catch (e) {
+        console.warn(`[meds-source] Epic parse failed for ${f.fileName}: ${e?.message || e}`);
+      }
+    }
+    if (all.length > 0) return { mode: 'epic', meds: all, legend };
+  } catch (e) {
+    console.warn(`[meds-source] Epic extraction error: ${e?.message || e}`);
+  }
+
+  return { mode: 'none', meds: [], legend };
+}
+
+/**
+ * Unified Current Medications endpoint. Returns the deterministic Current
+ * meds (status=active, last date within 18 months, deduped by drug) from
+ * the best structured source — the same source the worksheets use. The
+ * client's verify/edit card pre-fills from `currentText`; on Verify, the
+ * card POSTs to /api/user-current-medications which writes
+ * userDoc.currentMedications (then consumed by the Patient Summary draft
+ * via the patient-summary.draft prompt's {currentMedications} placeholder).
+ */
+app.get('/api/medications/current', async (req, res) => {
+  try {
+    const userId = resolveUserId(req, res);
+    if (!userId) return;
+    const userDoc = await cloudant.getDocument('maia_users', userId);
+    if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+
+    const { mode, meds, legend } = await resolvePatientMedicationSource(userId, userDoc);
+    const cutoff = new Date();
+    cutoff.setMonth(cutoff.getMonth() - 18);
+    const cutoffDate = cutoff.toISOString().slice(0, 10);
+
+    // Dedupe by drug (latest entry wins), then keep only current candidates.
+    const { mergeMedications } = await import('./utils/meds-extractor.js');
+    const merged = mergeMedications(meds);
+    const currentMeds = merged.filter(m => m.status === 'active' && m.isoDate >= cutoffDate);
+    const currentText = currentMeds.map(m => `- ${m.name}`).join('\n');
+
+    res.json({
+      success: true,
+      sourceMode: mode,
+      cutoffDate,
+      currentMeds,
+      currentText,
+      allMeds: merged,
+      legend
+    });
+  } catch (error) {
+    console.error('[medications/current] error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Encounters worksheet — a reverse-chronological list of clinical
 // encounters across ALL of the patient's source PDFs. Built
 // deterministically (no agent / no KB retrieval): each PDF is parsed,

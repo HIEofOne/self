@@ -119,54 +119,48 @@ configured). The `appleHealthFileInfo` ref is derived from
 ## 2. Current Medications
 
 Current Medications is a **user-verified** authoritative medication list
-that supersedes anything an AI pulls out of the knowledge base. The
-Patient Summary uses it as its source of truth (see the **MAIA
-INSTRUCTION TEXT** section of `NEW-AGENT.txt`, which instructs the
-agent: *"if a Current Medications list is provided in the request, use
-it as the authoritative source"*).
+that supersedes anything an AI pulls out of the knowledge base. When
+saved (`userDoc.currentMedications`) it is injected into the Patient
+Summary draft via the `{currentMedications}` placeholder of
+`patient-summary.draft` (Layer 2) — replacing the old system-prompt
+"Current Medications Priority" rule.
 
-### Where the list comes from (in order of preference)
+### Unified pipeline (v1.3.99+, Step 4)
 
-The wizard's Current Medications step (`src/components/ChatInterface.vue`
-+ `Lists.vue`) tries the following sources and offers the result for
-**human verification** before saving:
+`Lists.vue → loadCurrentMedications()` makes **one** deterministic call
+to `GET /api/medications/current`. The server:
 
-1. **Apple Health (`source: apple-health`).** If the user has an Apple
-   Health Export PDF and the agent endpoint is ready, the client calls
-   `POST /api/medications/extract` with `mode: 'apple-health'`. The
-   server:
-   - reads the focused, dated **`${userId}/Lists/medication_records.md`**
-     category markdown (via `findMedicationRecordsMarkdown`); falls back
-     to the full AH markdown `${userId}/Lists/<file>.md` only if that
-     category file is missing,
-   - sends the prompt below (see *Exact Private AI instructions*) to the
-     user's **primary Private AI agent** (Deepseek; see `NEW-AGENT.txt`
-     → *Private AI Agents*), using any `contextMeds` from an earlier
-     `from-summary` extraction as reconciliation context,
-   - parses the response into one med per line, then **filters out**
-     preamble the model may add (markdown headings, a "Current
-     Medications" label, the patient name/age line, bold markers, and
-     "no current medications…" refusals).
-   - **Soft-skip**: if the AH markdown isn't written yet, the user doc
-     isn't found, the agent isn't configured, or there's no AH file,
-     the endpoint returns `200 {success:true, skipped:true, reason}`
-     and emits a `medications-extract-skipped` provisioning event (so
-     the step shows in `maia-log.pdf`). The client cleanly falls back
-     to the next source.
+1. Calls `resolvePatientMedicationSource(userId)` which picks the best
+   *dated* structured source, in this priority order:
+   - **Apple Health** — parses `${userId}/Lists/medication_records.md`
+     deterministically (`parseAppleHealthMedRecords`). Source mode
+     `apple-health`.
+   - **Epic / MGB** — extracts the dated "Medication List" entries
+     from each PDF in the KB folder (`extractEpicMedications`). Source
+     mode `epic`.
+   - **none** — KB-only patient with no structured source.
+2. Merges + dedupes by drug (`mergeMedications`, keeping the latest
+   entry per drug).
+3. Returns the **Current candidates**: rows where `status === 'active'`
+   AND `isoDate >= cutoffDate` (today − 18 months). No agent call.
 
-2. **Patient-summary draft (`source: patient-summary`).** The wizard
-   first generates a draft Patient Summary (`/api/patient-summary/draft`)
-   from the full knowledge base, then calls
-   `POST /api/medications/extract` with `mode: 'from-summary'`. The
-   server prompts the agent to extract Current Medications from the
-   draft text.
+The client pre-fills the verify/edit card with these. On Verify the user
+POSTs to `/api/user-current-medications` → `userDoc.currentMedications`
+(authoritative), which the Patient Summary then injects.
 
-3. **Existing `userDoc.currentMedications` (`source: user-doc`).** On
-   Restore / resume, if a verified list already exists on the user doc
-   it's offered as-is for re-verification — no AI call.
+#### Sources of the displayed list
 
-4. **Manual (`source: manual`).** If every automated path returns
-   nothing, the wizard offers an empty editor for the user to type in.
+| `currentMedicationsSource` | Meaning |
+|---|---|
+| `user-doc` | A verified list already existed on the user doc (Restore / re-open) — re-offered as-is. |
+| `apple-health` | Deterministic from `medication_records.md`. |
+| `epic` | Deterministic from Epic "Medication List" entries. |
+| `manual` | No structured source produced any candidates; the user enters meds manually. |
+| `patient-summary` (legacy) | Older pre-Step-4 source label (the old `/api/medications/extract` from-summary path). Retained for backward display compatibility. |
+
+The legacy `/api/medications/extract` endpoint (modes `from-summary` /
+`apple-health`) is left in place but is **no longer called** by the
+client. It can be removed once any external callers have migrated.
 
 ### Prompts (Layer 2 ids — edit in `clinical-prompts.md`)
 
@@ -178,23 +172,23 @@ Two layers drive every AI extraction:
 perspective, redaction policy, output language/formatting. It does
 **not** carry deliverable-specific rules; those live in Layer 2.
 
-**(b) Per-request prompts** — sent by `POST /api/medications/extract`
-(in `server/index.js`) to the user's **primary Private AI** (Deepseek).
-The prompt text is in `clinical-prompts.md`:
+**(b) Deterministic Current Medications** (default since Step 4): no
+agent call. `GET /api/medications/current` returns the dated Current
+candidates from the unified pipeline above; the client pre-fills the
+verify/edit card from them.
 
-| Mode | Prompt id | Placeholders |
+**(c) Legacy per-request prompts** — `POST /api/medications/extract`
+still exists and uses these Layer-2 prompt ids, but is **not called by
+the current client**. Kept for backward compatibility:
+
+| Mode | Prompt id (legacy) | Placeholders |
 |---|---|---|
 | `from-summary` | `current-medications.extract.from-summary` | `{draftText}` |
 | `apple-health` | `current-medications.extract.apple-health`   | `{appleHealthMd}` `{contextBlock}` |
 
-`{contextBlock}` is built in code from `contextMeds` (the meds a prior
-`from-summary` call returned) — it's the empty string when absent.
-
-**To change extraction behavior**, edit the prompt body under the
-matching `### prompt: <id>` heading in `clinical-prompts.md`. The loader
-auto-reloads on save (no restart). The hardcoded fallback in
-`server/index.js` is preserved as a safety net so a broken file can't
-break the flow.
+These prompts can be edited in `clinical-prompts.md` (loader auto-reloads
+on save) but only matter if the deprecated endpoint is invoked by an
+external caller.
 
 ### Verification → Save
 
@@ -566,6 +560,19 @@ Logged in `maia-log.pdf` as `clean-index-built (N files)`.
   cutoff. Clarified that medication logic lives in the prompts, not the
   System Instructions, and noted worksheet UI sorting + Source-page
   hyperlinks.
+- *2026-05-22* — v1.3.100. **Step 4 — unified Current Medications.**
+  New `GET /api/medications/current` returns deterministic Current
+  candidates via `resolvePatientMedicationSource(userId)` (Apple Health
+  `medication_records.md` → Epic "Medication List" → none) +
+  18-month cutoff. Lists.vue replaces the dual `/api/medications/extract`
+  agent calls with this single deterministic fetch. New
+  `parseAppleHealthMedRecords()` produces the same normalized shape as
+  `extractEpicMedications`. The legacy extract endpoint is retained but
+  no longer called.
+- *2026-05-22* — v1.3.99. **Step 3 — Patient Summary spec.**
+  `patient-summary.draft` (Layer 2) expanded into the full deliverable;
+  `{currentMedications}` injection moves the "Current Medications
+  Priority" rule out of the system prompt into the per-request prompt.
 - *2026-05-22* — v1.3.98. Three-layer architecture: Layer 1 infra config
   (`NEW-AGENT.txt`, slimmed), Layer 2 clinical prompts (`clinical-prompts.md`,
   single editable source of truth), Layer 3 reference docs (this file).

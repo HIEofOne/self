@@ -93,6 +93,43 @@ export function mergeMedications(allMeds) {
 }
 
 /**
+ * Parse an Apple Health "Medication Records" markdown into the same
+ * normalized shape as Epic medications. The format (one entry per `---`
+ * separator) is:
+ *
+ *   **Date:** Apr 10, 2026 | **Page:** 127
+ *   Apr 10, 2026 **levothyroxine** **150 MCG tablet**
+ *   ---
+ *
+ * Apple Health does NOT mark entries as stopped/discontinued — every
+ * entry is a historical "active" snapshot. The 18-month cutoff applied
+ * downstream classifies which are still Current.
+ */
+export function parseAppleHealthMedRecords(text, fileTag) {
+  const meds = [];
+  const blocks = String(text || '').split(/\n---\n/);
+  for (const block of blocks) {
+    const head = block.match(/\*\*Date:\*\*\s*([A-Za-z]+\.?\s+\d{1,2},?\s+\d{4})\s*\|\s*\*\*Page:\*\*\s*(\d+)/);
+    if (!head) continue;
+    const isoDate = toIsoDate(head[1]);
+    const page = parseInt(head[2], 10);
+    if (!isoDate || !Number.isFinite(page)) continue;
+    // The bolded tokens after the header are the drug name and strength/form.
+    // The header itself bolded "Date:" and "Page:", which we filter out.
+    const remainder = block.slice(head.index + head[0].length);
+    const bolded = [...remainder.matchAll(/\*\*([^*]+?)\*\*/g)]
+      .map(m => m[1].trim())
+      .filter(s => s && !/^(date|page)\s*:/i.test(s));
+    if (bolded.length < 1) continue;
+    const name = bolded[0];
+    const strength = bolded[1] || '';
+    const fullName = strength ? `${name} ${strength}` : name;
+    meds.push({ name: fullName, status: 'active', isoDate, page, fileTag });
+  }
+  return meds;
+}
+
+/**
  * Build the clean, inline medication-list text fed to the agent. Each line
  * gives the medication, its authoritative action+date, and the page. The
  * agent must use THESE dates (never a document footer date).

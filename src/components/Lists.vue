@@ -831,9 +831,11 @@ const currentMedicationsSource = ref<string>('');
 const currentMedicationsSourceLabel = computed(() => {
   switch (currentMedicationsSource.value) {
     case 'apple-health': return 'Apple Health';
-    case 'patient-summary': return 'Patient Summary';
+    case 'epic': return 'Epic Medication List';
+    case 'patient-summary': return 'Patient Summary'; // legacy
     case 'user-doc': return 'Previously verified list';
     case 'manual': return 'Entered manually';
+    case 'none': return '';
     default: return '';
   }
 });
@@ -860,26 +862,8 @@ const medsDismissedThisSession = ref(false);
 /** True until the initial medications fetch from the server completes (covers UI flash). */
 const isInitialMedsLoading = ref(true);
 const verifyStorageKey = computed(() => props.userId ? `verify-meds-${props.userId}` : null);
-const waitForAgentReady = async () => {
-  for (let attempt = 0; attempt < 6; attempt += 1) {
-    try {
-      const statusResponse = await fetch(`/api/user-status?userId=${encodeURIComponent(props.userId)}`, {
-        credentials: 'include'
-      });
-      if (statusResponse.ok) {
-        const statusResult = await statusResponse.json();
-        if (statusResult?.agentReady) {
-          return true;
-        }
-      }
-    } catch (statusErr) {
-      // ignore status errors during wait
-    }
-    currentMedicationsStatus.value = 'waiting';
-    await new Promise(resolve => setTimeout(resolve, 5000));
-  }
-  return false;
-};
+// (waitForAgentReady removed in Step 4 — the unified Current Medications
+// pipeline is deterministic and no longer needs the agent.)
 const autoProcessAttempts = ref(0);
 
 const checkInitialFile = async () => {
@@ -2592,118 +2576,66 @@ const loadCurrentMedications = async (forceRefresh = false) => {
     }
 
     // New flow (replaces the old Path 2/3 split):
-    //   1. Always extract a baseline meds list from the draft Patient Summary
-    //      via /api/medications/extract mode=from-summary. The agent applies
-    //      the user's My Agent system-prompt hide-rules.
-    //   2. If an Apple Health file is present, run a second extraction in
-    //      mode=apple-health with step-1's result as `contextMeds` so the
-    //      agent can reconcile and refine.
-    //   3. Whichever returned non-empty is what we show to the user for
-    //      Verify/Edit. Manual entry is the final fallback.
-    const hasAppleHealthSource =
-      (categoriesList.value || []).some(cat =>
-        /medication/i.test(cat.name) && Array.isArray(cat.observations) && cat.observations.length > 0
-      ) || !!appleHealthFileInfo.value;
-
+    //   Unified pipeline (v1.3.99+, Step 4): a single deterministic call to
+    //   /api/medications/current. The server resolves the best dated source
+    //   (Apple Health medication_records.md → Epic "Medication List" →
+    //   none), normalizes/dedupes by drug, applies the 18-month "Current"
+    //   cutoff, and returns the candidate Current meds. No agent call here.
+    //   The user verifies/edits and POSTs to /api/user-current-medications,
+    //   which the Patient Summary draft then injects via {currentMedications}.
     const pathsTried: string[] = ['user-doc'];
     isInitialMedsLoading.value = false;
-    currentMedicationsStatus.value = 'waiting';
-    const agentReady = await waitForAgentReady();
-    isLoadingCurrentMedications.value = agentReady;
-    currentMedicationsStatus.value = agentReady ? 'consulting' : '';
+    currentMedicationsStatus.value = 'consulting';
+    isLoadingCurrentMedications.value = true;
 
-    let summaryMeds: string[] = [];
-    let summaryExtractError: string | null = null;
-    if (agentReady) {
-      try {
-        const r = await fetch('/api/medications/extract', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify({ userId: props.userId, mode: 'from-summary' })
-        });
-        if (!r.ok) {
-          const errBody = await r.json().catch(() => ({}));
-          summaryExtractError = errBody.error || `HTTP ${r.status}`;
+    interface CurrentMed { name: string; isoDate?: string; page?: number; fileTag?: string }
+    let unifiedMeds: CurrentMed[] = [];
+    let unifiedSource = 'none';
+    let unifiedError: string | null = null;
+    try {
+      const r = await fetch(`/api/medications/current?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
+      if (!r.ok) {
+        unifiedError = `HTTP ${r.status}`;
+      } else {
+        const j = await r.json();
+        if (j?.success) {
+          unifiedMeds = Array.isArray(j.currentMeds) ? j.currentMeds : [];
+          unifiedSource = String(j.sourceMode || 'none');
         } else {
-          const j = await r.json();
-          if (Array.isArray(j.medications)) summaryMeds = j.medications;
+          unifiedError = j?.error || 'failed';
         }
-      } catch (err) {
-        summaryExtractError = err instanceof Error ? err.message : 'extract failed';
       }
-      pathsTried.push('summary-extract');
-      logWizardEvent('current_meds_summary_extract', {
-        count: summaryMeds.length,
-        error: summaryExtractError
-      });
+    } catch (err) {
+      unifiedError = err instanceof Error ? err.message : 'fetch failed';
     }
-
-    let finalMeds: string[] = summaryMeds;
-    let source: 'apple-health' | 'patient-summary' | 'manual' =
-      summaryMeds.length > 0 ? 'patient-summary' : 'manual';
-    let appleHealthExtractError: string | null = null;
-
-    if (hasAppleHealthSource && agentReady) {
-      try {
-        const r = await fetch('/api/medications/extract', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify({
-            userId: props.userId,
-            mode: 'apple-health',
-            contextMeds: summaryMeds
-          })
-        });
-        if (!r.ok) {
-          const errBody = await r.json().catch(() => ({}));
-          appleHealthExtractError = errBody.error || `HTTP ${r.status}`;
-        } else {
-          const j = await r.json();
-          if (Array.isArray(j.medications) && j.medications.length > 0) {
-            finalMeds = j.medications;
-            source = 'apple-health';
-          }
-        }
-      } catch (err) {
-        appleHealthExtractError = err instanceof Error ? err.message : 'extract failed';
-      }
-      pathsTried.push('apple-health-extract');
-      logWizardEvent('current_meds_apple_health_extract', {
-        count: source === 'apple-health' ? finalMeds.length : 0,
-        contextCount: summaryMeds.length,
-        error: appleHealthExtractError
-      });
-    }
+    pathsTried.push('medications-current');
+    logWizardEvent('current_meds_unified_fetch', { count: unifiedMeds.length, source: unifiedSource, error: unifiedError });
 
     isLoadingCurrentMedications.value = false;
     currentMedicationsStatus.value = '';
 
-    if (finalMeds.length > 0) {
-      const medsText = finalMeds
-        .map(m => (m.startsWith('-') ? m : `- ${m}`))
-        .join('\n');
+    if (unifiedMeds.length > 0) {
+      const medsText = unifiedMeds.map(m => `- ${m.name}`).join('\n');
       currentMedications.value = medsText;
       isCurrentMedicationsEdited.value = false;
       isEditingCurrentMedications.value = false;
       currentMedicationsBlockTitle.value = 'Current Medications';
-      currentMedicationsSource.value = source;
+      currentMedicationsSource.value = unifiedSource;
       emit('medications-offered', {
-        lines: finalMeds.length,
-        source,
+        lines: unifiedMeds.length,
+        source: unifiedSource as any,
         outcome: 'success'
       });
       needsVerifyAction.value = true;
       persistVerifyState();
     } else if (wizardAutoFlow.value) {
       pathsTried.push('manual');
-      const lastError = summaryExtractError || appleHealthExtractError;
+      const lastError = unifiedError;
       currentMedicationsSource.value = 'manual';
       emit('medications-offered', {
         lines: 0,
         source: 'manual',
-        outcome: !agentReady ? 'agent-not-ready' : (lastError ? 'extract-error' : 'no-source'),
+        outcome: lastError ? 'extract-error' : 'no-source',
         detail: lastError || undefined
       });
       try {
@@ -2716,7 +2648,7 @@ const loadCurrentMedications = async (forceRefresh = false) => {
             event: 'current-medications-recovery-failed',
             pathsTried,
             lastError,
-            reason: !agentReady ? 'agent-not-ready' : (lastError ? 'extract-error' : 'no-source')
+            reason: lastError ? 'extract-error' : 'no-source'
           })
         });
       } catch { /* non-fatal */ }
@@ -2727,13 +2659,13 @@ const loadCurrentMedications = async (forceRefresh = false) => {
       clearWizardAutoFlow();
     } else {
       pathsTried.push('manual');
-      const lastError = summaryExtractError || appleHealthExtractError;
+      const lastError = unifiedError;
       currentMedicationsBlockTitle.value = 'Please enter your current medications manually';
       currentMedicationsSource.value = 'manual';
       emit('medications-offered', {
         lines: 0,
         source: 'manual',
-        outcome: !agentReady ? 'agent-not-ready' : (lastError ? 'extract-error' : 'no-source'),
+        outcome: lastError ? 'extract-error' : 'no-source',
         detail: lastError || undefined
       });
       startEditingCurrentMedications();
