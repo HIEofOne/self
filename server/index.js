@@ -12531,22 +12531,38 @@ app.get('/api/encounters/find', async (req, res) => {
     });
 
     // Rows are already sorted newest-first by buildEncountersTable.
+    // For "latest" / month-level / freeform queries we PREFER rows
+    // classified as 'narrative' (real clinical visits) over 'ancillary'
+    // (lab orders, imaging requisitions). A FHIR Encounter resource
+    // exists for a lab draw but users asking for "the most recent
+    // encounter" mean the most recent actual visit. Fall back to
+    // ancillary only when no narrative row matches.
+    const narrativeOnly = ws.rows.filter(r => (r.klass || 'narrative') === 'narrative');
     let chosen = null;
     let allMatches = [];
-    if (/^latest|most[\s-]?recent|last$/i.test(ref)) {
-      chosen = ws.rows[0];
+    let usedAncillaryFallback = false;
+    if (/^(latest|most[\s-]?recent|last)$/i.test(ref)) {
+      chosen = narrativeOnly[0] || null;
+      if (!chosen && ws.rows.length) { chosen = ws.rows[0]; usedAncillaryFallback = true; }
     } else if (/^\d{4}-\d{2}-\d{2}$/.test(ref)) {
+      // Date-specific queries match exactly — don't filter by klass.
       chosen = ws.rows.find(r => r.isoDate === ref) || null;
     } else if (/^\d{4}-\d{2}$/.test(ref)) {
-      // Most recent within the month.
-      chosen = ws.rows.find(r => String(r.isoDate || '').startsWith(ref)) || null;
+      // Most recent within the month — prefer narrative.
+      chosen = narrativeOnly.find(r => String(r.isoDate || '').startsWith(ref)) || null;
+      if (!chosen) {
+        chosen = ws.rows.find(r => String(r.isoDate || '').startsWith(ref)) || null;
+        if (chosen) usedAncillaryFallback = true;
+      }
     } else {
       // Free-text substring against descriptor or type.
       const needle = ref.toLowerCase();
-      allMatches = ws.rows.filter(r =>
+      const matches = (r) =>
         String(r.description || '').toLowerCase().includes(needle) ||
-        String(r.type || '').toLowerCase().includes(needle)
-      );
+        String(r.type || '').toLowerCase().includes(needle);
+      const narrativeMatches = narrativeOnly.filter(matches);
+      allMatches = narrativeMatches.length ? narrativeMatches : ws.rows.filter(matches);
+      if (allMatches.length && narrativeMatches.length === 0) usedAncillaryFallback = true;
       chosen = allMatches[0] || null;
     }
 
@@ -12566,9 +12582,11 @@ app.get('/api/encounters/find', async (req, res) => {
       row: {
         isoDate: chosen.isoDate,
         type: chosen.type,
+        klass: chosen.klass || 'narrative',
         description: chosen.description,
         sources: enrichSources(chosen.sources)
       },
+      usedAncillaryFallback,
       allMatchCount: allMatches.length || 1
     });
   } catch (error) {
