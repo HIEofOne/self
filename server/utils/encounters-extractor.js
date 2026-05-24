@@ -435,10 +435,33 @@ export function buildEncountersTable(allEncounters) {
     return [...nonAh, ...ah];
   };
 
+  // Classify a row as 'narrative' (an actual office/inpatient/telephone
+  // visit with a clinician — the kind you'd link to when asked "show me
+  // the most recent encounter note") or 'ancillary' (lab orders,
+  // imaging orders, requisitions — technically FHIR Encounter resources
+  // but not what users mean by "encounter"). Used by /api/encounters/
+  // find so that ref=latest prefers narrative rows; we fall back to
+  // ancillary only when no narrative exists. Defaults to 'narrative'
+  // on ambiguous descriptors to avoid silently hiding real visits.
+  const classifyEncounterRow = (description, type) => {
+    const d = String(description || '').toLowerCase();
+    const t = String(type || '').toLowerCase();
+    const narrativeHit = /(progress\s+note|office\s+visit|clinic\s+note|telephone\s+encounter|video\s+visit|consult(ation)?|admission|discharge|hospital\s+encounter|emergency|ed\s+visit|follow[- ]?up|new\s+patient|established\s+patient|h\s*&\s*p|history\s+and\s+physical|operative\s+note|procedure\s+note|annual\s+(physical|exam))/i.test(d);
+    if (narrativeHit) return 'narrative';
+    const ancillaryHit = /(\blab(s|oratory)?\b|\bpanel\b|specimen|requisition|x-?ray|imaging|\bct\b|\bmri\b|ultrasound|mammogram|\border(ed|s)?\b|laboratory\s+services|lab\s+services|pathology|cytology|venipuncture|phlebotomy)/i.test(d);
+    if (ancillaryHit) return 'ancillary';
+    // Type-level fallback: Inpatient/Telemedicine are inherently
+    // narrative; Outpatient with no specific descriptor is unknown so
+    // default narrative.
+    if (t === 'inpatient' || t === 'telemedicine') return 'narrative';
+    return 'narrative';
+  };
+
   const rows = [...byDate.values()]
     .map(g => ({
       isoDate: g.isoDate,
       type: g.type,
+      klass: classifyEncounterRow(pickDescription(g.descriptions), g.type),
       description: pickDescription(g.descriptions),
       sources: orderSources(g.sources)
     }))

@@ -1826,12 +1826,28 @@ const parseLabHistoryIntent = (text: string): { displayName: string; analyteTerm
 // Recognized refs: latest / last / most recent (→ "latest"), an
 // explicit YYYY-MM-DD or M/D/YYYY date, or a freeform fragment
 // matched against the encounter descriptor / type.
-const ENCOUNTER_VERB = /\b(show|link|open|find|where|locate|give\s+me|get\s+me)\b/i;
+const ENCOUNTER_VERB = /\b(show|link|open|find|where|locate|give\s+me|get\s+me|tell\s+me\s+about|describe|summari[sz]e)\b/i;
 const ENCOUNTER_NOUN = /\b(encounter|visit|note|notes|appointment|consultation|consult)\b/i;
+// Interrogative phrasings — "what was the most recent encounter?",
+// "when was my last visit?", "which was my latest appointment?". These
+// also count as intent IF they include a temporal anchor (recency or
+// explicit date), so we don't fire on generic questions like "what is
+// an encounter?".
+const ENCOUNTER_INTERROG = /\b(what|which|when|how)\b/i;
+const ENCOUNTER_RECENCY = /\b(latest|last|most[\s-]?recent|newest|next|upcoming|first|earliest|oldest)\b/i;
+const ENCOUNTER_DATE_HINT = /\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}\/\d{1,2}\/\d{4}\b|\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s+\d{1,2},?\s+\d{4}\b/i;
 const parseEncounterLinkIntent = (text: string): { ref: string; displayHint: string } | null => {
   const s = String(text || '');
   if (!s.trim()) return null;
-  if (!ENCOUNTER_VERB.test(s) || !ENCOUNTER_NOUN.test(s)) return null;
+  if (!ENCOUNTER_NOUN.test(s)) return null;
+  const hasVerb = ENCOUNTER_VERB.test(s);
+  const hasInterrog = ENCOUNTER_INTERROG.test(s);
+  const hasAnchor = ENCOUNTER_RECENCY.test(s) || ENCOUNTER_DATE_HINT.test(s);
+  // Path A: imperative verb + noun (existing behavior).
+  // Path B: interrogative + noun + temporal anchor (new). The anchor
+  // requirement keeps generic "what is an encounter?" / "what does a
+  // note look like?" from being hijacked.
+  if (!hasVerb && !(hasInterrog && hasAnchor)) return null;
   // Explicit ISO date wins.
   const iso = s.match(/\b(\d{4})-(\d{2})-(\d{2})\b/);
   if (iso) return { ref: `${iso[1]}-${iso[2]}-${iso[3]}`, displayHint: `on ${iso[0]}` };
