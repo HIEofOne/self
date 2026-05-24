@@ -1814,6 +1814,59 @@ const parseLabHistoryIntent = (text: string): { displayName: string; analyteTerm
   return null;
 };
 
+// Detect "show me a link to the <last|most recent|<date>> <encounter|
+// visit|note|appointment>" and similar phrasings. Returns the `ref`
+// to pass to /api/encounters/find. Returns null when no encounter
+// intent is detected.
+//
+// Recognized verbs: show / show me / link to / link / open / find /
+// where (is) / what was (the).
+// Recognized nouns: encounter / visit / note / appointment / clinical
+// note / progress note / consultation.
+// Recognized refs: latest / last / most recent (→ "latest"), an
+// explicit YYYY-MM-DD or M/D/YYYY date, or a freeform fragment
+// matched against the encounter descriptor / type.
+const ENCOUNTER_VERB = /\b(show|link|open|find|where|locate|give\s+me|get\s+me)\b/i;
+const ENCOUNTER_NOUN = /\b(encounter|visit|note|notes|appointment|consultation|consult)\b/i;
+const parseEncounterLinkIntent = (text: string): { ref: string; displayHint: string } | null => {
+  const s = String(text || '');
+  if (!s.trim()) return null;
+  if (!ENCOUNTER_VERB.test(s) || !ENCOUNTER_NOUN.test(s)) return null;
+  // Explicit ISO date wins.
+  const iso = s.match(/\b(\d{4})-(\d{2})-(\d{2})\b/);
+  if (iso) return { ref: `${iso[1]}-${iso[2]}-${iso[3]}`, displayHint: `on ${iso[0]}` };
+  // US-style M/D/YYYY date.
+  const us = s.match(/\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/);
+  if (us) {
+    const ref = `${us[3]}-${String(us[1]).padStart(2, '0')}-${String(us[2]).padStart(2, '0')}`;
+    return { ref, displayHint: `on ${ref}` };
+  }
+  // Spelled-month date ("May 7 2026" / "May 7, 2026").
+  const months: Record<string, number> = {
+    jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3,
+    apr: 4, april: 4, may: 5, jun: 6, june: 6, jul: 7, july: 7,
+    aug: 8, august: 8, sep: 9, sept: 9, september: 9, oct: 10,
+    october: 10, nov: 11, november: 11, dec: 12, december: 12
+  };
+  const spelled = s.match(/\b([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(\d{4})\b/);
+  if (spelled) {
+    const m = months[spelled[1].slice(0, 3).toLowerCase()];
+    if (m) {
+      const ref = `${spelled[3]}-${String(m).padStart(2, '0')}-${String(spelled[2]).padStart(2, '0')}`;
+      return { ref, displayHint: `on ${ref}` };
+    }
+  }
+  // "latest / last / most recent" — the most common phrasing.
+  if (/\b(latest|last|most[\s-]?recent|newest)\b/i.test(s)) {
+    return { ref: 'latest', displayHint: 'most recent' };
+  }
+  // Type hint ("telemedicine", "inpatient", "admission").
+  const typeMatch = s.match(/\b(telemedicine|telehealth|video|phone|telephone|inpatient|admission|emergency|outpatient|office|procedure|imaging)\b/i);
+  if (typeMatch) return { ref: typeMatch[1], displayHint: `matching "${typeMatch[1]}"` };
+  // No more-specific anchor — default to most recent.
+  return { ref: 'latest', displayHint: 'most recent' };
+};
+
 const selectFirstNonPrivateProvider = () => {
   const fallback = providers.value.find(p => p !== 'digitalocean');
   if (fallback) {
@@ -2060,6 +2113,12 @@ const sendMessage = async () => {
   // the chat handler routes through /api/labs/history below instead of
   // raw RAG. Captured here, BEFORE inputMessage.value is cleared.
   const labIntent = parseLabHistoryIntent(inputMessage.value);
+  // Detect "show me a link to / show me / link to <encounter|visit|note|
+  // appointment>" requests. When matched the chat routes through
+  // /api/encounters/find so the non-AH source (Epic / MGB / hospital
+  // export) is always preferred over the AH summary entry — the rule
+  // the Encounters worksheet already follows but plain RAG doesn't.
+  const encounterIntent = parseEncounterLinkIntent(inputMessage.value);
   messages.value.push(userMessage);
   originalMessages.value = JSON.parse(JSON.stringify(messages.value)); // Keep original in sync
   // Update trulyOriginalMessages when adding new messages (but not when filtering)
@@ -2108,6 +2167,69 @@ const sendMessage = async () => {
     }
     // MANUAL "list all <lab>" request to the Private AI:
     // Top-k RAG retrieval is structurally incompatible with "list ALL X"
+    // MANUAL "show a link to <encounter|visit|note>" request:
+    // Route through /api/encounters/find which reads the persisted
+    // structured rows from the Encounters worksheet. Those rows
+    // already follow the buildEncountersTable rule of preferring
+    // non-Apple-Health sources (Epic / MGB carry the full note,
+    // AH is summary-only). Plain RAG can pick whichever chunk
+    // happens to rank highest — usually the AH summary — which is
+    // exactly the bug this routing closes.
+    {
+      const providerKeyForEnc = getProviderKey(selectedProvider.value);
+      if (encounterIntent && providerKeyForEnc === 'digitalocean' && props.user?.userId) {
+        try {
+          const url = `/api/encounters/find?ref=${encodeURIComponent(encounterIntent.ref)}`;
+          const encRes = await fetch(url, { credentials: 'include' });
+          const encJson = await encRes.json().catch(() => ({}));
+          if (encRes.ok && encJson.success && encJson.available !== false && encJson.row) {
+            const row = encJson.row as {
+              isoDate?: string; type?: string; description?: string;
+              sources?: Array<{ fileTag?: string; page?: number; isAh?: boolean; fileName?: string | null; bucketKey?: string | null }>;
+            };
+            const sources = Array.isArray(row.sources) ? row.sources : [];
+            // The endpoint already orders sources non-AH first. Emit
+            // a citation for each — processPageReferences hyperlinks
+            // them. The FIRST one is the primary (non-AH if any).
+            const citations = sources
+              .filter(s => s.fileName && s.page)
+              .map(s => {
+                const tag = s.isAh ? ' (Apple Health summary)' : '';
+                return `[${s.fileName} p.${s.page}]${tag}`;
+              })
+              .join('\n');
+            const title = `**Encounter — ${encounterIntent.displayHint} (deterministic, from your Encounters worksheet)**`;
+            const body = [
+              `Date: ${row.isoDate || '(unknown)'}`,
+              `Type: ${row.type || '(unknown)'}`,
+              row.description ? `${row.description}` : ''
+            ].filter(Boolean).join('\n');
+            const note = sources.some(s => !s.isAh)
+              ? `\n\n_The primary link above is the non-Apple-Health source (carries the full note text). The Apple Health summary link is shown below it if present._`
+              : `\n\n_Only an Apple Health summary source is available for this encounter._`;
+            const encLabel = assistantLabelForKey(providerKeyForEnc);
+            const encMsg: Message = {
+              role: 'assistant',
+              content: `${title}\n\n${body}\n\n${citations}${note}`,
+              authorType: 'assistant',
+              providerKey: providerKeyForEnc,
+              authorId: providerKeyForEnc,
+              authorLabel: encLabel,
+              name: encLabel
+            };
+            messages.value.push(encMsg);
+            originalMessages.value = JSON.parse(JSON.stringify(messages.value));
+            trulyOriginalMessages.value = JSON.parse(JSON.stringify(messages.value));
+            isStreaming.value = false;
+            return;
+          }
+          // No worksheet, no match → fall through to RAG silently.
+        } catch (err) {
+          console.warn('[chat→encounters/find] failed; falling back to raw chat:', err);
+        }
+      }
+    }
+
     // queries — for a patient with 30 TSH readings, k=15 can never
     // return more than 15, and the two Private AIs each get a DIFFERENT
     // top-15. Sidestep RAG entirely: parse Lists/lab_results.md

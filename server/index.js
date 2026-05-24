@@ -12425,9 +12425,13 @@ app.post('/api/encounters/worksheet', async (req, res) => {
       }
     }
 
-    const { table, count } = buildEncountersTable(allEncounters);
+    const { table, count, rows } = buildEncountersTable(allEncounters);
     const generatedAt = new Date().toISOString();
-    const entry = { table, legend, generatedAt, fileCount: pdfFiles.length, encounterCount: count, modes };
+    // Persist the STRUCTURED `rows` alongside the markdown table so
+    // /api/encounters/find can deterministically return the non-AH
+    // source for any encounter without re-parsing markdown or re-
+    // running the (expensive) per-file PDF extraction.
+    const entry = { table, rows, legend, generatedAt, fileCount: pdfFiles.length, encounterCount: count, modes };
 
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
@@ -12466,6 +12470,109 @@ app.get('/api/encounters/worksheet', async (req, res) => {
     if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
     res.json({ success: true, encounters: userDoc.encountersWorksheet || null });
   } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Deterministic encounter lookup with non-AH-source-first ordering.
+//
+// Why this exists: the Encounters worksheet's buildEncountersTable
+// already prefers non-Apple-Health sources for both the displayed
+// descriptor and the source link order (AH is summary-only; the
+// hospital export carries the full note text). But when the user
+// asks a Private AI "show me a link to the most recent encounter
+// note", the agent does plain RAG and may surface an AH chunk first
+// — producing a citation to the AH file even when an Epic source
+// exists for the same visit. The chat client routes these queries
+// through this endpoint instead, which reads the persisted structured
+// rows and returns the same non-AH-first ordering the worksheet uses.
+//
+// Query params:
+//   ref=latest         — most recent encounter (default)
+//   ref=YYYY-MM-DD     — encounter on a specific date
+//   ref=YYYY-MM        — most recent encounter in a month
+//   ref=<freeform>     — substring match against the descriptor;
+//                        most-recent winner
+//
+// Response shape:
+//   { success, available, row?, allMatches?, reason? }
+// where `row` is the chosen encounter enriched with each source's
+// fileName + bucketKey from the legend (so the client can render a
+// `[<filename> p.<page>]` citation that processPageReferences will
+// hyperlink).
+app.get('/api/encounters/find', async (req, res) => {
+  try {
+    const userId = resolveUserId(req, res);
+    if (!userId) return;
+    const userDoc = await cloudant.getDocument('maia_users', userId);
+    if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+
+    const ws = userDoc.encountersWorksheet;
+    if (!ws || !Array.isArray(ws.rows) || ws.rows.length === 0) {
+      return res.json({
+        success: true, available: false,
+        reason: 'NO_ENCOUNTERS_WORKSHEET',
+        message: 'No encounters worksheet has been built yet. Open My Lists → Encounters to generate one.'
+      });
+    }
+
+    const ref = String(req.query?.ref || 'latest').trim();
+    const legend = Array.isArray(ws.legend) ? ws.legend : [];
+    const legendByTag = new Map(legend.map(l => [l.tag, l]));
+    const enrichSources = (sources) => (sources || []).map(s => {
+      const meta = legendByTag.get(s.fileTag) || {};
+      return {
+        fileTag: s.fileTag,
+        page: s.page,
+        isAh: !!s.isAh,
+        fileName: meta.fileName || null,
+        bucketKey: meta.bucketKey || null
+      };
+    });
+
+    // Rows are already sorted newest-first by buildEncountersTable.
+    let chosen = null;
+    let allMatches = [];
+    if (/^latest|most[\s-]?recent|last$/i.test(ref)) {
+      chosen = ws.rows[0];
+    } else if (/^\d{4}-\d{2}-\d{2}$/.test(ref)) {
+      chosen = ws.rows.find(r => r.isoDate === ref) || null;
+    } else if (/^\d{4}-\d{2}$/.test(ref)) {
+      // Most recent within the month.
+      chosen = ws.rows.find(r => String(r.isoDate || '').startsWith(ref)) || null;
+    } else {
+      // Free-text substring against descriptor or type.
+      const needle = ref.toLowerCase();
+      allMatches = ws.rows.filter(r =>
+        String(r.description || '').toLowerCase().includes(needle) ||
+        String(r.type || '').toLowerCase().includes(needle)
+      );
+      chosen = allMatches[0] || null;
+    }
+
+    if (!chosen) {
+      return res.json({
+        success: true, available: true,
+        reason: 'NO_MATCH',
+        message: `No encounter matched "${ref}".`,
+        ref
+      });
+    }
+
+    res.json({
+      success: true,
+      available: true,
+      ref,
+      row: {
+        isoDate: chosen.isoDate,
+        type: chosen.type,
+        description: chosen.description,
+        sources: enrichSources(chosen.sources)
+      },
+      allMatchCount: allMatches.length || 1
+    });
+  } catch (error) {
+    console.error('[encounters/find] error:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });

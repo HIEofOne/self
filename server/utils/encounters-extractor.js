@@ -448,5 +448,14 @@ export function buildEncountersTable(allEncounters) {
   const header = '| Date | Type | Encounter | Source |\n| --- | --- | --- | --- |';
   const fmtSources = (sources) => sources.map(s => `${s.fileTag} p.${s.page}`).join(', ');
   const body = rows.map(e => `| ${e.isoDate} | ${e.type} | ${esc(e.description)} | ${fmtSources(e.sources)} |`).join('\n');
-  return { table: rows.length ? `${header}\n${body}` : header, count: rows.length };
+  // Return the structured `rows` alongside the markdown table so
+  // downstream code (the /api/encounters/find endpoint, chat intent
+  // routing) doesn't have to parse the markdown back into objects.
+  // Each source row already carries the isAh flag and the array is
+  // already non-AH-first; consumers can render directly.
+  return {
+    table: rows.length ? `${header}\n${body}` : header,
+    count: rows.length,
+    rows
+  };
 }
