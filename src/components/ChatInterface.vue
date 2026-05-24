@@ -4695,13 +4695,18 @@ const viewFile = (file: UploadedFile, page?: number) => {
 const processPageReferences = (content: string): string => {
   const pdfFiles = uploadedFiles.value.filter(f => f.type === 'pdf');
   
-  // Find all occurrences of "page" or "Page" followed by a number
-  // Pattern matches: "Page 24", "page 24", "Page: 24", "page:24", "Page:** 24", "**Page:** 27", etc.
-  // IMPORTANT: Only match when "page" is directly followed by a number (with optional whitespace/punctuation/markdown)
-  // Do NOT match "page" followed by other words and then a number later
-  // The pattern allows: whitespace (\s), colons (:), asterisks (* for markdown), dashes (-), but NOT other letters/words
-  // Note: - is at the end of character class to avoid being interpreted as a range
-  const pageReferencePattern = /(Page|page)[\s:*-]*(\d+)/gi;
+  // Find all occurrences of a page reference: full word `Page`/`page`
+  // OR the abbreviated `p.` form. The abbreviated form is what the
+  // v1.4.13 NEW-AGENT.txt § Source Citations instruction tells the
+  // agent to emit ("[<filename> p.<page>]"), and what the
+  // deterministic lab-history renderer in this file emits per row.
+  // Pattern matches: "Page 24", "page 24", "Page: 24", "page:24",
+  // "Page:** 24", "**Page:** 27", AND "p.24" / "p. 24" / "p.**24**".
+  // Note: requires a word boundary BEFORE the page word so we don't
+  // hit "p" inside larger tokens (we want to match "p.24" but not the
+  // "p" in "patient24"). The `\.` after `p` in the abbreviated form is
+  // mandatory — bare `p` without a dot is too noisy to risk matching.
+  const pageReferencePattern = /\b(Page|page|p\.)[\s:*-]*(\d+)/gi;
   const pageReferences: Array<{ fullMatch: string; pageWord: string; pageNum: number; index: number }> = [];
   
   let match;
