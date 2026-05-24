@@ -215,10 +215,10 @@
     <!-- Current Medications Worksheets (one per Private AI agent).
          Rendered independently of the Apple Health PDF output below, so
          patients with no Apple Health file (KB-only) still see them. -->
-    <q-card v-for="ws in worksheetSpecs" :key="ws.profileKey" class="q-mb-md">
+    <q-card v-for="ws in worksheetSpecsOrdered" :key="ws.profileKey" class="q-mb-md">
       <q-card-section>
         <div class="row items-center justify-between q-mb-sm">
-          <div class="text-h6">{{ ws.title }}</div>
+          <div class="text-h6">{{ worksheetCardTitle(ws.profileKey) }}</div>
           <q-btn
             :label="worksheets[ws.profileKey] ? 'Refresh' : 'Generate'"
             color="primary"
@@ -626,12 +626,48 @@ interface WorksheetEntry {
   model?: string;
   generatedAt?: string;
 }
+// Two worksheet cards, one per Private AI profile slot. The profile
+// KEYS ('default', 'gpt') are historical — what each slot actually
+// resolves to (a GPT agent vs a Deepseek agent) varies per account
+// depending on when the account was created (the GPT/Deepseek primary
+// swap landed in v1.4.0). Display labels MUST derive from the actual
+// stored model name, not the slot key, otherwise existing accounts
+// see their cards mislabeled (e.g. the GPT-backed 'default' slot
+// rendered as "Deepseek"). Card order also derives from the model —
+// GPT card first, Deepseek second — so the primary is always on top.
 const worksheetSpecs = [
-  { profileKey: 'default', title: 'Current Medications Worksheet (Deepseek)' },
-  { profileKey: 'gpt', title: 'Current Medications Worksheet (GPT)' }
+  { profileKey: 'default' },
+  { profileKey: 'gpt' }
 ];
 const worksheets = ref<Record<string, WorksheetEntry>>({});
 const worksheetBusy = ref<string | null>(null);
+
+/** Derive the card title from the actual model name stored on the
+ *  worksheet (e.g. "openai-gpt-oss-120b" → "Current Medications
+ *  Worksheet (GPT)"). When no worksheet exists yet for this slot —
+ *  the user has not pressed Generate — fall back to the slot-key
+ *  convention used for NEW accounts ('default' = GPT, 'gpt' =
+ *  Deepseek). */
+const worksheetCardTitle = (profileKey: string): string => {
+  const model = String(worksheets.value[profileKey]?.model || '').toLowerCase();
+  let label = '';
+  if (model.includes('gpt')) label = 'GPT';
+  else if (model.includes('deepseek')) label = 'Deepseek';
+  else label = profileKey === 'gpt' ? 'Deepseek' : 'GPT';
+  return `Current Medications Worksheet (${label})`;
+};
+
+/** Sort the worksheet cards so the GPT-backed slot renders first
+ *  regardless of which slot key it lives in for this account. */
+const worksheetSpecsOrdered = computed(() => {
+  const rank = (profileKey: string) => {
+    const t = worksheetCardTitle(profileKey);
+    if (/\(GPT\)$/.test(t)) return 0;
+    if (/\(Deepseek\)$/.test(t)) return 1;
+    return 2;
+  };
+  return [...worksheetSpecs].sort((a, b) => rank(a.profileKey) - rank(b.profileKey));
+});
 
 const loadWorksheets = async () => {
   if (!props.userId) return;

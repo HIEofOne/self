@@ -58,3 +58,62 @@ export function extractCategorySection(fullMarkdown, heading) {
 export function extractAllergiesFromAppleHealthMarkdown(fullMarkdown) {
   return extractCategorySection(fullMarkdown, 'allergies');
 }
+
+/**
+ * Pull the AH "### Social History" section. AH typically lists tobacco,
+ * alcohol, drug use, exercise, employment, and living situation under
+ * this heading. Returns '' when absent.
+ */
+export function extractSocialHistoryFromAppleHealthMarkdown(fullMarkdown) {
+  return extractCategorySection(fullMarkdown, 'social history');
+}
+
+/**
+ * Build a Radiology block from the AH PDF. The AH export labels imaging
+ * results inconsistently across versions — "Imaging", "Diagnostic
+ * Imaging", and "Radiology" all appear. Try each and stitch what we
+ * find. Returns '' when none match.
+ */
+export function extractRadiologyFromAppleHealthMarkdown(fullMarkdown) {
+  const candidates = ['Radiology', 'Imaging', 'Diagnostic Imaging', 'Imaging Studies'];
+  const parts = [];
+  const seen = new Set();
+  for (const heading of candidates) {
+    const section = extractCategorySection(fullMarkdown, heading);
+    if (section && section.trim() && !seen.has(section)) {
+      seen.add(section);
+      parts.push(`**${heading}:**\n${section}`);
+    }
+  }
+  return parts.join('\n\n');
+}
+
+/**
+ * Pull together a Medical History authoritative block from the Apple
+ * Health PDF's "Conditions" + "Procedures" + "Past Medical History"
+ * categories. These are the sections the agent would have to reason
+ * about from KB chunks otherwise — and reliably misses, leaving the
+ * Patient Summary's Medical History heading empty. Returns '' if none
+ * of the source sections are present.
+ *
+ * Each contributing section is labeled with its origin header so the
+ * agent can preserve the distinction (Conditions vs Procedures) in
+ * its narrative — and so a reader debugging an unexpected sentence
+ * can trace it back to the right AH category.
+ */
+export function extractMedicalHistoryFromAppleHealthMarkdown(fullMarkdown) {
+  const wanted = [
+    { label: 'Conditions',           heading: 'Conditions' },
+    { label: 'Procedures',           heading: 'Procedures' },
+    { label: 'Past Medical History', heading: 'Past Medical History' },
+    { label: 'Family History',       heading: 'Family History' }
+  ];
+  const parts = [];
+  for (const w of wanted) {
+    const section = extractCategorySection(fullMarkdown, w.heading);
+    if (section && section.trim()) {
+      parts.push(`**${w.label}:**\n${section}`);
+    }
+  }
+  return parts.join('\n\n');
+}

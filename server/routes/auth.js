@@ -389,10 +389,10 @@ export async function ensureUserAgent(doClient, cloudant, userDoc) {
         modelId: modelId.trim(),
         projectId: projectId.trim(),
         region: getDoRegion(),
-        maxTokens: 16384,
+        maxTokens: 32768,
         topP: 1,
         temperature: 0.1,
-        k: 10,
+        k: 15,
         retrievalMethod: 'RETRIEVAL_METHOD_REWRITE'
       });
     } catch (err) {
@@ -519,10 +519,10 @@ export async function ensureSecondaryAgent(doClient, cloudant, userDoc) {
         modelId: modelId.trim(),
         projectId: projectId.trim(),
         region: getDoRegion(),
-        maxTokens: 16384,
+        maxTokens: 32768,
         topP: 1,
         temperature: 0.1,
-        k: 10,
+        k: 15,
         retrievalMethod: 'RETRIEVAL_METHOD_REWRITE'
       });
     } catch (err) {

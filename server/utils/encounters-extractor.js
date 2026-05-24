@@ -84,8 +84,51 @@ export function buildLinePageMap(lines, numPages) {
   return linePage;
 }
 
+/**
+ * Collapse text-overlay duplication common in MGB "Patient Extract"
+ * PDFs, which render every visible string in 3–4 stacked layers (for
+ * boldness). After pdf-parse, the text comes out as e.g.
+ *
+ *   "VOLYA,MARGARETVOLYA,MARGARETVOLYA,MARGARETVOLYA,MARGARET"
+ *   "11/03/2012 03:2311/03/2012 03:2311/03/2012 03:2311/03/2012 03:23"
+ *   "Discharge Reports From 1/1/1993 through 5/29/2015Discharge Reports …"
+ *
+ * Without dedup, the encounters / identity regex never matches.
+ *
+ * Per-line rather than global to keep the cost predictable on large
+ * files (the big MGB Patient Extract is 480 KB / 1900 dated lines).
+ * Minimum captured length of 4 chars avoids collapsing innocuous
+ * mid-word repetitions ("ll" in "Hello", "ss" in "Mississippi", etc.)
+ * — overlay duplications are always multi-character tokens. Exported
+ * for unit testing.
+ */
+export function dedupOverlay(text) {
+  const lines = String(text || '').split('\n');
+  const out = new Array(lines.length);
+  for (let i = 0; i < lines.length; i++) {
+    out[i] = lines[i].replace(/(.{4,}?)\1{1,}/g, '$1');
+  }
+  return out.join('\n');
+}
+
 // Epic encounter header, e.g. "08/27/2025 - Telemedicine in Department of Urology"
 const EPIC_HEADER = /^(\d{1,2}\/\d{1,2}\/\d{4})\s*-\s*(.+?)\s*$/;
+
+// MGB "Patient Extract" formats (the 447-page legacy export). After
+// dedupOverlay these come through as:
+//   "11/03/2012 03:23 Patient Care Referral"
+//   "Admission:11/3/2012"  /  "Discharge:11/6/2012"
+//   "Encounter Date: 6/10/2021"
+// Section banners like "Discharge Reports From 1/1/1993 through 5/29/2015"
+// must NOT be matched as encounters — see the explicit guard below.
+// `\s*` (not `\s+`) between time and descriptor — the dedup of an
+// overlay block like "11/03/2012 03:23Patient Care Referra..." has no
+// whitespace at the splice point.
+const MGB_DATETIME_HEADER  = /^(\d{1,2}\/\d{1,2}\/\d{4})\s+\d{1,2}:\d{2}(?::\d{2})?\s*(.+?)\s*$/;
+const MGB_ADMISSION        = /^Admission\s*:\s*(\d{1,2}\/\d{1,2}\/\d{4})\s*$/i;
+const MGB_DISCHARGE        = /^Discharge\s*:\s*(\d{1,2}\/\d{1,2}\/\d{4})\s*$/i;
+const MGB_ENCOUNTER_DATE   = /^Encounter\s+Date\s*:\s*(\d{1,2}\/\d{1,2}\/\d{4})\s*$/i;
+const MGB_SECTION_BANNER   = /\b(?:From|from)\s+\d{1,2}\/\d{1,2}\/\d{4}\s+(?:through|to)\s+\d{1,2}\/\d{1,2}\/\d{4}/;
 
 /**
  * Detect Epic-style encounters from text lines. Each distinct encounter
@@ -119,6 +162,103 @@ export function extractEpicEncounters(lines, linePage, fileTag) {
 }
 
 /**
+ * MGB "Patient Extract" encounters. This export format (the multi-
+ * hundred-page legacy hospital extract — different from the modern
+ * Epic ambulatory export that `EPIC_HEADER` matches) uses three
+ * encounter shapes. See the format constants above.
+ *
+ * Each Admission/Discharge pair is collapsed into ONE inpatient
+ * encounter (anchored to the admission date — a single hospital
+ * stay shouldn't show up as two rows). Section banners that
+ * literally contain "from M/D/YYYY through M/D/YYYY" are excluded
+ * regardless of which inner date matched.
+ */
+export function extractMgbPatientExtractEncounters(lines, linePage, fileTag) {
+  const byKey = new Map();
+  const add = (isoDate, dateRaw, descriptor, page, typeHint) => {
+    if (!isoDate || !descriptor) return;
+    const description = descriptor.trim().slice(0, 160);
+    const key = `${isoDate}|${description.toLowerCase()}`;
+    if (byKey.has(key)) return;
+    const type = typeHint || classifyEncounterType(description);
+    byKey.set(key, { isoDate, dateRaw, type, description, encounter: description, page, fileTag });
+  };
+
+  // First pass: pair Admission/Discharge across adjacent lines.
+  // Discharges within ~30 days of an admission anchor to the same
+  // hospital stay; lone admissions / discharges still produce a row.
+  let pendingAdmission = null; // { isoDate, dateRaw, page, line }
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    if (MGB_SECTION_BANNER.test(line)) continue;
+    let m = line.match(MGB_ADMISSION);
+    if (m) {
+      const iso = toIsoDate(m[1]);
+      if (iso) pendingAdmission = { isoDate: iso, dateRaw: m[1], page: linePage[i] || 1, line: i };
+      continue;
+    }
+    m = line.match(MGB_DISCHARGE);
+    if (m && pendingAdmission && (i - pendingAdmission.line) < 50) {
+      // Pair: one inpatient row anchored to admission date.
+      const dischargeIso = toIsoDate(m[1]);
+      add(pendingAdmission.isoDate, pendingAdmission.dateRaw,
+          `Inpatient admission${dischargeIso ? ` (discharged ${dischargeIso})` : ''}`,
+          pendingAdmission.page, 'Inpatient');
+      pendingAdmission = null;
+      continue;
+    }
+    // Lone discharge — keep it as an inpatient touchpoint.
+    if (m) {
+      const iso = toIsoDate(m[1]);
+      add(iso, m[1], 'Inpatient discharge', linePage[i] || 1, 'Inpatient');
+      continue;
+    }
+  }
+  // Flush a lone admission.
+  if (pendingAdmission) {
+    add(pendingAdmission.isoDate, pendingAdmission.dateRaw, 'Inpatient admission',
+        pendingAdmission.page, 'Inpatient');
+  }
+
+  // Second pass: standalone date-time + type lines, and Encounter Date
+  // headers (radiology / labs etc.). Skip lines that already appear in
+  // a section banner.
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    if (MGB_SECTION_BANNER.test(line)) continue;
+    let m = line.match(MGB_DATETIME_HEADER);
+    if (m) {
+      const iso = toIsoDate(m[1]);
+      const descriptor = m[2].replace(/[.\s]+$/, '').trim();
+      if (iso && descriptor && descriptor.length <= 160 && !/\d{4}\s+through\s+\d/.test(descriptor)) {
+        add(iso, m[1], descriptor, linePage[i] || 1);
+      }
+      continue;
+    }
+    m = line.match(MGB_ENCOUNTER_DATE);
+    if (m) {
+      const iso = toIsoDate(m[1]);
+      if (iso) {
+        // Walk forward a few lines to find a descriptor (the line
+        // after "Encounter Date:" is typically the report type).
+        let descriptor = '';
+        for (let j = i + 1; j < Math.min(i + 4, lines.length); j++) {
+          const lj = String(lines[j] || '').trim();
+          if (!lj || /^\d{1,2}\/\d{1,2}\/\d{4}/.test(lj) || MGB_SECTION_BANNER.test(lj)) continue;
+          descriptor = lj.slice(0, 160);
+          break;
+        }
+        add(iso, m[1], descriptor || 'Report', linePage[i] || 1);
+      }
+    }
+  }
+
+  return [...byKey.values()];
+}
+
+/**
  * Generic fallback for non-Epic PDFs: lines that begin with a date and
  * carry encounter-ish context. Lower precision; only used when no Epic
  * headers are found in a file.
@@ -146,14 +286,26 @@ export function extractGenericEncounters(lines, linePage, fileTag) {
 }
 
 /**
- * Extract encounters from one file's pdf-parse text. Epic-first, generic
- * fallback. Returns { encounters, mode } (mode: 'epic'|'generic'|'none').
+ * Extract encounters from one file's pdf-parse text. Try in order:
+ *   1. Modern Epic ambulatory header (`MM/DD/YYYY - <kind> in <loc>`)
+ *   2. MGB "Patient Extract" formats (datetime + type / Admission +
+ *      Discharge / Encounter Date) — see extractMgbPatientExtractEncounters
+ *   3. Generic dated-line + context heuristic
+ * Returns { encounters, mode } with mode set to whichever extractor
+ * produced the first non-empty result.
+ *
+ * `dedupOverlay` runs FIRST so the MGB Patient Extract format (which
+ * renders every visible string in 3-4 stacked overlay layers) becomes
+ * parseable. Idempotent on already-clean text.
  */
 export function extractEncountersFromText(text, numPages, fileTag) {
-  const lines = String(text || '').split('\n');
+  const cleaned = dedupOverlay(text);
+  const lines = cleaned.split('\n');
   const linePage = buildLinePageMap(lines, numPages || 1);
   const epic = extractEpicEncounters(lines, linePage, fileTag);
   if (epic.length > 0) return { encounters: epic, mode: 'epic' };
+  const mgb = extractMgbPatientExtractEncounters(lines, linePage, fileTag);
+  if (mgb.length > 0) return { encounters: mgb, mode: 'mgb-patient-extract' };
   const generic = extractGenericEncounters(lines, linePage, fileTag);
   return { encounters: generic, mode: generic.length ? 'generic' : 'none' };
 }

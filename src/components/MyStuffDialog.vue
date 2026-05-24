@@ -30,6 +30,58 @@
         <q-tab-panels v-model="currentTab" animated>
           <!-- Saved Files Tab -->
           <q-tab-panel name="files">
+            <!-- SAFETY: Patient mismatch banner. Renders when the
+                 deterministic identity scan finds files describing
+                 more than one patient (DOB mismatch). A MAIA account
+                 is for ONE patient — see Documentation/Clinical.md
+                 §… Records for two patients in one KB produces a
+                 Patient Summary that mixes them: clinically unsafe.
+                 Banner is persistent, red, and surfaces a per-file
+                 list so the user can remove the offending files. -->
+            <div
+              v-if="patientConsistency && patientConsistency.consistent === false"
+              class="q-mb-md q-pa-md"
+              style="border: 2px solid #b71c1c; border-radius: 6px; background: #ffebee;"
+            >
+              <div class="row items-center q-mb-sm">
+                <q-icon name="warning" color="negative" size="28px" class="q-mr-sm" />
+                <div class="text-h6 text-negative">SAFETY: Records for multiple patients detected</div>
+              </div>
+              <div class="text-body2 q-mb-sm">
+                A MAIA account is for <strong>one patient</strong>. The files below appear to
+                describe more than one person. Remove the mismatched files before continuing
+                — leaving them in the knowledge base will produce a Patient Summary that
+                mixes data from multiple patients, which is clinically unsafe.
+              </div>
+              <div class="q-mb-sm">
+                <strong>Primary patient (kept):</strong>
+                {{ patientConsistency.primary?.name || '(name not parseable)' }}
+                <span v-if="patientConsistency.primary?.dobIso">
+                  — DOB {{ patientConsistency.primary.dobIso }}
+                </span>
+                ({{ patientConsistency.primary?.fromFiles?.length || 0 }} file(s))
+              </div>
+              <div class="q-mb-xs"><strong>Mismatched files (remove these):</strong></div>
+              <ul class="q-mt-none q-mb-sm" style="margin-left: 1.5em;">
+                <li v-for="m in patientConsistency.mismatches" :key="m.fileName">
+                  <code>{{ m.fileName }}</code>
+                  <span v-if="m.name || m.dobIso" class="text-grey-8">
+                    — {{ m.name || '(name not parseable)' }}<span v-if="m.dobIso">, DOB {{ m.dobIso }}</span>
+                  </span>
+                </li>
+              </ul>
+              <div class="text-caption text-grey-8">
+                {{ patientConsistency.reason }}
+              </div>
+              <q-btn
+                flat dense color="negative"
+                icon="refresh"
+                label="Re-check"
+                class="q-mt-sm"
+                @click="checkPatientConsistency"
+              />
+            </div>
+
             <div v-if="loadingFiles" class="text-center q-pa-md">
               <q-spinner size="2em" />
               <div class="q-mt-sm">Loading files...</div>
@@ -1076,6 +1128,32 @@
             </div>
 
             <div v-else-if="patientSummary" class="q-mt-md">
+              <!-- SAFETY: identity-parse failure banner. Renders when
+                   the stored summary contains the sentinel string
+                   "Patient name not parseable from records" emitted by
+                   the server when no file in the KB yielded a
+                   parseable Name/DOB. Tells the user the summary is
+                   trustworthy except for the patient name itself. -->
+              <div
+                v-if="identityParseFailed"
+                class="q-mb-md q-pa-md"
+                style="border: 2px solid #f57c00; border-radius: 6px; background: #fff8e1;"
+              >
+                <div class="row items-center q-mb-xs">
+                  <q-icon name="warning" color="warning" size="24px" class="q-mr-sm" />
+                  <div class="text-subtitle1 text-warning">Patient identity could not be parsed</div>
+                </div>
+                <div class="text-body2">
+                  The Patient Summary below is correct in its clinical content, but the
+                  patient's <strong>name was not parseable</strong> from any of your source
+                  PDF headers (Apple Health / Epic / etc.). The summary deliberately reads
+                  "Patient name not parseable from records" instead of guessing — guessing
+                  would risk grabbing a spouse, emergency-contact, or referring-physician
+                  name from inside the records. To fix: add a clearer source PDF whose
+                  header contains the patient's name and DOB in a recognizable format,
+                  then regenerate.
+                </div>
+              </div>
               <div class="row items-center justify-between q-gutter-sm q-mb-sm">
                 <div class="text-caption text-grey-7">
                   <!-- Patient summary editing -->
@@ -1486,6 +1564,31 @@ const currentTab = ref(props.initialTab || 'files');
 const loadingFiles = ref(true);
 const filesError = ref('');
 const userFiles = ref<UserFile[]>([]);
+
+/**
+ * SAFETY: multi-patient detection. Holds the latest result of
+ * `/api/files/verify-patient-consistency` so the Saved Files banner
+ * can render when the user's file set describes more than one patient.
+ * Null = not checked yet; populated object = check ran. `.consistent`
+ * is true for the safe case, false to surface the SAFETY banner.
+ */
+const patientConsistency = ref<null | {
+  consistent: boolean;
+  primary: { name: string | null; dobIso: string | null; fromFiles?: string[] } | null;
+  mismatches: Array<{ fileName: string; name: string | null; dobIso: string | null }>;
+  reason: string;
+}>(null);
+const checkPatientConsistency = async () => {
+  if (!props.userId) return;
+  try {
+    const r = await fetch(`/api/files/verify-patient-consistency?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
+    if (!r.ok) return;
+    const d = await r.json();
+    patientConsistency.value = d?.success ? d : null;
+  } catch (err) {
+    console.warn('[MyStuff] patient-consistency check failed (non-fatal):', err);
+  }
+};
 const updatingFiles = ref(new Set<string>());
 
 const loadingAgent = ref(false);
@@ -1585,6 +1688,18 @@ const privacyFilterMapping = ref<Array<{ original: string; pseudonym: string }>>
 const loadingRandomNames = ref(false);
 const patientSummary = ref('');
 const patientSummaries = ref<Array<{ text: string; createdAt: string; updatedAt: string; isCurrent: boolean }>>([]);
+
+/**
+ * True when the stored Patient Summary contains the sentinel string
+ * the server emits when no file in the KB yielded a parseable patient
+ * identity (see server/index.js → buildPatientSummaryPromptForUser →
+ * `Patient name not parseable from records`). Drives the orange
+ * "Patient identity could not be parsed" banner above the summary.
+ * Cheap substring check on the rendered text.
+ */
+const identityParseFailed = computed(() =>
+  /patient\s+name\s+not\s+parseable\s+from\s+records/i.test(String(patientSummary.value || ''))
+);
 
 // Current Medications ↔ Patient Summary consistency check
 const verifiedCurrentMedications = ref<string | null>(null);
@@ -1979,6 +2094,11 @@ const loadFiles = async () => {
   } finally {
     loadingFiles.value = false;
   }
+  // Run the patient-consistency check whenever the file set is
+  // refreshed. Result drives the SAFETY banner at the top of this
+  // tab. Best-effort and silent on failure — banner just stays
+  // hidden if the check can't complete.
+  void checkPatientConsistency();
 };
 
 // const _toggleKnowledgeBase = async (file: UserFile) => {

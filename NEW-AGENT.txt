@@ -41,6 +41,11 @@ Remove any mention of problems or medications for sexual function including syri
 **Format and Language**
 Always start your response with the patient's name, age and sex. Do not show your reasoning. Provide the response in English. Format section headings so they are not too large.
 
+**Source Citations**
+When you reference a specific record (a visit note, lab result, medication entry, imaging report, etc.), cite the source inline immediately after the reference, in this exact format: `[<filename> p.<page>]` — for example "Cardiology consult on 2025-10-15 [Health Records - Margarita.pdf p.42]". The chat UI auto-converts these citations to clickable links that open the PDF at that page. WITHOUT the bracketed filename, no link can be created. Always include the .pdf filename, not just a "File N" tag.
+
+When the same fact appears in MORE THAN ONE source file — for example a clinical encounter that's documented in both an Apple Health export ("Health Records - …") and a hospital export (Epic, MGB, Mass General Brigham) — **prefer the non-Apple-Health source for the citation**. Apple Health entries are summary-only ("Telephone Encounter by Dr X") while the hospital export carries the full note text. Cite the Apple Health source only as a secondary if there is no other source.
+
 
 ---
 
@@ -48,11 +53,21 @@ Always start your response with the patient's name, age and sex. Do not show you
 
 Each MAIA account provisions **two** DigitalOcean GenAI agents, both
 attached to the same user knowledge base. They appear in the chat
-provider dropdown as "Private AI (Deepseek)" and "Private AI (GPT)".
+provider dropdown as "Private AI (GPT)" first and "Private AI (Deepseek)"
+second — GPT is the primary as of v1.4.0.
 
-### Primary — Private AI (Deepseek)
+> **About the profile keys.** The two slots are addressed in
+> `userDoc.agentProfiles[<key>]` by historical key names: `default`
+> (primary) and `gpt` (secondary). The keys are kept for back-compat
+> — what each key resolves to (GPT vs Deepseek) flipped in v1.4.0,
+> so display labels are derived from the actual stored model name,
+> not the slot key. (`server/routes/chat.js` builds the dropdown
+> labels; `src/components/Lists.vue` builds the worksheet card
+> titles; both look at the model field, never the slot key.)
+
+### Primary — Private AI (GPT)
 - Profile key: `default`
-- Model: **Deepseek V4 Pro** (`inference_name: deepseek-v4-pro`),
+- Model: **OpenAI GPT-oss-120b** (`inference_name: openai-gpt-oss-120b`),
   resolved to a model UUID at runtime from the DO GenAI models catalog.
   Optional env override: `DO_MODEL_ID` (primary only).
 - System Instructions: seeded from `## MAIA INSTRUCTION TEXT` above.
@@ -60,13 +75,16 @@ provider dropdown as "Private AI (Deepseek)" and "Private AI (GPT)".
 - This is the agent used by the Setup/Restore wizard automation and the
   default chat selection.
 
-### Alternate — Private AI (GPT)
-- Profile key: `gpt`
-- Model: **OpenAI GPT-oss-120b** (`inference_name: openai-gpt-oss-120b`),
-  resolved from the DO catalog (never falls back to a non-GPT model).
+### Secondary — Private AI (Deepseek)
+- Profile key: `gpt` (historical key; the model it resolves was swapped
+  in v1.4.0 — see note above).
+- Model: **Deepseek V4 Pro** (`inference_name: deepseek-v4-pro`),
+  resolved from the DO catalog (never falls back to a non-Deepseek
+  model on this slot).
 - System Instructions: a **one-time copy** of the primary agent's
   instruction at creation time; the two then diverge.
-- Agent name pattern: `{userId}-agent-gpt-{YYYYMMDDThhmmss}`.
+- Agent name pattern: `{userId}-agent-gpt-{YYYYMMDDThhmmss}` (the
+  `-gpt-` infix is historical, not a model indicator).
 
 ### Independent System Instructions
 After creation, each agent's System Instructions are stored per profile
@@ -90,12 +108,31 @@ cluster per DO account is shared by all knowledge bases.
 ```
 embedding_model: GTE Large EN v1.5
 reranking_model: BGE Reranker v2 m3
-chunking_strategy: semantic
-semantic_similarity_threshold: 0.5
-semantic_max_chunk_size: 750
-hierarchical_max_parent_chunk_size: 750
-hierarchical_max_child_chunk_size: 375
+chunking_strategy: hierarchical
+semantic_similarity_threshold: 0.4
+semantic_max_chunk_size: 1200
+hierarchical_max_parent_chunk_size: 1500
+hierarchical_max_child_chunk_size: 400
+ah_lists_max_chunk_size: 200
 ```
+
+The defaults above are tuned for the mixed AH-PDF + Epic-PDF
+workload typical of MAIA accounts (see `Documentation/Clinical.md`
+§7 for the rationale). Per-data-source overrides apply: the
+sidecar AH `Lists/*.md` data source (one entry per chunk) uses
+`CHUNKING_ALGORITHM_SEMANTIC` with `max_chunk_size =
+ah_lists_max_chunk_size` regardless of `chunking_strategy`.
+
+> **Two-slot KB strategy.** Each account has two KB slots: **KB-1**
+> (primary, the agent retrieves from this by default) and **KB-2**
+> (alternate, opt-in via My Stuff → My AI Agent). They ALWAYS use
+> OPPOSITE chunking strategies — KB-1 hierarchical → KB-2 semantic
+> (the new-account case as of v1.4.4); KB-1 semantic → KB-2
+> hierarchical (the pre-v1.4.4 case). The actual strategy each KB
+> was created with is persisted on `userDoc.kbChunkingStrategy`
+> (KB-1) and `userDoc.kb2.chunking` (KB-2), and the UI labels are
+> derived from those fields so they can never lie about what the
+> KB actually is.
 
 (The fenced block above is only the knowledge-base knobs that are
 actually sent to DigitalOcean. The OpenSearch database is deliberately
@@ -108,13 +145,23 @@ Parameter reference:
   runtime via the DO GenAI models API. Optional env override:
   `DO_EMBEDDING_MODEL_ID`.
 - **reranking_model** = `BGE Reranker v2 m3`.
-- **chunking_strategy** = `semantic` (default) or `hierarchical`.
+- **chunking_strategy** = `hierarchical` (default) or `semantic`.
+  Hierarchical is the new default — small child chunks for precise
+  retrieval, larger parent chunks returned to the LLM for context.
+  Better than semantic for the mixed structured + narrative case
+  typical of medical PDFs.
   - Semantic chunking:
-    - **semantic_similarity_threshold**: 0 – 1 (default `0.5`)
-    - **semantic_max_chunk_size**: 100 – 8192 (default `750`)
+    - **semantic_similarity_threshold**: 0 – 1 (default `0.4`)
+    - **semantic_max_chunk_size**: 100 – 8192 (default `1200`)
   - Hierarchical chunking:
-    - **hierarchical_max_parent_chunk_size**: 100 – 8192 (default `750`)
-    - **hierarchical_max_child_chunk_size**: 100 – 750 (default `375`)
+    - **hierarchical_max_parent_chunk_size**: 100 – 8192 (default `1500`)
+    - **hierarchical_max_child_chunk_size**: 100 – 750 (default `400`)
+- **ah_lists_max_chunk_size** = `200`. Per-source override for the
+  Apple Health `Lists/*.md` sidecar data source. AH categories are
+  many short entries (`**Date:** … | **Page:** …` then the
+  observation, then `---`) — at this size each entry is roughly
+  one chunk, so retrieval returns the *specific* records the agent
+  was asking about instead of a 30-entry blob.
 ### OpenSearch database (NOT a configurable parameter)
 
 The OpenSearch database is **not** selected by name and the name is

@@ -149,7 +149,7 @@ Output ONLY the list of current medications — one medication per line (name an
 ---
 
 ### prompt: patient-summary.draft
-<!-- placeholders: {patientIdentity} {currentMedications} {encounters} {allergies} {outOfRangeLabs} -->
+<!-- placeholders: {patientIdentity} {currentMedications} {stoppedMedications} {encounters} {allergies} {outOfRangeLabs} {medicalHistory} {socialHistory} {radiology} -->
 ```text
 You are creating a Patient Summary for an on-call physician who has never seen this patient. Use ONLY information found in this patient's knowledge base; never fabricate. Apply your system instructions for any items that must be omitted or redacted.
 
@@ -176,11 +176,19 @@ For each section, in order of preference:
 - Out of Range Labs
 - Other Testing — PFTs, EKGs, etc.
 
+{medicalHistory}
+
 {encounters}
+
+{currentMedications}
+
+{stoppedMedications}
 
 {allergies}
 
-{outOfRangeLabs}
+{socialHistory}
 
-{currentMedications}
+{radiology}
+
+{outOfRangeLabs}
 ```

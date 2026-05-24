@@ -25,11 +25,15 @@ let cachedRerankModel; // undefined = not resolved yet
 
 const DEFAULTS = {
   reranking_model: 'BGE Reranker v2 m3',
-  chunking_strategy: 'semantic',
-  semantic_similarity_threshold: 0.5,
-  semantic_max_chunk_size: 750,
-  hierarchical_max_parent_chunk_size: 750,
-  hierarchical_max_child_chunk_size: 375
+  chunking_strategy: 'hierarchical',
+  semantic_similarity_threshold: 0.4,
+  semantic_max_chunk_size: 1200,
+  hierarchical_max_parent_chunk_size: 1500,
+  hierarchical_max_child_chunk_size: 400,
+  // Per-source override applied to the AH Lists/*.md sidecar data
+  // source. AH categories are many short entries — small chunks =
+  // entry-level retrieval, not 30-entry blobs.
+  ah_lists_max_chunk_size: 200
 };
 
 /**
@@ -93,9 +97,28 @@ export function getChunkingForStrategy(strategy) {
   };
 }
 
-// Primary KB-1 uses the configured strategy (semantic by default).
+// Primary KB-1 uses the configured strategy (hierarchical by default).
 export function getChunkingForDataSource() {
-  return getChunkingForStrategy(getKbConfig().chunking_strategy || 'semantic');
+  return getChunkingForStrategy(getKbConfig().chunking_strategy || 'hierarchical');
+}
+
+/**
+ * Chunking override for the Apple Health Lists/*.md sidecar data
+ * source. Always SEMANTIC with a small max_chunk_size — the AH
+ * categories are many short entries (`**Date:** … | **Page:** …`
+ * then the observation, then `---`) and at this chunk size each
+ * entry is roughly one chunk. Better than hierarchical for entry-
+ * level retrieval (e.g., "what was the patient's A1c on 2026-04-08?").
+ */
+export function getChunkingForAppleHealthListsSource() {
+  const c = getKbConfig();
+  return {
+    chunking_algorithm: 'CHUNKING_ALGORITHM_SEMANTIC',
+    chunking_options: {
+      max_chunk_size: Number(c.ah_lists_max_chunk_size) || 200,
+      semantic_threshold: 0.7 // entries are ~self-contained — higher threshold = split more readily
+    }
+  };
 }
 
 /**

@@ -3887,10 +3887,10 @@ async function provisionUserAsync(userId, token) {
       modelId: modelId.trim(), // Ensure no whitespace
       projectId: projectId.trim(), // Ensure no whitespace
       region: getDoRegion(),
-      maxTokens: 16384,
+      maxTokens: 32768,
       topP: 1,
       temperature: 0.1,
-      k: 10,
+      k: 15,
       retrievalMethod: 'RETRIEVAL_METHOD_REWRITE'
     });
 
@@ -4095,10 +4095,10 @@ async function provisionUserAsync(userId, token) {
     
     await agentClient.update(newAgent.uuid, {
       instruction: maiaInstruction,
-      max_tokens: 16384,
+      max_tokens: 32768,
       top_p: 1,
       temperature: 0.1,
-      k: 10,
+      k: 15,
       retrieval_method: 'RETRIEVAL_METHOD_REWRITE'
     });
 
@@ -6088,23 +6088,40 @@ app.get('/api/agent-instructions', async (req, res) => {
         .map(kb => (typeof kb === 'string' ? kb : (kb?.uuid || kb?.id || kb?.knowledge_base_uuid)))
         .filter(Boolean)
     );
+    // Derive the KB labels from the actual stored chunking strategy
+    // for each KB. KB-1 has been hierarchical since v1.4.4 (was semantic
+    // before that); KB-2 is always the OPPOSITE strategy from KB-1 so
+    // the two slots offer a comparison. Hardcoded labels would lie
+    // about what the KB actually is.
+    // For accounts created in the brief window after the v1.4.4 default
+    // switched but BEFORE userDoc.kbChunkingStrategy was persisted (a
+    // few accounts like aaron23), fall back to the CURRENT configured
+    // strategy — which is what those KBs were actually created with.
+    // For very old (pre-v1.4.4) accounts the label may still be wrong,
+    // but per direction we don't migrate those.
+    const { getKbConfig } = await import('./utils/kb-config.js');
+    const currentStrategy = String(getKbConfig().chunking_strategy || 'hierarchical').toLowerCase();
     const kb2 = userDoc.kb2 || null;
+    const kb1Strategy = String(userDoc.kbChunkingStrategy || currentStrategy).toLowerCase();
+    const kb2Strategy = String(kb2?.chunking || (kb1Strategy === 'semantic' ? 'hierarchical' : 'semantic')).toLowerCase();
     const kbs = [
       {
         key: 'kb1',
-        label: 'Primary KB — semantic',
+        label: `Primary KB — ${kb1Strategy}`,
         name: userDoc.kbId ? getKBNameFromUserDoc(userDoc, userId) : null,
         kbId: userDoc.kbId || null,
         exists: !!userDoc.kbId,
-        connected: !!(userDoc.kbId && attachedSet.has(userDoc.kbId))
+        connected: !!(userDoc.kbId && attachedSet.has(userDoc.kbId)),
+        chunking: kb1Strategy
       },
       {
         key: 'kb2',
-        label: 'Alternate KB — hierarchical',
+        label: `Alternate KB — ${kb2Strategy}`,
         name: kb2?.kbName || null,
         kbId: kb2?.kbId || null,
         exists: !!kb2?.kbId,
-        connected: !!(kb2?.kbId && attachedSet.has(kb2.kbId))
+        connected: !!(kb2?.kbId && attachedSet.has(kb2.kbId)),
+        chunking: kb2Strategy
       }
     ];
 
@@ -6642,7 +6659,49 @@ async function setupKnowledgeBase(userId, kbName, filesInKB, bucketName, existin
         message: 'OpenSearch database_id is required. Ensure DIGITALOCEAN_TOKEN is set — the database is auto-discovered or created via the DO API.'
       };
     }
-    
+
+    // SAFETY GATE: refuse to index a KB whose files describe more than
+    // one patient. A MAIA account is for ONE patient; if the user
+    // accidentally uploaded a spouse's / dependent's / colleague's
+    // records, the resulting KB would produce a Patient Summary that
+    // mixes both — clinically unsafe. DOB mismatch is the trigger
+    // (name alone is too noisy). Skipped for ephemeral / re-index
+    // paths where the userDoc.files list hasn't necessarily changed.
+    if (!useEphemeralSpaces) {
+      try {
+        const userDocForCheck = await cloudant.getDocument('maia_users', userId);
+        const kbPrefix = `${userId}/${kbName}/`;
+        const checkFiles = (userDocForCheck?.files || []).filter(f =>
+          f?.fileName && f?.bucketKey && f.bucketKey.startsWith(kbPrefix) &&
+          (/\.pdf$/i.test(f.fileName) || /pdf/i.test(f.fileType || ''))
+        );
+        if (checkFiles.length >= 2) {
+          const { extractIdentitiesForFiles, detectPatientMismatch } = await import('./utils/patient-consistency.js');
+          const identities = await extractIdentitiesForFiles(checkFiles, {
+            readSpacesObjectBuffer, log: console
+          });
+          const consistencyResult = detectPatientMismatch(identities);
+          if (!consistencyResult.consistent) {
+            await appendUserProvisioningEvent(userId, {
+              event: 'patient-consistency-mismatch',
+              context: 'kb-setup-blocked',
+              primary: consistencyResult.primary?.name || null,
+              primaryDob: consistencyResult.primary?.dobIso || null,
+              mismatchFiles: consistencyResult.mismatches.map(m => m.fileName),
+              reason: consistencyResult.reason
+            });
+            return {
+              error: 'PATIENT_CONSISTENCY_MISMATCH',
+              message: consistencyResult.reason,
+              detail: consistencyResult
+            };
+          }
+        }
+      } catch (e) {
+        console.warn(`[KB Setup] patient-consistency check failed (non-fatal — proceeding): ${e?.message || e}`);
+      }
+    }
+
     // Clean-index (footer-stripped) indexing is opt-in for NEW KBs created
     // via the standard (non-ephemeral) Spaces flow. Generate the cleaned
     // `_clean/` sidecars first, then point the data source at that folder so
@@ -6680,6 +6739,58 @@ async function setupKnowledgeBase(userId, kbName, filesInKB, bucketName, existin
       }
     ];
 
+    // Apple Health Lists/*.md sidecar data source (Recommendation #4+#6
+    // from Documentation/Clinical.md §7). If the user has an AH PDF, the
+    // category-split sidecars (medication_records.md, clinical_notes.md,
+    // allergies.md, conditions.md, lab_results.md, …) are a MUCH better
+    // representation for KB retrieval than the raw PDF:
+    //   - One observation per chunk instead of 30 per chunk
+    //   - No PDF artifact text (page footers, generation dates)
+    //   - Each chunk is naturally typed by category
+    // We add Lists/ as a SECOND data source with small-chunk semantic
+    // splitting, alongside the main `_clean/` PDFs source. Idempotent:
+    // ensureAppleHealthListsBuilt() is a no-op when the sidecars already
+    // exist.
+    if (!useEphemeralSpaces) {
+      try {
+        const userDocForKb = await cloudant.getDocument('maia_users', userId);
+        const hasAh = Array.isArray(userDocForKb?.files) &&
+          userDocForKb.files.some(f => f?.isAppleHealth && f?.bucketKey);
+        if (hasAh) {
+          const { ensureAppleHealthListsBuilt } = await import('./utils/lists-builder.js');
+          const { S3Client } = await import('@aws-sdk/client-s3');
+          const s3Client = new S3Client({
+            endpoint: getSpacesEndpoint(),
+            region: 'us-east-1',
+            forcePathStyle: process.env.S3_FORCE_PATH_STYLE === 'true',
+            credentials: {
+              accessKeyId: process.env.DIGITALOCEAN_AWS_ACCESS_KEY_ID || process.env.SPACES_AWS_ACCESS_KEY_ID || '',
+              secretAccessKey: process.env.DIGITALOCEAN_AWS_SECRET_ACCESS_KEY || process.env.SPACES_AWS_SECRET_ACCESS_KEY || ''
+            }
+          });
+          const outcome = await ensureAppleHealthListsBuilt(userId, userDocForKb, {
+            readSpacesObjectBuffer, readSpacesTextObject,
+            s3Client, bucketName, cloudant
+          });
+          if (outcome === 'built' || outcome === 'cached') {
+            const { getChunkingForAppleHealthListsSource } = await import('./utils/kb-config.js');
+            const ahChunking = getChunkingForAppleHealthListsSource();
+            datasources.push({
+              spaces_data_source: {
+                bucket_name: bucketName,
+                item_path: `${userId}/Lists/`,
+                region: getDoRegion()
+              },
+              ...ahChunking
+            });
+            console.log(`[KB Setup] Added AH Lists/ data source (chunk=${ahChunking.chunking_options.max_chunk_size}) — sidecars ${outcome}`);
+          }
+        }
+      } catch (e) {
+        console.warn(`[KB Setup] AH Lists data source skipped: ${e?.message || e}`);
+      }
+    }
+
       let rerankingConfig = null;
       try {
         const rerankModel = await getRerankingModelName(doClient);
@@ -6711,22 +6822,30 @@ async function setupKnowledgeBase(userId, kbName, filesInKB, bucketName, existin
       kbId = kbResult.uuid || kbResult.id;
       console.log(`✅ Created new KB: ${kbName} (${kbId})`);
 
-      // Persist the clean-index flag so re-index / restore keep pointing the
-      // data source at the `_clean/` folder for this KB.
-      if (cleanIndex) {
-        for (let attempt = 0; attempt < 3; attempt++) {
-          try {
-            const doc = await cloudant.getDocument('maia_users', userId);
-            if (!doc) break;
-            doc.kbCleanIndex = true;
-            doc.updatedAt = new Date().toISOString();
-            await cloudant.saveDocument('maia_users', doc);
-            break;
-          } catch (e) {
-            if (e?.statusCode === 409 && attempt < 2) continue;
-            console.warn(`[clean-index] could not persist kbCleanIndex for ${userId}: ${e?.message || e}`);
-            break;
-          }
+      // Persist the clean-index flag AND the actual chunking strategy
+      // used for KB-1 so re-index / restore keep pointing at `_clean/`
+      // and the My-Agent UI can label the KB with what it really was
+      // (not just whatever today's getKbConfig() default happens to be).
+      // The chunking algorithm comes from DO's constants —
+      // CHUNKING_ALGORITHM_HIERARCHICAL / _SEMANTIC — we normalize to
+      // the short form ('hierarchical' / 'semantic') for storage and
+      // the label.
+      const kb1ChunkingStrategy = /HIERARCHICAL/i.test(chunking.chunking_algorithm)
+        ? 'hierarchical'
+        : 'semantic';
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const doc = await cloudant.getDocument('maia_users', userId);
+          if (!doc) break;
+          if (cleanIndex) doc.kbCleanIndex = true;
+          doc.kbChunkingStrategy = kb1ChunkingStrategy;
+          doc.updatedAt = new Date().toISOString();
+          await cloudant.saveDocument('maia_users', doc);
+          break;
+        } catch (e) {
+          if (e?.statusCode === 409 && attempt < 2) continue;
+          console.warn(`[KB-1] could not persist KB metadata for ${userId}: ${e?.message || e}`);
+          break;
         }
       }
 
@@ -6818,7 +6937,18 @@ async function ensureKb2(userId) {
     const bucketName = bucketUrl ? (bucketUrl.split('//')[1]?.split('.')[0] || 'maia') : 'maia';
     // KB-2 indexes the SAME folder KB-1 uses → no duplicate uploads.
     const itemPath = `${userId}/${kb1Name}/`;
-    const chunking = getChunkingForStrategy('hierarchical');
+    // KB-2 deliberately uses the OPPOSITE chunking strategy from KB-1,
+    // so the two slots offer the user a comparison ("does hierarchical
+    // or semantic chunking retrieve better for this corpus?"). KB-1 was
+    // semantic before v1.4.4 → KB-2 was hierarchical. KB-1 is now
+    // hierarchical → KB-2 should be semantic. The strategy KB-1 actually
+    // used is stored on userDoc.kbChunkingStrategy when KB-1 was
+    // created; fall back to the current config's opposite if absent.
+    const primaryStrategy = String(existingDoc?.kbChunkingStrategy || '').toLowerCase();
+    const kb2Strategy = primaryStrategy === 'semantic'
+      ? 'hierarchical'
+      : (primaryStrategy === 'hierarchical' ? 'semantic' : 'semantic');
+    const chunking = getChunkingForStrategy(kb2Strategy);
 
     let rerankingConfig = null;
     try {
@@ -6826,10 +6956,10 @@ async function ensureKb2(userId) {
       if (rerankModel) rerankingConfig = { enabled: true, model: rerankModel };
     } catch { /* non-fatal */ }
 
-    console.log(`[KB-2] Creating alternate KB ${kb2Name} (hierarchical) over ${itemPath} for ${userId}`);
+    console.log(`[KB-2] Creating alternate KB ${kb2Name} (${kb2Strategy}, opposite of KB-1=${primaryStrategy || 'unknown'}) over ${itemPath} for ${userId}`);
     const kbResult = await doClient.kb.create({
       name: kb2Name,
-      description: `Alternate (hierarchical) knowledge base for ${userId}`,
+      description: `Alternate (${kb2Strategy}) knowledge base for ${userId}`,
       projectId,
       databaseId,
       bucketName,
@@ -6846,7 +6976,7 @@ async function ensureKb2(userId) {
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const doc = await cloudant.getDocument('maia_users', userId);
-        doc.kb2 = { kbId: kb2Id, kbName: kb2Name, chunking: 'hierarchical', createdAt: new Date().toISOString() };
+        doc.kb2 = { kbId: kb2Id, kbName: kb2Name, chunking: kb2Strategy, createdAt: new Date().toISOString() };
         doc.updatedAt = new Date().toISOString();
         await cloudant.saveDocument('maia_users', doc);
         break;
@@ -7082,10 +7212,14 @@ app.post('/api/update-knowledge-base', async (req, res) => {
     
     if (kbSetupResult.error) {
       return res.status(400).json({
-        success: false, 
+        success: false,
         error: kbSetupResult.error,
         message: kbSetupResult.message,
-        kbId: kbSetupResult.kbId || null
+        kbId: kbSetupResult.kbId || null,
+        // Pass through the patient-consistency detail so the wizard
+        // can render a per-file SAFETY banner without re-running
+        // the scan.
+        detail: kbSetupResult.detail || null
       });
     }
     
@@ -10832,9 +10966,50 @@ async function buildPatientSummaryPromptForUser(userId, userDoc, profileKey = 'd
         if (id && (ahBuf || !hasAppleHealth)) break;
       } catch { /* try next file */ }
     }
-    patientIdentity = renderPatientIdentityBlock(id);
+    // Filename enrichment: the AH header now often gives only a
+    // first name (e.g. "Margarita") and Epic image PDFs return
+    // blank text. The Epic file*names* almost always carry
+    // LASTNAME_FIRSTNAME_… so we mine that to recover the
+    // surname. Header data wins where it's already complete.
+    try {
+      const { extractNameFromFilenames, mergeIdentityWithFilenamePair, renderPatientIdentityBlock: rerender } = await import('./utils/patient-identity.js');
+      const pair = extractNameFromFilenames(pdfFilesPI.map(f => f.fileName));
+      if (pair && pair.last) {
+        const merged = mergeIdentityWithFilenamePair(id || {}, pair);
+        if (merged?.name) {
+          id = { ...(id || {}), ...merged };
+        }
+      }
+      patientIdentity = rerender(id);
+    } catch (mErr) {
+      console.warn(`[patient-summary] filename enrichment failed: ${mErr?.message || mErr}`);
+      patientIdentity = renderPatientIdentityBlock(id);
+    }
   } catch (e) {
     console.warn(`[patient-summary] identity extraction failed: ${e?.message || e}`);
+  }
+
+  // FAIL LOUDLY when identity extraction returned nothing for every
+  // file in the KB. Silent degradation is what produced the sierra08
+  // bug — when {patientIdentity} is empty the LLM falls back to RAG
+  // and may pick up a spouse / contact name as the patient. Inject a
+  // STRICT instruction telling the agent not to guess, AND log a red
+  // event to maia-log so the user sees the failure on the next
+  // setup-log regeneration.
+  if (!patientIdentity || !patientIdentity.trim()) {
+    patientIdentity =
+      '**Patient identity could not be parsed deterministically from the PDF headers.**\n\n' +
+      'Use the literal string "Patient name not parseable from records" as the first line of the summary. ' +
+      'DO NOT GUESS A NAME by extracting one from the knowledge base — emergency-contact, spouse, next-of-kin, ' +
+      'physician, referring-provider, and witness fields all contain person names that are NOT the patient. ' +
+      'It is better to say the name is missing than to confidently use the wrong one.';
+    try {
+      await appendUserProvisioningEvent(userId, {
+        event: 'patient-identity-extraction-failed',
+        context: 'patient-summary-build',
+        reason: 'No file in the KB yielded a parseable Name / DOB / Sex. Check the source PDFs.'
+      });
+    } catch { /* non-fatal */ }
   }
 
   // Out-of-Range Labs:
@@ -10950,7 +11125,93 @@ async function buildPatientSummaryPromptForUser(userId, userDoc, profileKey = 'd
     }
   } catch { /* no AH allergies — agent extracts from KB */ }
 
-  const vars = { patientIdentity, currentMedications, encounters, allergies, outOfRangeLabs };
+  // Medical History / Social History / Radiology blocks: all extracted
+  // deterministically from the AH PDF's category sections. Previously
+  // these were RAG-only sections — and the agent reliably under-retrieved
+  // even when the source data was clearly indexed. Injecting them as
+  // authoritative blocks matches the Allergies / Encounters / OOR Labs
+  // pattern. We pull the AH markdown ONCE and reuse it for all three.
+  // When no AH PDF is present, each placeholder is empty and the 3-tier
+  // spec falls through to KB-RAG → "Not documented" as a last resort.
+  let medicalHistory = '';
+  let socialHistory = '';
+  let radiology = '';
+  if (ahBuf) {
+    try {
+      const { extractPdfWithPages } = await import('./utils/pdf-parser.js');
+      const {
+        extractMedicalHistoryFromAppleHealthMarkdown,
+        extractSocialHistoryFromAppleHealthMarkdown,
+        extractRadiologyFromAppleHealthMarkdown
+      } = await import('./utils/ah-section-extract.js');
+      const result = await extractPdfWithPages(ahBuf);
+      const fullMd = (result?.pages || []).map(p => p.markdown).join('\n\n');
+
+      const mhBlock = extractMedicalHistoryFromAppleHealthMarkdown(fullMd);
+      if (mhBlock && mhBlock.trim()) {
+        medicalHistory = `**Authoritative Medical History (from Apple Health categories):**\n${mhBlock.trim()}\n\nUse this for the "Medical History" section above — synthesize it into a concise narrative (don't just bullet-dump). Surgical history belongs here too; include relevant items from the Procedures block. Do NOT replace these with anything from the knowledge base.`;
+      }
+
+      const shBlock = extractSocialHistoryFromAppleHealthMarkdown(fullMd);
+      if (shBlock && shBlock.trim()) {
+        socialHistory = `**Authoritative Social History (from Apple Health):**\n${shBlock.trim()}\n\nUse this for the "Social History" section above — summarize tobacco / alcohol / drug use, employment / school, living situation. Do NOT replace it with anything from the knowledge base.`;
+      }
+
+      const radBlock = extractRadiologyFromAppleHealthMarkdown(fullMd);
+      if (radBlock && radBlock.trim()) {
+        radiology = `**Authoritative Radiology / Imaging (from Apple Health):**\n${radBlock.trim()}\n\nUse this for the "Radiology" section above — give a brief reverse-chronological list of imaging studies (modality, body part, date, conclusion if available). Do NOT replace it with anything from the knowledge base.`;
+      }
+    } catch (e) {
+      console.warn(`[patient-summary] AH narrative-section extraction failed: ${e?.message || e}`);
+    }
+  }
+
+  // Stopped or Inactive Medications block: same deterministic source as
+  // Current Medications (`resolvePatientMedicationSource` — Apple Health
+  // medication_records.md or Epic Medication List). Splits on the 18-
+  // month cutoff: anything OLDER than cutoff, OR explicitly status
+  // 'discontinued' (Epic only), goes into this block. Deduped by drug
+  // (most recent entry wins, same as the Current logic), so a drug
+  // currently active won't also appear here.
+  let stoppedMedications = '';
+  try {
+    const { mode, meds, legend } = await resolvePatientMedicationSource(userId, userDoc);
+    if (meds.length > 0) {
+      const { mergeMedications } = await import('./utils/meds-extractor.js');
+      const cutoff = new Date(); cutoff.setMonth(cutoff.getMonth() - 18);
+      const cutoffDate = cutoff.toISOString().slice(0, 10);
+      const merged = mergeMedications(meds);
+      const stopped = merged.filter(m => m.status === 'discontinued' || (m.isoDate && m.isoDate < cutoffDate));
+      // Apply the same redaction the Current path uses (sex-fn meds, etc.)
+      const { redactMedications } = await import('./utils/medication-redactor.js');
+      const { kept } = redactMedications(stopped);
+      if (kept.length > 0) {
+        const lines = kept.map(m => {
+          const tag = m.fileTag ? ` [${m.fileTag}${m.page ? ` p.${m.page}` : ''}]` : '';
+          const date = m.isoDate ? ` (last ${m.isoDate})` : '';
+          return `- ${m.name}${date}${tag}`;
+        }).join('\n');
+        const srcNote = mode === 'apple-health'
+          ? 'from Apple Health Medication Records (entries not seen in the past 18 months)'
+          : (mode === 'epic' ? 'from the Epic Medication List (discontinued, or last action > 18 months ago)' : '');
+        stoppedMedications = `**Authoritative Stopped or Inactive Medications** (${srcNote}):\n${lines}\n\nUse this AS-IS for the "Stopped or Inactive Medications" section above — list each drug once with its last-seen date. Do NOT replace it with anything from the knowledge base. (Legend: ${legend.map(l => `${l.tag}=${l.fileName}`).join('; ')})`;
+      }
+    }
+  } catch (e) {
+    console.warn(`[patient-summary] stopped-meds extraction failed: ${e?.message || e}`);
+  }
+
+  const vars = {
+    patientIdentity,
+    currentMedications,
+    stoppedMedications,
+    encounters,
+    allergies,
+    outOfRangeLabs,
+    medicalHistory,
+    socialHistory,
+    radiology
+  };
   // Per-agent override (My Stuff → Patient Summary → "Instructions for
   // <Agent>"). When set, takes precedence over the Layer-2 default; the
   // same `{placeholders}` are substituted so the user can rearrange the
@@ -11977,6 +12238,115 @@ app.get('/api/medications/current', async (req, res) => {
     });
   } catch (error) {
     console.error('[medications/current] error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Multi-patient detection. Scans every PDF in the user's file set,
+// extracts the patient identity from each header, and reports whether
+// the files describe one patient or several. DOB is the authoritative
+// signal — name mismatches alone don't block (too easy to false-alarm
+// on PDF extraction artifacts, maiden/married names, Jr./Sr.). The
+// Setup and Restore wizards call this BEFORE KB creation; the My
+// Stuff Saved Files banner calls it whenever the file set changes.
+// Returns the full detection result so the caller can render an
+// actionable banner.
+app.get('/api/files/verify-patient-consistency', async (req, res) => {
+  try {
+    const userId = resolveUserId(req, res);
+    if (!userId) return;
+    const userDoc = await cloudant.getDocument('maia_users', userId);
+    if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+
+    // Scope to files in the KB folder (skip archived / previous-KB
+    // bucketKeys). Same filter the patient-summary builder uses.
+    const kbName = getKBNameFromUserDoc(userDoc, userId);
+    const kbPrefix = kbName ? `${userId}/${kbName}/` : null;
+    const files = (userDoc.files || []).filter(f =>
+      f?.fileName && f?.bucketKey &&
+      (!kbPrefix || f.bucketKey.startsWith(kbPrefix))
+    );
+    if (files.length === 0) {
+      return res.json({ success: true, consistent: true, primary: null, groups: [], mismatches: [], reason: 'No KB files to check.' });
+    }
+
+    const { extractIdentitiesForFiles, detectPatientMismatch } = await import('./utils/patient-consistency.js');
+    const identities = await extractIdentitiesForFiles(files, {
+      readSpacesObjectBuffer,
+      log: console
+    });
+    const result = detectPatientMismatch(identities);
+
+    // Log only when we detect a real (DOB-based) mismatch — soft
+    // name-only mismatches are advisory and don't merit a log entry
+    // every time the banner re-checks.
+    if (!result.consistent) {
+      try {
+        await appendUserProvisioningEvent(userId, {
+          event: 'patient-consistency-mismatch',
+          primary: result.primary?.name || null,
+          primaryDob: result.primary?.dobIso || null,
+          mismatchFiles: result.mismatches.map(m => m.fileName),
+          reason: result.reason
+        });
+      } catch { /* non-fatal */ }
+    }
+
+    res.json({ success: true, ...result, identities });
+  } catch (error) {
+    console.error('[verify-patient-consistency] error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Deterministic per-analyte lab history. Reads `${userId}/Lists/
+// lab_results.md` (built from the Apple Health PDF by lists-processor.js)
+// and returns the full time series for a given analyte. Bypasses
+// RAG entirely so the result is exhaustive — RAG over the indexed KB
+// is structurally incompatible with "list ALL TSH readings" because
+// top-k retrieval caps how many matching chunks the agent ever sees.
+//
+// The chat client uses this endpoint when the user message matches
+// "list all/show all/history/trend" + a recognizable analyte. Both
+// the AH presence and the sidecar build are required — accounts with
+// no AH file get a clean 404 and the client falls through to RAG.
+app.get('/api/labs/history', async (req, res) => {
+  try {
+    const userId = resolveUserId(req, res);
+    if (!userId) return;
+    const analyteQuery = String(req.query?.analyte || '').trim();
+    if (!analyteQuery) return res.status(400).json({ success: false, error: 'ANALYTE_REQUIRED' });
+
+    const md = await readSpacesTextObject(`${userId}/Lists/lab_results.md`);
+    if (!md || !md.trim()) {
+      // Return 200 (not 404) so the browser doesn't flag this as a
+      // console error — "no sidecar" is the expected case for any
+      // account without an Apple Health file, not an error. The client
+      // checks `available: false` and falls through to raw RAG.
+      return res.json({
+        success: true,
+        available: false,
+        reason: 'NO_LAB_RESULTS_SIDECAR',
+        message: 'No Apple Health lab results sidecar for this user.',
+        rows: [],
+        total: 0,
+        entryCount: 0
+      });
+    }
+
+    const { buildLabHistory } = await import('./utils/lab-history.js');
+    const { analyte, rows, total, entryCount } = buildLabHistory(md, analyteQuery);
+    res.json({
+      success: true,
+      analyte: analyte?.canonical || analyteQuery,
+      synonymsTried: analyte?.terms || [analyteQuery],
+      rows,
+      total,
+      entryCount,
+      source: 'apple-health/lab_results.md'
+    });
+  } catch (error) {
+    console.error('[labs/history] error:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });

@@ -163,6 +163,11 @@ export async function extractAndSaveCategoryFiles(fullMarkdown, userId, listsFol
             const existing = mergedByDate.get(currentDate);
             if (existing) {
               existing.lineCount += obsLines.length;
+              // Preserve body lines from THIS observation too, so the
+              // merged entry carries every analyte reading from every
+              // observation on this date (was previously dropped — only
+              // a `(N lines)` summary survived).
+              existing.bodyLines.push(...obsLines);
               if (categoryLower.includes('lab result') && outOfRangeLines.length > 0) {
                 if (!existing.outOfRangeLines) {
                   existing.outOfRangeLines = [];
@@ -172,6 +177,7 @@ export async function extractAndSaveCategoryFiles(fullMarkdown, userId, listsFol
             } else {
               mergedByDate.set(currentDate, {
                 lineCount: obsLines.length,
+                bodyLines: [...obsLines],
                 page,
                 outOfRangeLines: categoryLower.includes('lab result') ? outOfRangeLines : undefined
               });
@@ -208,6 +214,7 @@ export async function extractAndSaveCategoryFiles(fullMarkdown, userId, listsFol
         const existing = mergedByDate.get(currentDate);
         if (existing) {
           existing.lineCount += obsLines.length;
+          existing.bodyLines.push(...obsLines);
           if (categoryLower.includes('lab result') && outOfRangeLines.length > 0) {
             if (!existing.outOfRangeLines) {
               existing.outOfRangeLines = [];
@@ -217,6 +224,7 @@ export async function extractAndSaveCategoryFiles(fullMarkdown, userId, listsFol
         } else {
           mergedByDate.set(currentDate, {
             lineCount: obsLines.length,
+            bodyLines: [...obsLines],
             page,
             outOfRangeLines: categoryLower.includes('lab result') && outOfRangeLines.length > 0 ? outOfRangeLines : undefined
           });
@@ -229,12 +237,18 @@ export async function extractAndSaveCategoryFiles(fullMarkdown, userId, listsFol
       }
     }
     
-    // For Clinical Vitals and Lab Results, convert merged dates to observations
+    // For Clinical Vitals and Lab Results, convert merged dates to
+    // observations. Pass the accumulated bodyLines (every observation
+    // line from every reading on that date) through to the formatter
+    // so the actual analyte names + values survive into the sidecar.
     if (shouldMergeByDate) {
       for (const [date, data] of mergedByDate.entries()) {
-        const display = formatObservationForCategory(categoryName, date, [], data.page, data.lineCount);
+        const display = formatObservationForCategory(categoryName, date, data.bodyLines || [], data.page, data.lineCount);
         if (display) {
-          observations.push({ date, display, page: data.page, lineCount: data.lineCount });
+          observations.push({
+            date, display, page: data.page, lineCount: data.lineCount,
+            outOfRangeLines: data.outOfRangeLines
+          });
         }
       }
     }
@@ -391,11 +405,31 @@ function formatObservationForCategory(categoryName, date, obsLines, page, lineCo
       return `${date} **${nextLine}**`;
     }
     return date || '';
-  } else if (categoryLower.includes('clinical vitals') || 
+  } else if (categoryLower.includes('clinical vitals') ||
              categoryLower.includes('lab result')) {
-    // Clinical Vitals, Lab Results: Date + total number of lines
-    const count = lineCount ?? obsLines.length;
-    return `${date} (${count} line${count !== 1 ? 's' : ''})`;
+    // Clinical Vitals, Lab Results: preserve the actual analyte readings,
+    // not just the date + line count (the old behavior wiped out the
+    // analyte names and values, which made `Lists/lab_results.md`
+    // useless for both RAG retrieval AND deterministic "list all TSH"
+    // queries — every entry collapsed to "Aug 11, 2025 (4 lines)").
+    //
+    // Each observation in the AH PDF looks like one [D+P] header line
+    // plus N body lines until the next [D+P]. The header is just a
+    // date marker; the body lines carry "TSH: 6.13 uIU/mL (H)" etc.
+    // We join the BODY lines (skipping the header line) with a `; `
+    // separator so each observation date renders as one line per entry.
+    // Out-of-range markers (the lines containing "OUT … OF … RANG")
+    // are appended separately by the caller via obs.outOfRangeLines.
+    const bodyLines = (obsLines || []).slice(1)
+      .map(l => String(l || '').trim())
+      .filter(l => l && !l.startsWith('[D+P]') && !l.startsWith('##') && !l.startsWith('### '));
+    if (bodyLines.length === 0) {
+      // No body — fall back to the old date+count summary so the entry
+      // is still represented (better than nothing).
+      const count = lineCount ?? obsLines.length;
+      return `${date} (${count} line${count !== 1 ? 's' : ''})`;
+    }
+    return `${date} ${bodyLines.join('; ')}`;
   }
   
   // Default: just show date

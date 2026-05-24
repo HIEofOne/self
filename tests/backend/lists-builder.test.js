@@ -14,7 +14,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   extractCategorySection,
-  extractAllergiesFromAppleHealthMarkdown
+  extractAllergiesFromAppleHealthMarkdown,
+  extractMedicalHistoryFromAppleHealthMarkdown,
+  extractSocialHistoryFromAppleHealthMarkdown,
+  extractRadiologyFromAppleHealthMarkdown
 } from '../../server/utils/ah-section-extract.js';
 
 // Synthetic Apple-Health-style markdown that mimics what
@@ -86,6 +89,106 @@ describe('ah-section-extract', () => {
     expect(extractCategorySection('just some prose', 'allergies')).toBe('');
     expect(extractCategorySection('', 'allergies')).toBe('');
     expect(extractCategorySection(null, 'allergies')).toBe('');
+  });
+
+  it('extractMedicalHistoryFromAppleHealthMarkdown stitches Conditions + Procedures + Past Medical History', () => {
+    const md = [
+      '### Conditions',
+      '',
+      'Hypertension (active)',
+      'Hypothyroidism (active)',
+      '',
+      '### Procedures',
+      '',
+      'ACL repair 2008',
+      'Cholecystectomy 2014',
+      '',
+      '### Past Medical History',
+      '',
+      'Chronic knee pain (post-ACL injury)',
+      '',
+      '### Allergies',
+      '',
+      'Penicillin'
+    ].join('\n');
+    const block = extractMedicalHistoryFromAppleHealthMarkdown(md);
+    expect(block).toContain('Hypertension');
+    expect(block).toContain('Cholecystectomy');
+    expect(block).toContain('Chronic knee pain');
+    // Each contributing AH category is labeled in the block so the agent
+    // can preserve the distinction in its narrative.
+    expect(block).toContain('**Conditions:**');
+    expect(block).toContain('**Procedures:**');
+    expect(block).toContain('**Past Medical History:**');
+    // Allergies belong to the Allergies authoritative block, not Medical History.
+    expect(block).not.toContain('Penicillin');
+  });
+
+  it('extractMedicalHistoryFromAppleHealthMarkdown returns "" when none of the source categories exist', () => {
+    const md = '### Lab Results\n\nGlucose 95 mg/dL';
+    expect(extractMedicalHistoryFromAppleHealthMarkdown(md)).toBe('');
+  });
+
+  it('extractMedicalHistoryFromAppleHealthMarkdown is robust to a single contributing category', () => {
+    const md = '### Conditions\n\nHypertension';
+    const block = extractMedicalHistoryFromAppleHealthMarkdown(md);
+    expect(block).toContain('**Conditions:**');
+    expect(block).toContain('Hypertension');
+    expect(block).not.toContain('**Procedures:**'); // section absent → label not emitted
+  });
+
+  it('extractSocialHistoryFromAppleHealthMarkdown picks the AH Social History section verbatim', () => {
+    const md = [
+      '### Social History',
+      '',
+      'Tobacco: never smoker',
+      'Alcohol: 2 drinks/week',
+      '',
+      '### Lab Results',
+      '',
+      'Glucose 95 mg/dL'
+    ].join('\n');
+    const block = extractSocialHistoryFromAppleHealthMarkdown(md);
+    expect(block).toContain('Tobacco');
+    expect(block).toContain('Alcohol');
+    expect(block).not.toContain('Glucose');
+  });
+
+  it('extractRadiologyFromAppleHealthMarkdown stitches alternative AH headings (Imaging / Radiology / Diagnostic Imaging)', () => {
+    const md = [
+      '### Imaging',
+      '',
+      'Chest X-ray 2026-03-12: clear lung fields.',
+      '',
+      '### Diagnostic Imaging',
+      '',
+      'CT abdomen 2025-11-04: no acute findings.',
+      '',
+      '### Conditions',
+      '',
+      'Hypertension'
+    ].join('\n');
+    const block = extractRadiologyFromAppleHealthMarkdown(md);
+    expect(block).toContain('Chest X-ray');
+    expect(block).toContain('CT abdomen');
+    // Each contributing AH heading is labeled, distinct headings emit distinct labels.
+    expect(block).toContain('**Imaging:**');
+    expect(block).toContain('**Diagnostic Imaging:**');
+    // Other categories are not pulled in.
+    expect(block).not.toContain('Hypertension');
+  });
+
+  it('extractRadiologyFromAppleHealthMarkdown returns "" when no radiology-flavored heading is present', () => {
+    const md = '### Conditions\n\nHypertension\n\n### Lab Results\n\nGlucose 95';
+    expect(extractRadiologyFromAppleHealthMarkdown(md)).toBe('');
+  });
+
+  it('extractRadiologyFromAppleHealthMarkdown de-dupes identical sections (does not double-emit when two headings happen to produce the same text)', () => {
+    // Pathological case: two synonymous headings with identical content.
+    const md = '### Radiology\n\nChest X-ray 2026-03-12';
+    const block = extractRadiologyFromAppleHealthMarkdown(md);
+    // Only one heading matched, so only one label.
+    expect((block.match(/\*\*Radiology:\*\*/g) || []).length).toBe(1);
   });
 });
 

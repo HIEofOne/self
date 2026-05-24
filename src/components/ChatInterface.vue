@@ -1767,6 +1767,53 @@ const getProviderKey = (label: unknown) => {
 const isPrivateAISelected = computed(() => getProviderKey(selectedProvider.value) === 'digitalocean');
 const PRIVATE_AI_DEFAULT_PROMPT = 'Click SEND to get the patient summary';
 
+// Detect a "list all / show all / history / trend / over time / timeline"
+// request for a specific lab analyte. When matched, the chat handler
+// routes through /api/labs/history (deterministic, complete) instead
+// of raw RAG (top-k bounded, incomplete). Kept in sync with the
+// server's ANALYTE_SYNONYMS table (server/utils/lab-history.js) — the
+// regex is intentionally generous; the server is the authoritative
+// matcher. Returns `null` when no intent is detected.
+const LAB_INTENT_VERBS = /\b(list|show|all|history|trend|trends|timeline|over time|chronolog|sort(ed)? by date)\b/i;
+const LAB_ANALYTE_TERMS: Array<{ display: string; term: string; pattern: RegExp }> = [
+  { display: 'TSH', term: 'tsh', pattern: /\b(tsh|thyroid[- ]stimulat\w*|thyrotropin)\b/i },
+  { display: 'Free T4', term: 'free t4', pattern: /\b(free\s*t4|ft4|thyroxine)\b/i },
+  { display: 'Free T3', term: 'free t3', pattern: /\b(free\s*t3|ft3)\b/i },
+  { display: 'Hemoglobin A1c', term: 'a1c', pattern: /\b(hb?a1c|hemoglobin\s+a1c|glycated\s+hemoglobin|glycohemoglobin)\b/i },
+  { display: 'Glucose', term: 'glucose', pattern: /\b(glucose|fasting\s+glucose|blood\s+sugar)\b/i },
+  { display: 'LDL', term: 'ldl', pattern: /\b(ldl([- ]c)?|low[- ]density\s+lipoprotein)\b/i },
+  { display: 'HDL', term: 'hdl', pattern: /\b(hdl([- ]c)?|high[- ]density\s+lipoprotein)\b/i },
+  { display: 'Triglycerides', term: 'triglycerides', pattern: /\b(triglycerid\w*|trig|tg)\b/i },
+  { display: 'Total Cholesterol', term: 'cholesterol', pattern: /\b(total\s+cholesterol|cholesterol\s+total|cholesterol)\b/i },
+  { display: 'Creatinine', term: 'creatinine', pattern: /\b(creatinine|creat\b|serum\s+creatinine)\b/i },
+  { display: 'BUN', term: 'bun', pattern: /\b(bun|blood\s+urea\s+nitrogen|urea\s+nitrogen)\b/i },
+  { display: 'eGFR', term: 'egfr', pattern: /\b(egfr|estimated\s+gfr|glomerular\s+filtration)\b/i },
+  { display: 'Potassium', term: 'potassium', pattern: /\b(potassium|k\+)\b/i },
+  { display: 'Sodium', term: 'sodium', pattern: /\b(sodium|na\+)\b/i },
+  { display: 'Hemoglobin', term: 'hemoglobin', pattern: /\b(hemoglobin|hgb|hb)\b/i },
+  { display: 'Hematocrit', term: 'hematocrit', pattern: /\b(hematocrit|hct)\b/i },
+  { display: 'WBC', term: 'wbc', pattern: /\b(wbc|white\s+blood\s+cell|leukocyte)\b/i },
+  { display: 'Platelet', term: 'platelet', pattern: /\b(platelet|plt)\b/i },
+  { display: 'ALT', term: 'alt', pattern: /\b(alt|sgpt|alanine)\b/i },
+  { display: 'AST', term: 'ast', pattern: /\b(ast|sgot|aspartate)\b/i },
+  { display: 'PSA', term: 'psa', pattern: /\b(psa|prostate[- ]specific\s+antigen)\b/i },
+  { display: 'Vitamin D', term: 'vitamin d', pattern: /\b(vitamin\s+d|25[- ]oh|25[- ]hydroxy)\b/i },
+  { display: 'Vitamin B12', term: 'b12', pattern: /\b(b12|cyanocobalamin)\b/i },
+  { display: 'CRP', term: 'crp', pattern: /\b(crp|c[- ]reactive\s+protein)\b/i }
+];
+const parseLabHistoryIntent = (text: string): { displayName: string; analyteTerm: string } | null => {
+  const s = String(text || '');
+  if (!s.trim()) return null;
+  if (!LAB_INTENT_VERBS.test(s)) return null;
+  // First analyte that matches wins. Single-analyte intent only (a
+  // request like "show all TSH and A1c" would only get TSH; the user
+  // can ask again for A1c).
+  for (const a of LAB_ANALYTE_TERMS) {
+    if (a.pattern.test(s)) return { displayName: a.display, analyteTerm: a.term };
+  }
+  return null;
+};
+
 const selectFirstNonPrivateProvider = () => {
   const fallback = providers.value.find(p => p !== 'digitalocean');
   if (fallback) {
@@ -2008,6 +2055,11 @@ const sendMessage = async () => {
   const isUntouchedDefault = inputMessage.value.trim() === PRIVATE_AI_DEFAULT_PROMPT.trim();
   const mentionsSummary = /patient\s+summary/i.test(inputMessage.value);
   const isPatientSummaryRequest = isUntouchedDefault || mentionsSummary;
+  // Detect "list all / show all / history / trend / timeline / over time"
+  // + a recognizable analyte (TSH, A1c, glucose, LDL, …). When matched,
+  // the chat handler routes through /api/labs/history below instead of
+  // raw RAG. Captured here, BEFORE inputMessage.value is cleared.
+  const labIntent = parseLabHistoryIntent(inputMessage.value);
   messages.value.push(userMessage);
   originalMessages.value = JSON.parse(JSON.stringify(messages.value)); // Keep original in sync
   // Update trulyOriginalMessages when adding new messages (but not when filtering)
@@ -2054,6 +2106,60 @@ const sendMessage = async () => {
         console.warn('Could not fetch existing summary, generating new one:', err);
       }
     }
+    // MANUAL "list all <lab>" request to the Private AI:
+    // Top-k RAG retrieval is structurally incompatible with "list ALL X"
+    // queries — for a patient with 30 TSH readings, k=15 can never
+    // return more than 15, and the two Private AIs each get a DIFFERENT
+    // top-15. Sidestep RAG entirely: parse Lists/lab_results.md
+    // deterministically via /api/labs/history and render the full time
+    // series in chat. Falls back to raw chat (no recognized analyte, no
+    // AH sidecar, or any error). Patterned after the patient-summary
+    // routing below.
+    {
+      const providerKeyForLabs = getProviderKey(selectedProvider.value);
+      if (labIntent && providerKeyForLabs === 'digitalocean' && props.user?.userId) {
+        try {
+          const url = `/api/labs/history?analyte=${encodeURIComponent(labIntent.analyteTerm)}`;
+          const labRes = await fetch(url, { credentials: 'include' });
+          const labJson = await labRes.json().catch(() => ({}));
+          // The endpoint returns 200 with `available: false` when the
+          // user has no Apple Health sidecar — that's the normal case
+          // for accounts without an AH PDF, not an error. Fall through
+          // to RAG silently.
+          if (
+            labRes.ok && labJson.success && labJson.available !== false &&
+            Array.isArray(labJson.rows) && labJson.rows.length > 0
+          ) {
+            const lines = labJson.rows.map(r => {
+              const flag = r.flag ? ` (${r.flag})` : '';
+              const units = r.units ? ` ${r.units}` : '';
+              return `- ${r.isoDate} — ${r.value}${units}${flag}`;
+            }).join('\n');
+            const title = `**${labIntent.displayName} — complete history (deterministic, from your Apple Health export)**`;
+            const note = `\n\n_${labJson.total} reading${labJson.total === 1 ? '' : 's'} across ${labJson.entryCount} lab event${labJson.entryCount === 1 ? '' : 's'}; sorted newest first. This list is exhaustive — pulled directly from your AH lab_results sidecar, not RAG._`;
+            const labLabel = assistantLabelForKey(providerKeyForLabs);
+            const labMsg: Message = {
+              role: 'assistant',
+              content: `${title}\n\n${lines}${note}`,
+              authorType: 'assistant',
+              providerKey: providerKeyForLabs,
+              authorId: providerKeyForLabs,
+              authorLabel: labLabel,
+              name: labLabel
+            };
+            messages.value.push(labMsg);
+            originalMessages.value = JSON.parse(JSON.stringify(messages.value));
+            trulyOriginalMessages.value = JSON.parse(JSON.stringify(messages.value));
+            isStreaming.value = false;
+            return;
+          }
+          // 404 (no AH sidecar) or zero rows → fall through to raw RAG chat.
+        } catch (err) {
+          console.warn('[chat→labs/history] failed; falling back to raw chat:', err);
+        }
+      }
+    }
+
     // MANUAL "patient summary" request to the Private AI:
     // Re-route through /api/patient-summary/draft so the SAME Layer-2
     // prompt, identity/encounters/allergies/OOR-labs/currentMedications
@@ -3342,6 +3448,8 @@ const generateSetupLogPdf = async () => {
       const getEventColor = (evt: Record<string, any>): [number, number, number] => {
         if (evt.event === 'error') return [200, 0, 0];
         if (evt.event === 'account-deleted') return [200, 0, 0];
+        if (evt.event === 'patient-consistency-mismatch') return [200, 0, 0];
+        if (evt.event === 'patient-identity-extraction-failed') return [200, 0, 0];
         if (evt.event?.startsWith('test-')) return [200, 100, 0];
         if (evt.event === 'medications-saved' || evt.event === 'summary-saved' ||
             evt.event === 'medications-restored' || evt.event === 'summary-restored' ||
@@ -3496,6 +3604,24 @@ const generateSetupLogPdf = async () => {
           case 'test-verification': return `[${t}] TEST verification: ${evt.label || ''} ${evt.passed ? 'PASS' : 'FAIL'}${evt.detail ? ' - ' + evt.detail : ''}`;
           case 'admin-notified': return `[${t}] Admin notified — from: ${evt.from || '?'}, to: ${evt.to || '?'}`;
           case 'error': return `[${t}] ERROR: ${evt.step || ''} - ${evt.message || ''}`;
+          case 'patient-identity-extraction-failed':
+            // Bold red — appears in the log when the PS builder
+            // couldn't parse Name/DOB/Sex from any KB file. The PS
+            // prompt is also told NOT to guess (see server/index.js
+            // buildPatientSummaryPromptForUser).
+            return `[${t}] SAFETY: Patient identity could not be parsed from any file${evt.context ? ` [${evt.context}]` : ''}.\n        ${evt.reason || ''}\n        The Patient Summary will say "Patient name not parseable from records" instead of guessing.`;
+          case 'patient-consistency-mismatch': {
+            // Bolded by the isMilestone check below (event ends with
+            // a '-mismatch' suffix → matched as a milestone). The
+            // body line is INTENTIONALLY verbose so a clinician /
+            // support person reading the PDF sees exactly what was
+            // detected and which files were involved.
+            const ctx = evt.context ? ` [${evt.context}]` : '';
+            const mismatches = Array.isArray(evt.mismatchFiles) && evt.mismatchFiles.length
+              ? `\n        Mismatch files: ${evt.mismatchFiles.join(', ')}`
+              : '';
+            return `[${t}] SAFETY: Patient mismatch detected${ctx}\n        Primary: ${evt.primary || '(unknown)'} (DOB ${evt.primaryDob || 'unknown'})${mismatches}\n        Reason: ${evt.reason || ''}`;
+          }
           default: return `[${t}] ${evt.event || 'unknown'}`;
         }
       };
@@ -3554,7 +3680,7 @@ const generateSetupLogPdf = async () => {
         // A null/empty render means "intentionally not shown" (diagnostic
         // events we keep a renderer for but don't want in the PDF).
         if (!text) continue;
-        const isMilestone = evt.event?.endsWith('-complete') || evt.event?.endsWith('-started') || evt.event === 'account-deleted';
+        const isMilestone = evt.event?.endsWith('-complete') || evt.event?.endsWith('-started') || evt.event === 'account-deleted' || evt.event === 'patient-consistency-mismatch' || evt.event === 'patient-identity-extraction-failed';
 
         if (isMilestone) {
           doc.setFont('helvetica', 'bold');
@@ -3607,67 +3733,11 @@ const generateSetupLogPdf = async () => {
     y += 6;
   }
 
-  // ── Reference: How the My Lists tab works ───────────────────────────
-  // A static explainer so anyone reading maia-log.pdf understands what
-  // the My Lists tab produces and how. Kept in sync with
-  // Documentation/Clinical.md.
-  {
-    doc.addPage();
-    y = 20;
-    doc.setFontSize(13);
-    doc.setFont('helvetica', 'bold');
-    doc.text('How the My Lists tab works', margin, y);
-    doc.setFont('helvetica', 'normal');
-    y += 8;
-    doc.setFontSize(9);
-
-    const para = (heading: string, body: string) => {
-      if (y > 265) { doc.addPage(); y = 20; }
-      doc.setFont('helvetica', 'bold');
-      doc.text(heading, margin, y);
-      doc.setFont('helvetica', 'normal');
-      y += 5;
-      for (const sl of doc.splitTextToSize(body, maxWidth)) {
-        if (y > 272) { doc.addPage(); y = 20; }
-        doc.text(sl, margin, y);
-        y += 4.5;
-      }
-      y += 4;
-    };
-
-    para(
-      'Categories from Apple Health',
-      'If an Apple Health "Health Records" export PDF is among your files, MAIA converts it to ' +
-      'Markdown and splits it into one Markdown list per "### Category" heading it finds ' +
-      '(Medications, Conditions, Allergies, Procedures, Immunizations, Lab Results, Vital Signs, ' +
-      'etc.). These are saved under your account and shown here for viewing and download. If you ' +
-      'have no Apple Health export, this block reads "No Apple Health file categories are available."'
-    );
-    para(
-      'Patient Summary draft',
-      'During Setup, MAIA asks your primary Private AI (GPT) to generate a draft Patient ' +
-      'Summary from your full indexed knowledge base. The draft is stored privately and is not ' +
-      'committed until you review and Verify it on the Patient Summary tab.'
-    );
-    para(
-      'Current Medications Worksheets (Deepseek and GPT)',
-      'Each of your two Private AIs (Deepseek and GPT) independently builds a medication worksheet. ' +
-      'When an Apple Health export is present, the worksheet is built from the structured "Medication ' +
-      'Records" list (every entry has a date and page number), which is far more reliable than ' +
-      'searching the whole knowledge base; otherwise it falls back to knowledge-base retrieval. Each ' +
-      'worksheet is a table with one row per medication: the drug name, a Status of Current / ' +
-      'Discontinued / Inpatient, the Last date prescribed, and a Source citing a short "File N" tag ' +
-      '(full filenames are listed as a legend at the bottom). The two AIs are run separately so you ' +
-      'can compare their results; use REFRESH on a card to regenerate. These worksheets replace the ' +
-      'older single Current Medications extract/verify step.'
-    );
-    para(
-      'Why two AIs',
-      'MAIA provisions two private agents per account (Deepseek and GPT), both attached to the same ' +
-      'knowledge base. Setup waits for BOTH to finish provisioning before completing, so both ' +
-      'worksheets can be generated and compared.'
-    );
-  }
+  // (Removed v1.4.5: the "How the My Lists tab works" static explainer
+  // page used to live here. It duplicated Documentation/Clinical.md and
+  // made the log harder to scan; the log should be operational events
+  // only, not reference docs. If you want the explainer, read
+  // Documentation/Clinical.md §1 directly.)
 
   const pdfBlob = doc.output('blob');
   await writeFileToFolder(localFolderHandle.value, 'maia-log.pdf', pdfBlob);
@@ -6734,6 +6804,24 @@ const triggerSetupWorksheets = () => {
       }
     })();
   }
+  // Also build the Encounters worksheet (deterministic — no agent call,
+  // just PDF parsing) so it's ready in My Lists without the user having
+  // to click "Generate". Pairs with the Medication Worksheets above.
+  void (async () => {
+    try {
+      const res = await fetch('/api/encounters/worksheet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ userId })
+      });
+      if (!res.ok) {
+        console.warn(`[Wizard] Encounters worksheet build failed: HTTP ${res.status}`);
+      }
+    } catch (err) {
+      console.warn('[Wizard] Encounters worksheet build error:', err);
+    }
+  })();
 };
 
 // ── TEST MODE: Auto-verify watchers ──────────────────────────────
