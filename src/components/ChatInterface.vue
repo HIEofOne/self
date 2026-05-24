@@ -2130,7 +2130,8 @@ const sendMessage = async () => {
             labRes.ok && labJson.success && labJson.available !== false &&
             Array.isArray(labJson.rows) && labJson.rows.length > 0
           ) {
-            const lines = labJson.rows.map(r => {
+            type LabRow = { isoDate?: string; value?: string | number; units?: string; flag?: string };
+            const lines = (labJson.rows as LabRow[]).map((r: LabRow) => {
               const flag = r.flag ? ` (${r.flag})` : '';
               const units = r.units ? ` ${r.units}` : '';
               return `- ${r.isoDate} — ${r.value}${units}${flag}`;
