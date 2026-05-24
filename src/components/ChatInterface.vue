@@ -457,8 +457,8 @@
               </q-item-section>
               <q-item-section>
                 <q-item-label :class="{ 'text-grey-5': !wizardCurrentMedications && !stage2StatusDisplay.completed && !wizardPreparingRecords }">
-                  Current Medications
-                  <span v-if="wizardCurrentMedications" class="text-green text-caption q-ml-sm">Verified</span>
+                  Medication Worksheets
+                  <span v-if="wizardCurrentMedications" class="text-green text-caption q-ml-sm">Generating in My Lists</span>
                   <span v-else-if="wizardPreparingRecords" class="text-primary text-caption q-ml-sm">Preparing...</span>
                   <span v-else-if="wizardFlowPhase === 'medications'" class="text-primary text-caption q-ml-sm">Verify in My Lists</span>
                 </q-item-label>
@@ -3269,6 +3269,7 @@ const generateSetupLogPdf = async () => {
     `Private AI (Deepseek) ready: ${gptAgentReady.value ? 'Yes' : 'Pending'}`,
     `KB indexed: ${hasIndexing ? 'Yes' : 'Pending'} (${indexTokens} tokens)`,
     `Current Medications: ${wizardCurrentMedications.value ? 'Verified' : 'Pending verification'}`,
+    `Medication Worksheets: see My Lists (GPT + Deepseek)`,
     `Patient Summary: ${hasSummary ? 'Yes' : 'No'}`
   ];
   for (const item of summaryItems) {
@@ -6316,6 +6317,9 @@ const startSetupWizardPolling = () => {
           logProvisioningEvent({ event: 'setup-resumed', reason: 'current-medications-not-verified' });
         } else {
           // Meds verified, summary still a draft → resume at summary phase.
+          // (Common after Restore: restored Patient Summary is a draft until
+          // the user verifies it. Logged once: the phase flip to 'summary'
+          // keeps this block from re-entering.)
           wizardFlowPhase.value = 'summary';
           myStuffInitialTab.value = 'summary';
           showMyStuffDialog.value = true;
@@ -6609,8 +6613,9 @@ watch(
       }
 
       // Step 2: Trigger background generation of both Medication Worksheets
-      // (Deepseek + GPT) and kick off GPT provisioning so it deploys
-      // concurrently with indexing. Setup completion is gated on GPT.
+      // (GPT + Deepseek) and kick off the secondary Private AI provisioning
+      // so it deploys concurrently with indexing. Setup completion is gated
+      // on the secondary being ready.
       wizardPreparingMessage.value = 'Generating medication worksheets from your records...';
       void ensureGptProvisioned();
       triggerSetupWorksheets();
