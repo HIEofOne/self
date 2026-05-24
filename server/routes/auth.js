@@ -82,8 +82,12 @@ function isValidUUID(value) {
 }
 
 // Model identifiers for the two Private AI agents. Matched against the
-// DO catalog by inference_name / name / id. The primary (Deepseek) is
-// the default; the secondary (GPT-OSS-120B) backs "Private AI (GPT)".
+// DO catalog by inference_name / name / id. The primary (GPT-OSS-120B)
+// is the default; the secondary (Deepseek V4 Pro) backs the historical
+// "Private AI (Deepseek)" profile slot. NOTE: profile keys 'default' and
+// 'gpt' stay as historical identifiers — 'default' now resolves a GPT
+// agent, 'gpt' now resolves a Deepseek agent (kept to avoid migrating
+// every existing userDoc.agentProfiles[*].agentId).
 export const MODEL_DEEPSEEK = { inference_name: 'deepseek-v4-pro', name: 'Deepseek V4 Pro', id: 'deepseek-v4-pro' };
 export const MODEL_GPT = { inference_name: 'openai-gpt-oss-120b', name: 'OpenAI GPT-oss-120b', id: 'openai-gpt-oss-120b' };
 
@@ -92,11 +96,11 @@ const matchesModel = (m, spec) =>
   m.name === spec.name ||
   (spec.id && m.id === spec.id);
 
-// `modelSpec` selects which catalog model to resolve (default Deepseek).
-// `process.env.DO_MODEL_ID` only applies to the primary/Deepseek agent —
-// the GPT agent must always resolve its own model from the catalog.
-async function resolveModelAndProject(doClient, modelSpec = MODEL_DEEPSEEK) {
-  const isPrimary = modelSpec === MODEL_DEEPSEEK;
+// `modelSpec` selects which catalog model to resolve (default GPT, the
+// primary). `process.env.DO_MODEL_ID` only applies to the primary agent —
+// the secondary must always resolve its own model from the catalog.
+async function resolveModelAndProject(doClient, modelSpec = MODEL_GPT) {
+  const isPrimary = modelSpec === MODEL_GPT;
   let modelId = isPrimary ? process.env.DO_MODEL_ID : undefined;
   let projectId = process.env.DO_PROJECT_ID;
 
@@ -134,7 +138,7 @@ async function resolveModelAndProject(doClient, modelSpec = MODEL_DEEPSEEK) {
   }
 
   // FALLBACK: reuse an existing agent's model UUID (primary only —
-  // never silently give the GPT agent a non-GPT model).
+  // never silently give the secondary agent the wrong model).
   if (!isValidUUID(modelId) && isPrimary) {
     try {
       const agents = await doClient.agent.list();
@@ -454,11 +458,13 @@ export async function ensureUserAgent(doClient, cloudant, userDoc) {
   return userDoc;
 }
 
-// Ensure the SECONDARY "Private AI (GPT)" agent exists, recorded under
-// userDoc.agentProfiles.gpt. Idempotent: reuses the agent if its id
-// still resolves in DO, otherwise creates one. The GPT agent's initial
-// system prompt is a ONE-TIME COPY of the primary agent's current
-// instruction (falling back to NEW-AGENT.txt); the two then diverge.
+// Ensure the SECONDARY "Private AI (Deepseek)" agent exists, recorded
+// under userDoc.agentProfiles.gpt (profile key kept for historical
+// reasons — see MODEL_GPT/MODEL_DEEPSEEK comment above). Idempotent:
+// reuses the agent if its id still resolves in DO, otherwise creates
+// one. The secondary agent's initial system prompt is a ONE-TIME COPY
+// of the primary agent's current instruction (falling back to
+// NEW-AGENT.txt); the two then diverge.
 // The same user KB is attached (DO KB→agent is many-to-many). This is
 // called from the same places that ensure the primary agent (Setup
 // completion, rehydrate, sign-in backfill) so existing accounts get
@@ -494,9 +500,9 @@ export async function ensureSecondaryAgent(doClient, cloudant, userDoc) {
     lockPromise.catch(() => {});
     agentCreationLocks.set(lockKey, lockPromise);
     try {
-      const { modelId, projectId } = await resolveModelAndProject(doClient, MODEL_GPT);
+      const { modelId, projectId } = await resolveModelAndProject(doClient, MODEL_DEEPSEEK);
       if (!isValidUUID(modelId) || !isValidUUID(projectId)) {
-        throw new Error('Unable to resolve GPT model or project ID for secondary agent creation');
+        throw new Error('Unable to resolve Deepseek model or project ID for secondary agent creation');
       }
       // One-time copy of the primary agent's instruction.
       let instruction = '';
@@ -542,7 +548,7 @@ export async function ensureSecondaryAgent(doClient, cloudant, userDoc) {
       agentId: gptAgentId,
       agentName: resolved.name,
       endpoint,
-      modelName: resolved.model?.inference_name || resolved.model?.name || MODEL_GPT.inference_name
+      modelName: resolved.model?.inference_name || resolved.model?.name || MODEL_DEEPSEEK.inference_name
     });
     userDoc.updatedAt = new Date().toISOString();
     try {

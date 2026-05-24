@@ -157,7 +157,14 @@ Start with the patient's name, age, and sex on the first line.
 
 {patientIdentity}
 
-Then produce the following sections, in this order, each on its own highlighted heading line followed by a concise prose paragraph or short list (do not invent sub-headings, and do not show your reasoning):
+Then produce the following sections, in this order, each on its own highlighted heading line followed by a concise prose paragraph or short list (do not invent sub-headings, and do not show your reasoning).
+
+**You MUST emit EVERY heading below, in this exact order**, regardless of how much data you found. Do not skip, merge, or rename headings.
+
+For each section, in order of preference:
+1. If an **authoritative block** is provided for that section below (look for "Authoritative …" headers further down), use it AS-IS — those blocks override the knowledge base.
+2. Otherwise, **search the knowledge base** for that topic and summarize what you find. Do this BEFORE giving up — the absence of an authoritative block does NOT mean the data is missing; it just means it wasn't extracted deterministically.
+3. ONLY if BOTH an authoritative block is absent AND the knowledge base has nothing on the topic, write the heading followed by exactly: "Not documented in the available records."
 
 - Medical History — a concise narrative including surgical history.
 - Recent Visits (past 12 months) — providers seen and the diagnoses from those visits.

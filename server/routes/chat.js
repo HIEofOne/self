@@ -536,7 +536,14 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
     let live = false;
     try {
       const a = await doClient.agent.get(agentId);
-      live = !!(a?.deployment?.url);
+      // BOTH conditions required: a deployment URL AND STATUS_RUNNING.
+      // A URL alone can return 403 on the first request while the agent
+      // is still booting (the regression behind "selected the agent, got
+      // AGENT_NOT_READY / 403"). Restore declared itself complete on
+      // URL-present, then the dropdown advertised an agent that wasn't
+      // actually serving yet.
+      const status = a?.deployment?.status;
+      live = !!(a?.deployment?.url) && status === 'STATUS_RUNNING';
     } catch {
       live = false; // 404 / destroyed / unreachable → not live
     }
@@ -547,32 +554,52 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
   // Describe which Private AI agents (profiles) are deployed for a doc.
   // The frontend renders one dropdown entry per ready profile and sends
   // `agentProfileKey` alongside provider 'digitalocean'.
+  // Label is derived from the ACTUAL model behind each profile, not from
+  // the profile key. Profile keys 'default' / 'gpt' are historical slots
+  // — for accounts created before the GPT/Deepseek swap, profile key
+  // 'default' still points at a Deepseek agent and 'gpt' at GPT. We must
+  // not mis-label them. The dropdown is then sorted so GPT comes first
+  // (primary), Deepseek second, regardless of which slot each happens to
+  // live in for this user.
+  const labelForModel = (modelName) => {
+    const m = String(modelName || '').toLowerCase();
+    if (m.includes('gpt')) return 'Private AI (GPT)';
+    if (m.includes('deepseek')) return 'Private AI (Deepseek)';
+    return 'Private AI';
+  };
+  const sortKeyForModel = (modelName) => {
+    const m = String(modelName || '').toLowerCase();
+    if (m.includes('gpt')) return 0; // GPT first (primary)
+    if (m.includes('deepseek')) return 1;
+    return 2;
+  };
+
   const buildPrivateAiProfiles = async (doc) => {
     if (!doc) return [];
     const out = [];
     const profiles = (doc.agentProfiles && typeof doc.agentProfiles === 'object') ? doc.agentProfiles : {};
-    // Primary / Deepseek — also satisfied by the flat fields for
-    // legacy docs that predate agentProfiles. (The primary is already
-    // gated upstream by workflowStage / ensureUserAgent.)
+
+    // 'default' slot — also satisfied by the flat fields for legacy docs
+    // that predate agentProfiles. Same liveness gate as the other slot:
+    // STATUS_RUNNING + URL (a URL-only / STATUS_DEPLOYING agent 403s on
+    // first request).
     const def = profiles.default || {};
-    const defReady = !!((def.agentId && def.endpoint) || (doc.assignedAgentId && doc.agentEndpoint));
-    if (defReady) {
-      out.push({
-        key: 'default',
-        label: 'Private AI (Deepseek)',
-        model: def.modelName || doc.agentModelName || 'deepseek-v4-pro'
-      });
+    const primaryAgentId = def.agentId || doc.assignedAgentId || null;
+    const primaryEndpoint = def.endpoint || doc.agentEndpoint || null;
+    if (primaryAgentId && primaryEndpoint && await verifyAgentLive(primaryAgentId)) {
+      const model = def.modelName || doc.agentModelName || 'openai-gpt-oss-120b';
+      out.push({ key: 'default', label: labelForModel(model), model });
     }
-    // Secondary / GPT — only when its agent is verified LIVE in DO, not
-    // merely present in the (possibly stale) profile.
+
+    // 'gpt' slot (historical name — may now be a Deepseek agent).
     const gpt = profiles.gpt || {};
     if (gpt.agentId && gpt.endpoint && await verifyAgentLive(gpt.agentId)) {
-      out.push({
-        key: 'gpt',
-        label: 'Private AI (GPT)',
-        model: gpt.modelName || 'openai-gpt-oss-120b'
-      });
+      const model = gpt.modelName || 'deepseek-v4-pro';
+      out.push({ key: 'gpt', label: labelForModel(model), model });
     }
+
+    // Sort so the user always sees GPT (primary) first.
+    out.sort((a, b) => sortKeyForModel(a.model) - sortKeyForModel(b.model));
     return out;
   };
 

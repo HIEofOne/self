@@ -963,8 +963,8 @@
               indicator-color="primary"
             >
               <q-tab name="summary" label="Summary" />
-              <q-tab name="inst-default" label="Instructions for Deepseek" />
-              <q-tab name="inst-gpt" label="Instructions for GPT" />
+              <q-tab name="inst-default" label="Instructions for GPT" />
+              <q-tab name="inst-gpt" label="Instructions for Deepseek" />
             </q-tabs>
 
             <!-- Instruction editor (per-agent Patient Summary prompt override) -->
@@ -1031,7 +1031,7 @@
                     <div class="row items-center justify-between q-mb-sm">
                       <div>
                         <div class="text-subtitle2">
-                          Private AI ({{ cand.profileKey === 'gpt' ? 'GPT' : 'Deepseek' }})
+                          Private AI ({{ /gpt/i.test(String(cand.model || '')) ? 'GPT' : (/deepseek/i.test(String(cand.model || '')) ? 'Deepseek' : (cand.profileKey === 'gpt' ? 'Deepseek' : 'GPT')) }})
                           <span v-if="cand.ok" class="text-caption text-grey-7 q-ml-sm">
                             {{ cand.model }}{{ cand.generationSeconds ? ` · ${cand.generationSeconds}s` : '' }}
                           </span>
@@ -1223,36 +1223,11 @@
       </q-card>
     </q-dialog>
 
-    <!-- Current Medications Mismatch Warning -->
-    <q-dialog v-model="showMedsMismatchDialog" persistent>
-      <q-card style="min-width: 420px; max-width: 560px">
-        <q-card-section>
-          <div class="text-h6 text-negative">
-            <q-icon name="warning" class="q-mr-sm" />
-            Medications Mismatch
-          </div>
-        </q-card-section>
-        <q-card-section class="q-pt-none text-body2">
-          The Current Medications section in the Patient Summary does not match
-          your verified Current Medications list. An inconsistent Patient Summary
-          could lead to incorrect medical information being shared.
-        </q-card-section>
-        <q-card-actions align="right" class="q-gutter-sm">
-          <q-btn
-            flat
-            label="I UNDERSTAND"
-            color="grey-8"
-            @click="handleMedsMismatchAcknowledge"
-          />
-          <q-btn
-            unelevated
-            label="UPDATE"
-            color="primary"
-            @click="handleMedsMismatchUpdate"
-          />
-        </q-card-actions>
-      </q-card>
-    </q-dialog>
+    <!-- (The "Medications Mismatch" modal that previously offered an
+         I UNDERSTAND / UPDATE choice was removed: when verified Current
+         Medications exist and disagree with the Patient Summary, the
+         summary is auto-patched in place. See checkMedicationsConsistency
+         + handleMedsMismatchUpdate.) -->
 
     <!-- PDF Viewer Modal -->
     <PdfViewerModal
@@ -1518,7 +1493,8 @@ const agentError = ref('');
 const agentInstructions = ref('');
 const editMode = ref(false);
 const editedInstructions = ref('');
-// Private AI agent profiles (Deepseek = 'default', GPT = 'gpt'). The
+// Private AI agent profiles (GPT = 'default' [primary], Deepseek = 'gpt'
+// [secondary] — profile keys kept for historical reasons; see auth.js). The
 // My AI Agent tab shows one sub-tab per profile, each with its own
 // system prompt + KB-attach toggle, all keyed by activeAgentProfile.
 const agentProfilesList = ref<Array<{ key: string; label: string }>>([]);
@@ -5630,14 +5606,19 @@ const checkMedicationsConsistency = async () => {
     const normalizedSummary = normalizeMedsText(medsFromSummary);
 
     if (normalizedList !== normalizedSummary) {
-      showMedsMismatchDialog.value = true;
-      // Log to setup log
+      // The Patient Summary disagrees with the user's Validated Current
+      // Medications list. The verified list is always authoritative — auto-
+      // patch the summary in place, no modal prompt (the previous
+      // "Medications Mismatch" dialog with UPDATE / I UNDERSTAND buttons
+      // is gone; an inconsistent summary is unsafe enough that we just fix
+      // it). The user still sees a positive toast.
       fetch('/api/wizard-log', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ userId: props.userId, event: 'Dialog: Medications Mismatch shown', details: {} })
+        body: JSON.stringify({ userId: props.userId, event: 'Patient Summary auto-updated with verified Current Medications (mismatch detected)', details: {} })
       }).catch(() => {});
+      await handleMedsMismatchUpdate();
     }
   } catch (err) {
     console.warn('[MyStuff] Failed to check medications consistency:', err);
@@ -5876,17 +5857,9 @@ const updateSummaryWithVerifiedMeds = async () => {
   }
 };
 
-/**
- * Handle I UNDERSTAND from the mismatch dialog: user accepts the difference.
- */
-const handleMedsMismatchAcknowledge = () => {
-  showMedsMismatchDialog.value = false;
-  medsMismatchAcknowledged.value = true;
-  fetch('/api/wizard-log', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
-    body: JSON.stringify({ userId: props.userId, event: 'Dialog: Medications Mismatch — user chose I UNDERSTAND', details: {} })
-  }).catch(() => {});
-};
+// (handleMedsMismatchAcknowledge removed with the Medications Mismatch
+// dialog — when verified meds differ from the Patient Summary we now
+// auto-patch in checkMedicationsConsistency, no user prompt.)
 
 const saveSummaryFromTab = async () => {
   if (!props.userId) {

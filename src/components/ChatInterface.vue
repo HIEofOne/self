@@ -988,8 +988,10 @@ const wizardCurrentMedications = ref(false);
 const wizardPatientSummary = ref(false);
 const wizardAgentReady = ref(false);
 const wizardStage1Complete = ref(false);
-// Secondary "Private AI (GPT)" provisioning state. Setup gates completion on
-// this so BOTH Private AIs exist before the wizard finishes.
+// Secondary "Private AI (Deepseek)" provisioning state (variable kept as
+// `gptAgentReady` for historical reasons — profile key is 'gpt'). Setup
+// gates completion on this so BOTH Private AIs exist before the wizard
+// finishes.
 const gptAgentReady = ref(false);
 const gptProvisioningActive = ref(false);
 const wizardUploadIntent = ref<'other' | 'restore' | null>(null);
@@ -1698,6 +1700,30 @@ const providerOptions = computed(() => {
   return opts;
 });
 
+// Re-derive each Private AI label from the actual model name and sort
+// GPT first, Deepseek second. We do this client-side (it also happens
+// server-side) so the dropdown stays correctly ordered even if the
+// server response is cached/stale. The 'default' / 'gpt' profile keys
+// are HISTORICAL slot names — for accounts created before the
+// GPT/Deepseek swap, profile key 'default' may still point at a
+// Deepseek agent. Pure function — call it on the array we just got
+// from the server.
+const normalizePrivateAiProfiles = (
+  raw: Array<{ key: string; label: string; model?: string }>
+): Array<{ key: string; label: string; model?: string }> => {
+  const labelFor = (m?: string, key?: string) => {
+    const s = String(m || '').toLowerCase();
+    if (s.includes('gpt')) return 'Private AI (GPT)';
+    if (s.includes('deepseek')) return 'Private AI (Deepseek)';
+    return key === 'gpt' ? 'Private AI (Deepseek)' : 'Private AI (GPT)';
+  };
+  const rank = (label: string) =>
+    /gpt/i.test(label) ? 0 : /deepseek/i.test(label) ? 1 : 2;
+  return [...raw]
+    .map(pr => ({ ...pr, label: labelFor(pr.model, pr.key) }))
+    .sort((a, b) => rank(a.label) - rank(b.label));
+};
+
 // True when the given label is any Private AI variant.
 const isPrivateAiLabel = (label: string) =>
   label === providerLabels.digitalocean ||
@@ -1867,11 +1893,14 @@ const loadProviders = async () => {
     }
     
     providers.value = availableProviders;
-    privateAiProfiles.value = Array.isArray(data.privateAiProfiles) ? data.privateAiProfiles : [];
+    privateAiProfiles.value = normalizePrivateAiProfiles(
+      Array.isArray(data.privateAiProfiles) ? data.privateAiProfiles : []
+    );
 
     if (providers.value.length > 0) {
       if (providers.value.includes('digitalocean')) {
-        // Default to the first ready Private AI profile (Deepseek).
+        // Default to the first ready Private AI profile (now GPT after
+        // normalize sort).
         selectedProvider.value = privateAiProfiles.value[0]?.label || providerLabels.digitalocean;
         showPrivateUnavailableDialog.value = false; // clear in case it was shown before refetch
       } else {
@@ -2025,6 +2054,57 @@ const sendMessage = async () => {
         console.warn('Could not fetch existing summary, generating new one:', err);
       }
     }
+    // MANUAL "patient summary" request to the Private AI:
+    // Re-route through /api/patient-summary/draft so the SAME Layer-2
+    // prompt, identity/encounters/allergies/OOR-labs/currentMedications
+    // injection, and primary-agent instructions are used. A typed message
+    // like "Please regenerate my patient summary" must NOT bypass those
+    // by going through raw /api/chat/digitalocean. The result is also
+    // saved as the formal Patient Summary (same as the SEND path).
+    {
+      const providerKeyForCheck = getProviderKey(selectedProvider.value);
+      if (mentionsSummary && !isUntouchedDefault && providerKeyForCheck === 'digitalocean' && props.user?.userId) {
+        try {
+          const draftRes = await fetch('/api/patient-summary/draft', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ userId: props.user.userId })
+          });
+          const draftJson = await draftRes.json().catch(() => ({}));
+          if (draftRes.ok && draftJson.success && draftJson.summary) {
+            const psLabel = assistantLabelForKey(providerKeyForCheck);
+            const psMessage: Message = {
+              role: 'assistant',
+              content: draftJson.summary,
+              authorType: 'assistant',
+              providerKey: providerKeyForCheck,
+              authorId: providerKeyForCheck,
+              authorLabel: psLabel,
+              name: psLabel
+            };
+            messages.value.push(psMessage);
+            await savePatientSummary(draftJson.summary);
+            originalMessages.value = JSON.parse(JSON.stringify(messages.value));
+            trulyOriginalMessages.value = JSON.parse(JSON.stringify(messages.value));
+            isStreaming.value = false;
+            showNewSummaryDialog.value = true;
+            return;
+          }
+          if (draftRes.status === 202 && draftJson.message) {
+            // Primary agent still deploying — surface a non-fatal note
+            // and fall through to the regular chat path so the user still
+            // gets *some* response (they can retry once the agent is up).
+            console.warn('[chat→patient-summary] draft pending:', draftJson.message);
+          } else if (!draftRes.ok) {
+            console.warn('[chat→patient-summary] draft failed:', draftJson.error || draftRes.status);
+          }
+        } catch (err) {
+          console.warn('[chat→patient-summary] draft request failed; falling back to raw chat:', err);
+        }
+      }
+    }
+
     // Build messages with file context
     const messagesWithContext = uploadedFiles.value.length > 0
       ? messages.value.map((msg, index) => {
@@ -3167,7 +3247,7 @@ const generateSetupLogPdf = async () => {
   // API versions
   const availableApis = providers.value.map(p => {
     const label = providerLabels[p] || p;
-    if (p === 'digitalocean') return `${label} (deepseek-v4-pro)`;
+    if (p === 'digitalocean') return `${label} (openai-gpt-oss-120b)`;
     if (p === 'anthropic') return `${label} (claude-opus-4-6)`;
     return label;
   }).join(', ');
@@ -3185,8 +3265,8 @@ const generateSetupLogPdf = async () => {
   const hasSummary = wizardPatientSummary.value;
   const summaryItems = [
     `Files uploaded: ${totalFiles}`,
-    `Private AI (Deepseek) ready: ${wizardStage1Complete.value ? 'Yes' : 'No'}`,
-    `Private AI (GPT) ready: ${gptAgentReady.value ? 'Yes' : 'Pending'}`,
+    `Private AI (GPT) ready: ${wizardStage1Complete.value ? 'Yes' : 'No'}`,
+    `Private AI (Deepseek) ready: ${gptAgentReady.value ? 'Yes' : 'Pending'}`,
     `KB indexed: ${hasIndexing ? 'Yes' : 'Pending'} (${indexTokens} tokens)`,
     `Current Medications: ${wizardCurrentMedications.value ? 'Verified' : 'Pending verification'}`,
     `Patient Summary: ${hasSummary ? 'Yes' : 'No'}`
@@ -3292,7 +3372,7 @@ const generateSetupLogPdf = async () => {
             return `[${t}] Files uploaded: ${parts.join(', ')}`;
           }
           case 'apple-health-detected': return `[${t}] Apple Health detected: ${evt.fileName || ''}`;
-          case 'agent-deployed': return `[${t}] Private AI (Deepseek) deployed and available${evt.elapsedMs ? ` (${formatElapsed(evt.elapsedMs)})` : ''}`;
+          case 'agent-deployed': return `[${t}] Private AI (GPT) deployed and available${evt.elapsedMs ? ` (${formatElapsed(evt.elapsedMs)})` : ''}`;
           case 'kb-indexed': {
             const parts = [];
             if (evt.fileCount) parts.push(`${evt.fileCount} files`);
@@ -3326,7 +3406,7 @@ const generateSetupLogPdf = async () => {
           case 'kb-connection-changed': {
             const verb = evt.action === 'connected' ? 'Connected' : 'Disconnected';
             const prep = evt.action === 'connected' ? 'to' : 'from';
-            const agent = evt.agentProfileKey === 'gpt' ? 'Private AI (GPT)' : 'Private AI (Deepseek)';
+            const agent = evt.agentProfileKey === 'gpt' ? 'Private AI (Deepseek)' : 'Private AI (GPT)';
             const role = evt.kbRole ? ` [${evt.kbRole}]` : '';
             return `[${t}] ${verb} ${evt.kbName || evt.kbKey}${role} ${prep} ${agent}`;
           }
@@ -3343,7 +3423,7 @@ const generateSetupLogPdf = async () => {
           case 'medications-extract-skipped':
             return `[${t}] AI medication extraction skipped (${evt.reason || 'unknown'}) — used patient-summary medications instead`;
           case 'meds-worksheet-generated': {
-            const agent = evt.agentProfileKey === 'gpt' ? 'Private AI (GPT)' : 'Private AI (Deepseek)';
+            const agent = evt.agentProfileKey === 'gpt' ? 'Private AI (Deepseek)' : 'Private AI (GPT)';
             const model = evt.model ? ` [${evt.model}]` : '';
             const files = evt.fileCount ? `, ${evt.fileCount} source file(s)` : '';
             const src = evt.sourceMode === 'apple-health-markdown'
@@ -3352,19 +3432,19 @@ const generateSetupLogPdf = async () => {
               : (evt.sourceMode === 'kb-retrieval' ? ', source: knowledge-base retrieval' : ''));
             return `[${t}] Current Medications Worksheet generated — ${agent}${model}${files}${src}`;
           }
-          case 'gpt-agent-created': return `[${t}] Private AI (GPT) agent created — deploying`;
+          case 'gpt-agent-created': return `[${t}] Private AI (Deepseek) agent created — deploying`;
           case 'gpt-agent-deployed':
-          case 'gpt-agent-ready': return `[${t}] Private AI (GPT) deployed and available`;
+          case 'gpt-agent-ready': return `[${t}] Private AI (Deepseek) deployed and available`;
           case 'encounters-worksheet-generated':
             return `[${t}] Encounters list built (${evt.encounterCount || 0} encounters from ${evt.fileCount || 0} file(s))`;
           case 'draft-summary-failed':
             return `[${t}] Draft Patient Summary FAILED${evt.status ? ` (HTTP ${evt.status})` : ''}${evt.reason ? ` — ${evt.reason}` : ''}`;
           case 'meds-worksheet-failed': {
-            const agent = evt.agentProfileKey === 'gpt' ? 'Private AI (GPT)' : 'Private AI (Deepseek)';
+            const agent = evt.agentProfileKey === 'gpt' ? 'Private AI (Deepseek)' : 'Private AI (GPT)';
             return `[${t}] Medications Worksheet FAILED — ${agent}${evt.status ? ` (HTTP ${evt.status})` : ''}${evt.reason ? ` — ${evt.reason}` : ''}`;
           }
           case 'meds-worksheet-pending': {
-            const agent = evt.agentProfileKey === 'gpt' ? 'Private AI (GPT)' : 'Private AI (Deepseek)';
+            const agent = evt.agentProfileKey === 'gpt' ? 'Private AI (Deepseek)' : 'Private AI (GPT)';
             return `[${t}] Medications Worksheet deferred — ${agent} not ready yet${evt.reason ? ` (${evt.reason})` : ''}`;
           }
           case 'medications-dismissed': return `[${t}] Medications step dismissed without verification`;
@@ -3435,7 +3515,14 @@ const generateSetupLogPdf = async () => {
             }
           }
           const testTag = isTest ? ' (TEST)' : '';
-          const label = (evt.event === 'setup-started' ? '--- Setup' : '--- Restore') + testTag + ' ---';
+          // Time-stamped section heading. We fold "[time] Setup started" /
+          // "[time] Restore started" INTO the divider so the bold section
+          // label itself unambiguously announces the start — matches the
+          // visual weight of the later "Setup complete" / "Restore
+          // complete" milestones.
+          const startTime = evt.time ? new Date(evt.time).toLocaleTimeString() : '??:??';
+          const action = evt.event === 'setup-started' ? 'Setup started' : 'Restore started';
+          const label = `--- ${action} @ ${startTime}${testTag} ---`;
           if (lastSession) {
             y += 3;
             doc.setDrawColor(100);
@@ -3449,6 +3536,9 @@ const generateSetupLogPdf = async () => {
           doc.setFont('helvetica', 'normal');
           doc.setFontSize(9);
           y += 6;
+          // Skip the separate "[time] Setup started" / "[time] Restore
+          // started" event line — already represented in the bold header.
+          continue;
         } else if (evt.event === 'account-deleted' && lastSession) {
           y += 3;
           doc.setDrawColor(100);
@@ -3554,7 +3644,7 @@ const generateSetupLogPdf = async () => {
     );
     para(
       'Patient Summary draft',
-      'During Setup, MAIA asks your primary Private AI (Deepseek) to generate a draft Patient ' +
+      'During Setup, MAIA asks your primary Private AI (GPT) to generate a draft Patient ' +
       'Summary from your full indexed knowledge base. The draft is stored privately and is not ' +
       'committed until you review and Verify it on the Patient Summary tab.'
     );
@@ -6552,10 +6642,11 @@ watch(
  * is expected and non-fatal; the user can Refresh it later.
  */
 /**
- * Ensure the secondary "Private AI (GPT)" agent is provisioned and deployed.
- * POSTs /api/agents/ensure-secondary (idempotent) and polls until the agent
- * reports an endpoint (ready) or the timeout elapses. Sets gptAgentReady.
- * Returns true if GPT is ready. Never throws.
+ * Ensure the secondary "Private AI (Deepseek)" agent is provisioned and
+ * deployed. POSTs /api/agents/ensure-secondary (idempotent) and polls
+ * until the agent reports an endpoint (ready) or the timeout elapses.
+ * Sets gptAgentReady (variable kept for historical reasons; profile key
+ * stays 'gpt'). Returns true if the secondary is ready. Never throws.
  */
 let gptProvisioningInflight: Promise<boolean> | null = null;
 const ensureGptProvisioned = (maxMs = 240000, silent = false, intervalMs = 8000): Promise<boolean> => {
@@ -6582,7 +6673,7 @@ const runEnsureGptProvisioned = async (maxMs: number, silent: boolean, intervalM
   if (!silent && $q?.notify) {
     notif = $q.notify({
       type: 'ongoing',
-      message: 'Provisioning your second Private AI (GPT)…',
+      message: 'Provisioning your second Private AI (Deepseek)…',
       timeout: 0
     });
   }
@@ -6608,9 +6699,9 @@ const runEnsureGptProvisioned = async (maxMs: number, silent: boolean, intervalM
     gptProvisioningActive.value = false;
     if (notif) {
       if (gptAgentReady.value) {
-        notif({ type: 'positive', message: 'Private AI (GPT) is ready.', timeout: 2500 });
+        notif({ type: 'positive', message: 'Private AI (Deepseek) is ready.', timeout: 2500 });
       } else {
-        notif({ type: 'warning', message: 'Private AI (GPT) is still deploying — you can use it from My Lists / the chat shortly.', timeout: 5000 });
+        notif({ type: 'warning', message: 'Private AI (Deepseek) is still deploying — you can use it from My Lists / the chat shortly.', timeout: 5000 });
       }
     }
   }
@@ -6778,7 +6869,7 @@ const handleIndexingStarted = (data: { jobId: string; phase: string }) => {
   };
   startStage3ElapsedTimer();
   updateContextualTip();
-  // Concurrency: kick off the second Private AI (GPT) NOW, while the KB
+  // Concurrency: kick off the second Private AI (Deepseek) NOW, while the KB
   // indexes (often many minutes). Both agents then deploy in parallel and
   // GPT is usually ready by the time indexing finishes — instead of being
   // created lazily at the end (which left the user waiting on it). Silent
@@ -7096,11 +7187,12 @@ const handlePatientSummarySaved = async (payload?: { userId?: string; summary?: 
   await refreshWizardState();
   // Guided flow: saving summary also completes the flow
   if (wizardFlowPhase.value === 'summary') {
-    // Gate completion on BOTH Private AIs being provisioned (Deepseek is
-    // already up; wait for GPT to finish deploying).
+    // Gate completion on BOTH Private AIs being provisioned (GPT — the
+    // primary — is already up; wait for Deepseek (secondary) to finish
+    // deploying).
     if (!gptAgentReady.value) {
       wizardPreparingRecords.value = true;
-      wizardPreparingMessage.value = 'Finishing setup — provisioning Private AI (GPT)…';
+      wizardPreparingMessage.value = 'Finishing setup — provisioning Private AI (Deepseek)…';
       await ensureGptProvisioned();
       wizardPreparingRecords.value = false;
     }
@@ -7134,11 +7226,12 @@ const handlePatientSummaryVerified = async (payload?: { userId?: string; summary
   await refreshWizardState();
   // Guided flow: verifying summary completes the flow
   if (wizardFlowPhase.value === 'summary') {
-    // Gate completion on BOTH Private AIs being provisioned (Deepseek is
-    // already up; wait for GPT to finish deploying).
+    // Gate completion on BOTH Private AIs being provisioned (GPT — the
+    // primary — is already up; wait for Deepseek (secondary) to finish
+    // deploying).
     if (!gptAgentReady.value) {
       wizardPreparingRecords.value = true;
-      wizardPreparingMessage.value = 'Finishing setup — provisioning Private AI (GPT)…';
+      wizardPreparingMessage.value = 'Finishing setup — provisioning Private AI (Deepseek)…';
       await ensureGptProvisioned();
       wizardPreparingRecords.value = false;
     }

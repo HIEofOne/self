@@ -483,7 +483,7 @@ Please provide a list of all top-level markdown categories (### headings) and th
 
     // Call the agent (with 401 retry — stale API key auto-heals)
     const chatMessages = [{ role: 'user', content: prompt }];
-    const chatOptions = { model: userDoc.agentModelName || 'deepseek-v4-pro', stream: false };
+    const chatOptions = { model: userDoc.agentModelName || 'openai-gpt-oss-120b', stream: false };
 
     let response;
     try {
@@ -2946,7 +2946,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
 
       // Call the agent (with 401 retry — stale API key auto-heals)
       const chatMessages = [{ role: 'user', content: prompt }];
-      const chatOptions = { model: userDoc.agentModelName || 'deepseek-v4-pro', stream: false };
+      const chatOptions = { model: userDoc.agentModelName || 'openai-gpt-oss-120b', stream: false };
 
       let response;
       try {

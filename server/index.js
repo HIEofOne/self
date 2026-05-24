@@ -3513,15 +3513,16 @@ async function provisionUserAsync(userId, token) {
       projectId = await getProjectIdForGenAI(doClient) || projectId;
     }
 
-    // PREFERRED PATH: look up Deepseek V4 Pro in the DO catalog FIRST.
-    // Only fall back to an existing agent's model if the catalog lookup fails.
+    // PREFERRED PATH: look up GPT-OSS-120B (the primary model) in the DO
+    // catalog FIRST. Only fall back to an existing agent's model if the
+    // catalog lookup fails.
     if (!isValidUUID(modelId)) {
       try {
         const modelsResponse = await doClient.request('/v2/gen-ai/models');
         const models = modelsResponse.models || modelsResponse.data?.models || [];
         if (models.length > 0) {
           const preferredModel = models.find(m =>
-            m.inference_name === 'deepseek-v4-pro' || m.name === 'Deepseek V4 Pro' || m.id === 'deepseek-v4-pro'
+            m.inference_name === 'openai-gpt-oss-120b' || m.name === 'OpenAI GPT-oss-120b' || m.id === 'openai-gpt-oss-120b'
           );
           if (preferredModel && preferredModel.uuid && isValidUUID(preferredModel.uuid)) {
             modelId = preferredModel.uuid;
@@ -4382,7 +4383,7 @@ async function provisionUserAsync(userId, token) {
               const response = await agentProvider.chat(
                 [{ role: 'user', content: prompt }],
                 { 
-                  model: agentModelName || 'deepseek-v4-pro',
+                  model: agentModelName || 'openai-gpt-oss-120b',
                   stream: false
                 }
               );
@@ -4472,7 +4473,7 @@ async function provisionUserAsync(userId, token) {
 
             const summaryResponse = await agentProvider.chat(
               [{ role: 'user', content: summaryPrompt }],
-              { model: agentModelName || 'deepseek-v4-pro' }
+              { model: agentModelName || 'openai-gpt-oss-120b' }
             );
 
             const summary = summaryResponse.content || summaryResponse.text || '';
@@ -8714,7 +8715,7 @@ async function deleteUserAndResources(userId, options = {}) {
           }
         }
       }
-      // Explicitly delete the secondary "Private AI (GPT)" agent. (It
+      // Explicitly delete the secondary "Private AI (Deepseek)" agent. (It
       // is also caught by the orphan scan below since its name matches
       // `${userId}-agent-`, but delete it directly so it goes even if
       // the naming convention ever changes.)
@@ -9663,7 +9664,7 @@ app.put('/api/account/rehydrate', async (req, res) => {
       }
     }
 
-    // Rebuild the SECONDARY "Private AI (GPT)" agent too if its backed-up
+    // Rebuild the SECONDARY "Private AI (Deepseek)" agent too if its backed-up
     // id no longer resolves (Destroy Cloud Account removed it). Its KB is
     // re-attached by the post-restore /api/chat/providers poll once the
     // KB exists. Best-effort — never fail the whole restore over it.
@@ -10640,7 +10641,7 @@ app.post('/api/generate-patient-summary', async (req, res) => {
     try {
       // chat() method signature: chat(messages, options, onUpdate)
       const chatMessages = [{ role: 'user', content: summaryPrompt }];
-      const chatOptions = { model: userDoc.agentModelName || 'deepseek-v4-pro', stream: false };
+      const chatOptions = { model: userDoc.agentModelName || 'openai-gpt-oss-120b', stream: false };
 
       let summaryResponse;
       try {
@@ -10921,9 +10922,29 @@ async function buildPatientSummaryPromptForUser(userId, userDoc, profileKey = 'd
   // Allergies context: Apple Health's `allergies.md` is the authoritative
   // structured list. If present, inject it so the agent uses it AS-IS for
   // the Allergies section.
+  //
+  // Race-resistant fallback: during Setup, the PS draft is fired
+  // immediately after KB indexing completes, but the Lists/*.md sidecars
+  // (built by the Apple Health category-split pipeline) may not be
+  // written yet. If allergies.md is missing AND we already have the AH
+  // PDF markdown loaded in memory (`ahBuf`, used above for OOR labs),
+  // extract the "### Allergies" section inline so the placeholder is
+  // never empty just because the sidecar was racing.
   let allergies = '';
   try {
-    const allergiesMd = await readSpacesTextObject(`${userId}/Lists/allergies.md`);
+    let allergiesMd = await readSpacesTextObject(`${userId}/Lists/allergies.md`);
+    if ((!allergiesMd || !allergiesMd.trim()) && ahBuf) {
+      try {
+        const { extractPdfWithPages } = await import('./utils/pdf-parser.js');
+        const { extractAllergiesFromAppleHealthMarkdown } = await import('./utils/ah-section-extract.js');
+        const result = await extractPdfWithPages(ahBuf);
+        const fullMd = (result?.pages || []).map(p => p.markdown).join('\n\n');
+        const section = extractAllergiesFromAppleHealthMarkdown(fullMd);
+        if (section && section.trim()) allergiesMd = section;
+      } catch (e) {
+        console.warn(`[patient-summary] inline AH allergies fallback failed: ${e?.message || e}`);
+      }
+    }
     if (allergiesMd && allergiesMd.trim()) {
       allergies = `**Authoritative Allergies (from Apple Health):**\n${allergiesMd.trim()}\n\nUse this for the "Allergies" section above — do NOT replace it with anything from the knowledge base.`;
     }
@@ -11039,7 +11060,7 @@ app.post('/api/patient-summary/generate-pair', async (req, res) => {
     };
 
     const tasks = [
-      callOne(userDoc.agentApiKey, userDoc.agentEndpoint, userDoc.agentModelName || 'deepseek-v4-pro', 'default', userDoc.assignedAgentId, defaultPrompt)
+      callOne(userDoc.agentApiKey, userDoc.agentEndpoint, userDoc.agentModelName || 'openai-gpt-oss-120b', 'default', userDoc.assignedAgentId, defaultPrompt)
     ];
     if (gptAgentId && gptEndpoint && gptApiKey && !gptError) {
       tasks.push(callOne(gptApiKey, gptEndpoint, gptModel, 'gpt', gptAgentId, gptPrompt));
@@ -11175,12 +11196,47 @@ app.post('/api/patient-summary/draft', async (req, res) => {
     const { DigitalOceanProvider } = await import('../lib/chat-client/providers/digitalocean.js');
     const agentProvider = new DigitalOceanProvider(userDoc.agentApiKey, { baseURL: userDoc.agentEndpoint });
 
+    // Synchronously ensure Apple Health Lists/*.md sidecars exist before
+    // building the prompt. Without this, Setup races the category-split
+    // pipeline and emits a PS with empty Allergies / Recent Visits
+    // sections (the fragility described in clinical-prompts.md). Helper
+    // is idempotent — a no-op if the sidecars are already in place.
+    try {
+      const { ensureAppleHealthListsBuilt } = await import('./utils/lists-builder.js');
+      const bucketUrl = getSpacesBucketName();
+      const bucketName = bucketUrl ? (bucketUrl.split('//')[1]?.split('.')[0] || 'maia') : null;
+      if (bucketName) {
+        const { S3Client } = await import('@aws-sdk/client-s3');
+        const s3Client = new S3Client({
+          endpoint: getSpacesEndpoint(),
+          region: 'us-east-1',
+          forcePathStyle: process.env.S3_FORCE_PATH_STYLE === 'true',
+          credentials: {
+            accessKeyId: process.env.DIGITALOCEAN_AWS_ACCESS_KEY_ID || process.env.SPACES_AWS_ACCESS_KEY_ID || '',
+            secretAccessKey: process.env.DIGITALOCEAN_AWS_SECRET_ACCESS_KEY || process.env.SPACES_AWS_SECRET_ACCESS_KEY || ''
+          }
+        });
+        const outcome = await ensureAppleHealthListsBuilt(userId, userDoc, {
+          readSpacesObjectBuffer, readSpacesTextObject,
+          s3Client, bucketName, cloudant
+        });
+        if (outcome === 'built') {
+          // Re-fetch userDoc so the prompt builder sees the freshly-set
+          // appleHealthCategoriesBuiltAt / isAppleHealth flags.
+          const refreshed = await cloudant.getDocument('maia_users', userId);
+          if (refreshed) userDoc = refreshed;
+        }
+      }
+    } catch (e) {
+      console.warn(`[DRAFT SUMMARY] AH lists pre-build failed (non-fatal): ${e?.message || e}`);
+    }
+
     // Build the prompt via the shared helper (Layer-2 spec + currentMedications
     // + past-12mo encounters context). Used by every summary endpoint so they
     // can never drift.
     const draftPrompt = await buildPatientSummaryPromptForUser(userId, userDoc);
     const chatMessages = [{ role: 'user', content: draftPrompt }];
-    const chatOptions = { model: userDoc.agentModelName || 'deepseek-v4-pro', stream: false };
+    const chatOptions = { model: userDoc.agentModelName || 'openai-gpt-oss-120b', stream: false };
 
     let chatResp;
     try {
@@ -11332,7 +11388,7 @@ Output ONLY the list of current medications — one medication per line (name an
 
     const { DigitalOceanProvider } = await import('../lib/chat-client/providers/digitalocean.js');
     const agentProvider = new DigitalOceanProvider(userDoc.agentApiKey, { baseURL: userDoc.agentEndpoint });
-    const chatOptions = { model: userDoc.agentModelName || 'deepseek-v4-pro', stream: false };
+    const chatOptions = { model: userDoc.agentModelName || 'openai-gpt-oss-120b', stream: false };
 
     let chatResp;
     try {
@@ -11614,11 +11670,11 @@ app.post('/api/medications/worksheet', async (req, res) => {
           userDoc = await ensureSecondaryAgent(doClient, cloudant, userDoc);
           gpt = userDoc.agentProfiles?.gpt;
         } catch (e) {
-          return res.status(202).json({ success: false, pending: true, reason: 'GPT_PROVISIONING', message: 'Provisioning Private AI (GPT)…' });
+          return res.status(202).json({ success: false, pending: true, reason: 'GPT_PROVISIONING', message: 'Provisioning Private AI (Deepseek)…' });
         }
         if (!gpt?.endpoint) {
           // Created but still deploying — caller should retry shortly.
-          return res.status(202).json({ success: false, pending: true, reason: 'GPT_DEPLOYING', message: 'Private AI (GPT) is deploying — try Refresh in a few minutes.' });
+          return res.status(202).json({ success: false, pending: true, reason: 'GPT_DEPLOYING', message: 'Private AI (Deepseek) is deploying — try Refresh in a few minutes.' });
         }
       }
       agentId = gpt.agentId;
@@ -11630,7 +11686,7 @@ app.post('/api/medications/worksheet', async (req, res) => {
       }
       agentId = userDoc.assignedAgentId;
       endpoint = userDoc.agentEndpoint;
-      model = userDoc.agentModelName || 'deepseek-v4-pro';
+      model = userDoc.agentModelName || 'openai-gpt-oss-120b';
     }
 
     // File legend from the indexed KB files (File 1..N). Server-supplied
@@ -11754,7 +11810,7 @@ app.post('/api/medications/worksheet', async (req, res) => {
             // Agent (e.g. the GPT one) is still deploying — return a structured
             // pending response, not a 500, and record it.
             await appendUserProvisioningEvent(userId, { event: 'meds-worksheet-pending', agentProfileKey: profileKey, reason: 'AGENT_NOT_READY', status: rsc });
-            return res.status(202).json({ success: false, pending: true, reason: 'AGENT_NOT_READY', agentProfileKey: profileKey, message: `Private AI (${profileKey === 'gpt' ? 'GPT' : 'Deepseek'}) is still deploying — try Refresh shortly.` });
+            return res.status(202).json({ success: false, pending: true, reason: 'AGENT_NOT_READY', agentProfileKey: profileKey, message: `Private AI (${profileKey === 'gpt' ? 'Deepseek' : 'GPT'}) is still deploying — try Refresh shortly.` });
           }
           throw retryError;
         }
@@ -12029,7 +12085,7 @@ app.get('/api/encounters/worksheet', async (req, res) => {
   }
 });
 
-// Ensure the secondary "Private AI (GPT)" agent is provisioned and report
+// Ensure the secondary "Private AI (Deepseek)" agent is provisioned and report
 // whether it has finished deploying (endpoint resolved). The Setup wizard
 // calls this and polls until ready:true so BOTH Private AIs exist before
 // Setup completes. Safe to call repeatedly (ensureSecondaryAgent is

@@ -746,8 +746,41 @@ const executeRehydrate = async () => {
   // indexing) so we don't declare Restore complete while the Private AI
   // agent is still coming online — that gap is what produced the
   // user-visible "Authentication failed" on the first chat.
-  setStatus('Waiting for the Private AI agent to finish deploying…');
+  setStatus('Waiting for the primary Private AI agent to finish deploying…');
   try { await agentReadyPromise; } catch { /* non-fatal */ }
+
+  // Also wait for the SECONDARY Private AI agent (the historical 'gpt'
+  // profile slot, now Deepseek). The rehydrate flow on the server kicks
+  // off ensureSecondaryAgent in the background, but if we declare Restore
+  // complete before that finishes, the dropdown shows the secondary as
+  // "Not available: AGENT_NOT_READY" and the first chat attempt 403s.
+  // Same gate as Setup uses: poll /api/agents/ensure-secondary until it
+  // reports `ready:true` (which itself requires STATUS_RUNNING). Cap the
+  // wait so a stuck deploy doesn't hang Restore forever — the chat
+  // chooser will pick the secondary up on its own once it goes live.
+  setStatus('Waiting for the secondary Private AI agent to finish deploying…');
+  try {
+    const secondaryStart = Date.now();
+    const maxMs = 240000; // 4 min ceiling — matches Setup's ensureGptProvisioned
+    while (Date.now() - secondaryStart < maxMs) {
+      try {
+        const res = await fetch('/api/agents/ensure-secondary', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ userId: uid })
+        });
+        const d = await res.json().catch(() => ({}));
+        if (res.ok && d.ready) {
+          logProvisioningEvent({ event: 'gpt-agent-ready', elapsedMs: Date.now() - secondaryStart });
+          break;
+        }
+      } catch { /* keep polling */ }
+      const secs = Math.round((Date.now() - secondaryStart) / 1000);
+      setStatus(`Deploying secondary Private AI… (${Math.floor(secs / 60)}m ${secs % 60}s)`);
+      await new Promise(r => setTimeout(r, 6000));
+    }
+  } catch { /* non-fatal — never block Restore on the secondary */ }
 
   await logProvisioningEvent({ event: 'restore-complete' });
   restoreSummary.value = 'Account restored from local backup.';
@@ -1380,6 +1413,32 @@ const executeRestore = async () => {
     if (doneItems.some(i => i.key === 'chats')) parts.push('chats restored');
     if (errorItems.length > 0) parts.push(`${errorItems.length} failed`);
     restoreSummary.value = parts.join(', ') + '.';
+
+    // Same secondary-agent gate as the v2 rehydrate path. Without this,
+    // legacy-path Restore declares itself complete while the secondary
+    // Private AI is still deploying — the chooser then advertises an
+    // agent that 403s on first chat.
+    try {
+      const secondaryStart = Date.now();
+      const maxMs = 240000;
+      while (Date.now() - secondaryStart < maxMs) {
+        try {
+          const res = await fetch('/api/agents/ensure-secondary', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ userId: uid })
+          });
+          const d = await res.json().catch(() => ({}));
+          if (res.ok && d.ready) {
+            logProvisioningEvent({ event: 'gpt-agent-ready', elapsedMs: Date.now() - secondaryStart });
+            break;
+          }
+        } catch { /* keep polling */ }
+        await new Promise(r => setTimeout(r, 6000));
+      }
+    } catch { /* non-fatal */ }
+
     await logProvisioningEvent({ event: 'restore-complete' });
 
     phase.value = 'complete';
