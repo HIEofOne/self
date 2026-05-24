@@ -3860,22 +3860,25 @@ const loadPrivacyFilter = async () => {
       ? props.originalMessages 
       : props.messages;
     
-    // Filter to only Private AI messages and user messages for name extraction
-    // Private AI is identified by providerKey === 'digitalocean'
-    const messagesToAnalyze = allMessages.filter(msg => {
-      // Include user messages (they may contain names)
-      if (msg.role === 'user') {
-        return true;
-      }
-      // Include only Private AI assistant messages
-      if (msg.role === 'assistant') {
-        const isPrivateAI = (msg as any).providerKey === 'digitalocean' || 
-                            (msg as any).authorLabel === 'Private AI' ||
-                            (msg as any).name === 'Private AI';
-        return isPrivateAI;
-      }
-      return false;
-    });
+    // Include EVERY user and assistant message in the name-extraction
+    // pass, regardless of which provider authored it. The previous
+    // filter (Private AI assistant messages only — `providerKey ===
+    // 'digitalocean'` / `authorLabel === 'Private AI'`) became
+    // load-bearing after the v1.4.0 Patient Summary overhaul:
+    // post-overhaul assistant messages carry labels like
+    // "Private AI (GPT)" / "Private AI (Deepseek)" and PS-routed /
+    // lab-history-routed messages set their own labels too. Public-AI
+    // responses (Anthropic, ChatGPT, public Deepseek) also legitimately
+    // contain patient names that need redacting. Excluding any of
+    // those from the analyze pass means their names are never added
+    // to `privacyFilterMapping`, so the subsequent replace pass has
+    // nothing to substitute — the user sees an unchanged chat.
+    // Including everything is also strictly safer: hiding any chat
+    // content from the redaction extractor leaks names, never the
+    // reverse.
+    const messagesToAnalyze = allMessages.filter(msg =>
+      msg.role === 'user' || msg.role === 'assistant'
+    );
     
     // Check if we have messages to query Private AI
     if (!messagesToAnalyze || messagesToAnalyze.length === 0) {
@@ -4681,13 +4684,31 @@ const filterCurrentChat = () => {
   });
   
   if (!hasChanges && !namesReplaced) {
+    // Self-diagnosing toast: tell the user EXACTLY what the filter
+    // saw so the next "doesn't replace" bug report comes with the
+    // information needed to find the root cause. The two common
+    // failure modes are (a) the mapping has names that don't appear
+    // in the chat content (extraction ran on different messages than
+    // the user is now viewing), or (b) the chat is already filtered.
     if ($q && typeof $q.notify === 'function') {
+      const mappingPreview = (privacyFilterMapping.value || [])
+        .slice(0, 5)
+        .map(m => m.original)
+        .filter(Boolean)
+        .join(', ');
+      const messageCount = messagesToFilter.length;
+      const mappingCount = (privacyFilterMapping.value || []).length;
+      const detail = mightBeFiltered
+        ? `Messages appear to already be filtered. Use truly original messages to re-filter. (${mappingCount} mappings, ${messageCount} messages scanned)`
+        : `Privacy Filter found no matches.\n` +
+          `• ${mappingCount} name${mappingCount === 1 ? '' : 's'} in the mapping${mappingPreview ? ` (${mappingPreview}${mappingCount > 5 ? '…' : ''})` : ''}\n` +
+          `• ${messageCount} message${messageCount === 1 ? '' : 's'} scanned\n` +
+          `If you expect names to be redacted, check that they appear LITERALLY in the chat text (the mapping is built from the names the Private AI extracted on Analyze; new messages added since may not be covered — re-run Analyze).`;
       $q.notify({
         type: 'info',
-        message: mightBeFiltered 
-          ? 'Messages appear to already be filtered. Use truly original messages to re-filter.'
-          : 'No names found to replace in messages. They may not be present in the current chat.',
-        timeout: 4000
+        message: detail,
+        timeout: 10000,
+        multiLine: true
       });
     }
     return;
