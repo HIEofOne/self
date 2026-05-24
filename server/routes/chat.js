@@ -264,27 +264,41 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
         res.setHeader('Cache-Control', 'no-cache');
         res.setHeader('Connection', 'keep-alive');
 
-        // Handle streaming updates
-        if (userAgentProvider) {
-          await userAgentProvider.chat(messages, { ...options, stream: true }, 
-            (update) => {
-              res.write(`data: ${JSON.stringify(update)}\n\n`);
-              
-              if (update.isComplete) {
-                res.end();
-              }
-            }
-          );
-        } else {
-          await chatClient.chat(provider, messages, { ...options, stream: true }, 
-            (update) => {
-              res.write(`data: ${JSON.stringify(update)}\n\n`);
-              
-              if (update.isComplete) {
-                res.end();
-              }
-            }
-          );
+        // Track whether the provider callback emitted isComplete=true
+        // (and thus called res.end()). If the provider's promise
+        // resolves WITHOUT having sent an isComplete update — which
+        // we've observed on certain deep-link sessions where the DO
+        // agent returns no body, and on transient upstream errors —
+        // we need to send a final SSE event AND end the response.
+        // Without this, the connection stays open and the client
+        // hangs at "Thinking…" with no console error.
+        let completedFromProvider = false;
+        const writeUpdate = (update) => {
+          try {
+            res.write(`data: ${JSON.stringify(update)}\n\n`);
+          } catch { /* connection already closed */ }
+          if (update.isComplete) {
+            completedFromProvider = true;
+            try { res.end(); } catch { /* already ended */ }
+          }
+        };
+
+        try {
+          if (userAgentProvider) {
+            await userAgentProvider.chat(messages, { ...options, stream: true }, writeUpdate);
+          } else {
+            await chatClient.chat(provider, messages, { ...options, stream: true }, writeUpdate);
+          }
+        } finally {
+          // Fallback: provider returned but never reported isComplete.
+          // Emit a synthetic completion event + close the stream so
+          // the client's read loop can exit normally.
+          if (!completedFromProvider && !res.writableEnded) {
+            try {
+              res.write(`data: ${JSON.stringify({ isComplete: true, reason: 'provider-stream-ended-without-isComplete' })}\n\n`);
+            } catch { /* ignore */ }
+            try { res.end(); } catch { /* ignore */ }
+          }
         }
       } else {
         // Non-streaming response

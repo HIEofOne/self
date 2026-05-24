@@ -12336,6 +12336,20 @@ app.get('/api/labs/history', async (req, res) => {
 
     const { buildLabHistory } = await import('./utils/lab-history.js');
     const { analyte, rows, total, entryCount } = buildLabHistory(md, analyteQuery);
+
+    // Include the user's Apple Health PDF filename so the chat client
+    // can render each row's `page` as a clickable [<filename> p.<page>]
+    // citation. processPageReferences in ChatInterface only auto-links
+    // page refs that name a filename in the same message; without this
+    // the deterministic lab history shows dates+values but no link to
+    // the source page.
+    let ahFileName = null;
+    try {
+      const udoc = await cloudant.getDocument('maia_users', userId);
+      const ahFile = (udoc?.files || []).find(f => f?.isAppleHealth && f?.fileName);
+      if (ahFile) ahFileName = ahFile.fileName;
+    } catch { /* non-fatal */ }
+
     res.json({
       success: true,
       analyte: analyte?.canonical || analyteQuery,
@@ -12343,7 +12357,8 @@ app.get('/api/labs/history', async (req, res) => {
       rows,
       total,
       entryCount,
-      source: 'apple-health/lab_results.md'
+      source: 'apple-health/lab_results.md',
+      ahFileName
     });
   } catch (error) {
     console.error('[labs/history] error:', error);

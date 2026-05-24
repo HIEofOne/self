@@ -2130,11 +2130,18 @@ const sendMessage = async () => {
             labRes.ok && labJson.success && labJson.available !== false &&
             Array.isArray(labJson.rows) && labJson.rows.length > 0
           ) {
-            type LabRow = { isoDate?: string; value?: string | number; units?: string; flag?: string };
+            type LabRow = { isoDate?: string; value?: string | number; units?: string; flag?: string; page?: number };
+            // Per-row citation in [<filename> p.<page>] format so the
+            // chat UI's processPageReferences turns each into a
+            // clickable link to the AH PDF at that page. Falls back to
+            // a bare date/value line when the AH filename isn't known
+            // (older accounts where ahFileName wasn't returned).
+            const ahFileName: string | null = (typeof labJson.ahFileName === 'string' && labJson.ahFileName) || null;
             const lines = (labJson.rows as LabRow[]).map((r: LabRow) => {
               const flag = r.flag ? ` (${r.flag})` : '';
               const units = r.units ? ` ${r.units}` : '';
-              return `- ${r.isoDate} — ${r.value}${units}${flag}`;
+              const citation = (ahFileName && r.page) ? ` [${ahFileName} p.${r.page}]` : '';
+              return `- ${r.isoDate} — ${r.value}${units}${flag}${citation}`;
             }).join('\n');
             const title = `**${labIntent.displayName} — complete history (deterministic, from your Apple Health export)**`;
             const note = `\n\n_${labJson.total} reading${labJson.total === 1 ? '' : 's'} across ${labJson.entryCount} lab event${labJson.entryCount === 1 ? '' : 's'}; sorted newest first. This list is exhaustive — pulled directly from your AH lab_results sidecar, not RAG._`;
@@ -2285,10 +2292,27 @@ const sendMessage = async () => {
     messages.value.push(assistantMessage);
     // DO NOT update originalMessages here - wait until streaming completes
 
-    // Read stream
+    // Read stream — with an idle timeout so a hung upstream (no data
+    // for N seconds) doesn't leave the user staring at "Thinking…"
+    // forever. Server-side also has a finally-block that always emits
+    // a terminating isComplete, but a transport-level stall (proxy,
+    // network) wouldn't hit that — the client-side timeout is the
+    // belt-and-suspenders.
+    const STREAM_IDLE_TIMEOUT_MS = 90_000;
+    const timeoutFor = (ms: number) => new Promise<{ done: true; value: undefined; timeout: true }>(resolve => {
+      setTimeout(() => resolve({ done: true, value: undefined, timeout: true }), ms);
+    });
     while (true) {
-      const { done, value } = await reader!.read();
-      
+      const result = await Promise.race([
+        reader!.read().then(r => ({ ...r, timeout: false })),
+        timeoutFor(STREAM_IDLE_TIMEOUT_MS)
+      ]) as { done: boolean; value?: Uint8Array; timeout?: boolean };
+      if (result.timeout) {
+        try { reader!.cancel(); } catch { /* ignore */ }
+        throw new Error(`Chat request timed out — the Private AI did not respond within ${Math.round(STREAM_IDLE_TIMEOUT_MS / 1000)}s. Try again, or reload if the problem persists.`);
+      }
+      const { done, value } = result;
+
       if (done) break;
 
       const chunk = decoder.decode(value, { stream: true });
