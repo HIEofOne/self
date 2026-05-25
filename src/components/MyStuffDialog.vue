@@ -1097,9 +1097,12 @@
                         @click="chooseSummaryCandidate(cand.text)"
                       />
                     </div>
-                    <div v-if="cand.ok && cand.text" class="text-body2 q-pa-sm bg-grey-1 rounded-borders">
-                      <vue-markdown :source="cand.text" />
-                    </div>
+                    <div
+                      v-if="cand.ok && cand.text"
+                      class="text-body2 q-pa-sm bg-grey-1 rounded-borders"
+                      v-html="renderPsHtml(cand.text)"
+                      @click="handlePsCitationClick"
+                    ></div>
                     <div v-else class="text-caption text-orange-9">
                       Not available: {{ cand.reason || cand.error || 'unknown' }}.
                       <span v-if="cand.reason === 'AGENT_NOT_READY' || cand.reason === 'GPT_NOT_READY'">
@@ -1369,9 +1372,12 @@
         </q-card-section>
 
         <q-card-section style="max-height: 60vh; overflow-y: auto;">
-          <div v-if="!editingSummary" class="text-body2">
-            <vue-markdown :source="summaryViewText" />
-          </div>
+          <div
+            v-if="!editingSummary"
+            class="text-body2"
+            v-html="renderPsHtml(summaryViewText)"
+            @click="handlePsCitationClick"
+          ></div>
           <q-input
             v-else
             v-model="summaryViewText"
@@ -1427,9 +1433,11 @@
           <div class="text-body1 q-mb-md">
             A new patient summary has been generated. Choose which summary to replace:
           </div>
-          <div class="text-body2 q-pa-md bg-grey-1 rounded-borders">
-            <vue-markdown :source="newSummaryToReplace" />
-          </div>
+          <div
+            class="text-body2 q-pa-md bg-grey-1 rounded-borders"
+            v-html="renderPsHtml(newSummaryToReplace)"
+            @click="handlePsCitationClick"
+          ></div>
         </q-card-section>
 
         <q-card-actions align="right" class="q-pa-md">
@@ -1748,19 +1756,22 @@ const showPdfViewer = ref(false);
 // "view file" clicks (which default to page 1).
 const pdfViewerInitialPage = ref<number | undefined>(undefined);
 
-// Pre-process Patient Summary text through processFileNCitations:
-// rewrites raw-filename citations into [File N p.<N>] tags, wraps
-// File N mentions into clickable anchors, appends a File legend.
-// Rendered via local markdown-it with html:true so the anchors
-// survive (vue-markdown-render's default strips HTML). The click
-// handler on the container intercepts .page-link anchors and opens
-// the right PDF at the right page.
-const patientSummaryHtml = computed(() => {
-  const txt = patientSummary.value || '';
+// Render arbitrary Patient Summary text (current PS, dual-summary
+// candidates, saved-summary viewer, replace-summary modal) through
+// processFileNCitations — rewrites raw-filename citations into
+// [File N p.<N>] tags, wraps File N mentions into clickable
+// anchors, appends a File legend. Rendered via local markdown-it
+// with html:true so the anchors survive (vue-markdown-render's
+// default strips HTML). Caller must put a @click handler on the
+// container that calls handlePsCitationClick to actually open the
+// PDF when one of the anchors is clicked.
+const renderPsHtml = (text: string | null | undefined): string => {
+  const txt = String(text || '');
   if (!txt.trim()) return '';
   const processed = processFileNCitations(txt, userFiles.value as any);
   return psMarkdown.render(processed);
-});
+};
+const patientSummaryHtml = computed(() => renderPsHtml(patientSummary.value));
 const handlePsCitationClick = (event: Event) => {
   const target = event.target as HTMLElement;
   const link = target.closest('.page-link') as HTMLElement | null;
