@@ -105,6 +105,45 @@ if (typeof window !== 'undefined') {
   pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.js';
 }
 
+// Per-session cache of the printed-page-number ↔ physical-page-number
+// offset for each PDF. Keyed by bucketKey (preferred) or fileUrl.
+// Computed once on first viewer open; reused for every subsequent
+// citation click on the same file.
+const pageOffsetCache = new Map<string, number>();
+
+/**
+ * Scan the first few physical pages of a PDF for a footer like
+ * `Page 1 of 444` and compute the offset between printed and
+ * physical pages. Many EHR exports have a cover or header page so
+ * the printed page numbers (which the LLM cites because they're
+ * the human-readable page reference) lag the physical page numbers
+ * (which the PDF viewer indexes by) by 1 or more.
+ *
+ * Returns offset such that `physicalPage = citationPage + offset`.
+ * Returns 0 when no footer is detectable (default to identity).
+ */
+async function detectPrintedPageOffset(pdf: any): Promise<number> {
+  const footerRe = /\bPage\s+(\d+)\s+of\s+\d+\b/i;
+  const maxScan = Math.min(8, pdf.numPages || 0);
+  for (let physical = 1; physical <= maxScan; physical++) {
+    try {
+      const page = await pdf.getPage(physical);
+      const tc = await page.getTextContent();
+      const text = (tc.items as Array<{ str: string }>).map(it => it.str).join(' ');
+      const m = text.match(footerRe);
+      if (m) {
+        const printed = parseInt(m[1], 10);
+        if (Number.isFinite(printed) && printed >= 1) {
+          // physical N has printed P → offset = N - P. So a later
+          // citation of printed P' maps to physical P' + (N - P).
+          return physical - printed;
+        }
+      }
+    } catch { /* keep scanning */ }
+  }
+  return 0;
+}
+
 interface Props {
   modelValue: boolean;
   file?: {
@@ -149,6 +188,10 @@ const pageInput = ref('');
 const pdfDocument = ref<any>(null);
 const isLoading = ref(false);
 const errorMessage = ref<string>('');
+// Offset between citation page (printed in footer / what the LLM
+// cites) and physical page (what the viewer renders). 0 when the
+// two coincide. See detectPrintedPageOffset above for the heuristic.
+const printedToPhysicalOffset = ref(0);
 
 // Computed
 const pdfUrl = computed(() => {
@@ -202,6 +245,17 @@ const loadPdfDocument = async () => {
     pdfDocument.value = loadingTask;
     const pdf = await loadingTask.promise;
     totalPages.value = pdf.numPages || 0;
+    // Compute (or fetch from cache) the citation→physical offset.
+    // Keyed by bucketKey when available (stable across sessions
+    // and viewer reopens), else by fileUrl as a fallback.
+    const cacheKey = props.file?.bucketKey || pdfUrl.value || '';
+    if (cacheKey && pageOffsetCache.has(cacheKey)) {
+      printedToPhysicalOffset.value = pageOffsetCache.get(cacheKey) || 0;
+    } else {
+      const off = await detectPrintedPageOffset(pdf);
+      printedToPhysicalOffset.value = off;
+      if (cacheKey) pageOffsetCache.set(cacheKey, off);
+    }
   } catch (error: any) {
     errorMessage.value = error?.message || 'Failed to load PDF. This file may not be a valid PDF.';
     pdfDocument.value = null;
@@ -255,12 +309,26 @@ const goToPage = () => {
   }
 };
 
+// Translate a citation (printed) page to physical, clamping to
+// available range. `printedToPhysicalOffset` is set after PDF load
+// + footer scan in loadPdfDocument; until then it's 0 (identity).
+const toPhysicalPage = (citationPage: number): number => {
+  const physical = citationPage + printedToPhysicalOffset.value;
+  if (!Number.isFinite(physical) || physical < 1) return 1;
+  if (totalPages.value > 0 && physical > totalPages.value) return totalPages.value;
+  return physical;
+};
+
 // Watch for file changes
 watch(() => props.file, (newFile) => {
   if (newFile && !isLoading.value) {
+    // Don't apply offset yet — PDF hasn't loaded so the offset is
+    // still its default 0. The offset gets applied below by the
+    // initialPage watcher AFTER load.
     currentPage.value = props.initialPage && props.initialPage > 0 ? props.initialPage : 1;
     totalPages.value = 0;
     errorMessage.value = '';
+    printedToPhysicalOffset.value = 0;
     loadPdfDocument();
   }
 }, { immediate: true });
@@ -268,16 +336,15 @@ watch(() => props.file, (newFile) => {
 // Watch for modal opening and initialPage changes
 watch(() => [props.modelValue, props.initialPage], ([isOpen, initialPage]) => {
   if (isOpen && props.file && initialPage !== undefined && typeof initialPage === 'number' && initialPage > 0) {
-    // Wait for PDF to load, then set the page
+    // Wait for PDF to load (so totalPages AND
+    // printedToPhysicalOffset are populated), then set the
+    // physical page derived from the citation page.
     const checkAndSetPage = () => {
       if (totalPages.value > 0) {
-        const pageNum = Number(initialPage);
-        if (pageNum <= totalPages.value) {
-          currentPage.value = pageNum;
-          pageInput.value = String(pageNum);
-        }
+        const physical = toPhysicalPage(Number(initialPage));
+        currentPage.value = physical;
+        pageInput.value = String(physical);
       } else {
-        // PDF not loaded yet, try again
         setTimeout(checkAndSetPage, 100);
       }
     };
