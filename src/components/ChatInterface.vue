@@ -4847,11 +4847,13 @@ const processPageReferences = (content: string): string => {
   );
   const fileNsReferenced = new Set<number>();
   if (pdfsByFileN.length > 0) {
-    const fileNTagPattern = /\[\s*File\s+(\d+)\s+p\.?\s*(\d+)\s*\]/gi;
-    content = content.replace(fileNTagPattern, (full, n, p) => {
+    // Wrap a single `File N p.<page>` mention in a clickable anchor,
+    // recording the resolved File index for the legend footer. Used
+    // by both the bracketed and bare-form passes below.
+    const buildAnchorFor = (n: string, p: string): string | null => {
       const idx = parseInt(n, 10) - 1;
       const target = pdfsByFileN[idx];
-      if (!target) return full; // unknown legend index — leave as-is
+      if (!target) return null;
       fileNsReferenced.add(idx);
       const pageNum = parseInt(p, 10);
       const label = `File ${n} p.${p}`;
@@ -4859,6 +4861,27 @@ const processPageReferences = (content: string): string => {
       const safeFileName = (target.fileName || '').replace(/"/g, '&quot;');
       const safeBucketKey = (target.bucketKey || '').replace(/"/g, '&quot;');
       return `<a href="#" class="page-link" data-filename="${safeFileName}" data-page="${pageNum}" data-bucket-key="${safeBucketKey}" title="${safeFileName}">${escapedLabel}</a>`;
+    };
+
+    // Pass 1: bracketed form `[File N p.<page>]` (or with multiple
+    // refs separated by `;` — split outside this regex by markdown).
+    const fileNTagPattern = /\[\s*File\s+(\d+)\s+p\.?\s*(\d+)\s*\]/gi;
+    content = content.replace(fileNTagPattern, (full, n, p) => buildAnchorFor(n, p) ?? full);
+
+    // Pass 2: bare form `File N p.<page>` (no brackets). The LLM
+    // sometimes drops the brackets when weaving citations into
+    // narrative prose ("…uneventful postoperative course File 3
+    // p.136."). Conservative: require a leading word boundary so we
+    // don't wrap things like "FileSystem 3 p.1", and require the
+    // `p.<digits>` so we don't match "File 3 contains 12 entries".
+    // Negative lookbehinds skip text already inside our pass-1
+    // anchor (`>File 3 p.136</a>`) — JS supports lookbehinds in
+    // modern browsers; we use a safer alternative: only match when
+    // NOT immediately preceded by `>` or `"` (anchor body/attr).
+    const bareFileNPattern = /(^|[^>"'\w])File\s+(\d+)\s+p\.?\s*(\d+)\b/gi;
+    content = content.replace(bareFileNPattern, (full, pre, n, p) => {
+      const anchor = buildAnchorFor(n, p);
+      return anchor ? `${pre}${anchor}` : full;
     });
     // Auto-append a visible "File legend" footer so users can see
     // which file each `File N` maps to. Without this, a citation like
