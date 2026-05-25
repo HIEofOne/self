@@ -10732,16 +10732,29 @@ function rewriteCitationsToFileLegend(text, userDoc, userId) {
     .filter(f => f.isReference !== true);
   if (pdfs.length === 0) return text;
 
+  // The KB indexes files under their SANITIZED bucket-key name (per
+  // /api/files/upload: replace(/[^a-zA-Z0-9.-]/g, '_')), so the LLM
+  // cites the cleaned form (e.g. `__Margaret__`) even when the
+  // userDoc display name preserves the original spaces (`_ Margaret _`).
+  // We therefore try BOTH forms when rewriting.
+  const sanitize = (s) => String(s || '').replace(/[^a-zA-Z0-9.-]/g, '_');
+
   // Build longest-first so a filename that's a prefix of another
   // (e.g. `A.PDF` vs `A.PDF-extra.PDF`) doesn't get matched as the
-  // shorter one inside a longer citation.
-  const ordered = pdfs
-    .map((f, i) => ({ idx: i, fileName: f.fileName }))
-    .sort((a, b) => b.fileName.length - a.fileName.length);
+  // shorter one inside a longer citation. Include both display and
+  // sanitized variants per file; dedupe identical strings.
+  const candidates = [];
+  pdfs.forEach((f, i) => {
+    const display = f.fileName;
+    const clean = sanitize(display);
+    candidates.push({ idx: i, name: display });
+    if (clean !== display) candidates.push({ idx: i, name: clean });
+  });
+  const ordered = candidates.sort((a, b) => b.name.length - a.name.length);
 
   let out = text;
-  for (const { idx, fileName } of ordered) {
-    const escName = fileName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  for (const { idx, name } of ordered) {
+    const escName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     // Either [<filename> p.<page>] or 【<filename> p.<page>】 .
     // Allow Page / page / p. between filename and number.
     const re = new RegExp(
