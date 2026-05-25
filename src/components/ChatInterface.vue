@@ -4832,6 +4832,33 @@ const viewFile = (file: UploadedFile, page?: number) => {
 // Strategy: Find "page"/"Page" + number in markdown, insert HTML links before parsing
 const processPageReferences = (content: string): string => {
   const pdfFiles = uploadedFiles.value.filter(f => f.type === 'pdf');
+
+  // First pass: resolve `[File N p.<page>]` legend-tag citations into
+  // direct hyperlinks. The server's Patient Summary prompt instructs
+  // the LLM to cite Radiology (and any other long-filename section)
+  // using `[File N p.<page>]` form to avoid spelling out unreadable
+  // Epic export filenames. File N maps to availableUserFiles[N-1]
+  // among PDFs (References excluded — the server uses the same
+  // filter as /api/user-files when building the legend). We rewrite
+  // the matched text inline as a clickable anchor that preserves
+  // the short `File N p.<page>` label.
+  const pdfsByFileN = availableUserFiles.value.filter(f =>
+    /\.pdf$/i.test(f.fileName || '')
+  );
+  if (pdfsByFileN.length > 0) {
+    const fileNTagPattern = /\[\s*File\s+(\d+)\s+p\.?\s*(\d+)\s*\]/gi;
+    content = content.replace(fileNTagPattern, (full, n, p) => {
+      const idx = parseInt(n, 10) - 1;
+      const target = pdfsByFileN[idx];
+      if (!target) return full; // unknown legend index — leave as-is
+      const pageNum = parseInt(p, 10);
+      const label = `File ${n} p.${p}`;
+      const escapedLabel = label.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const safeFileName = (target.fileName || '').replace(/"/g, '&quot;');
+      const safeBucketKey = (target.bucketKey || '').replace(/"/g, '&quot;');
+      return `<a href="#" class="page-link" data-filename="${safeFileName}" data-page="${pageNum}" data-bucket-key="${safeBucketKey}" title="${safeFileName}">${escapedLabel}</a>`;
+    });
+  }
   
   // Find all occurrences of a page reference: full word `Page`/`page`
   // OR the abbreviated `p.` form. The abbreviated form is what the
@@ -4898,8 +4925,13 @@ const processPageReferences = (content: string): string => {
   for (let i = pageReferences.length - 1; i >= 0; i--) {
     const { fullMatch, pageNum, index } = pageReferences[i];
     
-    // Skip if this text is already inside an HTML tag (to avoid double-linking)
-    const beforeMatch = processedContent.substring(Math.max(0, index - 50), index);
+    // Skip if this text is already inside an HTML tag (to avoid double-linking).
+    // Window is large because our File-N legend pre-pass (above) emits
+    // anchors whose `title=` / `data-filename=` attributes can hold
+    // very long Epic-export filenames; a small window would miss the
+    // opening `<a ` and let this loop re-wrap `p.<N>` inside those
+    // anchors.
+    const beforeMatch = processedContent.substring(Math.max(0, index - 1500), index);
     if (beforeMatch.includes('<a ') && !beforeMatch.includes('</a>')) {
       continue;
     }
