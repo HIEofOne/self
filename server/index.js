@@ -11184,6 +11184,47 @@ async function buildPatientSummaryPromptForUser(userId, userDoc, profileKey = 'd
     }
   }
 
+  // Build a File N → fileName legend covering ALL user PDFs (AH and
+  // non-AH alike), and append a citation-format constraint to the
+  // Radiology block. Radiology is the section most likely to fall
+  // through to free-form KB-RAG (no AH source for most users), and
+  // when raw filenames are long/mangled (e.g. Epic portal exports
+  // that pack two filenames into one: `<A>-<B>.PDF`), the LLM emits
+  // them verbatim and the citation becomes unreadable. With the
+  // legend in scope, the agent can — and is told to — cite as
+  // `[File N p.<page>]` instead, which the client renderer auto-
+  // links via processPageReferences (using availableUserFiles to
+  // resolve File N → real filename → clickable PDF URL).
+  //
+  // Same approach as the Stopped-Medications block (line ~11215),
+  // generalized: we include the legend even when there's no
+  // deterministic Radiology source, because the agent will still
+  // be doing KB-RAG and we want its citations constrained.
+  // Filter MUST mirror /api/user-files (exclude References folder and
+  // isReference=true) so that File N in the prompt resolves to the
+  // SAME index the client uses when matching against
+  // availableUserFiles. Then PDF-only and stable insertion order.
+  const referencesPrefix = `${userId}/References/`;
+  const pdfFilesForLegend = (Array.isArray(userDoc?.files) ? userDoc.files : [])
+    .filter(f => f && f.fileName && /\.pdf$/i.test(f.fileName))
+    .filter(f => !(f.bucketKey || '').startsWith(referencesPrefix))
+    .filter(f => f.isReference !== true);
+  if (pdfFilesForLegend.length > 0) {
+    const fileLegend = pdfFilesForLegend
+      .map((f, i) => `File ${i + 1}=${f.fileName}`)
+      .join('; ');
+    const citationRule =
+      `\n\n**Citation format for the Radiology section:** When citing any imaging study, use \`[File N p.<page>]\` only (e.g. \`[File 3 p.118]\`). NEVER spell out the raw filename — many filenames are long Epic export strings that render unreadably. (Legend: ${fileLegend})`;
+    if (radiology) {
+      radiology += citationRule;
+    } else {
+      // No AH-derived Radiology block. The agent will do KB-RAG; we
+      // still inject the legend + citation rule so any imaging it
+      // surfaces is cited in tag form.
+      radiology = `**Radiology / Imaging:** No deterministic Apple Health Radiology source available — synthesize from the knowledge base.${citationRule}`;
+    }
+  }
+
   // Stopped or Inactive Medications block: same deterministic source as
   // Current Medications (`resolvePatientMedicationSource` — Apple Health
   // medication_records.md or Epic Medication List). Splits on the 18-
