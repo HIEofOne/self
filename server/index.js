@@ -30,7 +30,7 @@ import { getEmbeddingModelIdForKb, getEmbeddingModelNameFromNewAgent } from './u
 import { getChunkingForDataSource, getChunkingForStrategy, getRerankingModelName } from './utils/kb-config.js';
 import { getProjectIdForGenAI } from './utils/project-config.js';
 import setupAuthRoutes from './routes/auth.js';
-import setupChatRoutes from './routes/chat.js';
+import setupChatRoutes, { getOwnerIdForDeepLinkSession } from './routes/chat.js';
 import setupFileRoutes from './routes/files.js';
 import { getUserBucketSize } from './routes/files.js';
 import {
@@ -5552,11 +5552,29 @@ app.get('/api/verify-file-state', async (req, res) => {
 // Get user files
 app.get('/api/user-files', async (req, res) => {
   try {
-    const { userId, subfolder, source } = req.query;
-    
+    const { subfolder, source } = req.query;
+    let { userId } = req.query;
+
+    // Deep-link guests have their own (empty) user doc — if we honor
+    // their userId here, the client's availableUserFiles list is empty
+    // and processPageReferences can't hyperlink any [<file> p.<page>]
+    // citation that the agent (or our deterministic worksheet
+    // endpoints) returns. Override to the owner's userId for deep-link
+    // sessions. The proxy-pdf endpoint already authorizes deep-link
+    // access to any bucketKey under the owner's prefix, so handing the
+    // file list over is consistent with what they can actually fetch.
+    if (isDeepLinkSession(req)) {
+      try {
+        const ownerId = await getOwnerIdForDeepLinkSession(req, cloudant);
+        if (ownerId) userId = ownerId;
+      } catch (e) {
+        console.warn('[user-files] deep-link owner lookup failed:', e?.message);
+      }
+    }
+
     if (!userId) {
-      return res.status(400).json({ 
-        success: false, 
+      return res.status(400).json({
+        success: false,
         message: 'User ID is required',
         error: 'MISSING_USER_ID'
       });
