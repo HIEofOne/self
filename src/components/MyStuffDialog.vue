@@ -1200,9 +1200,12 @@
                   placeholder="Enter patient summary..."
                 />
               </div>
-              <div v-else class="text-body1 q-pa-md bg-grey-1 rounded-borders">
-                <vue-markdown :source="patientSummary" />
-              </div>
+              <div
+                v-else
+                class="text-body1 q-pa-md bg-grey-1 rounded-borders"
+                v-html="patientSummaryHtml"
+                @click="handlePsCitationClick"
+              ></div>
 
               <div class="row items-center q-gutter-sm q-mt-md">
                 <q-btn
@@ -1311,6 +1314,7 @@
     <PdfViewerModal
       v-model="showPdfViewer"
       :file="viewingFile"
+      :initial-page="pdfViewerInitialPage"
     />
 
     <!-- Text/Markdown Viewer Modal -->
@@ -1454,11 +1458,18 @@
 <script setup lang="ts">
 import { ref, computed, watch, onUnmounted, nextTick } from 'vue';
 import VueMarkdown from 'vue-markdown-render';
+import MarkdownIt from 'markdown-it';
 import PdfViewerModal from './PdfViewerModal.vue';
 import TextViewerModal from './TextViewerModal.vue';
 import Lists from './Lists.vue';
 import { useQuasar } from 'quasar';
 import { deleteChatById } from '../utils/chatApi';
+import { processFileNCitations } from '../utils/fileNCitations';
+
+// Local markdown-it with html: true so the <a class="page-link"> anchors
+// emitted by processFileNCitations survive rendering. vue-markdown-render
+// has html: false by default which would strip them.
+const psMarkdown = new MarkdownIt({ html: true, linkify: false, breaks: false });
 
 interface UserFile {
   fileName: string;
@@ -1732,6 +1743,44 @@ const newSummaryToReplace = ref('');
 
 // PDF Viewer
 const showPdfViewer = ref(false);
+// Page to jump to when opening the PDF viewer via a File-N citation
+// click in the Patient Summary tab. Reset to undefined for direct
+// "view file" clicks (which default to page 1).
+const pdfViewerInitialPage = ref<number | undefined>(undefined);
+
+// Pre-process Patient Summary text through processFileNCitations:
+// rewrites raw-filename citations into [File N p.<N>] tags, wraps
+// File N mentions into clickable anchors, appends a File legend.
+// Rendered via local markdown-it with html:true so the anchors
+// survive (vue-markdown-render's default strips HTML). The click
+// handler on the container intercepts .page-link anchors and opens
+// the right PDF at the right page.
+const patientSummaryHtml = computed(() => {
+  const txt = patientSummary.value || '';
+  if (!txt.trim()) return '';
+  const processed = processFileNCitations(txt, userFiles.value as any);
+  return psMarkdown.render(processed);
+});
+const handlePsCitationClick = (event: Event) => {
+  const target = event.target as HTMLElement;
+  const link = target.closest('.page-link') as HTMLElement | null;
+  if (!link) return;
+  event.preventDefault();
+  const bucketKey = link.getAttribute('data-bucket-key');
+  const fileName = link.getAttribute('data-filename');
+  const pageStr = link.getAttribute('data-page');
+  if (!bucketKey || !fileName) return;
+  const page = pageStr ? parseInt(pageStr, 10) : undefined;
+  pdfViewerInitialPage.value = page;
+  // Build a minimal UserFile shape so viewFileInPdfViewer works.
+  viewFileInPdfViewer({
+    fileName,
+    bucketKey,
+    fileSize: 0,
+    uploadedAt: '',
+    inKnowledgeBase: true
+  } as UserFile);
+};
 const showTextViewer = ref(false);
 const viewingFile = ref<any>(null);
 
@@ -2618,13 +2667,15 @@ const viewFileInPdfViewer = (file: UserFile) => {
     name: file.fileName,
     type: detectFileTypeFromMetadata(file.fileName, file.fileType)
   };
-  
+
   // Determine file type and open appropriate viewer
   const fileType = detectFileTypeFromMetadata(file.fileName, file.fileType);
   if (fileType === 'pdf') {
     showPdfViewer.value = true;
     showTextViewer.value = false;
   } else {
+    // Non-PDFs ignore initialPage; clear it so the next PDF open doesn't inherit a stale value.
+    pdfViewerInitialPage.value = undefined;
     // Default to text viewer for text, markdown, and unknown types
     showTextViewer.value = true;
     showPdfViewer.value = false;

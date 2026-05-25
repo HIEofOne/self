@@ -823,6 +823,7 @@ import SavedChatsModal from './SavedChatsModal.vue';
 import MyStuffDialog from './MyStuffDialog.vue';
 import { jsPDF } from 'jspdf';
 import MarkdownIt from 'markdown-it';
+import { processFileNCitations } from '../utils/fileNCitations';
 import {
   isFileSystemAccessSupported,
   pickLocalFolder,
@@ -4842,92 +4843,9 @@ const processPageReferences = (content: string): string => {
   // filter as /api/user-files when building the legend). We rewrite
   // the matched text inline as a clickable anchor that preserves
   // the short `File N p.<page>` label.
-  const pdfsByFileN = availableUserFiles.value.filter(f =>
-    /\.pdf$/i.test(f.fileName || '')
-  );
-  const fileNsReferenced = new Set<number>();
-  if (pdfsByFileN.length > 0) {
-    // Pass 0: rewrite raw-filename citations (the LLM's default for
-    // chat responses, since the chat path doesn't go through the
-    // server's PS-only rewriteCitationsToFileLegend post-processor)
-    // into `[File N p.<page>]` form. The KB indexes files under the
-    // SANITIZED bucket-key name (`[^a-zA-Z0-9.-]` → `_`) but
-    // availableUserFiles carries the original display name, so we
-    // build candidate patterns for BOTH and dedupe — same logic the
-    // server uses on PS output. Longest-first so a filename that's a
-    // prefix of another can't be matched as the shorter one.
-    const sanitizeForKb = (s: string) => String(s || '').replace(/[^a-zA-Z0-9.-]/g, '_');
-    const rewriteCandidates: Array<{ idx: number; name: string }> = [];
-    const seen = new Set<string>();
-    pdfsByFileN.forEach((f, i) => {
-      const display = f.fileName || '';
-      if (display && !seen.has(display)) { seen.add(display); rewriteCandidates.push({ idx: i, name: display }); }
-      const clean = sanitizeForKb(display);
-      if (clean && clean !== display && !seen.has(clean)) { seen.add(clean); rewriteCandidates.push({ idx: i, name: clean }); }
-    });
-    rewriteCandidates.sort((a, b) => b.name.length - a.name.length);
-    for (const { idx, name } of rewriteCandidates) {
-      const escName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      // Either `[...]` or CJK `【...】`. Allow leading/trailing
-      // whitespace inside the brackets (LLMs often emit
-      // `[ <filename> p.1 ]`). Page word can be Page / page / p.
-      const re = new RegExp(
-        `[\\[\\u3010]\\s*${escName}\\s+(?:Page|page|p\\.?)\\s*(\\d+)\\s*[\\]\\u3011]`,
-        'gi'
-      );
-      content = content.replace(re, (_full, page) => `[File ${idx + 1} p.${page}]`);
-    }
-
-    // Wrap a single `File N p.<page>` mention in a clickable anchor,
-    // recording the resolved File index for the legend footer. Used
-    // by both the bracketed and bare-form passes below.
-    const buildAnchorFor = (n: string, p: string): string | null => {
-      const idx = parseInt(n, 10) - 1;
-      const target = pdfsByFileN[idx];
-      if (!target) return null;
-      fileNsReferenced.add(idx);
-      const pageNum = parseInt(p, 10);
-      const label = `File ${n} p.${p}`;
-      const escapedLabel = label.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      const safeFileName = (target.fileName || '').replace(/"/g, '&quot;');
-      const safeBucketKey = (target.bucketKey || '').replace(/"/g, '&quot;');
-      return `<a href="#" class="page-link" data-filename="${safeFileName}" data-page="${pageNum}" data-bucket-key="${safeBucketKey}" title="${safeFileName}">${escapedLabel}</a>`;
-    };
-
-    // Pass 1: bracketed form `[File N p.<page>]` (or with multiple
-    // refs separated by `;` — split outside this regex by markdown).
-    const fileNTagPattern = /\[\s*File\s+(\d+)\s+p\.?\s*(\d+)\s*\]/gi;
-    content = content.replace(fileNTagPattern, (full, n, p) => buildAnchorFor(n, p) ?? full);
-
-    // Pass 2: bare form `File N p.<page>` (no brackets). The LLM
-    // sometimes drops the brackets when weaving citations into
-    // narrative prose ("…uneventful postoperative course File 3
-    // p.136."). Conservative: require a leading word boundary so we
-    // don't wrap things like "FileSystem 3 p.1", and require the
-    // `p.<digits>` so we don't match "File 3 contains 12 entries".
-    // Negative lookbehinds skip text already inside our pass-1
-    // anchor (`>File 3 p.136</a>`) — JS supports lookbehinds in
-    // modern browsers; we use a safer alternative: only match when
-    // NOT immediately preceded by `>` or `"` (anchor body/attr).
-    const bareFileNPattern = /(^|[^>"'\w])File\s+(\d+)\s+p\.?\s*(\d+)\b/gi;
-    content = content.replace(bareFileNPattern, (full, pre, n, p) => {
-      const anchor = buildAnchorFor(n, p);
-      return anchor ? `${pre}${anchor}` : full;
-    });
-    // Auto-append a visible "File legend" footer so users can see
-    // which file each `File N` maps to. Without this, a citation like
-    // `File 3 p.1` is meaningless to the reader even though the link
-    // opens the right PDF. We list only the Files actually referenced
-    // (not every PDF the user has).
-    if (fileNsReferenced.size > 0) {
-      const sorted = [...fileNsReferenced].sort((a, b) => a - b);
-      const legendLines = sorted.map(idx => {
-        const f = pdfsByFileN[idx];
-        return `- **File ${idx + 1}**: ${f?.fileName || '(unknown)'}`;
-      }).join('\n');
-      content = `${content}\n\n---\n**File legend**\n${legendLines}`;
-    }
-  }
+  // File-N citation rewrite + wrap + legend-footer is shared with
+  // MyStuffDialog (Patient Summary tab) via src/utils/fileNCitations.
+  content = processFileNCitations(content, availableUserFiles.value);
   
   // Find all occurrences of a page reference: full word `Page`/`page`
   // OR the abbreviated `p.` form. The abbreviated form is what the
