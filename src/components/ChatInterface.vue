@@ -4845,12 +4845,14 @@ const processPageReferences = (content: string): string => {
   const pdfsByFileN = availableUserFiles.value.filter(f =>
     /\.pdf$/i.test(f.fileName || '')
   );
+  const fileNsReferenced = new Set<number>();
   if (pdfsByFileN.length > 0) {
     const fileNTagPattern = /\[\s*File\s+(\d+)\s+p\.?\s*(\d+)\s*\]/gi;
     content = content.replace(fileNTagPattern, (full, n, p) => {
       const idx = parseInt(n, 10) - 1;
       const target = pdfsByFileN[idx];
       if (!target) return full; // unknown legend index — leave as-is
+      fileNsReferenced.add(idx);
       const pageNum = parseInt(p, 10);
       const label = `File ${n} p.${p}`;
       const escapedLabel = label.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -4858,6 +4860,19 @@ const processPageReferences = (content: string): string => {
       const safeBucketKey = (target.bucketKey || '').replace(/"/g, '&quot;');
       return `<a href="#" class="page-link" data-filename="${safeFileName}" data-page="${pageNum}" data-bucket-key="${safeBucketKey}" title="${safeFileName}">${escapedLabel}</a>`;
     });
+    // Auto-append a visible "File legend" footer so users can see
+    // which file each `File N` maps to. Without this, a citation like
+    // `File 3 p.1` is meaningless to the reader even though the link
+    // opens the right PDF. We list only the Files actually referenced
+    // (not every PDF the user has).
+    if (fileNsReferenced.size > 0) {
+      const sorted = [...fileNsReferenced].sort((a, b) => a - b);
+      const legendLines = sorted.map(idx => {
+        const f = pdfsByFileN[idx];
+        return `- **File ${idx + 1}**: ${f?.fileName || '(unknown)'}`;
+      }).join('\n');
+      content = `${content}\n\n---\n**File legend**\n${legendLines}`;
+    }
   }
   
   // Find all occurrences of a page reference: full word `Page`/`page`
@@ -5070,6 +5085,45 @@ const handlePageLinkClick = async (event: Event) => {
   
   const pageNumber = parseInt(pageNum, 10);
   
+  // Late-binding legend-tag resolution: if the link's visible text
+  // matches `File N p.<page>` (a Patient Summary Radiology citation
+  // emitted by the server's legend-tag prompt), resolve File N against
+  // the PDF-only ordering of availableUserFiles — same indexing the
+  // server uses when building the legend. This covers the cases the
+  // render-time pre-pass in processPageReferences couldn't:
+  //   - availableUserFiles loaded AFTER the message rendered, and
+  //     the computed didn't pick up the change (defensive belt-and-
+  //     suspenders to the existing reactive dependency).
+  //   - the link was created as a chooser fallback because the
+  //     pre-pass conditional was false at render time.
+  const linkText = (link.textContent || '').trim();
+  const fileNMatch = linkText.match(/^\s*File\s+(\d+)\s+p\.?\s*(\d+)\s*$/i);
+  if (fileNMatch) {
+    let pool = availableUserFiles.value.filter(f => /\.pdf$/i.test(f.fileName || ''));
+    if (pool.length === 0 && !loadingUserFiles.value) {
+      await loadUserFilesForChooser(false);
+      pool = availableUserFiles.value.filter(f => /\.pdf$/i.test(f.fileName || ''));
+    }
+    const idx = parseInt(fileNMatch[1], 10) - 1;
+    const target = pool[idx];
+    if (target) {
+      const targetPage = parseInt(fileNMatch[2], 10);
+      const userFile: UploadedFile = {
+        id: `user-file-${target.bucketKey}`,
+        name: target.fileName,
+        size: 0,
+        type: detectFileTypeFromMetadata(target.fileName, target.fileType),
+        content: '',
+        originalFile: null as any,
+        bucketKey: target.bucketKey,
+        uploadedAt: new Date()
+      };
+      viewFile(userFile, targetPage);
+      return;
+    }
+    // No such File N in the pool — fall through to existing behavior.
+  }
+
   // Check if this is a chooser link (no filename specified)
   if (link.classList.contains('page-link-chooser')) {
     const pdfFiles = uploadedFiles.value.filter(f => f.type === 'pdf');
