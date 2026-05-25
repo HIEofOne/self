@@ -4847,6 +4847,37 @@ const processPageReferences = (content: string): string => {
   );
   const fileNsReferenced = new Set<number>();
   if (pdfsByFileN.length > 0) {
+    // Pass 0: rewrite raw-filename citations (the LLM's default for
+    // chat responses, since the chat path doesn't go through the
+    // server's PS-only rewriteCitationsToFileLegend post-processor)
+    // into `[File N p.<page>]` form. The KB indexes files under the
+    // SANITIZED bucket-key name (`[^a-zA-Z0-9.-]` → `_`) but
+    // availableUserFiles carries the original display name, so we
+    // build candidate patterns for BOTH and dedupe — same logic the
+    // server uses on PS output. Longest-first so a filename that's a
+    // prefix of another can't be matched as the shorter one.
+    const sanitizeForKb = (s: string) => String(s || '').replace(/[^a-zA-Z0-9.-]/g, '_');
+    const rewriteCandidates: Array<{ idx: number; name: string }> = [];
+    const seen = new Set<string>();
+    pdfsByFileN.forEach((f, i) => {
+      const display = f.fileName || '';
+      if (display && !seen.has(display)) { seen.add(display); rewriteCandidates.push({ idx: i, name: display }); }
+      const clean = sanitizeForKb(display);
+      if (clean && clean !== display && !seen.has(clean)) { seen.add(clean); rewriteCandidates.push({ idx: i, name: clean }); }
+    });
+    rewriteCandidates.sort((a, b) => b.name.length - a.name.length);
+    for (const { idx, name } of rewriteCandidates) {
+      const escName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      // Either `[...]` or CJK `【...】`. Allow leading/trailing
+      // whitespace inside the brackets (LLMs often emit
+      // `[ <filename> p.1 ]`). Page word can be Page / page / p.
+      const re = new RegExp(
+        `[\\[\\u3010]\\s*${escName}\\s+(?:Page|page|p\\.?)\\s*(\\d+)\\s*[\\]\\u3011]`,
+        'gi'
+      );
+      content = content.replace(re, (_full, page) => `[File ${idx + 1} p.${page}]`);
+    }
+
     // Wrap a single `File N p.<page>` mention in a clickable anchor,
     // recording the resolved File index for the legend footer. Used
     // by both the bracketed and bare-form passes below.
