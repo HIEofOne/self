@@ -3,7 +3,7 @@ region: tor1
 services:
   - name: web
     github:
-      repo: agropper/self
+      repo: agropper/maia-cloud-user-app
       branch: main
       deploy_on_push: true
     build_command: npm run build
