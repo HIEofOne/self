@@ -10709,6 +10709,50 @@ app.post('/api/reset-kb', async (req, res) => {
 });
 
 // Generate Patient Summary endpoint
+/**
+ * Post-process a Patient Summary draft from the LLM: replace any raw-
+ * filename citations `[<fileName> p.<page>]` with `[File N p.<page>]`
+ * using the same PDF-only, References-excluded ordering that the
+ * client renderer uses to resolve File N back to a real file. This is
+ * deterministic and runs regardless of whether the LLM followed the
+ * legend-tag instruction in the prompt — necessary because LLMs (esp.
+ * GPT-OSS-120B) sometimes ignore the citation-format rule and spell
+ * the filename out verbatim, which renders unreadably for long Epic-
+ * export filenames and breaks the client's File-N click resolver.
+ *
+ * Matches both square `[]` and CJK 【】 brackets — Deepseek emits the
+ * latter occasionally. Whitespace around the page word is tolerant.
+ */
+function rewriteCitationsToFileLegend(text, userDoc, userId) {
+  if (!text || typeof text !== 'string') return text;
+  const referencesPrefix = `${userId}/References/`;
+  const pdfs = (Array.isArray(userDoc?.files) ? userDoc.files : [])
+    .filter(f => f && f.fileName && /\.pdf$/i.test(f.fileName))
+    .filter(f => !(f.bucketKey || '').startsWith(referencesPrefix))
+    .filter(f => f.isReference !== true);
+  if (pdfs.length === 0) return text;
+
+  // Build longest-first so a filename that's a prefix of another
+  // (e.g. `A.PDF` vs `A.PDF-extra.PDF`) doesn't get matched as the
+  // shorter one inside a longer citation.
+  const ordered = pdfs
+    .map((f, i) => ({ idx: i, fileName: f.fileName }))
+    .sort((a, b) => b.fileName.length - a.fileName.length);
+
+  let out = text;
+  for (const { idx, fileName } of ordered) {
+    const escName = fileName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // Either [<filename> p.<page>] or 【<filename> p.<page>】 .
+    // Allow Page / page / p. between filename and number.
+    const re = new RegExp(
+      `[\\[\\u3010]\\s*${escName}\\s+(?:Page|page|p\\.?)\\s*(\\d+)\\s*[\\]\\u3011]`,
+      'gi'
+    );
+    out = out.replace(re, (_full, page) => `[File ${idx + 1} p.${page}]`);
+  }
+  return out;
+}
+
 app.post('/api/generate-patient-summary', async (req, res) => {
   try {
     const { userId } = req.body;
@@ -10813,11 +10857,19 @@ app.post('/api/generate-patient-summary', async (req, res) => {
         }
       }
 
-      const summary = summaryResponse.content || summaryResponse.text || '';
+      let summary = summaryResponse.content || summaryResponse.text || '';
 
       if (!summary || summary.trim().length === 0) {
         throw new Error('Empty summary received from agent');
       }
+
+      // Rewrite any raw-filename citations the LLM produced into the
+      // File N legend-tag form. LLMs (especially GPT-OSS-120B) often
+      // ignore the prompt's "use [File N p.<page>] only" instruction
+      // for sections like Radiology and Social History, leaving the
+      // unreadable Epic-export filename verbatim. This deterministic
+      // pass guarantees consistent output regardless of compliance.
+      summary = rewriteCitationsToFileLegend(summary, userDoc, userId);
 
       // Re-fetch user document to get latest revision (may have been updated by background polling)
       // Retry up to 3 times to handle document conflicts
@@ -11370,8 +11422,10 @@ app.post('/api/patient-summary/generate-pair', async (req, res) => {
             throw firstError;
           }
         }
-        const text = (resp.content || resp.text || '').trim();
+        let text = (resp.content || resp.text || '').trim();
         if (!text) throw new Error('Empty summary');
+        // Same deterministic citation-rewrite as the single-agent path.
+        text = rewriteCitationsToFileLegend(text, userDoc, userId);
         return { ok: true, profileKey, model: modelName, text, generationSeconds: Math.round(((Date.now() - t0) / 1000) * 10) / 10 };
       } catch (e) {
         const sc = e.status || e.statusCode || 0;
@@ -11586,8 +11640,10 @@ app.post('/api/patient-summary/draft', async (req, res) => {
       }
     }
 
-    const summary = (chatResp.content || chatResp.text || '').trim();
+    let summary = (chatResp.content || chatResp.text || '').trim();
     if (!summary) throw new Error('Empty draft from agent');
+    // Same deterministic citation-rewrite as the other PS endpoints.
+    summary = rewriteCitationsToFileLegend(summary, userDoc, userId);
     const generationSeconds = Math.round(((Date.now() - startedAt) / 1000) * 10) / 10;
 
     let saved = false;
