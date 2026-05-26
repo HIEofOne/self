@@ -1442,6 +1442,33 @@ const startRestoreIndexing = async () => {
       return;
     }
     const filesResult = await filesResponse.json();
+
+    // Idempotency guard: if the KB already covers every file the
+    // server lists, skip the re-index. Without this, every
+    // sign-in after a successful Restore re-POSTs
+    // /api/update-knowledge-base, which spawns a fresh DO indexing
+    // job that the My Stuff modelValue watcher then surfaces as an
+    // "Indexing in progress" badge / modal on the user's next open
+    // — confusing because the user didn't trigger anything.
+    const indexingState = filesResult?.indexingState;
+    if (indexingState?.allKbFilesIndexed === true) {
+      restoreIndexingQueued.value = false;
+      return;
+    }
+    // Also skip if a DO indexing job is ALREADY running for this
+    // user (don't pile a duplicate on top — the existing job will
+    // finish and cover any unindexed files).
+    const kbIndexing = filesResult?.kbIndexingStatus;
+    const indexingInProgress = !!(
+      kbIndexing &&
+      kbIndexing.backendCompleted !== true &&
+      (kbIndexing.phase === 'indexing' || kbIndexing.phase === 'indexing_started')
+    );
+    if (indexingInProgress) {
+      restoreIndexingQueued.value = false;
+      return;
+    }
+
     const files = Array.isArray(filesResult?.files)
       ? (filesResult.files as Array<{ fileName?: string; bucketKey?: string }>)
       : [];
