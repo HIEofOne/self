@@ -330,6 +330,76 @@
       </q-card-section>
     </q-card>
 
+    <!-- Out of Range Labs worksheet (Epic / non-Apple-Health PDFs only).
+         AH PDFs feed the Patient Summary's OOR section directly via the
+         server-side extractAppleHealthOorLabs path; this card exists for
+         accounts that have ONLY Epic-style exports — same UX as the
+         Encounters card above. -->
+    <q-card class="q-mb-md">
+      <q-card-section>
+        <div class="row items-center justify-between q-mb-sm">
+          <div class="text-h6">Out of Range Labs</div>
+          <q-btn
+            :label="oorLabsWorksheet ? 'Refresh' : 'Generate'"
+            color="primary"
+            dense
+            :loading="oorLabsBusy"
+            @click="generateOorLabs"
+          />
+        </div>
+        <div class="text-caption text-grey-7 q-mb-sm">
+          Deterministic scan of non-Apple-Health PDFs for labs flagged H / L / HIGH / LOW / * or whose value falls outside an inline reference range. Apple Health files feed the Patient Summary's OOR section directly — this card covers the remaining files.
+        </div>
+        <div v-if="oorLabsWorksheet" class="text-caption text-grey-7 q-mb-sm">
+          {{ oorLabsWorksheet.rowCount || 0 }} out-of-range labs from
+          {{ oorLabsWorksheet.fileCount || 0 }} file{{ (oorLabsWorksheet.fileCount || 0) === 1 ? '' : 's' }} ·
+          built {{ formatWorksheetTime(oorLabsWorksheet.generatedAt) }}
+        </div>
+
+        <div v-if="!oorLabsWorksheet" class="text-body2 text-grey-7">
+          No out-of-range labs scan yet. Press <strong>Generate</strong> to scan your non-Apple-Health PDF files.
+        </div>
+
+        <template v-else>
+          <q-markup-table v-if="oorLabsWorksheet.rows?.length" flat bordered dense wrap-cells>
+            <thead>
+              <tr>
+                <th class="text-left">Date</th>
+                <th class="text-left">Analyte</th>
+                <th class="text-left">Value</th>
+                <th class="text-left">Units</th>
+                <th class="text-left">Flag</th>
+                <th class="text-left">Reference</th>
+                <th class="text-left">Source</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(row, ri) in oorLabsWorksheet.rows" :key="ri">
+                <td>{{ row.isoDate || '(undated)' }}</td>
+                <td>{{ row.analyte }}</td>
+                <td>{{ row.value }}</td>
+                <td>{{ row.units || '' }}</td>
+                <td>{{ row.flag }}</td>
+                <td>{{ row.refRange || '' }}</td>
+                <td>
+                  <a href="#" class="text-primary" @click.prevent="openWorksheetSource(`${row.fileTag} p.${row.page}`, oorLabsWorksheet.legend)">{{ row.fileTag }} p.{{ row.page }}</a>
+                </td>
+              </tr>
+            </tbody>
+          </q-markup-table>
+          <div v-else class="text-body2 text-grey-7">
+            No out-of-range labs were detected in your non-Apple-Health files.
+          </div>
+
+          <div v-if="oorLabsWorksheet.legend?.length" class="q-mt-sm text-caption text-grey-7">
+            <div v-for="(l, li) in oorLabsWorksheet.legend" :key="li">
+              {{ l.tag }} = {{ l.fileName }}
+            </div>
+          </div>
+        </template>
+      </q-card-section>
+    </q-card>
+
     <!-- Results -->
     <div v-if="(pdfData || markdownContent) && !isProcessing">
 
@@ -757,6 +827,67 @@ const generateEncounters = async () => {
     if ($q?.notify) $q.notify({ type: 'negative', message: msg, timeout: 5000 });
   } finally {
     encountersBusy.value = false;
+  }
+};
+
+// ── Out-of-Range Labs worksheet (Epic / non-AH PDFs only) ──────────
+interface OorLabsRow {
+  analyte: string;
+  value: string;
+  units?: string;
+  refLow?: number | null;
+  refHigh?: number | null;
+  refRange?: string;
+  flag: string;
+  isoDate?: string;
+  page: number;
+  fileTag: string;
+}
+interface OorLabsEntry {
+  rows: OorLabsRow[];
+  legend: Array<{ tag: string; fileName: string; bucketKey?: string }>;
+  generatedAt?: string;
+  fileCount?: number;
+  rowCount?: number;
+}
+const oorLabsWorksheet = ref<OorLabsEntry | null>(null);
+const oorLabsBusy = ref(false);
+
+const loadOorLabs = async () => {
+  if (!props.userId) return;
+  try {
+    const r = await fetch(`/api/labs/oor-worksheet?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
+    if (r.ok) {
+      const d = await r.json();
+      oorLabsWorksheet.value = (d && d.oorLabs) || null;
+    }
+  } catch { /* non-fatal */ }
+};
+
+const generateOorLabs = async () => {
+  if (oorLabsBusy.value) return;
+  oorLabsBusy.value = true;
+  try {
+    const r = await fetch('/api/labs/oor-worksheet', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ userId: props.userId })
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || d.success === false) {
+      throw new Error(d.message || d.error || 'Failed to build OOR labs list');
+    }
+    oorLabsWorksheet.value = {
+      rows: d.rows || [], legend: d.legend || [], generatedAt: d.generatedAt,
+      fileCount: d.fileCount, rowCount: d.rowCount
+    };
+    if ($q?.notify) $q.notify({ type: 'positive', message: `OOR labs scan built (${d.rowCount || 0})`, timeout: 2500 });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to build OOR labs list';
+    if ($q?.notify) $q.notify({ type: 'negative', message: msg, timeout: 5000 });
+  } finally {
+    oorLabsBusy.value = false;
   }
 };
 
@@ -2512,6 +2643,7 @@ onMounted(async () => {
   await loadSavedResults();
   void loadWorksheets();
   void loadEncounters();
+  void loadOorLabs();
 
   // Only start auto-processing if no saved results (file not yet processed into lists)
   if (!hasSavedResults.value) {

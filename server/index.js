@@ -11124,7 +11124,12 @@ async function buildPatientSummaryPromptForUser(userId, userDoc, profileKey = 'd
       console.warn(`[patient-summary] OOR extraction failed: ${e?.message || e}`);
     }
   } else if (!hasAppleHealth) {
-    outOfRangeLabs = `**For the "Out of Range Labs" section above**, write exactly this and nothing more: "Ask the Private AI for lists or graphs of specific lab results."`;
+    // Without an Apple Health PDF we can't extract OOR labs
+    // authoritatively for the Patient Summary inline — the AH PDF
+    // markdown preserves "[OUT OF RANGE]" flags that Epic exports
+    // don't. Point the user to the deterministic Epic OOR scanner in
+    // My Lists, which they can run on demand.
+    outOfRangeLabs = `**For the "Out of Range Labs" section above**, write exactly this and nothing more: "Out-of-range labs work best when an Apple Health file is available. Open My Lists → Out of Range Labs to run a deterministic scan over the patient's non-Apple-Health PDFs."`;
   }
 
   // Encounters context: extract deterministically from PDFs and keep the
@@ -12597,6 +12602,123 @@ app.get('/api/encounters/worksheet', async (req, res) => {
     const userDoc = await cloudant.getDocument('maia_users', userId);
     if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
     res.json({ success: true, encounters: userDoc.encountersWorksheet || null });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Deterministic Out-Of-Range labs worksheet from NON-Apple-Health PDFs
+// (Epic / MGB / etc). Apple Health PDFs already feed the OOR section
+// of the Patient Summary directly; this endpoint serves accounts that
+// have only Epic-style exports — same UX as the Encounters worksheet
+// (POST to (re)build, GET to read the cached doc).
+app.post('/api/labs/oor-worksheet', async (req, res) => {
+  try {
+    const userId = resolveUserId(req, res);
+    if (!userId) return;
+    const userDoc = await cloudant.getDocument('maia_users', userId);
+    if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+
+    const kbName = getKBNameFromUserDoc(userDoc, userId);
+    const kbPrefix = kbName ? `${userId}/${kbName}/` : null;
+    // Non-AH PDFs only — AH OOR labs are already extracted into the PS
+    // pipeline by extractAppleHealthOorLabs (which has the structured
+    // "[OUT OF RANGE]" markdown to work from). Here we cover the
+    // accounts where AH is absent.
+    const pdfFiles = (userDoc.files || []).filter(f =>
+      f?.fileName &&
+      !f.isAppleHealth &&
+      (!kbPrefix || (f.bucketKey || '').startsWith(kbPrefix)) &&
+      (/\.pdf$/i.test(f.fileName) || /pdf/i.test(f.fileType || ''))
+    );
+    if (pdfFiles.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'NO_EPIC_PDFS',
+        message: 'No non-Apple-Health PDF files to scan for out-of-range labs.'
+      });
+    }
+
+    const legend = pdfFiles.map((f, i) => ({ tag: `File ${i + 1}`, fileName: f.fileName, bucketKey: f.bucketKey || null }));
+
+    const { extractEpicOorLabs } = await import('./utils/epic-oor-extractor.js');
+    const { buildLinePageMap } = await import('./utils/encounters-extractor.js');
+    const pdfParse = (await import('pdf-parse')).default;
+
+    const allRows = [];
+    const modes = {};
+    for (let i = 0; i < pdfFiles.length; i++) {
+      const f = pdfFiles[i];
+      const tag = `File ${i + 1}`;
+      if (!f.bucketKey) { modes[tag] = 'missing-key'; continue; }
+      const buf = await readSpacesObjectBuffer(f.bucketKey);
+      if (!buf) { modes[tag] = 'download-failed'; continue; }
+      try {
+        const data = await pdfParse(buf);
+        const lines = (data.text || '').split('\n');
+        const linePage = buildLinePageMap(lines, data.numpages);
+        const rows = extractEpicOorLabs(lines, linePage, tag);
+        modes[tag] = `ok (${rows.length})`;
+        allRows.push(...rows);
+      } catch (e) {
+        modes[tag] = 'parse-error';
+        console.warn(`[oor-worksheet] parse failed for ${f.fileName}: ${e?.message || e}`);
+      }
+    }
+
+    // Sort newest-first by isoDate (empty dates at the end).
+    allRows.sort((a, b) => {
+      if (!a.isoDate && !b.isoDate) return 0;
+      if (!a.isoDate) return 1;
+      if (!b.isoDate) return -1;
+      return a.isoDate < b.isoDate ? 1 : a.isoDate > b.isoDate ? -1 : 0;
+    });
+
+    const generatedAt = new Date().toISOString();
+    const entry = {
+      rows: allRows,
+      legend,
+      generatedAt,
+      fileCount: pdfFiles.length,
+      rowCount: allRows.length,
+      modes
+    };
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const doc = await cloudant.getDocument('maia_users', userId);
+        if (!doc) break;
+        doc.oorLabsWorksheet = entry;
+        doc.updatedAt = new Date().toISOString();
+        await cloudant.saveDocument('maia_users', doc);
+        break;
+      } catch (e) {
+        if (e?.statusCode === 409 && attempt < 2) continue;
+        console.warn(`[oor-worksheet] could not persist for ${userId}: ${e?.message || e}`);
+        break;
+      }
+    }
+
+    await appendUserProvisioningEvent(userId, {
+      event: 'oor-labs-worksheet-generated',
+      fileCount: pdfFiles.length,
+      rowCount: allRows.length
+    });
+
+    res.json({ success: true, ...entry });
+  } catch (error) {
+    console.error('Error building OOR labs worksheet:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/labs/oor-worksheet', async (req, res) => {
+  try {
+    const userId = await resolveOwnerUserId(req, res);
+    if (!userId) return;
+    const userDoc = await cloudant.getDocument('maia_users', userId);
+    if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+    res.json({ success: true, oorLabs: userDoc.oorLabsWorksheet || null });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
