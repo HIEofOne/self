@@ -6184,42 +6184,22 @@ const closeDialog = async (): Promise<boolean> => {
   if (currentTab.value === 'summary' && summaryNeedsVerify.value) {
     summaryDismissedThisSession.value = true;
   }
-  // Check if indexing is in progress
-  if (indexingKB.value && currentIndexingJobId.value) {
-    const result = await new Promise<'ok' | 'cancel' | 'dismiss'>((resolve) => {
-      if ($q && typeof $q.dialog === 'function') {
-        $q.dialog({
-          title: 'Indexing in progress',
-          message: 'Knowledge base indexing is still in progress and could take up to 60 minutes. What would you like to do?',
-          persistent: true,
-          ok: {
-            label: 'OK',
-            color: 'primary',
-            flat: false
-          },
-          cancel: {
-            label: 'Cancel Indexing',
-            color: 'negative',
-            flat: true
-          }
-        }).onOk(() => resolve('ok'))
-          .onCancel(() => resolve('cancel'))
-          .onDismiss(() => resolve('dismiss'));
-      } else {
-        const action = window.confirm('Indexing is in progress. Click OK to continue watching, or Cancel to cancel indexing.');
-        resolve(action ? 'ok' : 'cancel');
-      }
-    });
 
-    if (result === 'cancel') {
-      // Cancel indexing and restore files
-      await cancelIndexingAndRestore();
-      // After cancel, allow closing
-    } else if (result === 'ok' || result === 'dismiss') {
-      // User wants to stay and watch - don't close
-      return false;
-    }
-  }
+  // NOTE: We deliberately do NOT block closing on `indexingKB &&
+  // currentIndexingJobId` here. KB indexing is a server-side job —
+  // it continues to completion whether or not the dialog stays
+  // open. The previous "Indexing in progress" modal interrupted
+  // users on every X-out (including spurious re-index jobs queued
+  // by handleRehydrationComplete after a successful Restore),
+  // offered "Cancel" with no explanation of what cancel would
+  // undo, and trapped users in a loop because closing kills the
+  // polling UI but the modal kept firing. The polling tear-down
+  // in pollIndexingProgress (`if (!isOpen.value) clearInterval`)
+  // is the correct behavior; the modelValue watcher re-attaches
+  // polling when the dialog reopens. If you actually want to
+  // CANCEL an in-flight job, do it from the Files tab's per-file
+  // "Cancel indexing" affordance (cancelIndexingAndRestore) where
+  // the consequences are explicit.
 
   if (hasUnsavedChanges.value) {
     const confirmClose = await new Promise<boolean>((resolve) => {
