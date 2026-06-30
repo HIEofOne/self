@@ -1,32 +1,41 @@
 <template>
   <Teleport to="body">
-    <!-- Backdrop only when expanded; click to collapse back to the rail.
-         Rail itself stays always-visible so users can see alert badges
-         (yellow warning triangles for indexing / verification / etc.) while
-         continuing to chat. -->
-    <transition name="my-stuff-backdrop">
-      <div
-        v-if="isOpen"
-        class="my-stuff-backdrop"
-        @click="closeDialog"
-      ></div>
-    </transition>
-
-    <!-- The sidebar itself: rail + (when expanded) content panel.
-         Was a <q-dialog> until v1.4.30; converted to a fixed-position
-         drawer in v1.4.31 (Step 1 of the dialog→sidebar overhaul).
-         All inner functionality is intentionally untouched. -->
+    <!-- The sidebar shell. Three visual states:
+           1. Rail-labeled  (default): rail ~180px with icon + label.
+           2. Rail-icons:   rail ~60px,  icons only.
+           3. Content open: rail (either width) on the left, content
+                            panel REPLACES the chat area on the right
+                            (full viewport width minus rail).
+         Top toggle on the rail switches between states 1 and 2; a
+         click on any rail item switches into state 3. Closing the
+         content panel (chevron / Esc-equivalent) returns to whichever
+         rail mode the user had selected. -->
     <aside
       class="my-stuff-sidebar"
-      :class="{ 'my-stuff-sidebar--expanded': isOpen }"
+      :class="{
+        'my-stuff-sidebar--content-open': isOpen,
+        'my-stuff-sidebar--rail-labeled': railLabeled,
+        'my-stuff-sidebar--rail-icons': !railLabeled
+      }"
       :aria-expanded="isOpen ? 'true' : 'false'"
     >
-      <!-- Always-visible rail. Click a rail icon to expand and jump to
-           that section. Each rail item gets a badge slot so future
-           functionality can surface alerts (indexing failure, unverified
-           summary, mismatched patient, etc.) without forcing the user
-           to open the panel. -->
+      <!-- Rail. Always visible (when the component is mounted at all,
+           i.e. canAccessMyStuff). Label visibility is driven by the
+           rail-labeled / rail-icons class on the parent. -->
       <nav class="my-stuff-rail" aria-label="My Stuff sections">
+        <!-- Top toggle: switches rail between labeled (~180px) and
+             icons-only (~60px). Icon points the direction the rail
+             will move on click. -->
+        <button
+          type="button"
+          class="my-stuff-rail__toggle"
+          :aria-label="railLabeled ? 'Collapse rail to icons' : 'Expand rail to labels'"
+          :title="railLabeled ? 'Collapse rail' : 'Expand rail'"
+          @click="toggleRailLabeled"
+        >
+          <q-icon :name="railLabeled ? 'chevron_left' : 'chevron_right'" size="22px" />
+        </button>
+
         <button
           v-for="t in railTabs"
           :key="t.name"
@@ -37,10 +46,11 @@
           :aria-label="t.label"
           @click="railClick(t.name)"
         >
-          <q-icon :name="t.icon" size="22px" />
-          <!-- Badge slot: alertCount per tab is wired in railTabs below;
-               currently always 0 (placeholder). Real alert signals get
-               filled in during the later UI-polish phase. -->
+          <q-icon :name="t.icon" size="22px" class="my-stuff-rail__icon" />
+          <span class="my-stuff-rail__label">{{ t.label }}</span>
+          <!-- Alert badge slot. Real signals (indexing failure,
+               unverified summary, mismatched patient, etc.) get
+               wired in during the later UI phase. -->
           <q-badge
             v-if="t.alertCount > 0"
             class="my-stuff-rail__badge"
@@ -52,23 +62,22 @@
         </button>
       </nav>
 
-      <!-- Expanded content panel. Visibility driven by `isOpen`. We
-           keep it mounted (v-show, not v-if) so the existing tab
-           state, scroll positions, and timers don't reset every time
-           the user collapses + reopens the rail. -->
+      <!-- Content panel: replaces the chat area entirely when open.
+           v-show (not v-if) so tab state, scroll, polling timers,
+           computed deps survive open/close round-trips. -->
       <div v-show="isOpen" class="my-stuff-content">
     <q-card style="width: 100%; height: 100%; display: flex; flex-direction: column; box-shadow: none; border-radius: 0;">
       <q-card-section class="row items-center q-pb-none" style="flex-shrink: 0;">
         <div class="text-h5">My Stuff</div>
         <q-space />
         <q-btn
-          icon="chevron_left"
+          icon="close"
           flat
           round
           dense
           @click="closeDialog"
-          aria-label="Collapse sidebar"
-          title="Collapse"
+          aria-label="Close panel"
+          title="Close"
         />
       </q-card-section>
 
@@ -1667,9 +1676,9 @@ const railTabs = computed(() => [
   { name: 'references', icon: 'link',         label: 'References',      alertCount: 0 }
 ]);
 
-// Click a rail icon: expand the sidebar AND jump to that section. If
-// the sidebar is already expanded and the user clicks the same tab's
-// icon, collapse back to rail mode (parity with mini-drawer UX).
+// Click a rail icon: open the content panel AND jump to that section.
+// If the panel is already open AND showing this tab, close it
+// (toggle parity with the chevron header button).
 const railClick = (name: string) => {
   if (isOpen.value && currentTab.value === name) {
     closeDialog();
@@ -1681,6 +1690,51 @@ const railClick = (name: string) => {
     emit('update:modelValue', true);
   }
 };
+
+// Rail width preference: true = ~180px showing icons + labels
+// (default), false = ~60px icons-only. Independent of `isOpen`;
+// remembered for the session via localStorage so a user who
+// prefers icons-only keeps it across reloads. Also surfaces the
+// current rail width as a CSS variable on <body> so the chat
+// container can use `padding-left: var(--my-stuff-rail-width)`
+// to stay clear of the rail.
+const RAIL_LABEL_LS_KEY = 'maia.myStuffRailLabeled';
+const readRailLabeledPref = (): boolean => {
+  try {
+    const v = window.localStorage.getItem(RAIL_LABEL_LS_KEY);
+    if (v === '0') return false;
+    if (v === '1') return true;
+  } catch { /* SSR / private mode */ }
+  return true; // default: labeled
+};
+const railLabeled = ref<boolean>(readRailLabeledPref());
+
+const RAIL_WIDTH_LABELED = '180px';
+const RAIL_WIDTH_ICONS   = '60px';
+
+// Push the rail width into <body> as a CSS custom property so any
+// app-level container can react. The chat layout in ChatInterface
+// uses `padding-left: var(--my-stuff-rail-width, 0px)` to avoid
+// being obscured by the rail.
+const syncBodyRailWidth = () => {
+  try {
+    const w = railLabeled.value ? RAIL_WIDTH_LABELED : RAIL_WIDTH_ICONS;
+    document.body.style.setProperty('--my-stuff-rail-width', w);
+  } catch { /* non-DOM env */ }
+};
+syncBodyRailWidth();
+watch(railLabeled, () => syncBodyRailWidth());
+
+const toggleRailLabeled = () => {
+  railLabeled.value = !railLabeled.value;
+  try { window.localStorage.setItem(RAIL_LABEL_LS_KEY, railLabeled.value ? '1' : '0'); } catch { /* ignore */ }
+};
+
+// On unmount (e.g. sign-out → canAccessMyStuff false → component
+// removed), clear the rail width so the chat reclaims full width.
+onUnmounted(() => {
+  try { document.body.style.removeProperty('--my-stuff-rail-width'); } catch { /* ignore */ }
+});
 const loadingFiles = ref(true);
 const filesError = ref('');
 const userFiles = ref<UserFile[]>([]);
@@ -6557,64 +6611,82 @@ onUnmounted(() => {
      resilient to that. Class names are deliberately prefixed with
      `my-stuff-` to avoid global collisions. -->
 <style lang="scss">
-$my-stuff-rail-width: 60px;
-$my-stuff-expanded-width: 600px;
-$my-stuff-z: 6000; // above q-dialog default (~6000); sub-dialogs from
-                  // within MyStuff (PDF viewer, etc.) still layer above.
-
-.my-stuff-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.4);
-  z-index: $my-stuff-z - 1;
-}
-
-// Backdrop fade-in/out
-.my-stuff-backdrop-enter-active,
-.my-stuff-backdrop-leave-active {
-  transition: opacity 180ms ease;
-}
-.my-stuff-backdrop-enter-from,
-.my-stuff-backdrop-leave-to {
-  opacity: 0;
-}
+$my-stuff-rail-width-icons:   60px;
+$my-stuff-rail-width-labeled: 180px;
+$my-stuff-z: 6000; // above q-dialog default; sub-dialogs from within
+                  // (PDF viewer, etc.) still layer above naturally.
 
 .my-stuff-sidebar {
   position: fixed;
   top: 0;
   left: 0;
   bottom: 0;
-  width: $my-stuff-rail-width;
   background: #fff;
   border-right: 1px solid #e0e0e0;
   box-shadow: 2px 0 8px rgba(0, 0, 0, 0.06);
   display: flex;
   flex-direction: row;
   z-index: $my-stuff-z;
-  transition: width 220ms ease;
   overflow: hidden;
+  transition: width 220ms ease, right 220ms ease;
 
-  &--expanded {
-    width: $my-stuff-expanded-width;
+  // State 1: rail labeled, content closed.
+  &.my-stuff-sidebar--rail-labeled:not(.my-stuff-sidebar--content-open) {
+    width: $my-stuff-rail-width-labeled;
+  }
+
+  // State 2: rail icons-only, content closed.
+  &.my-stuff-sidebar--rail-icons:not(.my-stuff-sidebar--content-open) {
+    width: $my-stuff-rail-width-icons;
+  }
+
+  // State 3: content open — sidebar expands to the entire viewport
+  // (rail + full-width content panel). No backdrop, no chat
+  // visible alongside (per UX requirement: "There is never a
+  // situation where the MyStuff interface is running and the chat
+  // is visible too").
+  &.my-stuff-sidebar--content-open {
+    width: 100vw;
     box-shadow: 4px 0 16px rgba(0, 0, 0, 0.12);
   }
 }
 
 .my-stuff-rail {
-  width: $my-stuff-rail-width;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  padding: 8px 0;
+  align-items: stretch;
+  padding: 8px 6px;
   gap: 4px;
   background: #fafafa;
   border-right: 1px solid #e8e8e8;
+  transition: width 220ms ease;
+
+  // Width follows the parent state — icons-only vs labeled.
+  .my-stuff-sidebar--rail-labeled & { width: $my-stuff-rail-width-labeled; }
+  .my-stuff-sidebar--rail-icons &   { width: $my-stuff-rail-width-icons; }
+}
+
+.my-stuff-rail__toggle {
+  align-self: flex-end;
+  width: 36px;
+  height: 36px;
+  margin: 0 4px 4px auto;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: #777;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  &:hover { background: rgba(0, 0, 0, 0.06); color: #222; }
+  &:focus-visible { outline: 2px solid #1976d2; outline-offset: 2px; }
 }
 
 .my-stuff-rail__btn {
   position: relative;
-  width: 44px;
   height: 44px;
   border-radius: 8px;
   border: none;
@@ -6622,21 +6694,44 @@ $my-stuff-z: 6000; // above q-dialog default (~6000); sub-dialogs from
   cursor: pointer;
   display: flex;
   align-items: center;
-  justify-content: center;
+  padding: 0 10px;
+  gap: 10px;
   color: #555;
   transition: background 120ms ease, color 120ms ease;
+  text-align: left;
 
   &:hover { background: rgba(0, 0, 0, 0.06); color: #222; }
   &:focus-visible { outline: 2px solid #1976d2; outline-offset: 2px; }
   &.is-active {
     background: rgba(25, 118, 210, 0.12);
     color: #1976d2;
+    font-weight: 500;
+  }
+
+  .my-stuff-sidebar--rail-icons & {
+    justify-content: center;
+    padding: 0;
   }
 }
 
+.my-stuff-rail__icon {
+  flex-shrink: 0;
+}
+
+.my-stuff-rail__label {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  line-height: 1.2;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+
+  // Hide label when rail is in icons-only mode.
+  .my-stuff-sidebar--rail-icons & { display: none; }
+}
+
 .my-stuff-rail__badge {
-  // Quasar's `floating` positions top-right of the parent btn
-  // automatically; we just tweak the offset slightly.
   transform: translate(20%, -20%);
 }
 
@@ -6647,5 +6742,6 @@ $my-stuff-z: 6000; // above q-dialog default (~6000); sub-dialogs from
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  background: #fff;
 }
 </style>

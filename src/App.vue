@@ -3345,6 +3345,13 @@ onMounted(async () => {
 <style>
 .q-layout {
   padding: 0 !important;
+  /* Reserve room for the MyStuff rail on the left. The rail sets
+     --my-stuff-rail-width on <body> when it mounts (0px / 60px /
+     180px depending on user preference) and clears it on unmount.
+     Defaults to 0 when the rail isn't mounted (no auth) so the
+     welcome page and unauthenticated views aren't shifted. */
+  padding-left: var(--my-stuff-rail-width, 0px) !important;
+  transition: padding-left 220ms ease;
 }
 
 .q-page-container {
