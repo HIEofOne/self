@@ -263,32 +263,20 @@
                 @change="handleFileSelect"
               />
             </div>
+            <!-- v1.4.33: the "My Stuff" launcher button, the
+                 inline User:<id> label, and the SIGN OUT button
+                 were removed from this toolbar. The rail
+                 (MyStuffDialog) now owns:
+                   - section nav (replaces the My Stuff button)
+                   - user identity caption (bottom of rail)
+                   - sign-out button (bottom of rail, with exit-
+                     door icon in icons-only mode)
+                 The wizard "Show wizard" button stays — it's
+                 unrelated to MyStuff and still belongs in the
+                 chat header. -->
             <div class="col" style="display: flex; align-items: center; justify-content: center;">
-              <q-btn
-                v-if="canAccessMyStuff"
-                outline
-                dense
-                icon="settings"
-                label="My Stuff"
-                color="grey-7"
-                @click="() => { myStuffInitialTab = 'files'; showMyStuffDialog = true; }"
-              >
-                <q-tooltip>My Stuff: Manage files, knowledge base, agent settings, and patient summary</q-tooltip>
-              </q-btn>
-              <!-- Status box hidden for now
-              <span class="text-body2 text-grey-7" :title="contextualTip">
-                <template v-for="(part, index) in parsedContextualTip" :key="index">
-                  <span v-if="part.type === 'text'">{{ part.text }}</span>
-                  <a
-                    v-else-if="part.type === 'link'"
-                    href="#"
-                    class="text-primary text-underline"
-                    style="cursor: pointer; text-decoration: underline;"
-                    @click.prevent="handleLinkClick(part)"
-                  >{{ part.text }}</a>
-                </template>
-              </span>
-              -->
+              <!-- intentionally empty — center column reserved for
+                   future use (e.g. contextual status tip). -->
             </div>
             <div class="col-auto" style="display: flex; align-items: center; justify-content: flex-end; gap: 8px;">
               <q-btn
@@ -303,10 +291,6 @@
               >
                 <q-tooltip>Show wizard</q-tooltip>
               </q-btn>
-              <span class="text-body2 text-grey-7">
-                {{ props.user?.isTemporary ? 'Local only user:' : 'User:' }} {{ props.user?.userId || 'Guest' }}
-              </span>
-              <q-btn flat dense label="SIGN OUT" color="grey-8" @click="handleSignOut" />
             </div>
           </div>
         </div>
@@ -646,6 +630,7 @@
       @rehydration-complete="handleRehydrationComplete"
       @file-added-to-kb="handleFileAddedToKb"
       @tab-opened="handleMyStuffTabOpened"
+      @sign-out-requested="handleSignOut"
       v-if="canAccessMyStuff"
     />
 

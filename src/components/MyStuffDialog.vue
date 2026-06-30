@@ -22,19 +22,23 @@
       <!-- Rail. Always visible (when the component is mounted at all,
            i.e. canAccessMyStuff). Label visibility is driven by the
            rail-labeled / rail-icons class on the parent. -->
-      <nav class="my-stuff-rail" aria-label="My Stuff sections">
-        <!-- Top toggle: switches rail between labeled (~180px) and
-             icons-only (~60px). Icon points the direction the rail
-             will move on click. -->
-        <button
-          type="button"
-          class="my-stuff-rail__toggle"
-          :aria-label="railLabeled ? 'Collapse rail to icons' : 'Expand rail to labels'"
-          :title="railLabeled ? 'Collapse rail' : 'Expand rail'"
-          @click="toggleRailLabeled"
-        >
-          <q-icon :name="railLabeled ? 'chevron_left' : 'chevron_right'" size="22px" />
-        </button>
+      <nav class="my-stuff-rail" aria-label="Workbook">
+        <!-- Top of rail: "Workbook" brand + chevron toggle. In
+             labeled mode shows the label + chevron-left (will
+             collapse to icons). In icons-only mode shows just the
+             chevron-right (will expand to labeled). -->
+        <div class="my-stuff-rail__brand">
+          <span v-if="railLabeled" class="my-stuff-rail__brand-label">Workbook</span>
+          <button
+            type="button"
+            class="my-stuff-rail__toggle"
+            :aria-label="railLabeled ? 'Collapse rail to icons' : 'Expand rail to labels'"
+            :title="railLabeled ? 'Collapse rail' : 'Expand rail'"
+            @click="toggleRailLabeled"
+          >
+            <q-icon :name="railLabeled ? 'chevron_left' : 'chevron_right'" size="22px" />
+          </button>
+        </div>
 
         <button
           v-for="t in railTabs"
@@ -60,47 +64,47 @@
             floating
           />
         </button>
+
+        <!-- Spacer pushes the user / sign-out group to the bottom of
+             the rail. Flex column with margin-top: auto on the next
+             element accomplishes the same thing more reliably than
+             a separate spacer div. -->
+
+        <!-- User + sign-out, anchored to the bottom of the rail.
+             Labeled mode: "User: <id>" caption + full SIGN OUT
+             button. Icons-only mode: just an exit-door icon button
+             with the userId in the tooltip. Replaces the per-chat
+             toolbar group that used to live in ChatInterface.vue's
+             header. -->
+        <div class="my-stuff-rail__user">
+          <div v-if="railLabeled" class="my-stuff-rail__user-id" :title="props.userId">
+            {{ props.userId || 'Guest' }}
+          </div>
+          <button
+            type="button"
+            class="my-stuff-rail__signout"
+            :class="{ 'my-stuff-rail__signout--icon': !railLabeled }"
+            @click="handleSignOutClick"
+            :aria-label="`Sign out ${props.userId || ''}`.trim()"
+            :title="railLabeled ? 'Sign out' : `Sign out (${props.userId || 'Guest'})`"
+          >
+            <q-icon name="logout" size="20px" />
+            <span v-if="railLabeled" class="my-stuff-rail__signout-label">SIGN OUT</span>
+          </button>
+        </div>
       </nav>
 
       <!-- Content panel: replaces the chat area entirely when open.
            v-show (not v-if) so tab state, scroll, polling timers,
-           computed deps survive open/close round-trips. -->
+           computed deps survive open/close round-trips.
+           v1.4.33: the "My Stuff" header row and the inline q-tabs
+           strip were removed — the rail on the left now serves as
+           the section header / nav, and the rail's "Workbook"
+           label + active-tab highlight tell the user where they
+           are. -->
       <div v-show="isOpen" class="my-stuff-content">
     <q-card style="width: 100%; height: 100%; display: flex; flex-direction: column; box-shadow: none; border-radius: 0;">
-      <q-card-section class="row items-center q-pb-none" style="flex-shrink: 0;">
-        <div class="text-h5">My Stuff</div>
-        <q-space />
-        <q-btn
-          icon="close"
-          flat
-          round
-          dense
-          @click="closeDialog"
-          aria-label="Close panel"
-          title="Close"
-        />
-      </q-card-section>
-
       <q-card-section style="flex: 1; overflow-y: auto; min-height: 0;">
-        <q-tabs 
-          v-model="currentTab" 
-          class="text-grey bg-grey-3 rounded-borders"
-          active-color="primary" 
-          indicator-color="primary" 
-          align="justify" 
-          style="flex-shrink: 0;"
-          dense
-        >
-          <q-tab name="files" label="Saved Files" icon="description" />
-          <q-tab name="agent" label="My AI Agent" icon="smart_toy" />
-          <q-tab name="chats" label="Saved Chats" icon="chat" />
-          <q-tab name="summary" label="Patient Summary" icon="description" />
-          <q-tab name="lists" label="My Lists" icon="list" />
-          <q-tab name="privacy" label="Privacy Filter" icon="privacy_tip" />
-          <q-tab name="diary" label="Patient Diary" icon="book" />
-          <q-tab name="references" label="REFERENCES" icon="link" />
-        </q-tabs>
-
         <q-tab-panels v-model="currentTab" animated>
           <!-- Saved Files Tab -->
           <q-tab-panel name="files">
@@ -1630,6 +1634,11 @@ const emit = defineEmits<{
   'show-patient-summary': [];
   'file-added-to-kb': [data: { fileName: string; bucketKey: string }];
   'tab-opened': [tab: string];
+  // Sign-out moved from the chat toolbar into the rail's bottom
+  // section. The parent (ChatInterface.vue) still owns the actual
+  // sign-out logic (snapshot save, session destroy, App-level
+  // state reset); we just forward the user's click.
+  'sign-out-requested': [];
 }>();
 
 // Handle show patient summary from Lists component — regenerate summary with updated medications
@@ -1728,6 +1737,10 @@ watch(railLabeled, () => syncBodyRailWidth());
 const toggleRailLabeled = () => {
   railLabeled.value = !railLabeled.value;
   try { window.localStorage.setItem(RAIL_LABEL_LS_KEY, railLabeled.value ? '1' : '0'); } catch { /* ignore */ }
+};
+
+const handleSignOutClick = () => {
+  emit('sign-out-requested');
 };
 
 // On unmount (e.g. sign-out → canAccessMyStuff false → component
@@ -6667,11 +6680,33 @@ $my-stuff-z: 6000; // above q-dialog default; sub-dialogs from within
   .my-stuff-sidebar--rail-icons &   { width: $my-stuff-rail-width-icons; }
 }
 
+// Top of rail: "Workbook" label + chevron toggle. Labeled mode
+// shows both; icons-only mode shows just the chevron, centered.
+.my-stuff-rail__brand {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 4px 8px 8px;
+  border-bottom: 1px solid #eee;
+  margin-bottom: 6px;
+
+  .my-stuff-sidebar--rail-icons & {
+    justify-content: center;
+    padding: 4px 0 8px 0;
+  }
+}
+
+.my-stuff-rail__brand-label {
+  flex: 1;
+  font-size: 16px;
+  font-weight: 600;
+  color: #222;
+  letter-spacing: 0.2px;
+}
+
 .my-stuff-rail__toggle {
-  align-self: flex-end;
   width: 36px;
   height: 36px;
-  margin: 0 4px 4px auto;
   border-radius: 6px;
   border: none;
   background: transparent;
@@ -6680,6 +6715,7 @@ $my-stuff-z: 6000; // above q-dialog default; sub-dialogs from within
   display: flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
 
   &:hover { background: rgba(0, 0, 0, 0.06); color: #222; }
   &:focus-visible { outline: 2px solid #1976d2; outline-offset: 2px; }
@@ -6733,6 +6769,68 @@ $my-stuff-z: 6000; // above q-dialog default; sub-dialogs from within
 
 .my-stuff-rail__badge {
   transform: translate(20%, -20%);
+}
+
+// User + sign-out group, anchored to the bottom of the rail with
+// `margin-top: auto` (the parent <nav> is flex column).
+.my-stuff-rail__user {
+  margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px solid #eee;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+
+  .my-stuff-sidebar--rail-icons & {
+    align-items: center;
+  }
+}
+
+.my-stuff-rail__user-id {
+  font-size: 12px;
+  color: #666;
+  padding: 0 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.my-stuff-rail__signout {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: transparent;
+  color: #555;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  margin: 0 6px 8px 6px;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+
+  &:hover {
+    background: rgba(229, 57, 53, 0.06);
+    color: #e53935;
+    border-color: #e53935;
+  }
+  &:focus-visible { outline: 2px solid #1976d2; outline-offset: 2px; }
+
+  &--icon {
+    // Icons-only rail: square button, no label, no border.
+    width: 36px;
+    padding: 0;
+    justify-content: center;
+    border: none;
+    margin: 0 0 8px 0;
+  }
+}
+
+.my-stuff-rail__signout-label {
+  flex: 1;
 }
 
 .my-stuff-content {
