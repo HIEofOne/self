@@ -1,10 +1,75 @@
 <template>
-  <q-dialog v-model="isOpen" persistent>
-    <q-card style="width: 90vw; height: 90vh; max-width: 90vw; max-height: 90vh; display: flex; flex-direction: column;">
+  <Teleport to="body">
+    <!-- Backdrop only when expanded; click to collapse back to the rail.
+         Rail itself stays always-visible so users can see alert badges
+         (yellow warning triangles for indexing / verification / etc.) while
+         continuing to chat. -->
+    <transition name="my-stuff-backdrop">
+      <div
+        v-if="isOpen"
+        class="my-stuff-backdrop"
+        @click="closeDialog"
+      ></div>
+    </transition>
+
+    <!-- The sidebar itself: rail + (when expanded) content panel.
+         Was a <q-dialog> until v1.4.30; converted to a fixed-position
+         drawer in v1.4.31 (Step 1 of the dialog→sidebar overhaul).
+         All inner functionality is intentionally untouched. -->
+    <aside
+      class="my-stuff-sidebar"
+      :class="{ 'my-stuff-sidebar--expanded': isOpen }"
+      :aria-expanded="isOpen ? 'true' : 'false'"
+    >
+      <!-- Always-visible rail. Click a rail icon to expand and jump to
+           that section. Each rail item gets a badge slot so future
+           functionality can surface alerts (indexing failure, unverified
+           summary, mismatched patient, etc.) without forcing the user
+           to open the panel. -->
+      <nav class="my-stuff-rail" aria-label="My Stuff sections">
+        <button
+          v-for="t in railTabs"
+          :key="t.name"
+          type="button"
+          class="my-stuff-rail__btn"
+          :class="{ 'is-active': isOpen && currentTab === t.name }"
+          :title="t.label"
+          :aria-label="t.label"
+          @click="railClick(t.name)"
+        >
+          <q-icon :name="t.icon" size="22px" />
+          <!-- Badge slot: alertCount per tab is wired in railTabs below;
+               currently always 0 (placeholder). Real alert signals get
+               filled in during the later UI-polish phase. -->
+          <q-badge
+            v-if="t.alertCount > 0"
+            class="my-stuff-rail__badge"
+            color="warning"
+            text-color="black"
+            :label="t.alertCount > 9 ? '9+' : String(t.alertCount)"
+            floating
+          />
+        </button>
+      </nav>
+
+      <!-- Expanded content panel. Visibility driven by `isOpen`. We
+           keep it mounted (v-show, not v-if) so the existing tab
+           state, scroll positions, and timers don't reset every time
+           the user collapses + reopens the rail. -->
+      <div v-show="isOpen" class="my-stuff-content">
+    <q-card style="width: 100%; height: 100%; display: flex; flex-direction: column; box-shadow: none; border-radius: 0;">
       <q-card-section class="row items-center q-pb-none" style="flex-shrink: 0;">
         <div class="text-h5">My Stuff</div>
         <q-space />
-        <q-btn icon="close" flat round dense @click="closeDialog" />
+        <q-btn
+          icon="chevron_left"
+          flat
+          round
+          dense
+          @click="closeDialog"
+          aria-label="Collapse sidebar"
+          title="Collapse"
+        />
       </q-card-section>
 
       <q-card-section style="flex: 1; overflow-y: auto; min-height: 0;">
@@ -1280,6 +1345,8 @@
         </q-tab-panels>
       </q-card-section>
     </q-card>
+      </div>
+    </aside>
 
     <!-- Local Folder Delete Reminder -->
     <q-dialog v-model="showLocalFolderDeleteReminder" persistent>
@@ -1460,7 +1527,7 @@
       </q-card>
     </q-dialog>
 
-  </q-dialog>
+  </Teleport>
 </template>
 
 <script setup lang="ts">
@@ -1580,6 +1647,40 @@ const handleMedicationsOffered = (payload: {
 
 const isOpen = ref(props.modelValue);
 const currentTab = ref(props.initialTab || 'files');
+
+// Rail tab manifest. Mirrors the inline <q-tab> list in the template's
+// expanded content panel exactly — the rail is just a vertical version
+// of that same nav. Icons are reused so the user has a consistent
+// visual mapping between the collapsed rail and the open header.
+// `alertCount` is the placeholder slot for future alert badges
+// (indexing failures, unverified Patient Summary, mismatched patient,
+// etc.) — currently always 0; real signals get wired in the later UI-
+// polish phase.
+const railTabs = computed(() => [
+  { name: 'files',      icon: 'description',  label: 'Saved Files',     alertCount: 0 },
+  { name: 'agent',      icon: 'smart_toy',    label: 'My AI Agent',     alertCount: 0 },
+  { name: 'chats',      icon: 'chat',         label: 'Saved Chats',     alertCount: 0 },
+  { name: 'summary',    icon: 'description',  label: 'Patient Summary', alertCount: 0 },
+  { name: 'lists',      icon: 'list',         label: 'My Lists',        alertCount: 0 },
+  { name: 'privacy',    icon: 'privacy_tip',  label: 'Privacy Filter',  alertCount: 0 },
+  { name: 'diary',      icon: 'book',         label: 'Patient Diary',   alertCount: 0 },
+  { name: 'references', icon: 'link',         label: 'References',      alertCount: 0 }
+]);
+
+// Click a rail icon: expand the sidebar AND jump to that section. If
+// the sidebar is already expanded and the user clicks the same tab's
+// icon, collapse back to rail mode (parity with mini-drawer UX).
+const railClick = (name: string) => {
+  if (isOpen.value && currentTab.value === name) {
+    closeDialog();
+    return;
+  }
+  currentTab.value = name;
+  if (!isOpen.value) {
+    isOpen.value = true;
+    emit('update:modelValue', true);
+  }
+};
 const loadingFiles = ref(true);
 const filesError = ref('');
 const userFiles = ref<UserFile[]>([]);
@@ -6446,5 +6547,105 @@ onUnmounted(() => {
 .verify-highlight {
   box-shadow: 0 0 0 2px #e53935;
   border-radius: 6px;
+}
+</style>
+
+<!-- Sidebar shell styles. NOT scoped because the markup is wrapped in
+     <Teleport to="body"> — Vue 3's scoped-attribute machinery DOES
+     propagate to teleported content in most cases, but the backdrop
+     is rendered conditionally and we want to keep the selectors
+     resilient to that. Class names are deliberately prefixed with
+     `my-stuff-` to avoid global collisions. -->
+<style lang="scss">
+$my-stuff-rail-width: 60px;
+$my-stuff-expanded-width: 600px;
+$my-stuff-z: 6000; // above q-dialog default (~6000); sub-dialogs from
+                  // within MyStuff (PDF viewer, etc.) still layer above.
+
+.my-stuff-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  z-index: $my-stuff-z - 1;
+}
+
+// Backdrop fade-in/out
+.my-stuff-backdrop-enter-active,
+.my-stuff-backdrop-leave-active {
+  transition: opacity 180ms ease;
+}
+.my-stuff-backdrop-enter-from,
+.my-stuff-backdrop-leave-to {
+  opacity: 0;
+}
+
+.my-stuff-sidebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: $my-stuff-rail-width;
+  background: #fff;
+  border-right: 1px solid #e0e0e0;
+  box-shadow: 2px 0 8px rgba(0, 0, 0, 0.06);
+  display: flex;
+  flex-direction: row;
+  z-index: $my-stuff-z;
+  transition: width 220ms ease;
+  overflow: hidden;
+
+  &--expanded {
+    width: $my-stuff-expanded-width;
+    box-shadow: 4px 0 16px rgba(0, 0, 0, 0.12);
+  }
+}
+
+.my-stuff-rail {
+  width: $my-stuff-rail-width;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 8px 0;
+  gap: 4px;
+  background: #fafafa;
+  border-right: 1px solid #e8e8e8;
+}
+
+.my-stuff-rail__btn {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #555;
+  transition: background 120ms ease, color 120ms ease;
+
+  &:hover { background: rgba(0, 0, 0, 0.06); color: #222; }
+  &:focus-visible { outline: 2px solid #1976d2; outline-offset: 2px; }
+  &.is-active {
+    background: rgba(25, 118, 210, 0.12);
+    color: #1976d2;
+  }
+}
+
+.my-stuff-rail__badge {
+  // Quasar's `floating` positions top-right of the parent btn
+  // automatically; we just tweak the offset slightly.
+  transform: translate(20%, -20%);
+}
+
+.my-stuff-content {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 </style>
