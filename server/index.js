@@ -11740,7 +11740,10 @@ app.post('/api/patient-summary/draft', async (req, res) => {
     // can never drift.
     const draftPrompt = await buildPatientSummaryPromptForUser(userId, userDoc);
     const chatMessages = [{ role: 'user', content: draftPrompt }];
-    const chatOptions = { model: userDoc.agentModelName || 'openai-gpt-oss-120b', stream: false };
+    const chatModel = userDoc.agentModelName || 'openai-gpt-oss-120b';
+    const chatOptions = { model: chatModel, stream: false };
+    console.log(`[DRAFT SUMMARY] Calling Private AI for ${userId} (model: ${chatModel})...`);
+    const aiStartedAt = Date.now();
 
     let chatResp;
     try {
@@ -11769,6 +11772,9 @@ app.post('/api/patient-summary/draft', async (req, res) => {
         throw firstError;
       }
     }
+
+    const aiElapsedMs = Date.now() - aiStartedAt;
+    console.log(`[DRAFT SUMMARY] Private AI responded for ${userId} in ${(aiElapsedMs / 1000).toFixed(1)}s`);
 
     let summary = (chatResp.content || chatResp.text || '').trim();
     if (!summary) throw new Error('Empty draft from agent');

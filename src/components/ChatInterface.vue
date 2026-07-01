@@ -449,7 +449,9 @@
                 <q-item-label :class="{ 'text-grey-5': !wizardCurrentMedications && !stage2StatusDisplay.completed && !wizardPreparingRecords }">
                   Medication Worksheets
                   <span v-if="wizardCurrentMedications" class="text-green text-caption q-ml-sm">Generating in My Lists</span>
-                  <span v-else-if="wizardPreparingRecords" class="text-primary text-caption q-ml-sm">Preparing...</span>
+                  <span v-else-if="wizardPreparingRecords" class="text-primary text-caption q-ml-sm">
+                    Preparing... {{ wizardPreparingStartedAt ? formatElapsed(wizardPreparingStartedAt) : '' }}
+                  </span>
                   <span v-else-if="wizardFlowPhase === 'medications'" class="text-primary text-caption q-ml-sm">Verify in My Lists</span>
                 </q-item-label>
               </q-item-section>
@@ -466,7 +468,9 @@
                 <q-item-label :class="{ 'text-grey-5': !wizardPatientSummary && !stage2StatusDisplay.completed && !wizardPreparingRecords }">
                   Patient Summary
                   <span v-if="wizardPatientSummary" class="text-green text-caption q-ml-sm">Verified</span>
-                  <span v-else-if="wizardPreparingRecords" class="text-primary text-caption q-ml-sm">Preparing...</span>
+                  <span v-else-if="wizardPreparingRecords" class="text-primary text-caption q-ml-sm">
+                    Preparing... {{ wizardPreparingStartedAt ? formatElapsed(wizardPreparingStartedAt) : '' }}
+                  </span>
                   <q-btn
                     v-else-if="stage2StatusDisplay.completed && wizardStage1Complete"
                     flat dense size="sm" color="orange-8" label="Verify"
@@ -1000,6 +1004,7 @@ const wizardStage1Complete = ref(false);
 // finishes.
 const gptAgentReady = ref(false);
 const gptProvisioningActive = ref(false);
+const wizardPreparingStartedAt = ref<number | null>(null);
 const wizardUploadIntent = ref<'other' | 'restore' | null>(null);
 const wizardMessages = ref<Record<number, string>>({});
 const wizardIntroLines = ref<string[]>([]);
@@ -1855,6 +1860,15 @@ const isPrivateAiLabel = (label: string) =>
   label === providerLabels.digitalocean ||
   label.startsWith('Private AI') ||
   privateAiProfiles.value.some(pr => pr.label === label);
+
+// Dynamic label for a profile key ('default' = primary, 'gpt' = secondary).
+// Reads the actual model from privateAiProfiles when available; falls back
+// to generic "Private AI (primary)" / "Private AI (secondary)".
+const labelForProfileKey = (key: string): string => {
+  const prof = privateAiProfiles.value.find(p => p.key === key);
+  if (prof) return prof.label;
+  return key === 'default' ? 'Private AI (primary)' : 'Private AI (secondary)';
+};
 
 // The agentProfileKey for the current selection (null for non-Private
 // AI). Defaults to 'default' for a Private AI label with no match
@@ -3703,8 +3717,8 @@ const generateSetupLogPdf = async () => {
   const hasSummary = wizardPatientSummary.value;
   const summaryItems = [
     `Files uploaded: ${totalFiles}`,
-    `Private AI (GPT) ready: ${wizardStage1Complete.value ? 'Yes' : 'No'}`,
-    `Private AI (Deepseek) ready: ${gptAgentReady.value ? 'Yes' : 'Pending'}`,
+    `${labelForProfileKey('default')} ready: ${wizardStage1Complete.value ? 'Yes' : 'No'}`,
+    `${labelForProfileKey('gpt')} ready: ${gptAgentReady.value ? 'Yes' : 'Pending'}`,
     `KB indexed: ${hasIndexing ? 'Yes' : 'Pending'} (${indexTokens} tokens)`,
     `Current Medications: ${wizardCurrentMedications.value ? 'Verified' : 'Pending verification'}`,
     `Medication Worksheets: see My Lists (GPT + Deepseek)`,
@@ -3814,7 +3828,7 @@ const generateSetupLogPdf = async () => {
             return `[${t}] Files uploaded: ${parts.join(', ')}`;
           }
           case 'apple-health-detected': return `[${t}] Apple Health detected: ${evt.fileName || ''}`;
-          case 'agent-deployed': return `[${t}] Private AI (GPT) deployed and available${evt.elapsedMs ? ` (${formatElapsed(evt.elapsedMs)})` : ''}`;
+          case 'agent-deployed': return `[${t}] ${labelForProfileKey('default')} deployed and available${evt.elapsedMs ? ` (${formatElapsed(evt.elapsedMs)})` : ''}`;
           case 'kb-indexed': {
             const parts = [];
             if (evt.fileCount) parts.push(`${evt.fileCount} files`);
@@ -3848,7 +3862,7 @@ const generateSetupLogPdf = async () => {
           case 'kb-connection-changed': {
             const verb = evt.action === 'connected' ? 'Connected' : 'Disconnected';
             const prep = evt.action === 'connected' ? 'to' : 'from';
-            const agent = evt.agentProfileKey === 'gpt' ? 'Private AI (Deepseek)' : 'Private AI (GPT)';
+            const agent = labelForProfileKey(evt.agentProfileKey === 'gpt' ? 'gpt' : 'default');
             const role = evt.kbRole ? ` [${evt.kbRole}]` : '';
             return `[${t}] ${verb} ${evt.kbName || evt.kbKey}${role} ${prep} ${agent}`;
           }
@@ -3865,7 +3879,7 @@ const generateSetupLogPdf = async () => {
           case 'medications-extract-skipped':
             return `[${t}] AI medication extraction skipped (${evt.reason || 'unknown'}) — used patient-summary medications instead`;
           case 'meds-worksheet-generated': {
-            const agent = evt.agentProfileKey === 'gpt' ? 'Private AI (Deepseek)' : 'Private AI (GPT)';
+            const agent = labelForProfileKey(evt.agentProfileKey === 'gpt' ? 'gpt' : 'default');
             const model = evt.model ? ` [${evt.model}]` : '';
             const files = evt.fileCount ? `, ${evt.fileCount} source file(s)` : '';
             const src = evt.sourceMode === 'apple-health-markdown'
@@ -3874,19 +3888,19 @@ const generateSetupLogPdf = async () => {
               : (evt.sourceMode === 'kb-retrieval' ? ', source: knowledge-base retrieval' : ''));
             return `[${t}] Current Medications Worksheet generated — ${agent}${model}${files}${src}`;
           }
-          case 'gpt-agent-created': return `[${t}] Private AI (Deepseek) agent created — deploying`;
+          case 'gpt-agent-created': return `[${t}] ${labelForProfileKey('gpt')} agent created — deploying`;
           case 'gpt-agent-deployed':
-          case 'gpt-agent-ready': return `[${t}] Private AI (Deepseek) deployed and available`;
+          case 'gpt-agent-ready': return `[${t}] ${labelForProfileKey('gpt')} deployed and available`;
           case 'encounters-worksheet-generated':
             return `[${t}] Encounters list built (${evt.encounterCount || 0} encounters from ${evt.fileCount || 0} file(s))`;
           case 'draft-summary-failed':
             return `[${t}] Draft Patient Summary FAILED${evt.status ? ` (HTTP ${evt.status})` : ''}${evt.reason ? ` — ${evt.reason}` : ''}`;
           case 'meds-worksheet-failed': {
-            const agent = evt.agentProfileKey === 'gpt' ? 'Private AI (Deepseek)' : 'Private AI (GPT)';
+            const agent = labelForProfileKey(evt.agentProfileKey === 'gpt' ? 'gpt' : 'default');
             return `[${t}] Medications Worksheet FAILED — ${agent}${evt.status ? ` (HTTP ${evt.status})` : ''}${evt.reason ? ` — ${evt.reason}` : ''}`;
           }
           case 'meds-worksheet-pending': {
-            const agent = evt.agentProfileKey === 'gpt' ? 'Private AI (Deepseek)' : 'Private AI (GPT)';
+            const agent = labelForProfileKey(evt.agentProfileKey === 'gpt' ? 'gpt' : 'default');
             return `[${t}] Medications Worksheet deferred — ${agent} not ready yet${evt.reason ? ` (${evt.reason})` : ''}`;
           }
           case 'medications-dismissed': return `[${t}] Medications step dismissed without verification`;
@@ -7026,6 +7040,8 @@ watch(
       // Keep the wizard dialog OPEN with spinners so the user doesn't see a zombie chat.
       void generateSetupLogPdf();
       wizardPreparingRecords.value = true;
+      wizardPreparingStartedAt.value = Date.now();
+      console.log('[Wizard] Transitioning to preparation phase (draft PS + medications)');
       wizardPreparingMessage.value = 'Confirming knowledge base is attached to your agent...';
       if (wizardTimeoutTimer) {
         clearTimeout(wizardTimeoutTimer);
@@ -7042,7 +7058,8 @@ watch(
       // agent-record refresh lags the KB completion event.
       preGeneratedSummary.value = null;
       if (props.user?.userId) {
-        wizardPreparingMessage.value = 'Generating draft Patient Summary from your records (may take 30–60 seconds)...';
+        console.log('[Wizard] Starting draft Patient Summary generation...');
+        wizardPreparingMessage.value = 'Generating draft Patient Summary from your records (may take 1–4 minutes)...';
         try {
           const draftStartedAt = Date.now();
           const genRes = await fetch('/api/patient-summary/draft', {
@@ -7064,6 +7081,7 @@ watch(
             const generationSeconds = typeof genResult.generationSeconds === 'number'
               ? genResult.generationSeconds
               : Math.round(((Date.now() - draftStartedAt) / 1000) * 10) / 10;
+            console.log(`[Wizard] Draft Patient Summary generated: ${summaryLines} lines, ${text.length} chars, ${generationSeconds}s`);
             logProvisioningEvent({
               event: 'draft-summary-generated',
               lines: summaryLines,
@@ -7075,6 +7093,7 @@ watch(
           }
         } catch (err) {
           console.warn('[Wizard] Draft Patient Summary generation failed:', err);
+          logProvisioningEvent({ event: 'draft-summary-failed', reason: String(err) });
         }
       }
 
@@ -7082,16 +7101,13 @@ watch(
       // (GPT + Deepseek) and kick off the secondary Private AI provisioning
       // so it deploys concurrently with indexing. Setup completion is gated
       // on the secondary being ready.
+      console.log('[Wizard] Starting medication worksheets + secondary agent provisioning');
       wizardPreparingMessage.value = 'Generating medication worksheets from your records...';
       void ensureGptProvisioned();
       triggerSetupWorksheets();
 
-      // Step 3 (restored Step-C, v1.3.101+): open My Lists → Current
-      // Medications for the user to VERIFY before the Patient Summary.
-      // The card pre-fills instantly from the unified deterministic source
-      // (GET /api/medications/current — Apple Health md → Epic
-      // Medication List → manual). On Verify, handleCurrentMedicationsSaved
-      // advances the phase to 'summary' and opens the Patient Summary tab.
+      // Step 3: open My Lists → Current Medications for the user to VERIFY.
+      console.log('[Wizard] Advancing to medications phase — opening My Lists');
       wizardFlowPhase.value = 'medications';
       wizardPreparingMessage.value = 'Opening Current Medications for review...';
       wizardPreparingRecords.value = false;
@@ -7113,7 +7129,7 @@ watch(
  * is expected and non-fatal; the user can Refresh it later.
  */
 /**
- * Ensure the secondary "Private AI (Deepseek)" agent is provisioned and
+ * Ensure the secondary Private AI agent is provisioned and
  * deployed. POSTs /api/agents/ensure-secondary (idempotent) and polls
  * until the agent reports an endpoint (ready) or the timeout elapses.
  * Sets gptAgentReady (variable kept for historical reasons; profile key
@@ -7144,7 +7160,7 @@ const runEnsureGptProvisioned = async (maxMs: number, silent: boolean, intervalM
   if (!silent && $q?.notify) {
     notif = $q.notify({
       type: 'ongoing',
-      message: 'Provisioning your second Private AI (Deepseek)…',
+      message: `Provisioning your second ${labelForProfileKey('gpt')}…`,
       timeout: 0
     });
   }
@@ -7170,9 +7186,9 @@ const runEnsureGptProvisioned = async (maxMs: number, silent: boolean, intervalM
     gptProvisioningActive.value = false;
     if (notif) {
       if (gptAgentReady.value) {
-        notif({ type: 'positive', message: 'Private AI (Deepseek) is ready.', timeout: 2500 });
+        notif({ type: 'positive', message: `${labelForProfileKey('gpt')} is ready.`, timeout: 2500 });
       } else {
-        notif({ type: 'warning', message: 'Private AI (Deepseek) is still deploying — you can use it from My Lists / the chat shortly.', timeout: 5000 });
+        notif({ type: 'warning', message: `${labelForProfileKey('gpt')} is still deploying — you can use it from My Lists / the chat shortly.`, timeout: 5000 });
       }
     }
   }
@@ -7358,7 +7374,7 @@ const handleIndexingStarted = (data: { jobId: string; phase: string }) => {
   };
   startStage3ElapsedTimer();
   updateContextualTip();
-  // Concurrency: kick off the second Private AI (Deepseek) NOW, while the KB
+  // Concurrency: kick off the second Private AI NOW, while the KB
   // indexes (often many minutes). Both agents then deploy in parallel and
   // GPT is usually ready by the time indexing finishes — instead of being
   // created lazily at the end (which left the user waiting on it). Silent
@@ -7635,6 +7651,7 @@ const handleCurrentMedicationsSaved = async (payload?: { value?: string; edited?
   // Only advance when the user explicitly clicked Verify (verified=true).
   // Per-row edits/deletes should NOT close the medications view.
   if (wizardFlowPhase.value === 'medications' && payload?.verified) {
+    console.log('[Wizard] Medications verified — advancing to summary phase');
     wizardFlowPhase.value = 'summary';
     guidedFlowDismissCount.value = 0;
     void generateSetupLogPdf();
@@ -7702,7 +7719,7 @@ const handlePatientSummarySaved = async (payload?: { userId?: string; summary?: 
     // deploying).
     if (!gptAgentReady.value) {
       wizardPreparingRecords.value = true;
-      wizardPreparingMessage.value = 'Finishing setup — provisioning Private AI (Deepseek)…';
+      wizardPreparingMessage.value = `Finishing setup — provisioning ${labelForProfileKey('gpt')}…`;
       await ensureGptProvisioned();
       wizardPreparingRecords.value = false;
     }
@@ -7741,7 +7758,7 @@ const handlePatientSummaryVerified = async (payload?: { userId?: string; summary
     // deploying).
     if (!gptAgentReady.value) {
       wizardPreparingRecords.value = true;
-      wizardPreparingMessage.value = 'Finishing setup — provisioning Private AI (Deepseek)…';
+      wizardPreparingMessage.value = `Finishing setup — provisioning ${labelForProfileKey('gpt')}…`;
       await ensureGptProvisioned();
       wizardPreparingRecords.value = false;
     }

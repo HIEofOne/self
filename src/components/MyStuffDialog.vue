@@ -1129,8 +1129,8 @@
               indicator-color="primary"
             >
               <q-tab name="summary" label="Summary" />
-              <q-tab name="inst-default" label="Instructions for GPT" />
-              <q-tab name="inst-gpt" label="Instructions for Deepseek" />
+              <q-tab name="inst-default" :label="instrTabLabel('default')" />
+              <q-tab name="inst-gpt" :label="instrTabLabel('gpt')" />
             </q-tabs>
 
             <!-- Instruction editor (per-agent Patient Summary prompt override) -->
@@ -1197,7 +1197,7 @@
                     <div class="row items-center justify-between q-mb-sm">
                       <div>
                         <div class="text-subtitle2">
-                          Private AI ({{ /gpt/i.test(String(cand.model || '')) ? 'GPT' : (/deepseek/i.test(String(cand.model || '')) ? 'Deepseek' : (cand.profileKey === 'gpt' ? 'Deepseek' : 'GPT')) }})
+                          {{ profileLabel(cand.profileKey || (idx === 0 ? 'default' : 'gpt')) }}
                           <span v-if="cand.ok" class="text-caption text-grey-7 q-ml-sm">
                             {{ cand.model }}{{ cand.generationSeconds ? ` · ${cand.generationSeconds}s` : '' }}
                           </span>
@@ -1944,6 +1944,17 @@ const editedInstructions = ref('');
 const agentProfilesList = ref<Array<{ key: string; label: string }>>([]);
 const activeAgentProfile = ref<string>('default');
 const savingInstructions = ref(false);
+
+const profileLabel = (profileKey: string): string => {
+  const prof = agentProfilesList.value.find(p => p.key === profileKey);
+  if (prof) return prof.label;
+  return profileKey === 'default' ? 'Private AI (primary)' : 'Private AI (secondary)';
+};
+const instrTabLabel = (profileKey: string): string => {
+  const label = profileLabel(profileKey);
+  const short = label.replace(/^Private AI\s*\(?\s*/, '').replace(/\)\s*$/, '');
+  return `Instructions for ${short}`;
+};
 
 // Deep link Private AI access setting
 const allowDeepLinkPrivateAI = ref(true); // Default to enabled
@@ -5819,8 +5830,8 @@ const loadPatientSummary = async () => {
 
 /* ── Dual-AI Patient Summary chooser ──────────────────────────────────
  * "Request New Summary" runs the prompt against BOTH Private AIs
- * (Deepseek + GPT) in parallel via /api/patient-summary/generate-pair and
- * lets the user pick one with "Choose this one". Each candidate carries
+ * in parallel via /api/patient-summary/generate-pair and lets the user
+ * pick one with "Choose this one". Each candidate carries
  * the model name + generation time so the comparison is transparent.
  * Choosing routes through the existing handleReplaceSummary save flow
  * (auto-saves to an empty slot, or shows the Replace dialog when full).
