@@ -1780,7 +1780,8 @@ const providerLabels: Record<string, string> = {
   anthropic: 'Anthropic',
   openai: 'ChatGPT',
   gemini: 'Gemini',
-  deepseek: 'DeepSeek'
+  deepseek: 'DeepSeek',
+  'deepseek-r1': 'DeepSeek R1'
 };
 
 const modelDisplayNames: Record<string, string> = {
