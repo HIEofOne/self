@@ -1723,6 +1723,34 @@ const setDeepLinkSession = (req, userDoc, shareId, chatId) => {
 
 const isDeepLinkSession = (req) => !!req.session?.isDeepLink;
 
+/**
+ * Resolve the owner userId for endpoints that a deep-link guest
+ * might call to view the sharing patient's data (encounters
+ * worksheet, OOR labs worksheet, etc). For a normal session,
+ * returns the caller's own userId. For a deep-link session,
+ * looks up the shared chat and returns its patientOwner so the
+ * guest sees the owner's data, not their own (empty) doc.
+ *
+ * Falls back to caller's userId if the lookup fails, matching
+ * the pre-deep-link behavior (endpoint will 404 on missing doc).
+ *
+ * NOTE: previously imported/defined at v1.4.20 (PR #106) and used
+ * by /api/encounters/find, /api/labs/history, /api/labs/oor-
+ * worksheet. Restored here after an inadvertent removal.
+ */
+async function resolveOwnerUserId(req, res) {
+  const callerId = resolveUserId(req, res);
+  if (!callerId) return null;
+  if (!isDeepLinkSession(req)) return callerId;
+  try {
+    const ownerId = await getOwnerIdForDeepLinkSession(req, cloudant);
+    return ownerId || callerId;
+  } catch (e) {
+    console.warn('[resolveOwnerUserId] owner lookup failed, using caller:', e?.message);
+    return callerId;
+  }
+}
+
 const generateDeepLinkUserId = (nameSlug, shareId) => {
   const randomPart = Math.random().toString(36).slice(2, 8);
   const timePart = Date.now().toString(36);
@@ -6273,9 +6301,14 @@ app.post('/api/user-current-medications', async (req, res) => {
       });
     }
 
-    // Update current medications
+    // Update current medications. `currentMedicationsUpdatedAt` is
+    // written every save so the /api/patient-summary GET can tell
+    // whether the saved Patient Summary was generated BEFORE these
+    // meds and is therefore stale (Current Medications section
+    // reflects an older, possibly-empty meds list).
     userDoc.currentMedications = currentMedications;
-    userDoc.updatedAt = new Date().toISOString();
+    userDoc.currentMedicationsUpdatedAt = new Date().toISOString();
+    userDoc.updatedAt = userDoc.currentMedicationsUpdatedAt;
 
     // Save with retry logic for conflicts
     let retries = 3;
@@ -10865,6 +10898,22 @@ app.post('/api/generate-patient-summary', async (req, res) => {
           console.log(`✅ [SUMMARY] Recreated API key for agent ${userDoc.assignedAgentId}`);
           const retryProvider = new DigitalOceanProvider(newApiKey, { baseURL: userDoc.agentEndpoint });
           summaryResponse = await retryProvider.chat(chatMessages, chatOptions);
+        } else if (statusCode >= 500 && statusCode < 600) {
+          // DO GenAI 5xx is usually transient (overloaded backend,
+          // brief availability blip). Retry once after a short
+          // delay before giving up. Without this, the user sees
+          // "Failed to generate patient summary" and has to click
+          // Retry themselves — but the error is almost always
+          // gone by then.
+          console.warn(`⚠️ [SUMMARY] ${statusCode} from agent for ${userId}, retrying once after 2s...`);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          try {
+            summaryResponse = await agentProvider.chat(chatMessages, chatOptions);
+            console.log(`✅ [SUMMARY] Retry succeeded for ${userId}`);
+          } catch (retryError) {
+            console.warn(`❌ [SUMMARY] Retry ALSO failed for ${userId}:`, retryError.message || retryError);
+            throw retryError;
+          }
         } else {
           throw firstError;
         }
@@ -11009,8 +11058,51 @@ function substitutePromptPlaceholders(body, vars) {
     Object.prototype.hasOwnProperty.call(vars, name) ? String(vars[name] ?? '') : `{${name}}`);
 }
 
+// Splice a verified Current Medications list into an existing
+// Patient Summary text — no AI call. Ported from
+// MyStuffDialog.replaceMedicationsInSummary so /api/patient-summary
+// can return a PS whose Current Medications section is always in
+// sync with `userDoc.currentMedications`, even if the PS was
+// generated before the meds were verified. Idempotent: if the
+// section is already in sync, returns the original string unchanged.
+function serverReplaceMedicationsInSummary(summaryText, newMedsText, markVerified = false) {
+  if (!summaryText) return summaryText;
+  const lines = summaryText.split('\n');
+  let headingIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const stripped = lines[i].toLowerCase().replace(/[#*_`]/g, '').trim();
+    if (stripped.startsWith('current medications')) {
+      headingIdx = i;
+      break;
+    }
+  }
+  if (headingIdx < 0) {
+    if (!newMedsText || !newMedsText.trim()) return summaryText;
+    return `${summaryText.trimEnd()}\n\n## Current Medications${markVerified ? ' (Patient Verified)' : ''}\n\n${newMedsText}\n`;
+  }
+  if (!newMedsText || !newMedsText.trim()) {
+    return summaryText;
+  }
+  const startIdx = headingIdx + 1;
+  let endIdx = lines.length;
+  for (let i = startIdx; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (line.match(/^#{1,3}\s+/) || (line.match(/^\*{2}.+\*{2}$/) && !line.toLowerCase().includes('medication'))) {
+      endIdx = i;
+      break;
+    }
+  }
+  let heading = lines[headingIdx];
+  heading = heading.replace(/\s*\((?:patient[\s-]?(?:verified|confirmed))\)\s*/gi, '').replace(/\s+$/, '');
+  if (markVerified) heading = `${heading} (Patient Verified)`;
+  const before = lines.slice(0, headingIdx);
+  const after = lines.slice(endIdx);
+  return [...before, heading, '', newMedsText, '', ...after].join('\n').trim();
+}
+
 async function buildPatientSummaryPromptForUser(userId, userDoc, profileKey = 'default') {
   const verifiedMeds = String(userDoc?.currentMedications || '').trim();
+  console.log(`[buildPatientSummaryPromptForUser] userId=${userId} profileKey=${profileKey} verifiedMedsPresent=${verifiedMeds.length > 0} verifiedMedsLen=${verifiedMeds.length} snippet="${verifiedMeds.slice(0, 200)}"`);
   const currentMedications = verifiedMeds
     ? `**Authoritative Current Medications (verified by the patient):**\n${verifiedMeds}\n\nUse this list AS-IS for the "Current Medications" section above — do NOT replace it with anything from the knowledge base.`
     : '';
@@ -13120,9 +13212,36 @@ app.get('/api/patient-summary', async (req, res) => {
         }
       : null;
 
+    // Splice the verified Current Medications directly into the
+    // returned summary text (no AI call, no client-side regen
+    // dance). If the section is already in sync, this is a no-op.
+    // When it DOES rewrite, we save the patched text back so it
+    // sticks, and mark the meds section "(Patient Verified)".
+    // This makes the "PS shows Not documented when meds are
+    // actually verified" problem impossible.
+    const hasVerifiedMeds = !!(userDoc.currentMedications && String(userDoc.currentMedications).trim());
+    let returnedSummary = currentSummary ? currentSummary.text : '';
+    if (hasVerifiedMeds && returnedSummary) {
+      const patched = serverReplaceMedicationsInSummary(returnedSummary, String(userDoc.currentMedications).trim(), true);
+      if (patched && patched !== returnedSummary) {
+        returnedSummary = patched;
+        // Persist the patch so subsequent loads don't have to
+        // recompute. Best-effort: if the save fails (e.g.,
+        // 409 conflict), we still return the patched text to the
+        // client — worst case, the next load re-patches.
+        try {
+          currentSummary.text = patched;
+          currentSummary.updatedAt = new Date().toISOString();
+          await cloudant.saveDocument('maia_users', userDoc);
+        } catch (e) {
+          console.warn(`[patient-summary GET] Could not persist meds-patched summary for ${userId}: ${e?.message || e}`);
+        }
+      }
+    }
+
     res.json({
       success: true,
-      summary: currentSummary ? currentSummary.text : '',
+      summary: returnedSummary,
       summaries: summaries.map((s, index) => ({
         text: s.text,
         createdAt: s.createdAt,

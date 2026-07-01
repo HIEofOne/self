@@ -2615,13 +2615,39 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         Key: latestMarkdownKey
       });
 
-      const response = await s3Client.send(getCommand);
-      const chunks = [];
-      for await (const chunk of response.Body) {
-        chunks.push(chunk);
+      let markdown;
+      try {
+        const response = await s3Client.send(getCommand);
+        const chunks = [];
+        for await (const chunk of response.Body) {
+          chunks.push(chunk);
+        }
+        markdown = Buffer.concat(chunks).toString('utf-8');
+      } catch (getErr) {
+        // Race: the LIST call returned this key, but the GET now
+        // 404s (`NoSuchKey`) — file was moved/deleted between
+        // list and fetch, or the Spaces listing cache lagged
+        // behind. Not a real error for the caller; there's simply
+        // no markdown to show. Fall through to the same
+        // `hasMarkdown: false` response as the "no keys at all"
+        // branch above.
+        const is404 = getErr?.name === 'NoSuchKey'
+          || getErr?.Code === 'NoSuchKey'
+          || getErr?.$metadata?.httpStatusCode === 404;
+        if (is404) {
+          console.warn(`[lists/markdown] listing referenced ${latestMarkdownKey} but GET 404'd — returning hasMarkdown:false`);
+          return res.json({
+            success: true,
+            hasMarkdown: false,
+            debug: {
+              listsFolder: listsFolder,
+              allFiles: allFiles,
+              raceMissingKey: latestMarkdownKey
+            }
+          });
+        }
+        throw getErr;
       }
-      const markdown = Buffer.concat(chunks).toString('utf-8');
-
 
       res.json({
         success: true,

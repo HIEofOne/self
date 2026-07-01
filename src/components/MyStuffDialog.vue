@@ -23,30 +23,62 @@
            i.e. canAccessMyStuff). Label visibility is driven by the
            rail-labeled / rail-icons class on the parent. -->
       <nav class="my-stuff-rail" aria-label="Workbook">
-        <!-- Top of rail: "Workbook" brand + chevron toggle. In
-             labeled mode shows the label + chevron-left (will
-             collapse to icons). In icons-only mode shows just the
-             chevron-right (will expand to labeled). -->
+        <!-- Top of rail: "Workbook" brand + chevron.
+             The chevron is context-aware to satisfy the user's
+             rule: "When the Workbook sidebar is collapsed, always
+             show the chat area."
+               - Content panel OPEN  → chevron closes the content
+                 (returns to the chat area). Icon: chevron_left,
+                 because the panel is to the right of the rail and
+                 the action retracts it.
+               - Content panel CLOSED → chevron toggles the rail
+                 between labeled (~180px) and icons-only (~60px).
+                 Icon points the direction the rail will move. -->
         <div class="my-stuff-rail__brand">
           <span v-if="railLabeled" class="my-stuff-rail__brand-label">Workbook</span>
           <button
             type="button"
             class="my-stuff-rail__toggle"
-            :aria-label="railLabeled ? 'Collapse rail to icons' : 'Expand rail to labels'"
-            :title="railLabeled ? 'Collapse rail' : 'Expand rail'"
-            @click="toggleRailLabeled"
+            :aria-label="chevronAriaLabel"
+            :title="chevronTitle"
+            @click="chevronClick"
           >
-            <q-icon :name="railLabeled ? 'chevron_left' : 'chevron_right'" size="22px" />
+            <q-icon :name="chevronIcon" size="22px" />
           </button>
         </div>
+
+        <!-- Setup Wizard — top of the rail list, above all section
+             icons. Moved here from the chat header in v1.4.34 so
+             every Workbook control lives in the rail.
+             When `wizardActive` is true (the parent's
+             showAgentSetupDialog is open OR wizardFlowPhase is in
+             a non-idle state), a yellow rotating ring appears
+             around the icon as a "wizard in progress" indicator. -->
+        <button
+          type="button"
+          class="my-stuff-rail__btn my-stuff-rail__btn--wizard"
+          :class="{ 'is-wizard-active': props.wizardActive }"
+          :title="'Setup Wizard' + (props.wizardActive ? ' (running)' : '')"
+          aria-label="Setup Wizard"
+          @click="handleWizardClick"
+        >
+          <span class="my-stuff-rail__wizard-icon-wrap">
+            <q-icon name="auto_fix_high" size="22px" class="my-stuff-rail__icon" />
+            <span v-if="props.wizardActive" class="my-stuff-rail__wizard-ring" aria-hidden="true"></span>
+          </span>
+          <span class="my-stuff-rail__label">Setup Wizard</span>
+        </button>
 
         <button
           v-for="t in railTabs"
           :key="t.name"
           type="button"
           class="my-stuff-rail__btn"
-          :class="{ 'is-active': isOpen && currentTab === t.name }"
-          :title="t.label"
+          :class="{
+            'is-active': isOpen && currentTab === t.name,
+            'has-attention': t.alertOutline
+          }"
+          :title="t.alertOutline ? `${t.label} — needs your attention` : t.label"
           :aria-label="t.label"
           @click="railClick(t.name)"
         >
@@ -1601,12 +1633,25 @@ interface Props {
   originalMessages?: Message[]; // Original unfiltered messages for privacy filtering
   rehydrationFiles?: Array<{ fileName?: string; bucketKey?: string; fileSize?: number; uploadedAt?: string }>;
   rehydrationActive?: boolean;
+  // True whenever the parent considers a wizard run to be in
+  // progress — wizard dialog open, or wizardFlowPhase not 'done'.
+  // Drives the yellow rotating ring around the Setup Wizard icon
+  // at the top of the rail. Optional + defaults to false so the
+  // ring is off unless the parent explicitly opts in.
+  wizardActive?: boolean;
+  // True when the server has no saved currentMedications — the
+  // user has neither verified nor edited them. Drives the yellow
+  // outline on the My Lists rail icon AND the navigation gate on
+  // Patient Summary ("must verify meds first").
+  medsNeedsVerify?: boolean;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   initialTab: 'files',
   messages: () => [],
   originalMessages: () => [],
+  wizardActive: false,
+  medsNeedsVerify: false,
 });
 
 const emit = defineEmits<{
@@ -1639,6 +1684,11 @@ const emit = defineEmits<{
   // sign-out logic (snapshot save, session destroy, App-level
   // state reset); we just forward the user's click.
   'sign-out-requested': [];
+  // Setup Wizard launcher moved to the top of the rail in
+  // v1.4.34. Parent still owns the wizard state machine
+  // (showAgentSetupDialog, wizardDismissed, wizardFlowPhase);
+  // we just forward the user's click.
+  'wizard-requested': [];
 }>();
 
 // Handle show patient summary from Lists component — regenerate summary with updated medications
@@ -1650,8 +1700,19 @@ const handleShowPatientSummary = () => {
   emit('show-patient-summary');
 };
 
-const handleCurrentMedicationsSaved = (payload: { value: string; edited: boolean; source?: string }) => {
+// (Prior client-side auto-regen refs removed — server-side
+// splice in GET /api/patient-summary handles the "verified meds
+// don't match PS Current Medications section" case without any
+// AI call.)
+
+const handleCurrentMedicationsSaved = (payload: { value: string; edited: boolean; changed?: boolean; source?: string }) => {
   emit('current-medications-saved', payload);
+  // Mark PS unverified so the yellow outline appears on the
+  // Patient Summary rail icon. No AI regen is needed — the next
+  // GET /api/patient-summary automatically splices the verified
+  // meds into the returned text (see serverReplaceMedicationsIn
+  // Summary). No wait, no flash.
+  summaryNeedsVerify.value = true;
 };
 
 const handleMedicationsOffered = (payload: {
@@ -1664,7 +1725,36 @@ const handleMedicationsOffered = (payload: {
 };
 
 const isOpen = ref(props.modelValue);
-const currentTab = ref(props.initialTab || 'files');
+
+// "When the Workbook sidebar is expanded, show the last open tab
+// or Saved Files if the last open is unknown."
+// Persist the user's last-opened tab to localStorage so it survives
+// page reloads and across sessions. On mount: prefer the parent's
+// explicit `initialTab` prop (programmatic open requests a specific
+// tab — wizard, restore, summary-ready prompt), else the persisted
+// value, else 'files'.
+const TAB_LS_KEY = 'maia.workbookLastTab';
+const VALID_TABS = new Set(['files', 'agent', 'chats', 'summary', 'lists', 'privacy', 'diary', 'references']);
+const readPersistedTab = (): string | null => {
+  try {
+    const v = window.localStorage.getItem(TAB_LS_KEY);
+    return v && VALID_TABS.has(v) ? v : null;
+  } catch { return null; }
+};
+const initialMountTab = props.initialTab || readPersistedTab() || 'files';
+const currentTab = ref<string>(initialMountTab);
+// Track the most recently APPLIED initialTab from the parent so the
+// modelValue watcher can distinguish a "parent passed a new
+// initialTab — honor it" from "parent reopened with the same stale
+// initialTab — keep the user's last choice." Without this, a user
+// who picks Agent from the rail loses their selection every time
+// the panel reopens (parent's `myStuffInitialTab` defaults to
+// 'files' and would otherwise overwrite).
+let lastAppliedInitialTab: string = props.initialTab || '';
+// Persist on change so reloads preserve the last-opened tab.
+watch(currentTab, (v) => {
+  try { window.localStorage.setItem(TAB_LS_KEY, v); } catch { /* ignore */ }
+});
 
 // Rail tab manifest. Mirrors the inline <q-tab> list in the template's
 // expanded content panel exactly — the rail is just a vertical version
@@ -1674,21 +1764,47 @@ const currentTab = ref(props.initialTab || 'files');
 // (indexing failures, unverified Patient Summary, mismatched patient,
 // etc.) — currently always 0; real signals get wired in the later UI-
 // polish phase.
+// `alertOutline` paints a yellow ring around the rail icon to
+// indicate "this section needs your attention" — currently used
+// for the two verification gates:
+//   - Patient Summary: not verified or edited yet
+//   - My Lists: Current Medications not verified or edited
+// Yellow OUTLINE is distinct from the rotating yellow RING on the
+// Setup Wizard icon (that one signals "wizard work in progress").
 const railTabs = computed(() => [
-  { name: 'files',      icon: 'description',  label: 'Saved Files',     alertCount: 0 },
-  { name: 'agent',      icon: 'smart_toy',    label: 'My AI Agent',     alertCount: 0 },
-  { name: 'chats',      icon: 'chat',         label: 'Saved Chats',     alertCount: 0 },
-  { name: 'summary',    icon: 'description',  label: 'Patient Summary', alertCount: 0 },
-  { name: 'lists',      icon: 'list',         label: 'My Lists',        alertCount: 0 },
-  { name: 'privacy',    icon: 'privacy_tip',  label: 'Privacy Filter',  alertCount: 0 },
-  { name: 'diary',      icon: 'book',         label: 'Patient Diary',   alertCount: 0 },
-  { name: 'references', icon: 'link',         label: 'References',      alertCount: 0 }
+  { name: 'files',      icon: 'description',  label: 'Saved Files',     alertCount: 0, alertOutline: false },
+  { name: 'agent',      icon: 'smart_toy',    label: 'My AI Agent',     alertCount: 0, alertOutline: false },
+  { name: 'chats',      icon: 'chat',         label: 'Saved Chats',     alertCount: 0, alertOutline: false },
+  { name: 'summary',    icon: 'description',  label: 'Patient Summary', alertCount: 0, alertOutline: summaryNeedsVerify.value },
+  { name: 'lists',      icon: 'list',         label: 'My Lists',        alertCount: 0, alertOutline: !!props.medsNeedsVerify },
+  { name: 'privacy',    icon: 'privacy_tip',  label: 'Privacy Filter',  alertCount: 0, alertOutline: false },
+  { name: 'diary',      icon: 'book',         label: 'Patient Diary',   alertCount: 0, alertOutline: false },
+  { name: 'references', icon: 'link',         label: 'References',      alertCount: 0, alertOutline: false }
 ]);
 
 // Click a rail icon: open the content panel AND jump to that section.
 // If the panel is already open AND showing this tab, close it
 // (toggle parity with the chevron header button).
 const railClick = (name: string) => {
+  // Gate: Patient Summary requires verified Current Medications.
+  // Even browsing to the tab to review the summary is blocked —
+  // we want the user to confirm meds first so the summary's
+  // "Current Medications" section is built from a verified list.
+  // The yellow outline on the My Lists rail icon points to where
+  // they need to go.
+  if (name === 'summary' && props.medsNeedsVerify) {
+    if ($q && typeof $q.dialog === 'function') {
+      $q.dialog({
+        title: 'Verify Current Medications first',
+        message: 'You must verify or edit your current medications before verifying the rest of the patient summary.',
+        ok: { label: 'OK', color: 'primary' }
+      });
+    } else {
+      window.alert('You must verify or edit your current medications before verifying the rest of the patient summary.');
+    }
+    return;
+  }
+
   if (isOpen.value && currentTab.value === name) {
     closeDialog();
     return;
@@ -1739,8 +1855,40 @@ const toggleRailLabeled = () => {
   try { window.localStorage.setItem(RAIL_LABEL_LS_KEY, railLabeled.value ? '1' : '0'); } catch { /* ignore */ }
 };
 
+// Context-aware chevron at the top of the rail.
+// - When the content panel is OPEN, the chevron's job is to
+//   "collapse the Workbook" → close the panel → show the chat.
+// - When the content panel is CLOSED, the chevron toggles the
+//   rail width (labeled / icons-only). Icon direction hints at
+//   the action.
+const chevronIcon = computed(() => {
+  if (isOpen.value) return 'chevron_left';        // collapse content
+  return railLabeled.value ? 'chevron_left' : 'chevron_right';
+});
+const chevronAriaLabel = computed(() => {
+  if (isOpen.value) return 'Collapse Workbook (show chat)';
+  return railLabeled.value ? 'Collapse rail to icons' : 'Expand rail to labels';
+});
+const chevronTitle = computed(() => {
+  if (isOpen.value) return 'Collapse (show chat)';
+  return railLabeled.value ? 'Collapse rail' : 'Expand rail';
+});
+const chevronClick = () => {
+  if (isOpen.value) {
+    // Close the content panel — chat reappears underneath the
+    // shrunken sidebar.
+    closeDialog();
+    return;
+  }
+  toggleRailLabeled();
+};
+
 const handleSignOutClick = () => {
   emit('sign-out-requested');
+};
+
+const handleWizardClick = () => {
+  emit('wizard-requested');
 };
 
 // On unmount (e.g. sign-out → canAccessMyStuff false → component
@@ -5621,12 +5769,16 @@ const loadPatientSummary = async () => {
     const response = await fetch(`/api/patient-summary?userId=${encodeURIComponent(props.userId)}`, {
       credentials: 'include'
     });
-    
+
     if (!response.ok) {
       throw new Error(`Failed to fetch patient summary: ${response.statusText}`);
     }
-    
+
     const result = await response.json();
+    // Server-side splice guarantees `result.summary` always has
+    // the verified Current Medications in place (no AI call, no
+    // client-side regen dance). See serverReplaceMedicationsIn
+    // Summary in the GET /api/patient-summary handler.
     // Prefer a committed summary. If none is committed yet, fall back to the
     // wizard's hidden draft (userDoc.draftPatientSummary) so updateSummary-
     // WithVerifiedMeds has text to splice the verified meds into.
@@ -5823,20 +5975,28 @@ const dismissSummaryPair = () => {
 };
 
 const requestNewSummary = async () => {
+  console.log('[MyStuff] requestNewSummary START', { userId: props.userId });
   // Guard: verify session is ready before calling agent endpoint
   if (!props.userId) {
     console.warn('[MyStuff] requestNewSummary skipped — no userId');
     return;
   }
   try {
+    console.log('[MyStuff] requestNewSummary: session check GET /api/user-status');
     const sessionCheck = await fetch(`/api/user-status?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
+    console.log('[MyStuff] requestNewSummary: session check response', { ok: sessionCheck.ok, status: sessionCheck.status });
     if (!sessionCheck.ok) {
       console.warn(`[MyStuff] Session not ready (${sessionCheck.status}), falling back to loading existing summary`);
       await loadPatientSummary();
       return;
     }
-  } catch {
-    console.warn('[MyStuff] Session check failed, falling back to loading existing summary');
+    // Peek at what the server thinks currentMedications is RIGHT NOW.
+    try {
+      const j = await sessionCheck.clone().json();
+      console.log('[MyStuff] requestNewSummary: userDoc.currentMedications @ regen time', { present: !!j?.currentMedications, len: (j?.currentMedications || '').length });
+    } catch { /* body already consumed elsewhere is fine */ }
+  } catch (e) {
+    console.warn('[MyStuff] Session check failed, falling back to loading existing summary', e);
     await loadPatientSummary();
     return;
   }
@@ -5845,6 +6005,7 @@ const requestNewSummary = async () => {
   summaryError.value = '';
 
   try {
+    console.log('[MyStuff] requestNewSummary: POST /api/generate-patient-summary');
     const response = await fetch('/api/generate-patient-summary', {
       method: 'POST',
       headers: {
@@ -5855,6 +6016,7 @@ const requestNewSummary = async () => {
         userId: props.userId
       })
     });
+    console.log('[MyStuff] requestNewSummary: /api/generate-patient-summary response', { ok: response.ok, status: response.status });
 
     if (!response.ok) {
       const errorData = await response.json();
@@ -5862,6 +6024,7 @@ const requestNewSummary = async () => {
     }
 
     const result = await response.json();
+    console.log('[MyStuff] requestNewSummary: got result', { summaryLen: (result?.summary || '').length, summariesCount: result?.summaries?.length, snippet: (result?.summary || '').slice(0, 300) });
 
     // Use server's summary count (from generate response) so we don't rely on stale client state
     const summaryCount = result.summaries?.length ?? patientSummaries.value.length;
@@ -5897,9 +6060,31 @@ const requestNewSummary = async () => {
 };
 
 
+// One-shot session flag — the "editing PS won't change CM" warning
+// fires the first time the user enters PS edit mode in this
+// session. After they acknowledge once we don't badger them.
+const psCmEditWarningShownThisSession = ref(false);
+
 const startSummaryEdit = () => {
   summaryEditText.value = patientSummary.value || '';
   isEditingSummaryTab.value = true;
+  // Surface the "Current Medications section of the summary is a
+  // RENDERED COPY, not the source" gotcha. Without this, users
+  // who edit the meds inside the PS text will be confused when
+  // those edits don't propagate to the My Lists Current
+  // Medications worksheet or to subsequently-generated summaries.
+  if (!psCmEditWarningShownThisSession.value) {
+    psCmEditWarningShownThisSession.value = true;
+    if ($q && typeof $q.dialog === 'function') {
+      $q.dialog({
+        title: 'Heads up',
+        message: 'Editing the Patient Summary does not change the Current Medications. If you want to update them, do that first.',
+        ok: { label: 'OK', color: 'primary' }
+      });
+    } else {
+      window.alert('Editing the Patient Summary does not change the Current Medications. If you want to update them, do that first.');
+    }
+  }
 };
 
 const cancelSummaryEdit = () => {
@@ -6413,9 +6598,15 @@ watch(() => props.modelValue, async (newValue) => {
     // Reset per-open state
     medsMismatchAcknowledged.value = false;
 
-    // Set initial tab if provided
-    if (props.initialTab) {
+    // Honor a newly-supplied initialTab from the parent (a
+    // programmatic open like "open at Patient Summary after a
+    // fresh generation"). Don't re-apply the SAME initialTab
+    // every reopen — that would clobber the user's last choice
+    // when they re-expand via the rail. See the
+    // `lastAppliedInitialTab` doc comment near currentTab init.
+    if (props.initialTab && props.initialTab !== lastAppliedInitialTab) {
       currentTab.value = props.initialTab;
+      lastAppliedInitialTab = props.initialTab;
     }
     
     // Check for active indexing job and restore polling if needed
@@ -6725,7 +6916,7 @@ $my-stuff-z: 6000; // above q-dialog default; sub-dialogs from within
   position: relative;
   height: 44px;
   border-radius: 8px;
-  border: none;
+  border: 2px solid transparent;     // reserved for the yellow outline
   background: transparent;
   cursor: pointer;
   display: flex;
@@ -6733,7 +6924,7 @@ $my-stuff-z: 6000; // above q-dialog default; sub-dialogs from within
   padding: 0 10px;
   gap: 10px;
   color: #555;
-  transition: background 120ms ease, color 120ms ease;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
   text-align: left;
 
   &:hover { background: rgba(0, 0, 0, 0.06); color: #222; }
@@ -6742,6 +6933,14 @@ $my-stuff-z: 6000; // above q-dialog default; sub-dialogs from within
     background: rgba(25, 118, 210, 0.12);
     color: #1976d2;
     font-weight: 500;
+  }
+  // Attention outline — yellow border around the entire rail
+  // button. Different from the rotating ring on Setup Wizard
+  // (that one means "wizard in progress"); this one is static
+  // and means "this section needs your verification."
+  &.has-attention {
+    border-color: #fbc02d;
+    background: rgba(251, 192, 45, 0.08);
   }
 
   .my-stuff-sidebar--rail-icons & {
@@ -6769,6 +6968,45 @@ $my-stuff-z: 6000; // above q-dialog default; sub-dialogs from within
 
 .my-stuff-rail__badge {
   transform: translate(20%, -20%);
+}
+
+// Setup Wizard rail button: lives at the top of the rail's section
+// list (just below the Workbook brand row). When `wizardActive` is
+// true, a yellow rotating ring is rendered around the icon as a
+// "wizard is running" indicator.
+.my-stuff-rail__btn--wizard {
+  // Separator under the wizard so it's visually distinct from
+  // the 8 section icons below.
+  border-bottom: 1px solid #eee;
+  border-radius: 8px 8px 0 0;
+  margin-bottom: 4px;
+  padding-bottom: 4px;
+  padding-top: 4px;
+}
+
+.my-stuff-rail__wizard-icon-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+}
+
+.my-stuff-rail__wizard-ring {
+  position: absolute;
+  inset: -3px; // ring sits just outside the icon
+  border-radius: 50%;
+  border: 2px solid #fbc02d;       // yellow
+  border-top-color: transparent;   // gap → arrow-chasing-tail look
+  animation: my-stuff-wizard-spin 1.1s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes my-stuff-wizard-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
 }
 
 // User + sign-out group, anchored to the bottom of the rail with
