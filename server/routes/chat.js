@@ -70,7 +70,7 @@ export async function getOwnerIdForDeepLinkSession(req, cloudant) {
   return chat ? resolveAgentOwnerId(chat) : null;
 }
 
-export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
+export default function setupChatRoutes(app, chatClient, cloudant, doClient, appendUserProvisioningEvent) {
   /**
    * Main chat endpoint - routes to appropriate provider
    * POST /api/chat/:provider
@@ -288,6 +288,31 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
             await userAgentProvider.chat(messages, { ...options, stream: true }, writeUpdate);
           } else {
             await chatClient.chat(provider, messages, { ...options, stream: true }, writeUpdate);
+          }
+        } catch (streamErr) {
+          // Send the error to the client as a visible SSE event so the
+          // chat bubble shows the message instead of staying blank.
+          const errMsg = streamErr?.message || streamErr?.error?.message || 'Chat request failed';
+          console.error(`[chat/${provider}] streaming error:`, errMsg);
+          if (!completedFromProvider && !res.writableEnded) {
+            try {
+              res.write(`data: ${JSON.stringify({
+                delta: `Error: ${errMsg}`,
+                isComplete: true,
+                error: true
+              })}\n\n`);
+            } catch { /* connection closed */ }
+            completedFromProvider = true;
+            try { res.end(); } catch { /* already ended */ }
+          }
+          // Log to maia-log so the error appears in the setup log PDF
+          const chatUserId = agentOwnerId || userId || req.body?.userId || req.session?.userId;
+          if (chatUserId && appendUserProvisioningEvent) {
+            appendUserProvisioningEvent(chatUserId, {
+              event: 'chat-error',
+              provider,
+              error: errMsg
+            }).catch(() => {});
           }
         } finally {
           // Fallback: provider returned but never reported isComplete.
@@ -705,6 +730,6 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
     } else {
       providers = providers.filter((p) => p !== 'digitalocean');
     }
-    res.json({ providers, privateAiProfiles });
+    res.json({ providers, privateAiProfiles, providerModels: chatClient.getProviderModels() });
   });
 }

@@ -72,12 +72,32 @@ async function getOrCreateModelAccessKey(cloudant) {
   // Ensure the config database exists
   try { await cloudant.createDatabase(configDb); } catch (_) { /* already exists */ }
 
-  // Try to read cached key from CouchDB
+  // Try to read cached key from CouchDB, then validate it
   try {
     const doc = await cloudant.getDocument(configDb, docId);
     if (doc.secret_key) {
-      originalConsoleLog('[DO Inference] Using cached Model Access Key');
-      return doc.secret_key;
+      // Validate the cached key with a lightweight models list call
+      try {
+        const check = await fetch('https://inference.do-ai.run/v1/models', {
+          headers: { 'Authorization': `Bearer ${doc.secret_key}` }
+        });
+        if (check.ok) {
+          try {
+            const modelsData = await check.json();
+            const ids = (modelsData.data || []).map(m => m.id);
+            originalConsoleLog(`[DO Inference] Using cached Model Access Key (validated). Available models: ${ids.join(', ')}`);
+          } catch (_) {
+            originalConsoleLog('[DO Inference] Using cached Model Access Key (validated)');
+          }
+          return doc.secret_key;
+        }
+        originalConsoleLog(`[DO Inference] Cached key returned ${check.status} — rotating`);
+        // Delete the stale doc so we create a fresh key below
+        try { await cloudant.deleteDocument(configDb, docId, doc._rev); } catch (_) { /* ignore */ }
+      } catch (valErr) {
+        originalConsoleLog(`[DO Inference] Cached key validation failed: ${valErr.message} — rotating`);
+        try { await cloudant.deleteDocument(configDb, docId, doc._rev); } catch (_) { /* ignore */ }
+      }
     }
   } catch (_) { /* doc doesn't exist — create below */ }
 
@@ -1517,7 +1537,7 @@ app.use(session({
 setupAuthRoutes(app, passkeyService, cloudant, doClient, auditLog, { invalidateResourceCache });
 
 // Chat routes
-setupChatRoutes(app, chatClient, cloudant, doClient);
+setupChatRoutes(app, chatClient, cloudant, doClient, appendUserProvisioningEvent);
 
 // File routes
 setupFileRoutes(app, cloudant, doClient);
@@ -13847,11 +13867,43 @@ if (isProduction) {
 
 }
 
-// Resolve DO Inference Model Access Key (upgrades providers that lack direct API keys)
-if (process.env.DIGITALOCEAN_TOKEN) {
-  const inferenceKey = await getOrCreateModelAccessKey(cloudant);
+// Resolve DO Inference key: prefer explicit DO_INFERENCE_KEY, then auto-create via DO API
+{
+  const inferenceKey = process.env.DO_INFERENCE_KEY || (process.env.DIGITALOCEAN_TOKEN ? await getOrCreateModelAccessKey(cloudant) : null);
   if (inferenceKey) {
-    chatClient.enableDOInference(inferenceKey);
+    const source = process.env.DO_INFERENCE_KEY ? 'DO_INFERENCE_KEY env var' : 'auto-created via DO API';
+    console.log(`[DO Inference] Using key from ${source}`);
+    const modelsToCheck = [
+      'anthropic-claude-4.6-sonnet', 'nvidia-nemotron-3-super-120b',
+      'openai-gpt-5.5', 'openai-gpt-oss-120b',
+      'deepseek-v4-pro', 'deepseek-r1-distill-llama-70b'
+    ];
+    const availableModels = new Set();
+    await Promise.allSettled(modelsToCheck.map(async (model) => {
+      try {
+        const resp = await fetch('https://inference.do-ai.run/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${inferenceKey}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model, messages: [{ role: 'user', content: 'Hi' }], max_tokens: 1 }),
+          signal: AbortSignal.timeout(8000)
+        });
+        if (resp.ok) {
+          availableModels.add(model);
+        } else {
+          const body = await resp.json().catch(() => ({}));
+          console.log(`[DO Inference] Model ${model}: ${resp.status} — ${body.message || 'unavailable'}`);
+        }
+      } catch (e) {
+        if (e.name === 'TimeoutError' || e.name === 'AbortError') {
+          availableModels.add(model);
+          console.log(`[DO Inference] Model ${model}: OK (accepted, response timed out)`);
+        } else {
+          console.log(`[DO Inference] Model ${model}: ${e.message}`);
+        }
+      }
+    }));
+    console.log(`[DO Inference] Accessible models: ${[...availableModels].join(', ') || 'none'}`);
+    chatClient.enableDOInference(inferenceKey, availableModels);
   }
 }
 
@@ -13859,6 +13911,11 @@ if (process.env.DIGITALOCEAN_TOKEN) {
 console.log(`User app server ready on port ${PORT}`);
 console.log(`Passkey (from PUBLIC_APP_URL): origin=${passkeyService.origin} rpID=${passkeyService.rpID}`);
 const providers = chatClient.getAvailableProviders();
-console.log(`📊 Available Chat Providers: ${providers.join(', ')}`);
+const providerModels = chatClient.getProviderModels();
+const providerSummary = providers.map(p => {
+  const m = providerModels[p];
+  return m ? `${p} (${m})` : p;
+}).join(', ');
+console.log(`📊 Available Chat Providers: ${providerSummary}`);
 
 export default app;

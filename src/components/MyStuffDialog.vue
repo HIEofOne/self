@@ -39,12 +39,16 @@
           <button
             type="button"
             class="my-stuff-rail__toggle"
+            :class="{ 'close-prompt-highlight': showClosePrompt }"
             :aria-label="chevronAriaLabel"
             :title="chevronTitle"
             @click="chevronClick"
           >
             <q-icon :name="chevronIcon" size="22px" />
           </button>
+        </div>
+        <div v-if="showClosePrompt && railLabeled" class="close-prompt-banner">
+          Close the Workbook to chat
         </div>
 
         <!-- Setup Wizard — top of the rail list, above all section
@@ -1644,6 +1648,7 @@ interface Props {
   // outline on the My Lists rail icon AND the navigation gate on
   // Patient Summary ("must verify meds first").
   medsNeedsVerify?: boolean;
+  showClosePrompt?: boolean;
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -1652,6 +1657,7 @@ const props = withDefaults(defineProps<Props>(), {
   originalMessages: () => [],
   wizardActive: false,
   medsNeedsVerify: false,
+  showClosePrompt: false,
 });
 
 const emit = defineEmits<{
@@ -6910,6 +6916,30 @@ $my-stuff-z: 6000; // above q-dialog default; sub-dialogs from within
 
   &:hover { background: rgba(0, 0, 0, 0.06); color: #222; }
   &:focus-visible { outline: 2px solid #1976d2; outline-offset: 2px; }
+
+  &.close-prompt-highlight {
+    background: #4caf50;
+    color: #fff;
+    animation: close-prompt-pulse 1.5s ease-in-out infinite;
+    &:hover { background: #388e3c; color: #fff; }
+  }
+}
+
+@keyframes close-prompt-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(76, 175, 80, 0.5); }
+  50% { box-shadow: 0 0 0 6px rgba(76, 175, 80, 0); }
+}
+
+.close-prompt-banner {
+  margin: 4px 10px 8px;
+  padding: 6px 10px;
+  background: #e8f5e9;
+  color: #2e7d32;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  text-align: center;
+  line-height: 1.3;
 }
 
 .my-stuff-rail__btn {
