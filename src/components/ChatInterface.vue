@@ -66,10 +66,13 @@
                 style="display: inline-block; max-width: 80%;"
                 @click="handlePageLinkClick"
               >
-                <details v-if="msg.reasoningContent && !isStreaming" class="reasoning-section">
-                  <summary class="reasoning-toggle">Show reasoning</summary>
-                  <div class="reasoning-content">{{ msg.reasoningContent }}</div>
-                </details>
+                <div v-if="msg.reasoningContent && !isStreaming" class="reasoning-section">
+                  <div class="reasoning-toggle" @click="toggleReasoning(idx)">
+                    <span class="reasoning-arrow">{{ expandedReasoning[idx] ? '▼' : '▶' }}</span>
+                    {{ expandedReasoning[idx] ? 'Hide reasoning' : 'Show reasoning' }}
+                  </div>
+                  <div v-if="expandedReasoning[idx]" class="reasoning-content">{{ msg.reasoningContent }}</div>
+                </div>
                 <div v-html="messageDisplayHtml[idx]"></div>
                 <div class="q-mt-sm">
                   <q-btn
@@ -917,6 +920,10 @@ const trulyOriginalMessages = ref<Message[]>([]); // Store truly original messag
 const inputMessage = ref('');
 const isStreaming = ref(false);
 const streamingReasoning = ref('');
+const expandedReasoning = ref<Record<number, boolean>>({});
+const toggleReasoning = (idx: number) => {
+  expandedReasoning.value[idx] = !expandedReasoning.value[idx];
+};
 const uploadedFiles = ref<UploadedFile[]>([]);
 const fileInput = ref<HTMLInputElement | null>(null);
 const isUploadingFile = ref(false);
@@ -6679,7 +6686,7 @@ const scrollToBottom = async () => {
 };
 
 // Watch for specific changes and trigger scroll with flush: 'post'
-watch(() => [messages.value.length, messages.value[messages.value.length - 1]?.content], () => {
+watch(() => [messages.value.length, messages.value[messages.value.length - 1]?.content, streamingReasoning.value], () => {
   scrollToBottom();
 }, { flush: 'post' });
 
@@ -8433,6 +8440,11 @@ defineExpose({
   color: #757575;
   user-select: none;
   background: #fafafa;
+}
+
+.reasoning-arrow {
+  font-size: 10px;
+  margin-right: 4px;
 }
 
 .reasoning-section.streaming .reasoning-toggle {
