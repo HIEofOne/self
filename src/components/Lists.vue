@@ -684,7 +684,7 @@ const props = defineProps<Props>();
 const emit = defineEmits<{
   'back-to-chat': [];
   'show-patient-summary': [];
-  'current-medications-saved': [data: { value: string; edited: boolean; changed?: boolean; source?: string }];
+  'current-medications-saved': [data: { value: string; edited: boolean; changed?: boolean; source?: string; verified?: boolean }];
   'medications-offered': [data: {
     lines: number;
     source: 'apple-health' | 'patient-summary' | 'manual' | 'user-doc';
