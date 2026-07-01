@@ -138,13 +138,23 @@
           </template>
           
           <div v-if="isStreaming" class="text-grey-6">
-            <template v-if="streamingReasoning">
-              <details open class="reasoning-section streaming">
-                <summary class="reasoning-toggle">
+            <template v-if="streamingReasoning && !reasoningDone">
+              <div class="reasoning-section streaming">
+                <div class="reasoning-toggle">
                   <q-spinner-dots size="sm" /> Reasoning...
-                </summary>
-                <div class="reasoning-content">{{ streamingReasoning }}</div>
-              </details>
+                </div>
+                <div ref="streamingReasoningRef" class="reasoning-content">{{ streamingReasoning }}</div>
+              </div>
+            </template>
+            <template v-else-if="reasoningDone">
+              <div class="reasoning-section">
+                <div class="reasoning-toggle" @click="streamingReasoningExpanded = !streamingReasoningExpanded">
+                  <span class="reasoning-arrow">{{ streamingReasoningExpanded ? '▼' : '▶' }}</span>
+                  {{ streamingReasoningExpanded ? 'Hide reasoning' : 'Show reasoning' }}
+                </div>
+                <div v-if="streamingReasoningExpanded" class="reasoning-content">{{ streamingReasoning }}</div>
+              </div>
+              Generating response... <q-spinner-dots size="sm" />
             </template>
             <template v-else>
               Thinking... <q-spinner-dots size="sm" />
@@ -920,6 +930,9 @@ const trulyOriginalMessages = ref<Message[]>([]); // Store truly original messag
 const inputMessage = ref('');
 const isStreaming = ref(false);
 const streamingReasoning = ref('');
+const reasoningDone = ref(false);
+const streamingReasoningExpanded = ref(false);
+const streamingReasoningRef = ref<HTMLElement | null>(null);
 const expandedReasoning = ref<Record<number, boolean>>({});
 const toggleReasoning = (idx: number) => {
   expandedReasoning.value[idx] = !expandedReasoning.value[idx];
@@ -2266,6 +2279,8 @@ const sendMessage = async () => {
   
   isStreaming.value = true;
   streamingReasoning.value = '';
+  reasoningDone.value = false;
+  streamingReasoningExpanded.value = false;
 
   try {
     // If this is a patient summary request, check for existing summary first
@@ -2559,13 +2574,15 @@ const sendMessage = async () => {
     // network) wouldn't hit that — the client-side timeout is the
     // belt-and-suspenders.
     const STREAM_IDLE_TIMEOUT_MS = 90_000;
+    const STREAM_REASONING_TIMEOUT_MS = 300_000;
     const timeoutFor = (ms: number) => new Promise<{ done: true; value: undefined; timeout: true }>(resolve => {
       setTimeout(() => resolve({ done: true, value: undefined, timeout: true }), ms);
     });
     while (true) {
+      const idleMs = streamingReasoning.value ? STREAM_REASONING_TIMEOUT_MS : STREAM_IDLE_TIMEOUT_MS;
       const result = await Promise.race([
         reader!.read().then(r => ({ ...r, timeout: false })),
-        timeoutFor(STREAM_IDLE_TIMEOUT_MS)
+        timeoutFor(idleMs)
       ]) as { done: boolean; value?: Uint8Array; timeout?: boolean };
       if (result.timeout) {
         try { reader!.cancel(); } catch { /* ignore */ }
@@ -2589,6 +2606,9 @@ const sendMessage = async () => {
             }
 
             if (data.delta) {
+              if (streamingReasoning.value && !reasoningDone.value) {
+                reasoningDone.value = true;
+              }
               assistantMessage.content += data.delta;
             }
 
@@ -6688,6 +6708,13 @@ const scrollToBottom = async () => {
 // Watch for specific changes and trigger scroll with flush: 'post'
 watch(() => [messages.value.length, messages.value[messages.value.length - 1]?.content, streamingReasoning.value], () => {
   scrollToBottom();
+  if (streamingReasoningRef.value) {
+    nextTick(() => {
+      if (streamingReasoningRef.value) {
+        streamingReasoningRef.value.scrollTop = streamingReasoningRef.value.scrollHeight;
+      }
+    });
+  }
 }, { flush: 'post' });
 
 const startSetupWizardPolling = () => {
