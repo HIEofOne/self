@@ -1705,14 +1705,14 @@ const handleShowPatientSummary = () => {
 // don't match PS Current Medications section" case without any
 // AI call.)
 
-const handleCurrentMedicationsSaved = (payload: { value: string; edited: boolean; changed?: boolean; source?: string }) => {
+const handleCurrentMedicationsSaved = (payload: { value: string; edited: boolean; changed?: boolean; source?: string; verified?: boolean }) => {
   emit('current-medications-saved', payload);
-  // Mark PS unverified so the yellow outline appears on the
-  // Patient Summary rail icon. No AI regen is needed — the next
-  // GET /api/patient-summary automatically splices the verified
-  // meds into the returned text (see serverReplaceMedicationsIn
-  // Summary). No wait, no flash.
-  summaryNeedsVerify.value = true;
+  // Only mark PS unverified when the user explicitly clicked Edit
+  // or Verify. Per-row edits/deletes should NOT trigger a Patient
+  // Summary update — the user may still be editing more rows.
+  if (payload.verified) {
+    summaryNeedsVerify.value = true;
+  }
 };
 
 const handleMedicationsOffered = (payload: {

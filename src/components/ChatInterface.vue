@@ -7199,10 +7199,10 @@ watch(
           });
         } catch { /* non-fatal */ }
         addTestLog(`Medications extracted from summary (${medsText.split('\n').filter(l => l.trim()).length} lines) — auto-verified`);
-        handleCurrentMedicationsSaved({ value: medsText, edited: false, changed: true });
+        handleCurrentMedicationsSaved({ value: medsText, edited: false, changed: true, verified: true });
       } else {
         addTestLog('Medications not available — proceeding without', false);
-        handleCurrentMedicationsSaved({ value: '', edited: false, changed: false });
+        handleCurrentMedicationsSaved({ value: '', edited: false, changed: false, verified: true });
       }
     }
   }
@@ -7513,7 +7513,7 @@ const handleMedicationsOffered = (payload: {
   void generateSetupLogPdf();
 };
 
-const handleCurrentMedicationsSaved = async (payload?: { value?: string; edited?: boolean; changed?: boolean; source?: string }) => {
+const handleCurrentMedicationsSaved = async (payload?: { value?: string; edited?: boolean; changed?: boolean; source?: string; verified?: boolean }) => {
   const medsLineCount = payload?.value ? payload.value.split('\n').filter(l => l.trim()).length : 0;
   logProvisioningEvent({
     event: 'medications-saved',
@@ -7540,7 +7540,9 @@ const handleCurrentMedicationsSaved = async (payload?: { value?: string; edited?
   }
   // Guided flow: advance from medications → summary IMMEDIATELY (before network calls)
   // to avoid a flash where the medications tab sits in "saved" state.
-  if (wizardFlowPhase.value === 'medications') {
+  // Only advance when the user explicitly clicked Verify (verified=true).
+  // Per-row edits/deletes should NOT close the medications view.
+  if (wizardFlowPhase.value === 'medications' && payload?.verified) {
     wizardFlowPhase.value = 'summary';
     guidedFlowDismissCount.value = 0;
     void generateSetupLogPdf();
@@ -7550,8 +7552,14 @@ const handleCurrentMedicationsSaved = async (payload?: { value?: string; edited?
     myStuffInitialTab.value = 'summary';
     requestMyStuffSummaryAction('update-summary-meds', payload?.value || '');
   }
-  // Refresh wizard state in background (non-blocking)
-  void refreshWizardState();
+  // Refresh wizard state in background (non-blocking).
+  // Skip for per-row edits/deletes: refreshWizardState fetches
+  // GET /api/patient-summary which auto-splices meds into the
+  // summary on the server side — we only want that after explicit
+  // Verify or Edit.
+  if (payload?.verified) {
+    void refreshWizardState();
+  }
 };
 
 const handleMyStuffShowSummary = () => {

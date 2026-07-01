@@ -1535,7 +1535,7 @@ const handleVerifyCurrentMedications = async () => {
     clearVerifyRequirement();
     return;
   }
-  await saveCurrentMedicationsValue(currentMedications.value, true, true);
+  await saveCurrentMedicationsValue(currentMedications.value, true, true, true);
 };
 
 /** User dismisses the verify prompt without verifying — don't show the dialog again this session,
@@ -3064,7 +3064,7 @@ const cancelEditingCurrentMedications = () => {
   currentMedicationsBlockTitle.value = 'Current Medications';
 };
 
-const saveCurrentMedicationsValue = async (value: string, markEdited: boolean, clearVerify = false) => {
+const saveCurrentMedicationsValue = async (value: string, markEdited: boolean, clearVerify = false, verified = false) => {
   if (!props.userId) {
     if ($q && typeof $q.notify === 'function') {
       $q.notify({
@@ -3113,7 +3113,8 @@ const saveCurrentMedicationsValue = async (value: string, markEdited: boolean, c
       value,
       edited: markEdited,
       changed: value !== previousMedications,
-      source: currentMedicationsSource.value || 'manual'
+      source: currentMedicationsSource.value || 'manual',
+      verified
     });
 
     // v1.4.x: the "Update Patient Summary?" dialog used to fire
@@ -3136,9 +3137,9 @@ const saveCurrentMedicationsValue = async (value: string, markEdited: boolean, c
   }
 };
 
-// Save current medications to user document
+// Save current medications to user document (Edit button)
 const saveCurrentMedications = async () => {
-  await saveCurrentMedicationsValue(editingCurrentMedications.value, true, false);
+  await saveCurrentMedicationsValue(editingCurrentMedications.value, true, true, true);
 };
 
 // Handle SHOW SUMMARY button click
