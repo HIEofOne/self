@@ -53,12 +53,86 @@
           </div>
         </div>
         
-        <!-- Display Mode -->
+        <!-- Display Mode: row-based inline edit. Each med line has
+             a trash icon (delete) + pencil icon (inline edit, cursor
+             at end). A blank row at the bottom with a pencil lets the
+             user add a new med. Bulk-edit textarea is gone — the row
+             UI covers all edit cases. -->
         <div v-else-if="!isEditingCurrentMedications && currentMedications">
           <div v-if="currentMedicationsSourceLabel" class="text-caption text-grey-7 q-mb-sm">
             Source: {{ currentMedicationsSourceLabel }}
           </div>
-          <div class="text-body2" style="white-space: pre-wrap;">{{ cleanedCurrentMedications }}</div>
+          <div class="q-gutter-y-xs">
+            <div
+              v-for="(med, idx) in currentMedRows"
+              :key="`med-${idx}`"
+              class="row items-center no-wrap q-py-xs"
+              style="min-height: 32px;"
+            >
+              <q-btn
+                flat dense round size="sm"
+                icon="delete"
+                color="grey-7"
+                @click="deleteMedRow(idx)"
+                :disable="editingRowIndex !== null"
+                aria-label="Delete this medication"
+              >
+                <q-tooltip>Delete</q-tooltip>
+              </q-btn>
+              <q-btn
+                flat dense round size="sm"
+                icon="edit"
+                color="grey-7"
+                @click="startInlineEditRow(idx)"
+                :disable="editingRowIndex !== null"
+                aria-label="Edit this medication"
+              >
+                <q-tooltip>Edit</q-tooltip>
+              </q-btn>
+              <!-- Text OR inline input, depending on which row is in edit mode. -->
+              <input
+                v-if="editingRowIndex === idx"
+                ref="inlineInputRef"
+                v-model="editingRowText"
+                type="text"
+                class="col q-ml-sm"
+                style="border: 1px solid #1976d2; border-radius: 4px; padding: 4px 8px; font-family: inherit; font-size: 14px;"
+                @keyup.enter="commitInlineEditRow"
+                @keyup.esc="cancelInlineEditRow"
+                @blur="commitInlineEditRow"
+              />
+              <span v-else class="col q-ml-sm text-body2">{{ med }}</span>
+            </div>
+            <!-- "Add new medication" row: pencil only. Clicking it
+                 opens the inline input at the bottom of the list. -->
+            <div class="row items-center no-wrap q-py-xs" style="min-height: 32px;">
+              <!-- Trash placeholder for column alignment. -->
+              <div style="width: 32px; flex-shrink: 0;"></div>
+              <q-btn
+                flat dense round size="sm"
+                icon="edit"
+                color="primary"
+                @click="startInlineEditRow(-1)"
+                :disable="editingRowIndex !== null"
+                aria-label="Add a new medication"
+              >
+                <q-tooltip>Add new medication</q-tooltip>
+              </q-btn>
+              <input
+                v-if="editingRowIndex === -1"
+                ref="inlineInputRef"
+                v-model="editingRowText"
+                type="text"
+                class="col q-ml-sm"
+                style="border: 1px solid #1976d2; border-radius: 4px; padding: 4px 8px; font-family: inherit; font-size: 14px;"
+                placeholder="Type a new medication…"
+                @keyup.enter="commitInlineEditRow"
+                @keyup.esc="cancelInlineEditRow"
+                @blur="commitInlineEditRow"
+              />
+              <span v-else class="col q-ml-sm text-caption text-grey-6">Add a medication…</span>
+            </div>
+          </div>
           <div class="text-caption text-grey-7 q-mt-md q-pt-md" style="border-top: 1px solid #e0e0e0;">
             Please edit this AI suggestion to reflect your actual prescription drug use.
           </div>
@@ -1461,7 +1535,7 @@ const handleVerifyCurrentMedications = async () => {
     clearVerifyRequirement();
     return;
   }
-  await saveCurrentMedicationsValue(currentMedications.value, true, true);
+  await saveCurrentMedicationsValue(currentMedications.value, true, true, true);
 };
 
 /** User dismisses the verify prompt without verifying — don't show the dialog again this session,
@@ -2895,6 +2969,85 @@ const cleanedCurrentMedications = computed(() => {
   return removeHeadingsFromResponse(currentMedications.value);
 });
 
+// Row-based inline editing for Current Medications. Each med line
+// becomes a row with trash + pencil icons; users can delete or
+// edit a single med without going through a bulk textarea. A blank
+// row at the bottom (with a pencil) lets them add a new med.
+// Save fires per action (trash / commit-edit / commit-add) so the
+// server state and yellow-outline / PS-splice logic stay in sync.
+const parseMedLines = (text: string): string[] => {
+  if (!text) return [];
+  return text.split('\n')
+    .map(l => l.replace(/^\s*[-*•]\s*/, '').trim())
+    .filter(l => l.length > 0);
+};
+const serializeMedLines = (lines: string[]): string =>
+  lines.map(l => `- ${l.trim()}`).filter(l => l !== '- ').join('\n');
+
+const currentMedRows = computed<string[]>(() => parseMedLines(cleanedCurrentMedications.value));
+
+// Which row (0-based index) is currently in inline edit mode.
+// null = none. -1 = the "add new" row at the bottom.
+const editingRowIndex = ref<number | null>(null);
+const editingRowText = ref<string>('');
+const inlineInputRef = ref<HTMLInputElement | null>(null);
+
+const startInlineEditRow = async (idx: number) => {
+  editingRowIndex.value = idx;
+  editingRowText.value = idx >= 0 ? (currentMedRows.value[idx] || '') : '';
+  // Do NOT clearVerifyRequirement() here — a single-row edit is
+  // not the same as VERIFYING the whole list. The red borders on
+  // Edit/Verify stay until the user explicitly clicks the Verify
+  // button (handleVerifyCurrentMedications).
+  await nextTick();
+  if (inlineInputRef.value) {
+    inlineInputRef.value.focus();
+    // Place cursor at end of the existing text (per user request).
+    const len = inlineInputRef.value.value.length;
+    inlineInputRef.value.setSelectionRange(len, len);
+  }
+};
+
+const cancelInlineEditRow = () => {
+  editingRowIndex.value = null;
+  editingRowText.value = '';
+};
+
+const commitInlineEditRow = async () => {
+  const idx = editingRowIndex.value;
+  const text = editingRowText.value.trim();
+  editingRowIndex.value = null;
+  editingRowText.value = '';
+  if (idx === null) return;
+  const rows = [...currentMedRows.value];
+  if (idx === -1) {
+    // Adding a new row.
+    if (!text) return;
+    rows.push(text);
+  } else {
+    if (!text) {
+      // Empty commit = delete the row.
+      rows.splice(idx, 1);
+    } else {
+      rows[idx] = text;
+    }
+  }
+  // Pass clearVerify=false: a single-row inline edit/add is a
+  // partial change to the AI suggestion, not an all-list VERIFY.
+  // The red "please verify" borders on Edit/Verify remain until
+  // the user clicks Verify.
+  await saveCurrentMedicationsValue(serializeMedLines(rows), true, false);
+};
+
+const deleteMedRow = async (idx: number) => {
+  const rows = [...currentMedRows.value];
+  if (idx < 0 || idx >= rows.length) return;
+  rows.splice(idx, 1);
+  // Same reasoning as commitInlineEditRow above — a single-row
+  // delete doesn't count as verifying the whole list.
+  await saveCurrentMedicationsValue(serializeMedLines(rows), true, false);
+};
+
 // Start editing current medications
 const startEditingCurrentMedications = () => {
   isEditingCurrentMedications.value = true;
@@ -2911,7 +3064,7 @@ const cancelEditingCurrentMedications = () => {
   currentMedicationsBlockTitle.value = 'Current Medications';
 };
 
-const saveCurrentMedicationsValue = async (value: string, markEdited: boolean, clearVerify = false) => {
+const saveCurrentMedicationsValue = async (value: string, markEdited: boolean, clearVerify = false, verified = false) => {
   if (!props.userId) {
     if ($q && typeof $q.notify === 'function') {
       $q.notify({
@@ -2960,13 +3113,16 @@ const saveCurrentMedicationsValue = async (value: string, markEdited: boolean, c
       value,
       edited: markEdited,
       changed: value !== previousMedications,
-      source: currentMedicationsSource.value || 'manual'
+      source: currentMedicationsSource.value || 'manual',
+      verified
     });
 
-    // Only offer to update Patient Summary if the medications text actually changed
-    if (value !== previousMedications) {
-      showSummaryDialog.value = true;
-    }
+    // v1.4.x: the "Update Patient Summary?" dialog used to fire
+    // here. It's gone — MyStuffDialog.handleCurrentMedicationsSaved
+    // now auto-triggers the Patient Summary regeneration in the
+    // background and notifies the user via toast when it
+    // completes. The dialog component is still defined in the
+    // template in case we want to bring back an opt-in flow.
   } catch (err) {
     console.error('Error saving current medications:', err);
     if ($q && typeof $q.notify === 'function') {
@@ -2981,9 +3137,9 @@ const saveCurrentMedicationsValue = async (value: string, markEdited: boolean, c
   }
 };
 
-// Save current medications to user document
+// Save current medications to user document (Edit button)
 const saveCurrentMedications = async () => {
-  await saveCurrentMedicationsValue(editingCurrentMedications.value, true, false);
+  await saveCurrentMedicationsValue(editingCurrentMedications.value, true, true, true);
 };
 
 // Handle SHOW SUMMARY button click

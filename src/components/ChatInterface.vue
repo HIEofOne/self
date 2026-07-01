@@ -201,7 +201,38 @@
             </div>
           </div>
           
-          <div class="row q-gutter-sm">
+          <div class="row q-gutter-sm" style="align-items: center;">
+            <!-- v1.4.35: paperclip (attach_file) replaced by a
+                 plain "+" and moved to the LEFT of the AI provider
+                 dropdown. The entire status-bar row that used to
+                 sit below the actions row was removed in the same
+                 step (it now had nothing left in it — the wizard
+                 icon moved to the Workbook rail in v1.4.34, the
+                 My Stuff / userId / SIGN OUT moved to the rail in
+                 v1.4.33). The hidden <input type="file"> stays
+                 here so triggerFileInput() keeps working without
+                 any script changes. -->
+            <div class="col-auto">
+              <q-btn
+                flat
+                dense
+                round
+                icon="add"
+                class="text-grey-6"
+                :disable="isRequestSent"
+                @click="triggerFileInput"
+                aria-label="Attach file"
+              >
+                <q-tooltip v-if="isRequestSent">File import is disabled until your account is approved</q-tooltip>
+                <q-tooltip v-else>Attach files to add them to the chat context</q-tooltip>
+              </q-btn>
+              <input
+                ref="fileInput"
+                type="file"
+                style="display: none"
+                @change="handleFileSelect"
+              />
+            </div>
             <div class="col-auto">
               <q-select
                 v-model="selectedProvider"
@@ -230,83 +261,14 @@
               </q-input>
             </div>
             <div class="col-auto">
-              <q-btn 
-                color="primary" 
+              <q-btn
+                color="primary"
                 label="Send"
                 :disable="!inputMessage || isStreaming || isRequestSent"
                 @click="sendMessage"
               >
                 <q-tooltip v-if="isRequestSent">Chat is disabled until your account is approved</q-tooltip>
               </q-btn>
-            </div>
-          </div>
-          
-          <!-- Status Bar -->
-          <div class="row q-gutter-sm q-mt-sm q-pt-sm" style="border-top: 1px solid #eee; align-items: center;">
-            <div class="col-auto">
-              <q-btn 
-                flat 
-                dense 
-                round 
-                icon="attach_file" 
-                class="text-grey-6" 
-                :disable="isRequestSent"
-                @click="triggerFileInput"
-              >
-                <q-tooltip v-if="isRequestSent">File import is disabled until your account is approved</q-tooltip>
-                <q-tooltip v-else>Attach files to add them to the chat context</q-tooltip>
-              </q-btn>
-              <input
-                ref="fileInput"
-                type="file"
-                style="display: none"
-                @change="handleFileSelect"
-              />
-            </div>
-            <div class="col" style="display: flex; align-items: center; justify-content: center;">
-              <q-btn
-                v-if="canAccessMyStuff"
-                outline
-                dense
-                icon="settings"
-                label="My Stuff"
-                color="grey-7"
-                @click="() => { myStuffInitialTab = 'files'; showMyStuffDialog = true; }"
-              >
-                <q-tooltip>My Stuff: Manage files, knowledge base, agent settings, and patient summary</q-tooltip>
-              </q-btn>
-              <!-- Status box hidden for now
-              <span class="text-body2 text-grey-7" :title="contextualTip">
-                <template v-for="(part, index) in parsedContextualTip" :key="index">
-                  <span v-if="part.type === 'text'">{{ part.text }}</span>
-                  <a
-                    v-else-if="part.type === 'link'"
-                    href="#"
-                    class="text-primary text-underline"
-                    style="cursor: pointer; text-decoration: underline;"
-                    @click.prevent="handleLinkClick(part)"
-                  >{{ part.text }}</a>
-                </template>
-              </span>
-              -->
-            </div>
-            <div class="col-auto" style="display: flex; align-items: center; justify-content: flex-end; gap: 8px;">
-              <q-btn
-                v-if="!showAgentSetupDialog"
-                flat
-                dense
-                round
-                size="sm"
-                icon="auto_fix_high"
-                color="grey-7"
-                @click="() => { wizardDismissed = false; showAgentSetupDialog = true; }"
-              >
-                <q-tooltip>Show wizard</q-tooltip>
-              </q-btn>
-              <span class="text-body2 text-grey-7">
-                {{ props.user?.isTemporary ? 'Local only user:' : 'User:' }} {{ props.user?.userId || 'Guest' }}
-              </span>
-              <q-btn flat dense label="SIGN OUT" color="grey-8" @click="handleSignOut" />
             </div>
           </div>
         </div>
@@ -629,6 +591,8 @@
       :original-messages="trulyOriginalMessages.length > 0 ? trulyOriginalMessages : originalMessages"
       :rehydration-files="props.rehydrationFiles || []"
       :rehydration-active="props.rehydrationActive"
+      :wizard-active="wizardActive"
+      :meds-needs-verify="medsNeedsVerify"
       @chat-selected="handleChatSelected"
       @indexing-started="handleIndexingStarted"
       @indexing-status-update="handleIndexingStatusUpdate"
@@ -646,6 +610,8 @@
       @rehydration-complete="handleRehydrationComplete"
       @file-added-to-kb="handleFileAddedToKb"
       @tab-opened="handleMyStuffTabOpened"
+      @sign-out-requested="handleSignOut"
+      @wizard-requested="() => { wizardDismissed = false; showAgentSetupDialog = true; }"
       v-if="canAccessMyStuff"
     />
 
@@ -1628,7 +1594,88 @@ const currentChatSnapshot = computed(() => JSON.stringify(getComparableChatState
 const canSaveLocally = computed(() => currentChatSnapshot.value !== lastLocalSaveSnapshot.value);
 const canSaveToGroup = computed(() => currentChatSnapshot.value !== lastGroupSaveSnapshot.value);
 
-const userResourceStatus = ref<{ hasAgent: boolean; kbStatus: string; hasKB: boolean; hasFilesInKB: boolean; workflowStage?: string | null } | null>(null);
+const userResourceStatus = ref<{
+  hasAgent: boolean;
+  kbStatus: string;
+  hasKB: boolean;
+  hasFilesInKB: boolean;
+  workflowStage?: string | null;
+  // Drives the Setup Wizard rail icon's yellow spinner. Set in
+  // refreshWizardState() from /api/user-files (kbIndexingActive)
+  // and /api/patient-summary (hasPatientSummary). Other setters
+  // (e.g. updateContextualTip, which only calls /api/user-status)
+  // PRESERVE these two from the prior value rather than zeroing
+  // them — otherwise the spinner flickers between refreshes.
+  kbIndexingActive?: boolean;
+  hasPatientSummary?: boolean;
+  // True when the server has a saved currentMedications text. The
+  // only way that field becomes non-empty is via the Lists tab's
+  // "Verify" or "Save edit" buttons — both POST through
+  // /api/user-current-medications with the user-confirmed value.
+  // So `hasCurrentMedications === true` ≡ "user has verified
+  // current medications". Drives the My Lists rail icon outline
+  // and the "must verify meds first" gate on Patient Summary.
+  hasCurrentMedications?: boolean;
+} | null>(null);
+
+// "Wizard is incomplete" indicator for the rail spinner. Reflects
+// real outstanding setup work, not just session-local state. Order:
+//   1. Wizard dialog is currently open / focused.
+//   2. wizardFlowPhase is non-'done' (a multi-step flow is mid-way).
+//   3. Status hasn't loaded yet — don't claim incompleteness.
+//   4. KB is actively indexing right now.
+//   5. workflowStage hasn't reached 'link_stored' (the final stage).
+//   6. Agent is provisioned but there's still no Patient Summary
+//      (final user-facing setup gate).
+// Stages that count as "wizard done" — the user can still do more
+// (share a chat, save more files) but the initial setup is complete.
+// Anything BEFORE these means setup work is still outstanding.
+// - 'patient_summary': user has generated + verified a Patient
+//   Summary. This is the last user-facing setup gate.
+// - 'link_stored':    user has additionally saved/shared a chat
+//   link. Bonus stage, not required for "wizard done."
+const WIZARD_DONE_STAGES = new Set(['patient_summary', 'link_stored']);
+
+const wizardActive = computed<boolean>(() => {
+  if (showAgentSetupDialog.value) return true;
+  if (wizardFlowPhase.value !== 'done') return true;
+  const status = userResourceStatus.value;
+  if (!status) return false;
+  if (status.kbIndexingActive === true) return true;
+  // Setup is incomplete if workflowStage is set AND it isn't in
+  // the terminal set. NOTE we DO show the spinner for
+  // 'request_sent' — the user can't proceed but the wizard isn't
+  // done either, and the spinner is the cue to open Workbook and
+  // see what's blocking. We DON'T show for null/missing
+  // workflowStage because that's the "haven't loaded yet" case —
+  // false alarms on every mount would be worse than a brief
+  // delay before the spinner appears.
+  if (status.workflowStage && !WIZARD_DONE_STAGES.has(status.workflowStage)) return true;
+  // Only flag missing-patient-summary when we KNOW (refreshWizardState
+  // has run and reported false). If hasPatientSummary is undefined
+  // (status was last set by updateContextualTip, which doesn't fetch
+  // the summary), don't assume.
+  if (status.hasAgent && status.hasPatientSummary === false) return true;
+  return false;
+});
+
+// Current Medications need verification when the server has no
+// saved currentMedications (the only way that field becomes
+// non-empty is via the user's Verify / Save-edit action in the
+// Lists tab, both of which POST through /api/user-current-
+// medications). Drives the yellow outline on the My Lists rail
+// icon AND the "must verify meds first" gate when the user tries
+// to navigate to Patient Summary. Treats `undefined` as
+// "haven't loaded yet — don't false-alarm".
+const medsNeedsVerify = computed<boolean>(() => {
+  const status = userResourceStatus.value;
+  if (!status) return false;
+  // Only fires when the agent is provisioned (no point nagging
+  // the user about meds verification before there's an account
+  // to attach them to).
+  if (!status.hasAgent) return false;
+  return status.hasCurrentMedications === false;
+});
 const isRequestSent = computed(() => userResourceStatus.value?.workflowStage === 'request_sent');
 const statusPollInterval = ref<ReturnType<typeof setInterval> | null>(null);
 const showRequestSentModal = ref(false);
@@ -2686,12 +2733,21 @@ const refreshWizardState = async () => {
     }
 
     if (statusResult) {
+      // kbIndexingActive is available here from filesResult (parsed
+      // above as `indexingActiveFromFiles`). hasPatientSummary is
+      // patched in just below once summaryResponse is read — until
+      // then we preserve the prior value (undefined → "unknown" →
+      // wizard-active computed won't false-trigger).
+      const priorHasPatientSummary = userResourceStatus.value?.hasPatientSummary;
       userResourceStatus.value = {
         hasAgent: !!statusResult?.hasAgent,
         kbStatus: statusResult?.kbStatus || 'none',
         hasKB: !!statusResult?.hasKB,
         hasFilesInKB: !!statusResult?.hasFilesInKB,
-        workflowStage: statusResult?.workflowStage || null
+        workflowStage: statusResult?.workflowStage || null,
+        kbIndexingActive: !!indexingActiveFromFiles,
+        hasPatientSummary: priorHasPatientSummary,
+        hasCurrentMedications: !!statusResult?.currentMedications
       };
       // Whenever server says agent is ready, ensure providers list includes Private AI (no reliance on one-time transitions)
       const agentReady = !!(statusResult?.hasAgent || statusResult?.agentReady);
@@ -2778,10 +2834,21 @@ const refreshWizardState = async () => {
 
     if (summaryResponse.ok) {
       const summaryData = await summaryResponse.json();
+      const hasSummary = !!(summaryData?.summary && summaryData.summary.trim());
       // If server already has a patient summary, mark wizard as complete
       // (covers passkey sign-in from a different browser where localStorage is empty)
-      if (summaryData?.summary && summaryData.summary.trim()) {
+      if (hasSummary) {
         wizardPatientSummary.value = true;
+      }
+      // Update userResourceStatus so the rail wizard spinner reflects
+      // the real "patient summary present?" signal (the field couldn't
+      // be set in the main setter above because summaryResponse hadn't
+      // been read yet).
+      if (userResourceStatus.value) {
+        userResourceStatus.value = {
+          ...userResourceStatus.value,
+          hasPatientSummary: hasSummary
+        };
       }
     }
 
@@ -2832,7 +2899,6 @@ const refreshWizardState = async () => {
             if (stage3IndexingPoll.value) {
               clearInterval(stage3IndexingPoll.value);
             }
-            let prevPollState2 = '';
             stage3IndexingPoll.value = setInterval(async () => {
               try {
                 const statusResponse = await fetch(`/api/user-files?userId=${encodeURIComponent(props.user?.userId || '')}&source=wizard`, {
@@ -2850,14 +2916,8 @@ const refreshWizardState = async () => {
                 const liveTokens = statusResult?.kbTotalTokens ? String(statusResult.kbTotalTokens) : '0';
                 const tokens = (Number(storedTokens) > 0) ? storedTokens : liveTokens;
                 const elapsedPollMs = stage3IndexingStartedAt.value ? Date.now() - stage3IndexingStartedAt.value : 0;
-                const elapsedPollMin = Math.floor(elapsedPollMs / 60000);
-                const elapsedPollSec = Math.floor((elapsedPollMs % 60000) / 1000);
-                // Only log to console when state changes
-                const curPollState2 = `${backendDone}|${liveActive}|${tokens}|${storedStatus.phase || '?'}`;
-                if (curPollState2 !== prevPollState2) {
-                  console.log(`[KB-POLL] backendCompleted=${backendDone} liveActive=${liveActive} tokens=${tokens} phase=${storedStatus.phase || '?'} elapsed=${elapsedPollMin}m${elapsedPollSec}s`);
-                  prevPollState2 = curPollState2;
-                }
+                // (Verbose per-poll console log removed. maia-log
+                // captures completion via logProvisioningEvent.)
                 if (storedStatus.jobId && indexingJobIdFromFiles && storedStatus.jobId !== indexingJobIdFromFiles) {
                   return;
                 }
@@ -2882,9 +2942,7 @@ const refreshWizardState = async () => {
                 // Pure time-based fallback: 30+ min with no completion signal at all.
                 const pureTimeoutComplete = !backendDone && !inferredComplete && !tokenTimeoutComplete && elapsedPollMs > 30 * 60 * 1000;
                 const isCompleted = backendDone || inferredComplete || timedOutInactive || tokenTimeoutComplete || pureTimeoutComplete;
-                const completionReason = backendDone ? 'backendCompleted' : inferredComplete ? 'inferredComplete' : timedOutInactive ? 'timedOutInactive' : tokenTimeoutComplete ? 'tokenTimeout' : 'pureTimeout';
                 if (isCompleted) {
-                  console.log(`[KB-POLL] ✅ Indexing complete: tokens=${tokens} files=${storedStatus.filesIndexed || 0} reason=${completionReason} elapsed=${elapsedPollMin}m${elapsedPollSec}s`);
                   if (stage3IndexingPoll.value) {
                     clearInterval(stage3IndexingPoll.value);
                     stage3IndexingPoll.value = null;
@@ -4291,7 +4349,6 @@ const handleStage3Index = async (overrideNames?: string[], fromRestore = false) 
         }
         movedToKbBucketKeys.push(bucketKey);
       }
-      console.log(`[handleStage3Index] Toggled ${movedToKbBucketKeys.length}/${stage3Names.length} files to KB (already in KB: ${alreadyInKB}, failed: ${toggleFailures.length})`);
       if (toggleFailures.length > 0) {
         console.warn('[handleStage3Index] Toggle failures:', toggleFailures);
       }
@@ -4353,7 +4410,6 @@ const handleStage3Index = async (overrideNames?: string[], fromRestore = false) 
         const hasInitialFile = files.some((item: { isInitial?: boolean }) => !!item?.isInitial);
         emit('rehydration-complete', { hasInitialFile });
       }
-      let prevPollState = '';
       stage3IndexingPoll.value = setInterval(async () => {
         try {
           const statusResponse = await fetch(`/api/user-files?userId=${encodeURIComponent(props.user?.userId || '')}&source=wizard`, {
@@ -4371,14 +4427,11 @@ const handleStage3Index = async (overrideNames?: string[], fromRestore = false) 
           const liveTokens = statusResult?.kbTotalTokens ? String(statusResult.kbTotalTokens) : '0';
           const tokens = (Number(storedTokens) > 0) ? storedTokens : liveTokens;
           const elapsedPollMs = stage3IndexingStartedAt.value ? Date.now() - stage3IndexingStartedAt.value : 0;
-          const elapsedPollMin = Math.floor(elapsedPollMs / 60000);
-          const elapsedPollSec = Math.floor((elapsedPollMs % 60000) / 1000);
-          // Only log to console when state changes
-          const curPollState = `${backendDone}|${liveActive}|${tokens}|${kbStatus.phase || '?'}`;
-          if (curPollState !== prevPollState) {
-            console.log(`[KB-POLL] backendCompleted=${backendDone} liveActive=${liveActive} tokens=${tokens} phase=${kbStatus.phase || '?'} elapsed=${elapsedPollMin}m${elapsedPollSec}s`);
-            prevPollState = curPollState;
-          }
+          // (Verbose per-poll state log + human-readable elapsed
+          // formatter removed. Terminal completion no longer
+          // logs to console either — the maia-log
+          // logProvisioningEvent 'kb-indexed' entry captures the
+          // completion for the log file.)
           if (indexingStatus.value) {
             indexingStatus.value.phase = kbStatus.phase || indexingStatus.value.phase;
             indexingStatus.value.tokens = tokens;
@@ -4407,9 +4460,7 @@ const handleStage3Index = async (overrideNames?: string[], fromRestore = false) 
           // KBs of 4–10 PDFs legitimately take 15–25 minutes to index.
           const pureTimeoutComplete = !backendDone && !inferredComplete && !tokenTimeoutComplete && elapsedPollMs > 30 * 60 * 1000;
           const isCompleted = backendDone || inferredComplete || timedOutInactive || tokenTimeoutComplete || pureTimeoutComplete;
-          const completionReason = backendDone ? 'backendCompleted' : inferredComplete ? 'inferredComplete' : timedOutInactive ? 'timedOutInactive' : tokenTimeoutComplete ? 'tokenTimeout' : pureTimeoutComplete ? 'pureTimeout' : '';
           if (isCompleted) {
-            console.log(`[KB-POLL] ✅ Indexing complete: tokens=${tokens} files=${kbStatus.filesIndexed || 0} reason=${completionReason} elapsed=${elapsedPollMin}m${elapsedPollSec}s`);
             logProvisioningEvent({
               event: 'kb-indexed',
               tokens: parseInt(tokens) || 0,
@@ -7148,10 +7199,10 @@ watch(
           });
         } catch { /* non-fatal */ }
         addTestLog(`Medications extracted from summary (${medsText.split('\n').filter(l => l.trim()).length} lines) — auto-verified`);
-        handleCurrentMedicationsSaved({ value: medsText, edited: false, changed: true });
+        handleCurrentMedicationsSaved({ value: medsText, edited: false, changed: true, verified: true });
       } else {
         addTestLog('Medications not available — proceeding without', false);
-        handleCurrentMedicationsSaved({ value: '', edited: false, changed: false });
+        handleCurrentMedicationsSaved({ value: '', edited: false, changed: false, verified: true });
       }
     }
   }
@@ -7462,7 +7513,7 @@ const handleMedicationsOffered = (payload: {
   void generateSetupLogPdf();
 };
 
-const handleCurrentMedicationsSaved = async (payload?: { value?: string; edited?: boolean; changed?: boolean; source?: string }) => {
+const handleCurrentMedicationsSaved = async (payload?: { value?: string; edited?: boolean; changed?: boolean; source?: string; verified?: boolean }) => {
   const medsLineCount = payload?.value ? payload.value.split('\n').filter(l => l.trim()).length : 0;
   logProvisioningEvent({
     event: 'medications-saved',
@@ -7473,12 +7524,27 @@ const handleCurrentMedicationsSaved = async (payload?: { value?: string; edited?
   wizardStage2Complete.value = true;
   wizardStage2Pending.value = false;
   wizardStage2NoDevice.value = false;
+  // Optimistically update userResourceStatus so the yellow outline
+  // on the My Lists rail icon disappears IMMEDIATELY when the user
+  // verifies meds. Without this, the outline lingers until the
+  // background refreshWizardState() round-trip completes, which
+  // the user perceives as "Verify didn't work." Empty payload
+  // value means "cleared" — flip the flag false so the outline
+  // reappears (matches the server state we're about to confirm).
+  if (userResourceStatus.value) {
+    const valueTrimmed = (payload?.value || '').trim();
+    userResourceStatus.value = {
+      ...userResourceStatus.value,
+      hasCurrentMedications: valueTrimmed.length > 0
+    };
+  }
   // Guided flow: advance from medications → summary IMMEDIATELY (before network calls)
   // to avoid a flash where the medications tab sits in "saved" state.
-  if (wizardFlowPhase.value === 'medications') {
+  // Only advance when the user explicitly clicked Verify (verified=true).
+  // Per-row edits/deletes should NOT close the medications view.
+  if (wizardFlowPhase.value === 'medications' && payload?.verified) {
     wizardFlowPhase.value = 'summary';
     guidedFlowDismissCount.value = 0;
-    console.log('[Wizard] Current Medications saved — opening Patient Summary tab');
     void generateSetupLogPdf();
     // Switch to Patient Summary tab and text-patch the provisional summary with
     // the verified medications. Never a second AI call — the wizard budget is
@@ -7486,8 +7552,14 @@ const handleCurrentMedicationsSaved = async (payload?: { value?: string; edited?
     myStuffInitialTab.value = 'summary';
     requestMyStuffSummaryAction('update-summary-meds', payload?.value || '');
   }
-  // Refresh wizard state in background (non-blocking)
-  void refreshWizardState();
+  // Refresh wizard state in background (non-blocking).
+  // Skip for per-row edits/deletes: refreshWizardState fetches
+  // GET /api/patient-summary which auto-splices meds into the
+  // summary on the server side — we only want that after explicit
+  // Verify or Edit.
+  if (payload?.verified) {
+    void refreshWizardState();
+  }
 };
 
 const handleMyStuffShowSummary = () => {
@@ -7657,12 +7729,21 @@ const updateContextualTip = async () => {
     const workflowStage = userData.workflowStage || null;
     const hasKB = !!userData.hasKB;
     const hasFilesInKB = !!userData.hasFilesInKB;
+    // /api/user-status doesn't return kbIndexingActive or patient
+    // summary status — only refreshWizardState() fetches those.
+    // PRESERVE the prior values here (undefined → "unknown", so
+    // the wizard spinner doesn't false-trigger before
+    // refreshWizardState has run at least once).
+    const prior = userResourceStatus.value;
     userResourceStatus.value = {
       hasAgent: !!userData.hasAgent,
       kbStatus: userData.kbStatus || 'none',
       hasKB: hasKB,
       hasFilesInKB: hasFilesInKB,
-      workflowStage: workflowStage
+      workflowStage: workflowStage,
+      kbIndexingActive: prior?.kbIndexingActive,
+      hasPatientSummary: prior?.hasPatientSummary,
+      hasCurrentMedications: !!userData.currentMedications
     };
     
     // Check if workflowStage is 'indexing' (even if frontend polling isn't active)
@@ -7737,6 +7818,16 @@ onMounted(async () => {
 
     startSetupWizardPolling();
     updateContextualTip();
+    // Seed userResourceStatus with kbIndexingActive +
+    // hasPatientSummary so the Setup Wizard rail spinner reflects
+    // real outstanding work on first paint (not just after the
+    // user touches the wizard). refreshWizardState is the canonical
+    // 3-fetch loader (/api/user-status + /api/user-files +
+    // /api/patient-summary) that populates those fields. It's
+    // already called from every wizard-progressing event handler,
+    // so the spinner stays accurate as the user works through
+    // setup.
+    void refreshWizardState();
     setTimeout(() => void checkAndShowNeedsIndexingPrompt(), 800);
 
     // Update tip immediately when context changes (no polling needed for these)
