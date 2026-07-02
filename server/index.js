@@ -11674,7 +11674,9 @@ app.post('/api/patient-summary/draft', async (req, res) => {
     if (!userDoc) {
       return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
     }
-    if (!userDoc.assignedAgentId || !userDoc.agentEndpoint) {
+    const hasPrimaryAgent = userDoc.assignedAgentId && userDoc.agentEndpoint;
+    const hasSecondaryAgent = userDoc.agentProfiles?.gpt?.agentId && userDoc.agentProfiles?.gpt?.endpoint;
+    if (!hasPrimaryAgent && !hasSecondaryAgent) {
       return res.status(400).json({ success: false, error: 'AGENT_NOT_CONFIGURED' });
     }
 
@@ -11684,21 +11686,32 @@ app.post('/api/patient-summary/draft', async (req, res) => {
       } catch (attachError) {
         if (!attachError.message?.includes('already')) {
           console.error(`[DRAFT SUMMARY] Failed to attach KB: ${attachError.message}`);
-          return res.status(503).json({ success: false, error: 'KB_NOT_ATTACHED' });
         }
       }
-      // Ensure the agent actually retrieves from its KB (heal legacy NONE).
       await ensureAgentRetrieval(userDoc.assignedAgentId);
     } else if (!userDoc.kbId) {
       return res.status(400).json({ success: false, error: 'NO_KB' });
     }
 
-    if (!userDoc.agentApiKey) {
-      userDoc.agentApiKey = await getOrCreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
-    }
-
     const { DigitalOceanProvider } = await import('../lib/chat-client/providers/digitalocean.js');
-    const agentProvider = new DigitalOceanProvider(userDoc.agentApiKey, { baseURL: userDoc.agentEndpoint });
+    let agentProvider;
+    if (hasPrimaryAgent) {
+      if (!userDoc.agentApiKey) {
+        userDoc.agentApiKey = await getOrCreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
+      }
+      agentProvider = new DigitalOceanProvider(userDoc.agentApiKey, { baseURL: userDoc.agentEndpoint });
+    } else {
+      // No primary agent — go straight to secondary
+      console.log(`[DRAFT SUMMARY] No primary agent for ${userId} — using secondary agent`);
+      const gptProfile = userDoc.agentProfiles.gpt;
+      let gptApiKey = gptProfile.apiKey;
+      if (!gptApiKey) {
+        gptApiKey = await getOrCreateAgentApiKey(doClient, cloudant, userId, gptProfile.agentId, 'gpt');
+      }
+      agentProvider = new DigitalOceanProvider(gptApiKey, { baseURL: gptProfile.endpoint });
+      // Override the model so the chat call uses the secondary model
+      userDoc.agentModelName = gptProfile.modelName || 'openai-gpt-oss-120b';
+    }
 
     // Synchronously ensure Apple Health Lists/*.md sidecars exist before
     // building the prompt. Without this, Setup races the category-split
@@ -11746,6 +11759,7 @@ app.post('/api/patient-summary/draft', async (req, res) => {
     const aiStartedAt = Date.now();
 
     let chatResp;
+    let usedModel = chatModel;
     try {
       chatResp = await agentProvider.chat(chatMessages, chatOptions);
     } catch (firstError) {
@@ -11760,8 +11774,6 @@ app.post('/api/patient-summary/draft', async (req, res) => {
           chatResp = await retry.chat(chatMessages, chatOptions);
         } catch (retryError) {
           const rsc = retryError.status || retryError.statusCode || 0;
-          // Still not serving → agent not ready. Return a structured 202 (not
-          // a 500) so the client backs off and retries, and log it.
           if (rsc === 401 || rsc === 403) {
             await appendUserProvisioningEvent(userId, { event: 'draft-summary-failed', reason: 'AGENT_NOT_READY', status: rsc });
             return res.status(202).json({ success: false, pending: true, reason: 'AGENT_NOT_READY', message: 'Private AI is still deploying — try again shortly.' });
@@ -11773,8 +11785,32 @@ app.post('/api/patient-summary/draft', async (req, res) => {
       }
     }
 
+    // Fallback: if primary returned empty/failed, try secondary agent.
+    if (!chatResp && userDoc.agentProfiles?.gpt?.agentId && userDoc.agentProfiles.gpt.endpoint) {
+      const gptProfile = userDoc.agentProfiles.gpt;
+      console.log(`[DRAFT SUMMARY] Primary failed/empty — falling back to secondary agent for ${userId}`);
+      try {
+        // Attach KB to secondary agent so it can retrieve documents
+        if (userDoc.kbId) {
+          try { await doClient.agent.attachKB(gptProfile.agentId, userDoc.kbId); } catch (_) { /* already attached */ }
+          await ensureAgentRetrieval(gptProfile.agentId);
+        }
+        let gptApiKey = gptProfile.apiKey;
+        if (!gptApiKey) {
+          gptApiKey = await getOrCreateAgentApiKey(doClient, cloudant, userId, gptProfile.agentId, 'gpt');
+        }
+        const fallbackProvider = new DigitalOceanProvider(gptApiKey, { baseURL: gptProfile.endpoint });
+        const fallbackModel = gptProfile.modelName || 'openai-gpt-oss-120b';
+        chatResp = await fallbackProvider.chat(chatMessages, { model: fallbackModel, stream: false });
+        usedModel = fallbackModel;
+        console.log(`[DRAFT SUMMARY] Secondary agent succeeded for ${userId} (model: ${fallbackModel})`);
+      } catch (fallbackErr) {
+        console.warn(`[DRAFT SUMMARY] Secondary agent also failed for ${userId}: ${fallbackErr.message}`);
+      }
+    }
+
     const aiElapsedMs = Date.now() - aiStartedAt;
-    console.log(`[DRAFT SUMMARY] Private AI responded for ${userId} in ${(aiElapsedMs / 1000).toFixed(1)}s`);
+    console.log(`[DRAFT SUMMARY] Private AI responded for ${userId} in ${(aiElapsedMs / 1000).toFixed(1)}s (model: ${usedModel})`);
 
     let summary = (chatResp.content || chatResp.text || '').trim();
     if (!summary) throw new Error('Empty draft from agent');

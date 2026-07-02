@@ -1186,7 +1186,7 @@
             <div v-if="loadingPair || summaryPair" class="q-mb-md">
               <div v-if="loadingPair" class="text-center q-pa-md bg-grey-1 rounded-borders">
                 <q-spinner size="1.5em" color="primary" />
-                <div class="q-mt-sm text-body2">Generating from both Private AIs (this can take 30–90 seconds)…</div>
+                <div class="q-mt-sm text-body2">Generating from both Private AIs (this can take 1–5 minutes)…</div>
               </div>
               <template v-else-if="summaryPair">
                 <div class="text-caption text-grey-7 q-mb-sm">
@@ -5781,6 +5781,20 @@ const deleteBubble = async (bubble: { id: string; entries: Array<{ id: string; m
 const loadPatientSummary = async () => {
   loadingSummary.value = true;
   summaryError.value = '';
+
+  // Ensure Private AI profile labels are available for instruction tabs.
+  if (agentProfilesList.value.length === 0) {
+    try {
+      const provResp = await fetch('/api/chat/providers', { credentials: 'include' });
+      if (provResp.ok) {
+        const pd = await provResp.json();
+        const list = Array.isArray(pd.privateAiProfiles) ? pd.privateAiProfiles : [];
+        if (list.length > 0) {
+          agentProfilesList.value = list.map((p: { key: string; label: string }) => ({ key: p.key, label: p.label }));
+        }
+      }
+    } catch { /* non-fatal */ }
+  }
 
   try {
     const response = await fetch(`/api/patient-summary?userId=${encodeURIComponent(props.userId)}`, {

@@ -7041,6 +7041,7 @@ watch(
       void generateSetupLogPdf();
       wizardPreparingRecords.value = true;
       wizardPreparingStartedAt.value = Date.now();
+      startStage3ElapsedTimer();
       console.log('[Wizard] Transitioning to preparation phase (draft PS + medications)');
       wizardPreparingMessage.value = 'Confirming knowledge base is attached to your agent...';
       if (wizardTimeoutTimer) {
