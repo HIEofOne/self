@@ -399,7 +399,7 @@
               </q-item-section>
             </q-item>
 
-            <!-- Deploy AI Agent -->
+            <!-- Deploy Primary AI Agent -->
             <q-item dense class="q-py-xs">
               <q-item-section avatar style="min-width: 28px">
                 <q-spinner v-if="!wizardStage1Complete && agentSetupPollingActive" size="sm" color="primary" />
@@ -409,9 +409,12 @@
               </q-item-section>
               <q-item-section>
                 <q-item-label :class="{ 'text-grey-5': !wizardStage1Complete && !agentSetupPollingActive }">
-                  Deploy AI Agent
+                  Deploy {{ wizardPrimaryModelName || 'Primary AI' }} Agent
                   <span v-if="wizardStage1Complete" class="text-green text-caption q-ml-sm">Ready</span>
-                  <span v-else-if="agentSetupPollingActive" class="text-primary text-caption q-ml-sm">{{ wizardStage1StatusLine }}</span>
+                  <span v-else-if="agentSetupPollingActive" class="text-primary text-caption q-ml-sm">
+                    {{ wizardStage1StatusLine }}
+                    <span class="text-grey-6">(10 min max)</span>
+                  </span>
                   <span v-else-if="agentSetupTimedOut" class="text-negative text-caption q-ml-sm">Timed out</span>
                 </q-item-label>
               </q-item-section>
@@ -430,6 +433,7 @@
                   <span v-if="stage3IndexingActive" class="text-primary text-caption q-ml-sm">
                     {{ stage2StatusDisplay.tokens !== '0' ? `${stage2StatusDisplay.tokens} tokens` : 'Indexing...' }}
                     {{ stage3IndexingStartedAt ? `(${formatElapsed(stage3IndexingStartedAt)})` : '' }}
+                    <span class="text-grey-6">(30 min max)</span>
                   </span>
                   <span v-else-if="indexingStatus?.phase === 'complete'" class="text-green text-caption q-ml-sm">
                     {{ stage2StatusDisplay.files }} files, {{ stage2StatusDisplay.tokens }} tokens
@@ -438,45 +442,70 @@
               </q-item-section>
             </q-item>
 
-            <!-- Current Medications -->
+            <!-- Deploy Secondary AI Agent -->
+            <q-item v-if="wizardSecondaryProvStatus !== 'idle' || gptAgentReady" dense class="q-py-xs">
+              <q-item-section avatar style="min-width: 28px">
+                <q-icon v-if="gptAgentReady || wizardSecondaryProvStatus === 'done'" name="check_circle" color="green" size="sm" />
+                <q-spinner v-else-if="wizardSecondaryProvStatus === 'running'" size="sm" color="primary" />
+                <q-icon v-else-if="wizardSecondaryProvStatus === 'timeout'" name="warning" color="orange" size="sm" />
+                <q-icon v-else name="radio_button_unchecked" color="grey-4" size="sm" />
+              </q-item-section>
+              <q-item-section>
+                <q-item-label>
+                  Deploy {{ wizardSecondaryModelName || 'Secondary AI' }} Agent
+                  <span v-if="gptAgentReady || wizardSecondaryProvStatus === 'done'" class="text-green text-caption q-ml-sm">Ready</span>
+                  <span v-else-if="wizardSecondaryProvStatus === 'running'" class="text-primary text-caption q-ml-sm">
+                    Deploying... {{ wizardSecondaryProvStartedAt ? formatElapsed(wizardSecondaryProvStartedAt) : '' }}
+                    <span class="text-grey-6">(2 min max)</span>
+                  </span>
+                  <span v-else-if="wizardSecondaryProvStatus === 'timeout'" class="text-orange text-caption q-ml-sm">Still deploying</span>
+                </q-item-label>
+              </q-item-section>
+            </q-item>
+
+            <!-- Draft Patient Summary -->
+            <q-item v-if="wizardDraftPsStatus !== 'idle' || wizardPatientSummary || wizardPreparingRecords" dense class="q-py-xs">
+              <q-item-section avatar style="min-width: 28px">
+                <q-icon v-if="wizardDraftPsStatus === 'done' || wizardPatientSummary" name="check_circle" color="green" size="sm" />
+                <q-spinner v-else-if="wizardDraftPsStatus === 'running'" size="sm" color="primary" />
+                <q-icon v-else-if="wizardDraftPsStatus === 'failed'" name="warning" color="orange" size="sm" />
+                <q-icon v-else name="radio_button_unchecked" color="grey-4" size="sm" />
+              </q-item-section>
+              <q-item-section>
+                <q-item-label :class="{ 'text-grey-5': wizardDraftPsStatus === 'idle' && !wizardPatientSummary }">
+                  Draft Patient Summary
+                  <span v-if="wizardPatientSummary" class="text-green text-caption q-ml-sm">Verified</span>
+                  <span v-else-if="wizardDraftPsStatus === 'done'" class="text-green text-caption q-ml-sm">Generated</span>
+                  <span v-else-if="wizardDraftPsStatus === 'running'" class="text-primary text-caption q-ml-sm">
+                    {{ wizardDraftPsModel || 'AI' }} working...
+                    {{ wizardDraftPsStartedAt ? formatElapsed(wizardDraftPsStartedAt) : '' }}
+                    <span class="text-grey-6">(5 min max)</span>
+                  </span>
+                  <span v-else-if="wizardDraftPsStatus === 'failed'" class="text-orange text-caption q-ml-sm">
+                    Failed — will retry after medications
+                  </span>
+                  <q-btn
+                    v-else-if="stage2StatusDisplay.completed && wizardStage1Complete && !wizardPreparingRecords"
+                    flat dense size="sm" color="orange-8" label="Verify"
+                    class="q-ml-sm"
+                    @click="handleWizardSummaryAction"
+                  />
+                </q-item-label>
+              </q-item-section>
+            </q-item>
+
+            <!-- Medication Worksheets -->
             <q-item v-if="stage2StatusDisplay.show || wizardCurrentMedications || wizardPreparingRecords" dense class="q-py-xs">
               <q-item-section avatar style="min-width: 28px">
                 <q-icon v-if="wizardCurrentMedications" name="check_circle" color="green" size="sm" />
-                <q-spinner v-else-if="wizardPreparingRecords" size="sm" color="primary" />
+                <q-spinner v-else-if="wizardPreparingRecords && wizardDraftPsStatus !== 'running'" size="sm" color="primary" />
                 <q-icon v-else name="radio_button_unchecked" color="grey-4" size="sm" />
               </q-item-section>
               <q-item-section>
                 <q-item-label :class="{ 'text-grey-5': !wizardCurrentMedications && !stage2StatusDisplay.completed && !wizardPreparingRecords }">
                   Medication Worksheets
                   <span v-if="wizardCurrentMedications" class="text-green text-caption q-ml-sm">Generating in My Lists</span>
-                  <span v-else-if="wizardPreparingRecords" class="text-primary text-caption q-ml-sm">
-                    Preparing... {{ wizardPreparingStartedAt ? formatElapsed(wizardPreparingStartedAt) : '' }}
-                  </span>
                   <span v-else-if="wizardFlowPhase === 'medications'" class="text-primary text-caption q-ml-sm">Verify in My Lists</span>
-                </q-item-label>
-              </q-item-section>
-            </q-item>
-
-            <!-- Patient Summary -->
-            <q-item v-if="stage2StatusDisplay.show || wizardPatientSummary || wizardPreparingRecords" dense class="q-py-xs">
-              <q-item-section avatar style="min-width: 28px">
-                <q-icon v-if="wizardPatientSummary" name="check_circle" color="green" size="sm" />
-                <q-spinner v-else-if="wizardPreparingRecords" size="sm" color="primary" />
-                <q-icon v-else name="radio_button_unchecked" color="grey-4" size="sm" />
-              </q-item-section>
-              <q-item-section>
-                <q-item-label :class="{ 'text-grey-5': !wizardPatientSummary && !stage2StatusDisplay.completed && !wizardPreparingRecords }">
-                  Patient Summary
-                  <span v-if="wizardPatientSummary" class="text-green text-caption q-ml-sm">Verified</span>
-                  <span v-else-if="wizardPreparingRecords" class="text-primary text-caption q-ml-sm">
-                    Preparing... {{ wizardPreparingStartedAt ? formatElapsed(wizardPreparingStartedAt) : '' }}
-                  </span>
-                  <q-btn
-                    v-else-if="stage2StatusDisplay.completed && wizardStage1Complete"
-                    flat dense size="sm" color="orange-8" label="Verify"
-                    class="q-ml-sm"
-                    @click="handleWizardSummaryAction"
-                  />
                 </q-item-label>
               </q-item-section>
             </q-item>
@@ -1005,6 +1034,14 @@ const wizardStage1Complete = ref(false);
 const gptAgentReady = ref(false);
 const gptProvisioningActive = ref(false);
 const wizardPreparingStartedAt = ref<number | null>(null);
+// Detailed wizard sub-phase tracking for the preparation phase UI
+const wizardPrimaryModelName = ref<string | null>(null);   // e.g. "Kimi K2.5"
+const wizardSecondaryModelName = ref<string | null>(null);  // e.g. "GPT 120B"
+const wizardSecondaryProvStatus = ref<'idle' | 'running' | 'done' | 'timeout'>('idle');
+const wizardSecondaryProvStartedAt = ref<number | null>(null);
+const wizardDraftPsStatus = ref<'idle' | 'running' | 'done' | 'failed'>('idle');
+const wizardDraftPsStartedAt = ref<number | null>(null);
+const wizardDraftPsModel = ref<string | null>(null);        // which model is generating
 const wizardUploadIntent = ref<'other' | 'restore' | null>(null);
 const wizardMessages = ref<Record<number, string>>({});
 const wizardIntroLines = ref<string[]>([]);
@@ -6860,6 +6897,8 @@ const startSetupWizardPolling = () => {
         updateContextualTip();
         // Refetch providers so Private AI appears without page reload (await so UI updates before we return)
         await loadProviders();
+        // Populate model name for wizard UI
+        wizardPrimaryModelName.value = labelForProfileKey('default');
         return;
       }
 
@@ -7051,14 +7090,20 @@ watch(
       }
       guidedFlowDismissCount.value = 0;
 
+      // Populate model names for wizard UI from loaded profiles
+      wizardPrimaryModelName.value = labelForProfileKey('default');
+      wizardSecondaryModelName.value = labelForProfileKey('gpt');
+
       // Step 0: Ensure secondary agent exists BEFORE generating draft PS,
       // so the server can fall back to it if the primary fails.
       console.log('[Wizard] Ensuring secondary agent is provisioned...');
       wizardPreparingMessage.value = 'Ensuring your backup AI agent is ready...';
       logProvisioningEvent({ event: 'secondary-provision-started' });
-      const secondaryStartedAt = Date.now();
+      wizardSecondaryProvStatus.value = 'running';
+      wizardSecondaryProvStartedAt.value = Date.now();
       const secondaryReady = await ensureGptProvisioned(120000, true, 5000); // 2min timeout, silent, fast poll
-      const secondaryElapsed = ((Date.now() - secondaryStartedAt) / 1000).toFixed(1);
+      const secondaryElapsed = ((Date.now() - wizardSecondaryProvStartedAt.value) / 1000).toFixed(1);
+      wizardSecondaryProvStatus.value = secondaryReady ? 'done' : 'timeout';
       console.log(`[Wizard] Secondary agent ${secondaryReady ? 'ready' : 'not ready'} (${secondaryElapsed}s)`);
       logProvisioningEvent({
         event: secondaryReady ? 'secondary-provision-ready' : 'secondary-provision-timeout',
@@ -7066,18 +7111,14 @@ watch(
       });
 
       // Step 1: Generate and save the draft Patient Summary.
-      //
-      // No client-side KB-attached poll here: the server's /api/patient-summary/
-      // draft endpoint force-attaches the KB to the agent before calling the
-      // agent (see server/index.js — attachKB call), which makes the poll
-      // redundant. The previous 30s poll always timed out anyway because DO's
-      // agent-record refresh lags the KB completion event.
       preGeneratedSummary.value = null;
       if (props.user?.userId) {
         console.log('[Wizard] Starting draft Patient Summary generation...');
         logProvisioningEvent({ event: 'draft-summary-call-started' });
-        wizardPreparingMessage.value = 'Generating draft Patient Summary from your records (may take 1–4 minutes)...';
-        const draftStartedAt = Date.now();
+        wizardDraftPsStatus.value = 'running';
+        wizardDraftPsStartedAt.value = Date.now();
+        wizardDraftPsModel.value = wizardPrimaryModelName.value;
+        wizardPreparingMessage.value = `Generating draft Patient Summary (may take 1–4 minutes)...`;
         try {
           const genRes = await fetch('/api/patient-summary/draft', {
             method: 'POST',
@@ -7098,6 +7139,7 @@ watch(
             const generationSeconds = typeof genResult.generationSeconds === 'number'
               ? genResult.generationSeconds
               : Math.round(((Date.now() - draftStartedAt) / 1000) * 10) / 10;
+            wizardDraftPsStatus.value = 'done';
             console.log(`[Wizard] Draft Patient Summary generated: ${summaryLines} lines, ${text.length} chars, ${generationSeconds}s`);
             logProvisioningEvent({
               event: 'draft-summary-generated',
@@ -7106,9 +7148,11 @@ watch(
               generationSeconds
             });
           } else {
+            wizardDraftPsStatus.value = 'failed';
             console.warn('[Wizard] Draft Patient Summary returned empty text');
           }
         } catch (err: any) {
+          wizardDraftPsStatus.value = 'failed';
           const draftElapsed = ((Date.now() - draftStartedAt) / 1000).toFixed(1);
           console.warn(`[Wizard] Draft Patient Summary generation failed after ${draftElapsed}s:`, err);
           logProvisioningEvent({
