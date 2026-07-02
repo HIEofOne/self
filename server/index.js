@@ -1195,6 +1195,7 @@ async function validateUserResources(userId) {
           userDoc.agentEndpoint = null;
           userDoc.agentModelName = null;
           userDoc.agentApiKey = null;
+          userDoc.workflowStage = 'agent_named';
           cleaned = true;
         }
       } else {
@@ -1205,6 +1206,7 @@ async function validateUserResources(userId) {
         userDoc.agentEndpoint = null;
         userDoc.agentModelName = null;
         userDoc.agentApiKey = null;
+        userDoc.workflowStage = 'agent_named';
         cleaned = true;
       }
     } catch (error) {
@@ -1216,6 +1218,7 @@ async function validateUserResources(userId) {
         userDoc.agentEndpoint = null;
         userDoc.agentModelName = null;
         userDoc.agentApiKey = null;
+        userDoc.workflowStage = 'agent_named';
         cleaned = true;
       } else if (isRateLimitError(error)) {
         console.warn(`⚠️ Rate limit while checking agent for user ${userId}. Using cached validation result.`);
@@ -1395,6 +1398,7 @@ async function validateUserResources(userId) {
                 freshDoc.agentEndpoint = null;
                 freshDoc.agentModelName = null;
                 freshDoc.agentApiKey = null;
+                freshDoc.workflowStage = 'agent_named';
                 freshDoc.agentProfiles = {};
                 freshDoc.agentProfileDefaultKey = freshDoc.agentProfileDefaultKey || 'default';
                 freshDoc.deepLinkAgentOverrides = {};
@@ -11674,18 +11678,60 @@ app.post('/api/patient-summary/draft', async (req, res) => {
     if (!userDoc) {
       return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
     }
+
+    // Self-healing: provision missing agents instead of failing
+    if (!userDoc.assignedAgentId || !userDoc.agentEndpoint) {
+      console.log(`[DRAFT SUMMARY] Primary agent missing for ${userId} — attempting to provision`);
+      const provStartedAt = Date.now();
+      try {
+        const { ensureUserAgent } = await import('./routes/auth.js');
+        userDoc = await ensureUserAgent(doClient, cloudant, userDoc);
+        const provElapsed = ((Date.now() - provStartedAt) / 1000).toFixed(1);
+        console.log(`[DRAFT SUMMARY] Primary agent provisioned for ${userId} in ${provElapsed}s`);
+        await appendUserProvisioningEvent(userId, { event: 'draft-summary-auto-provision-primary', elapsedSeconds: Number(provElapsed), agentId: userDoc.assignedAgentId || null });
+      } catch (provErr) {
+        const provElapsed = ((Date.now() - provStartedAt) / 1000).toFixed(1);
+        console.warn(`[DRAFT SUMMARY] Primary agent provisioning failed for ${userId} in ${provElapsed}s: ${provErr.message}`);
+        await appendUserProvisioningEvent(userId, { event: 'draft-summary-auto-provision-primary-failed', elapsedSeconds: Number(provElapsed), reason: provErr.message });
+      }
+    }
+    if (!userDoc.agentProfiles?.gpt?.agentId || !userDoc.agentProfiles?.gpt?.endpoint) {
+      console.log(`[DRAFT SUMMARY] Secondary agent missing for ${userId} — attempting to provision`);
+      const provStartedAt = Date.now();
+      try {
+        const { ensureSecondaryAgent } = await import('./routes/auth.js');
+        userDoc = await ensureSecondaryAgent(doClient, cloudant, userDoc);
+        const provElapsed = ((Date.now() - provStartedAt) / 1000).toFixed(1);
+        console.log(`[DRAFT SUMMARY] Secondary agent provisioned for ${userId} in ${provElapsed}s`);
+        await appendUserProvisioningEvent(userId, { event: 'draft-summary-auto-provision-secondary', elapsedSeconds: Number(provElapsed), agentId: userDoc.agentProfiles?.gpt?.agentId || null });
+      } catch (provErr) {
+        const provElapsed = ((Date.now() - provStartedAt) / 1000).toFixed(1);
+        console.warn(`[DRAFT SUMMARY] Secondary agent provisioning failed for ${userId} in ${provElapsed}s: ${provErr.message}`);
+        await appendUserProvisioningEvent(userId, { event: 'draft-summary-auto-provision-secondary-failed', elapsedSeconds: Number(provElapsed), reason: provErr.message });
+      }
+    }
+
+    // Re-read after provisioning attempts
+    const freshProvDoc = await cloudant.getDocument('maia_users', userId);
+    if (freshProvDoc) userDoc = freshProvDoc;
+
     const hasPrimaryAgent = userDoc.assignedAgentId && userDoc.agentEndpoint;
     const hasSecondaryAgent = userDoc.agentProfiles?.gpt?.agentId && userDoc.agentProfiles?.gpt?.endpoint;
     if (!hasPrimaryAgent && !hasSecondaryAgent) {
       return res.status(400).json({ success: false, error: 'AGENT_NOT_CONFIGURED' });
     }
 
+    // Log draft summary start with agent availability
+    await appendUserProvisioningEvent(userId, { event: 'draft-summary-started', hasPrimaryAgent: !!hasPrimaryAgent, hasSecondaryAgent: !!hasSecondaryAgent, primaryModel: userDoc.agentModelName || null, secondaryModel: userDoc.agentProfiles?.gpt?.modelName || null });
+
     if (userDoc.kbId && userDoc.assignedAgentId) {
       try {
         await doClient.agent.attachKB(userDoc.assignedAgentId, userDoc.kbId);
+        await appendUserProvisioningEvent(userId, { event: 'draft-summary-kb-attached', agentId: userDoc.assignedAgentId, kbId: userDoc.kbId });
       } catch (attachError) {
         if (!attachError.message?.includes('already')) {
           console.error(`[DRAFT SUMMARY] Failed to attach KB: ${attachError.message}`);
+          await appendUserProvisioningEvent(userId, { event: 'draft-summary-kb-attach-failed', reason: attachError.message });
         }
       }
       await ensureAgentRetrieval(userDoc.assignedAgentId);
@@ -11743,15 +11789,18 @@ app.post('/api/patient-summary/draft', async (req, res) => {
           const refreshed = await cloudant.getDocument('maia_users', userId);
           if (refreshed) userDoc = refreshed;
         }
+        await appendUserProvisioningEvent(userId, { event: 'draft-summary-ah-lists', outcome: outcome || 'no-op' });
       }
     } catch (e) {
       console.warn(`[DRAFT SUMMARY] AH lists pre-build failed (non-fatal): ${e?.message || e}`);
+      await appendUserProvisioningEvent(userId, { event: 'draft-summary-ah-lists-failed', reason: e?.message || String(e) });
     }
 
     // Build the prompt via the shared helper (Layer-2 spec + currentMedications
     // + past-12mo encounters context). Used by every summary endpoint so they
     // can never drift.
     const draftPrompt = await buildPatientSummaryPromptForUser(userId, userDoc);
+    await appendUserProvisioningEvent(userId, { event: 'draft-summary-prompt-built', promptLength: draftPrompt.length });
     const chatMessages = [{ role: 'user', content: draftPrompt }];
     const chatModel = userDoc.agentModelName || 'openai-gpt-oss-120b';
     const chatOptions = { model: chatModel, stream: false };
@@ -11760,35 +11809,42 @@ app.post('/api/patient-summary/draft', async (req, res) => {
 
     let chatResp;
     let usedModel = chatModel;
-    try {
-      chatResp = await agentProvider.chat(chatMessages, chatOptions);
-    } catch (firstError) {
-      const sc = firstError.status || firstError.statusCode || 0;
-      // 401/403 from a DO agent usually means a stale key OR the agent isn't
-      // serving yet (still deploying). Recreate the key and retry once.
-      if ((sc === 401 || sc === 403) && userDoc.assignedAgentId) {
-        try {
-          const { recreateAgentApiKey } = await import('./utils/agent-helper.js');
-          const newApiKey = await recreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
-          const retry = new DigitalOceanProvider(newApiKey, { baseURL: userDoc.agentEndpoint });
-          chatResp = await retry.chat(chatMessages, chatOptions);
-        } catch (retryError) {
-          const rsc = retryError.status || retryError.statusCode || 0;
-          if (rsc === 401 || rsc === 403) {
-            await appendUserProvisioningEvent(userId, { event: 'draft-summary-failed', reason: 'AGENT_NOT_READY', status: rsc });
-            return res.status(202).json({ success: false, pending: true, reason: 'AGENT_NOT_READY', message: 'Private AI is still deploying — try again shortly.' });
+
+    // --- Primary agent attempt ---
+    if (hasPrimaryAgent) {
+      try {
+        chatResp = await agentProvider.chat(chatMessages, chatOptions);
+      } catch (primaryErr) {
+        const sc = primaryErr.status || primaryErr.statusCode || 0;
+        console.warn(`[DRAFT SUMMARY] Primary agent failed for ${userId} (status: ${sc}): ${primaryErr.message}`);
+        await appendUserProvisioningEvent(userId, { event: 'draft-summary-primary-failed', model: chatModel, status: sc || undefined, reason: primaryErr.message });
+
+        // 401/403 — try recreating the API key once before giving up on primary
+        if ((sc === 401 || sc === 403) && userDoc.assignedAgentId) {
+          try {
+            const { recreateAgentApiKey } = await import('./utils/agent-helper.js');
+            const newApiKey = await recreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
+            const retry = new DigitalOceanProvider(newApiKey, { baseURL: userDoc.agentEndpoint });
+            chatResp = await retry.chat(chatMessages, chatOptions);
+            console.log(`[DRAFT SUMMARY] Primary agent succeeded after key recreation for ${userId}`);
+            await appendUserProvisioningEvent(userId, { event: 'draft-summary-primary-key-recreated', model: chatModel });
+          } catch (retryErr) {
+            const rsc = retryErr.status || retryErr.statusCode || 0;
+            console.warn(`[DRAFT SUMMARY] Primary agent retry also failed for ${userId} (status: ${rsc}): ${retryErr.message}`);
+            await appendUserProvisioningEvent(userId, { event: 'draft-summary-primary-retry-failed', model: chatModel, status: rsc || undefined, reason: retryErr.message });
+            // Don't throw — fall through to secondary
           }
-          throw retryError;
         }
-      } else {
-        throw firstError;
+        // For non-401/403 errors, chatResp stays null — fall through to secondary
       }
     }
 
-    // Fallback: if primary returned empty/failed, try secondary agent.
-    if (!chatResp && userDoc.agentProfiles?.gpt?.agentId && userDoc.agentProfiles.gpt.endpoint) {
+    // --- Secondary agent fallback ---
+    if (!chatResp && hasSecondaryAgent) {
       const gptProfile = userDoc.agentProfiles.gpt;
-      console.log(`[DRAFT SUMMARY] Primary failed/empty — falling back to secondary agent for ${userId}`);
+      const fallbackModel = gptProfile.modelName || 'openai-gpt-oss-120b';
+      console.log(`[DRAFT SUMMARY] ${hasPrimaryAgent ? 'Primary failed/empty' : 'No primary agent'} — falling back to secondary for ${userId} (model: ${fallbackModel})`);
+      await appendUserProvisioningEvent(userId, { event: 'draft-summary-fallback-started', model: fallbackModel, reason: hasPrimaryAgent ? 'primary_failed' : 'no_primary_agent' });
       try {
         // Attach KB to secondary agent so it can retrieve documents
         if (userDoc.kbId) {
@@ -11800,12 +11856,14 @@ app.post('/api/patient-summary/draft', async (req, res) => {
           gptApiKey = await getOrCreateAgentApiKey(doClient, cloudant, userId, gptProfile.agentId, 'gpt');
         }
         const fallbackProvider = new DigitalOceanProvider(gptApiKey, { baseURL: gptProfile.endpoint });
-        const fallbackModel = gptProfile.modelName || 'openai-gpt-oss-120b';
         chatResp = await fallbackProvider.chat(chatMessages, { model: fallbackModel, stream: false });
         usedModel = fallbackModel;
         console.log(`[DRAFT SUMMARY] Secondary agent succeeded for ${userId} (model: ${fallbackModel})`);
+        await appendUserProvisioningEvent(userId, { event: 'draft-summary-fallback-succeeded', model: fallbackModel });
       } catch (fallbackErr) {
-        console.warn(`[DRAFT SUMMARY] Secondary agent also failed for ${userId}: ${fallbackErr.message}`);
+        const fsc = fallbackErr.status || fallbackErr.statusCode || 0;
+        console.warn(`[DRAFT SUMMARY] Secondary agent also failed for ${userId} (status: ${fsc}): ${fallbackErr.message}`);
+        await appendUserProvisioningEvent(userId, { event: 'draft-summary-fallback-failed', model: fallbackModel, status: fsc || undefined, reason: fallbackErr.message });
       }
     }
 
@@ -11839,11 +11897,14 @@ app.post('/api/patient-summary/draft', async (req, res) => {
     }
 
     const lines = summary.split('\n').filter(l => l.trim()).length;
+    const totalElapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+    await appendUserProvisioningEvent(userId, { event: 'draft-summary-succeeded', model: usedModel, elapsedSeconds: Number(totalElapsed), lines, chars: summary.length });
     res.json({ success: true, summary, lines, chars: summary.length, generationSeconds });
   } catch (error) {
     console.error('Error generating draft patient summary:', error);
     const sc = error.status || error.statusCode || 0;
-    try { await appendUserProvisioningEvent(userId, { event: 'draft-summary-failed', reason: error.message || 'error', status: sc || undefined }); } catch { /* non-fatal */ }
+    const failElapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+    try { await appendUserProvisioningEvent(userId, { event: 'draft-summary-failed', reason: error.message || 'error', status: sc || undefined, totalElapsedSeconds: Number(failElapsed) }); } catch { /* non-fatal */ }
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -13012,6 +13073,7 @@ app.post('/api/agents/ensure-secondary', async (req, res) => {
     if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
 
     const hadAgentBefore = !!userDoc.agentProfiles?.gpt?.agentId;
+    const ensureStartedAt = Date.now();
 
     const { ensureSecondaryAgent } = await import('./routes/auth.js');
     try {
@@ -13022,13 +13084,14 @@ app.post('/api/agents/ensure-secondary', async (req, res) => {
       return res.json({ success: true, ready: false, provisioning: true, reason: e?.message || 'provisioning' });
     }
 
+    const ensureElapsed = ((Date.now() - ensureStartedAt) / 1000).toFixed(1);
     let gpt = userDoc.agentProfiles?.gpt || {};
 
     // Log GPT creation exactly once (when it first appears).
     if (!hadAgentBefore && gpt.agentId) {
       try {
         await appendUserProvisioningEvent(userId, {
-          event: 'gpt-agent-created', agentId: gpt.agentId, agentName: gpt.agentName || null
+          event: 'gpt-agent-created', agentId: gpt.agentId, agentName: gpt.agentName || null, elapsedSeconds: Number(ensureElapsed)
         });
       } catch { /* non-fatal */ }
     }

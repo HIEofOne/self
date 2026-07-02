@@ -7043,12 +7043,27 @@ watch(
       wizardPreparingStartedAt.value = Date.now();
       startStage3ElapsedTimer();
       console.log('[Wizard] Transitioning to preparation phase (draft PS + medications)');
+      logProvisioningEvent({ event: 'preparation-phase-started' });
       wizardPreparingMessage.value = 'Confirming knowledge base is attached to your agent...';
       if (wizardTimeoutTimer) {
         clearTimeout(wizardTimeoutTimer);
         wizardTimeoutTimer = null;
       }
       guidedFlowDismissCount.value = 0;
+
+      // Step 0: Ensure secondary agent exists BEFORE generating draft PS,
+      // so the server can fall back to it if the primary fails.
+      console.log('[Wizard] Ensuring secondary agent is provisioned...');
+      wizardPreparingMessage.value = 'Ensuring your backup AI agent is ready...';
+      logProvisioningEvent({ event: 'secondary-provision-started' });
+      const secondaryStartedAt = Date.now();
+      const secondaryReady = await ensureGptProvisioned(120000, true, 5000); // 2min timeout, silent, fast poll
+      const secondaryElapsed = ((Date.now() - secondaryStartedAt) / 1000).toFixed(1);
+      console.log(`[Wizard] Secondary agent ${secondaryReady ? 'ready' : 'not ready'} (${secondaryElapsed}s)`);
+      logProvisioningEvent({
+        event: secondaryReady ? 'secondary-provision-ready' : 'secondary-provision-timeout',
+        elapsedSeconds: Number(secondaryElapsed)
+      });
 
       // Step 1: Generate and save the draft Patient Summary.
       //
@@ -7060,9 +7075,10 @@ watch(
       preGeneratedSummary.value = null;
       if (props.user?.userId) {
         console.log('[Wizard] Starting draft Patient Summary generation...');
+        logProvisioningEvent({ event: 'draft-summary-call-started' });
         wizardPreparingMessage.value = 'Generating draft Patient Summary from your records (may take 1–4 minutes)...';
+        const draftStartedAt = Date.now();
         try {
-          const draftStartedAt = Date.now();
           const genRes = await fetch('/api/patient-summary/draft', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -7092,23 +7108,27 @@ watch(
           } else {
             console.warn('[Wizard] Draft Patient Summary returned empty text');
           }
-        } catch (err) {
-          console.warn('[Wizard] Draft Patient Summary generation failed:', err);
-          logProvisioningEvent({ event: 'draft-summary-failed', reason: String(err) });
+        } catch (err: any) {
+          const draftElapsed = ((Date.now() - draftStartedAt) / 1000).toFixed(1);
+          console.warn(`[Wizard] Draft Patient Summary generation failed after ${draftElapsed}s:`, err);
+          logProvisioningEvent({
+            event: 'draft-summary-failed',
+            reason: String(err),
+            elapsedSeconds: Number(draftElapsed)
+          });
         }
       }
 
-      // Step 2: Trigger background generation of both Medication Worksheets
-      // (GPT + Deepseek) and kick off the secondary Private AI provisioning
-      // so it deploys concurrently with indexing. Setup completion is gated
-      // on the secondary being ready.
-      console.log('[Wizard] Starting medication worksheets + secondary agent provisioning');
+      // Step 2: Trigger background generation of both Medication Worksheets.
+      // Secondary agent was already provisioned in Step 0 above.
+      console.log('[Wizard] Starting medication worksheets');
+      logProvisioningEvent({ event: 'medication-worksheets-started' });
       wizardPreparingMessage.value = 'Generating medication worksheets from your records...';
-      void ensureGptProvisioned();
       triggerSetupWorksheets();
 
       // Step 3: open My Lists → Current Medications for the user to VERIFY.
       console.log('[Wizard] Advancing to medications phase — opening My Lists');
+      logProvisioningEvent({ event: 'medications-phase-opened' });
       wizardFlowPhase.value = 'medications';
       wizardPreparingMessage.value = 'Opening Current Medications for review...';
       wizardPreparingRecords.value = false;
@@ -7157,6 +7177,7 @@ const runEnsureGptProvisioned = async (maxMs: number, silent: boolean, intervalM
   const userId = props.user!.userId;
   gptProvisioningActive.value = true;
   const startedAt = Date.now();
+  logProvisioningEvent({ event: 'gpt-provision-poll-started', maxMs, intervalMs });
   let notif: ((props?: any) => void) | null = null;
   if (!silent && $q?.notify) {
     notif = $q.notify({
@@ -7177,11 +7198,16 @@ const runEnsureGptProvisioned = async (maxMs: number, silent: boolean, intervalM
         const d = await res.json().catch(() => ({}));
         if (res.ok && d.ready) {
           gptAgentReady.value = true;
+          const elapsedSeconds = Number(((Date.now() - startedAt) / 1000).toFixed(1));
+          logProvisioningEvent({ event: 'gpt-provision-poll-ready', elapsedSeconds });
           return true;
         }
-      } catch { /* keep polling */ }
+      } catch (e) {
+        console.warn('[Wizard] Secondary agent poll error:', e);
+      }
       await new Promise(r => setTimeout(r, intervalMs));
     }
+    logProvisioningEvent({ event: 'gpt-provision-poll-timeout', elapsedMs: Date.now() - startedAt });
     return false;
   } finally {
     gptProvisioningActive.value = false;
@@ -7653,6 +7679,7 @@ const handleCurrentMedicationsSaved = async (payload?: { value?: string; edited?
   // Per-row edits/deletes should NOT close the medications view.
   if (wizardFlowPhase.value === 'medications' && payload?.verified) {
     console.log('[Wizard] Medications verified — advancing to summary phase');
+    logProvisioningEvent({ event: 'medications-verified' });
     wizardFlowPhase.value = 'summary';
     guidedFlowDismissCount.value = 0;
     void generateSetupLogPdf();

@@ -6383,6 +6383,14 @@ const updateSummaryWithVerifiedMeds = async () => {
     // AI call for summary generation — the wizard budget is exactly 2 AI calls.
     if (!patientSummary.value) {
       console.warn('[MyStuff] No provisional Patient Summary available to patch');
+      try {
+        await fetch('/api/provisioning-log', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ userId: props.userId, event: 'no-draft-ps-available', source: 'MyStuffDialog' })
+        });
+      } catch { /* non-fatal */ }
       loadingSummary.value = false;
       return;
     }
