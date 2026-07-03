@@ -2217,7 +2217,9 @@ const loadProviders = async () => {
         // a valid Private AI label — otherwise a mid-session providers
         // reload (e.g. from refreshWizardState) would clobber the user's
         // secondary AI selection back to the primary.
-        if (!isPrivateAiLabel(normalizeProviderLabel(selectedProvider.value))) {
+        const currentLabel = normalizeProviderLabel(selectedProvider.value);
+        const isSpecificProfile = privateAiProfiles.value.some(pr => pr.label === currentLabel);
+        if (!isSpecificProfile) {
           selectedProvider.value = privateAiProfiles.value[0]?.label || providerLabels.digitalocean;
         }
         showPrivateUnavailableDialog.value = false; // clear in case it was shown before refetch
@@ -2268,9 +2270,11 @@ watch(
   (available) => {
     if (!available.length) return;
     if (available.includes('digitalocean')) {
-      // Only reset if the current selection isn't already a valid
-      // Private AI label — don't clobber a secondary AI selection.
-      if (!isPrivateAiLabel(normalizeProviderLabel(selectedProvider.value))) {
+      // Only reset if the current selection isn't a specific profile
+      // label — don't clobber a secondary AI selection, but DO replace
+      // the bare "Private AI" fallback with the full profile label.
+      const currentWatchLabel = normalizeProviderLabel(selectedProvider.value);
+      if (!privateAiProfiles.value.some(pr => pr.label === currentWatchLabel)) {
         selectedProvider.value = defaultPrivateAiLabel();
       }
       showPrivateUnavailableDialog.value = false; // Private AI is available

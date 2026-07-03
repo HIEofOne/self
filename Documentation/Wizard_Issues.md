@@ -1,7 +1,7 @@
 # Wizard Issues: Current State and Restructuring Plan
 
-**Date:** 2026-07-02
-**Version at time of writing:** 1.4.61
+**Date:** 2026-07-03
+**Version at time of writing:** 1.4.65
 **Related docs:** `Wizards.md` (lifecycle flows), `Wizards2.md` (API inventory)
 
 ---
@@ -375,7 +375,7 @@ by:
 
 ---
 
-## 5. Immediate Tactical Fixes (Already Applied)
+## 5. Fixes Applied (v1.4.58 -- v1.4.65)
 
 ### v1.4.58 — Post-completion UI guards
 
@@ -419,23 +419,123 @@ with stale server data.
 
 **Bug: Secondary agent auto-deploying without user action.**
 
-Root cause: the `/api/chat/providers` endpoint in `server/routes/chat.js` (lines
-700-721) lazily calls `ensureSecondaryAgent` whenever the primary agent is
-deployed and a KB exists, even if the user has never deployed the secondary
-agent. This fires every time `loadProviders()` is called from
-`refreshWizardState` (line 2882), which happens many times during setup. The
-secondary agent silently gets created as a side effect of loading the provider
-dropdown list.
+Root cause: the `/api/chat/providers` endpoint in `server/routes/chat.js`
+lazily calls `ensureSecondaryAgent` whenever the primary agent is deployed and a
+KB exists, even if the user has never deployed the secondary agent. This fires
+every time `loadProviders()` is called from `refreshWizardState`, which happens
+many times during setup. The secondary agent silently gets created as a side
+effect of loading the provider dropdown list.
 
-Fix: changed the guard from "no endpoint or not live" (which matched first-time
-creation) to "agentId exists AND (no endpoint or not live)" — i.e., only repair
-an agent that was previously deployed, never auto-create one from scratch. First
-creation is the user's action via the Deploy button in My AI Agent.
+Fix: changed the guard to require `agentProfiles.gpt.agentId` to already
+exist — i.e., only repair an agent that was previously deployed, never
+auto-create one from scratch. First creation is now the user's action via the
+Deploy button in My AI Agent, or the wizard's automatic secondary deploy step.
 
-### General observations
+### v1.4.62 — Secondary AI tab unreachable
 
-These fixes are band-aids. They prevent specific symptoms (stale server data
-overriding in-memory completion, silent agent provisioning) but don't address the
-underlying architectural problem of having multiple independent state systems.
-The restructuring plan in sections 3.1–3.7 remains the correct long-term
-solution.
+**Bug: Clicking "Secondary AI" tab reloads the primary tab instead.**
+
+Root cause: `loadAgent()` in MyStuffDialog reset `activeAgentProfile` to the
+first deployed profile when the current tab wasn't in the deployed-profiles list.
+Since the 'gpt' tab is always rendered (showing a Deploy button when undeployed),
+the reset was wrong — it prevented the user from ever reaching the secondary tab.
+
+Fix: removed the `activeAgentProfile` reset from `loadAgent()`.
+
+### v1.4.63 — Provider dropdown revert, response mislabel, reasoning mode
+
+**Bug: Chat provider dropdown reverts to Primary AI after selecting Secondary.**
+
+Root cause (path 1): `loadProviders()` unconditionally reset `selectedProvider`
+to the first Private AI profile label. After the user selected Secondary and
+sent a message, the streaming response triggered `loadProviders()` which
+overrode the selection.
+
+Fix: guard the reset with `isPrivateAiLabel` check — only reset if the current
+selection isn't already a valid Private AI label.
+
+**Bug: Chat response mislabeled as Primary AI when using Secondary.**
+
+Root cause: `providerLabel` for the assistant message was captured at
+response-time (after `loadProviders` had already reset `selectedProvider` back to
+Primary). The label showed the wrong agent.
+
+Fix: capture `providerLabel` at send-time, before the fetch call, so it reflects
+the user's actual selection.
+
+**Feature: Reasoning mode for Kimi K2.5 via DO GenAI agents.**
+
+The DigitalOcean provider's `streamChat` only handled `delta.content`. Kimi K2.5
+(a reasoning model) sends `delta.reasoning_content` for its chain-of-thought.
+
+Fix: added `reasoning_content` chunk handling to `digitalocean.js`, matching the
+pattern already used in `openai.js` for DeepSeek R1.
+
+### v1.4.64 — Provider dropdown revert (second path)
+
+**Bug: Dropdown still reverted via the `providers` watcher.**
+
+Root cause (path 2): a `watch()` on `providers.value` also reset
+`selectedProvider` to `defaultPrivateAiLabel()` whenever the providers list
+changed, independent of `loadProviders`.
+
+Fix: same `isPrivateAiLabel` guard applied to the watcher.
+
+### v1.4.65 — Wizard secondary deploy, dropdown label, reasoning filter,
+secondary agent controls
+
+**Feature: Wizard automatically deploys secondary agent after primary.**
+
+The wizard checklist now includes a "Deploy Secondary AI Agent" step that fires
+automatically once the primary agent is ready. It polls
+`/api/agents/ensure-secondary` every 5s with a 3-minute timeout, showing a
+spinner and elapsed time. The secondary deploy runs in parallel with KB indexing.
+
+On page refresh, `refreshWizardState` also triggers secondary deploy if the
+primary is ready but the secondary isn't yet deployed.
+
+**Bug: Dropdown shows bare "Private AI" instead of full profile label on reload.**
+
+Root cause: both `loadProviders` and the `providers` watcher used an
+`isPrivateAiLabel` guard that matched the generic "Private AI" fallback label.
+On page reload, `selectedProvider` started as "Private AI" (the fallback), the
+guard said "that's a valid Private AI label," and skipped updating it to the
+full profile label like "Private AI Primary (GPT)."
+
+Fix: changed the guard to check `privateAiProfiles.value.some(pr => pr.label ===
+currentLabel)` — only skip the reset if the current selection matches a specific
+profile label, not just the generic fallback.
+
+**Bug: GPT-OSS-120B (non-reasoning model) showing reasoning section.**
+
+Root cause: the `reasoning_content` streaming handler in `digitalocean.js`
+surfaced reasoning chunks from all models, not just reasoning models.
+GPT-OSS-120B apparently returns `reasoning_content` via the DO GenAI agent
+platform.
+
+Fix: only emit reasoning chunks when the model name contains 'kimi' or
+'deepseek-r1'.
+
+**Feature: Secondary AI tab now has same controls as Primary.**
+
+The My AI Agent > Secondary AI tab now shows the same controls as the Primary
+tab when the agent is deployed: deep link toggle, editable agent instructions,
+knowledge base connection checkboxes with "Index Now", and indexed files list.
+All data functions (`loadAgent`, `saveInstructions`, `applyKbChanges`) already
+used `activeAgentProfile.value` for per-agent scoping, so only the template
+needed to change.
+
+---
+
+## 6. General Observations
+
+The tactical fixes in section 5 address specific symptoms but don't address the
+underlying architectural problem of multiple independent state systems. The
+restructuring plan in sections 3.1–3.7 remains the correct long-term solution.
+
+The model configuration was also updated in this version range:
+- Primary agent: GPT-OSS-120B (`MODEL_PRIMARY = MODEL_GPT`)
+- Secondary agent: Kimi K2.5 (`MODEL_SECONDARY = MODEL_KIMI`)
+- `MODEL_PRIMARY` / `MODEL_SECONDARY` constants exported from `auth.js`
+- Secondary agent instruction: `'Do not hallucinate.'` (intentionally minimal
+  and different from the primary's MAIA identity prompt)

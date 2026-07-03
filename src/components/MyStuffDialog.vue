@@ -766,88 +766,217 @@
 
             <!-- Secondary agent tab -->
             <template v-else-if="activeAgentProfile === 'gpt'">
-              <div class="row items-center justify-between q-mb-md">
-                <div class="text-h6">{{ profileLabel('gpt') }}</div>
-              </div>
+              <!-- Deploy UI (when secondary not yet deployed) -->
+              <template v-if="!agentInstructions && !loadingAgent">
+                <div class="row items-center justify-between q-mb-md">
+                  <div class="text-h6">{{ profileLabel('gpt') }}</div>
+                </div>
 
-              <!-- Deployment status -->
-              <div v-if="secondaryDeployStatus === 'ready'" class="q-mb-md">
-                <q-banner class="bg-green-1 text-green-9 rounded-borders">
-                  <template v-slot:avatar><q-icon name="check_circle" color="green" /></template>
-                  Agent deployed and ready.
-                </q-banner>
-              </div>
+                <div v-if="secondaryDeployStatus === 'ready'" class="q-mb-md">
+                  <q-banner class="bg-green-1 text-green-9 rounded-borders">
+                    <template v-slot:avatar><q-icon name="check_circle" color="green" /></template>
+                    Agent deployed and ready.
+                  </q-banner>
+                </div>
 
-              <div v-else-if="secondaryDeployStatus === 'deploying'" class="q-mb-md">
-                <q-banner class="bg-blue-1 text-blue-9 rounded-borders">
-                  <template v-slot:avatar><q-spinner color="primary" size="1.2em" /></template>
-                  <div>
-                    Deploying...
-                    <strong>{{ secondaryDeployElapsed }}s</strong>
-                    <span class="text-grey-7"> / 3 min max</span>
-                  </div>
-                  <div v-if="secondaryDeploySteps.length" class="q-mt-sm">
-                    <div v-for="(step, i) in secondaryDeploySteps" :key="i" class="text-caption" :class="step.ok === false ? 'text-red' : step.ok ? 'text-green-8' : 'text-grey-7'">
-                      {{ step.label }}{{ step.elapsed ? ` (${step.elapsed}s)` : '' }}
-                      <span v-if="step.ok === false"> — failed: {{ step.error }}</span>
+                <div v-else-if="secondaryDeployStatus === 'deploying'" class="q-mb-md">
+                  <q-banner class="bg-blue-1 text-blue-9 rounded-borders">
+                    <template v-slot:avatar><q-spinner color="primary" size="1.2em" /></template>
+                    <div>
+                      Deploying...
+                      <strong>{{ secondaryDeployElapsed }}s</strong>
+                      <span class="text-grey-7"> / 3 min max</span>
+                    </div>
+                    <div v-if="secondaryDeploySteps.length" class="q-mt-sm">
+                      <div v-for="(step, i) in secondaryDeploySteps" :key="i" class="text-caption" :class="step.ok === false ? 'text-red' : step.ok ? 'text-green-8' : 'text-grey-7'">
+                        {{ step.label }}{{ step.elapsed ? ` (${step.elapsed}s)` : '' }}
+                        <span v-if="step.ok === false"> — failed: {{ step.error }}</span>
+                      </div>
+                    </div>
+                  </q-banner>
+                  <q-btn
+                    flat
+                    label="Cancel"
+                    color="red"
+                    icon="cancel"
+                    class="q-mt-sm"
+                    @click="cancelSecondaryDeploy"
+                  />
+                </div>
+
+                <div v-else-if="secondaryDeployStatus === 'failed'" class="q-mb-md">
+                  <q-banner class="bg-red-1 text-red-9 rounded-borders">
+                    <template v-slot:avatar><q-icon name="error" color="red" /></template>
+                    Deployment failed{{ secondaryDeployError ? ': ' + secondaryDeployError : '' }}
+                  </q-banner>
+                </div>
+
+                <div v-else-if="secondaryDeployStatus === 'timeout'" class="q-mb-md">
+                  <q-banner class="bg-orange-1 text-orange-9 rounded-borders">
+                    <template v-slot:avatar><q-icon name="schedule" color="orange" /></template>
+                    Deployment timed out after 3 minutes.
+                  </q-banner>
+                </div>
+
+                <div v-if="secondaryDeployStatus === 'idle' || secondaryDeployStatus === 'failed' || secondaryDeployStatus === 'timeout'" class="q-mb-md">
+                  <q-btn
+                    :label="`Deploy ${profileLabel('gpt')}`"
+                    color="primary"
+                    icon="rocket_launch"
+                    @click="startSecondaryDeploy"
+                  />
+                </div>
+              </template>
+
+              <!-- Full agent controls (same as primary, shown when deployed) -->
+              <template v-else>
+                <div class="row items-center justify-between q-mb-md">
+                  <div class="text-h6">Agent Instructions</div>
+                  <q-btn
+                    label="EDIT"
+                    color="primary"
+                    @click="editMode = !editMode"
+                    :icon="editMode ? 'close' : 'edit'"
+                  />
+                </div>
+
+                <div class="row items-center justify-center q-mb-md">
+                  <q-toggle
+                    v-model="allowDeepLinkPrivateAI"
+                    label="Deep link users can chat with your Private AI"
+                    color="primary"
+                    :loading="savingDeepLinkSetting"
+                    @update:model-value="saveDeepLinkPrivateAISetting"
+                  />
+                </div>
+
+                <div v-if="loadingAgent" class="text-center q-pa-md">
+                  <q-spinner size="2em" />
+                  <div class="q-mt-sm">Loading agent...</div>
+                </div>
+
+                <div v-else-if="agentError" class="text-center q-pa-md">
+                  <q-icon name="error" color="negative" size="40px" />
+                  <div class="text-negative q-mt-sm">{{ agentError }}</div>
+                  <q-btn label="Retry" color="primary" @click="loadAgent" class="q-mt-md" />
+                </div>
+
+                <div v-else-if="agentInstructions">
+                  <div v-if="editMode" class="q-mb-md">
+                    <q-input
+                      v-model="editedInstructions"
+                      type="textarea"
+                      rows="15"
+                      outlined
+                      autofocus
+                    />
+                    <div class="q-mt-md">
+                      <q-btn label="Save" color="primary" @click="saveInstructions" :loading="savingInstructions" />
+                      <q-btn label="Cancel" flat @click="cancelEdit" class="q-ml-sm" />
                     </div>
                   </div>
-                </q-banner>
-                <q-btn
-                  flat
-                  label="Cancel"
-                  color="red"
-                  icon="cancel"
-                  class="q-mt-sm"
-                  @click="cancelSecondaryDeploy"
-                />
-              </div>
 
-              <div v-else-if="secondaryDeployStatus === 'failed'" class="q-mb-md">
-                <q-banner class="bg-red-1 text-red-9 rounded-borders">
-                  <template v-slot:avatar><q-icon name="error" color="red" /></template>
-                  Deployment failed{{ secondaryDeployError ? ': ' + secondaryDeployError : '' }}
-                </q-banner>
-                <div v-if="secondaryDeploySteps.length" class="q-mt-sm q-ml-md">
-                  <div v-for="(step, i) in secondaryDeploySteps" :key="i" class="text-caption" :class="step.ok === false ? 'text-red' : step.ok ? 'text-green-8' : 'text-grey-7'">
-                    {{ step.label }}{{ step.elapsed ? ` (${step.elapsed}s)` : '' }}
-                    <span v-if="step.ok === false"> — {{ step.error }}</span>
+                  <div v-else>
+                    <div class="q-mb-md">
+                      <vue-markdown :source="agentInstructions" />
+                    </div>
+                  </div>
+
+                <div v-if="agentKbs.length" class="q-mt-lg" style="border-top: 1px solid #e0e0e0; padding-top: 16px;">
+                  <div class="text-h6 q-mb-md">Knowledge Bases</div>
+
+                  <div class="text-caption text-grey-7 q-mb-sm">
+                    Tick a box to stage a change, then press <strong>Index Now</strong> to apply.
+                    Changes here do not affect your Saved Files.
+                  </div>
+
+                  <div
+                    v-for="kb in agentKbs"
+                    :key="kb.key"
+                    class="row items-center q-mb-sm"
+                  >
+                    <div class="col-auto q-pr-sm">
+                      <q-checkbox v-model="pendingKb[kb.key]" :disable="kbApplyBusy" />
+                    </div>
+                    <div class="col">
+                      <div class="text-weight-medium">{{ kb.label }}</div>
+                      <div class="text-caption text-grey-7 q-mt-xs">
+                        {{ kb.name || (kb.key === 'kb2' ? 'Created on first connect' : '—') }}
+                      </div>
+                    </div>
+                    <div class="col-auto">
+                      <q-chip
+                        :color="kb.connected ? 'green' : 'grey-5'"
+                        text-color="white"
+                        :label="kb.connected ? 'Connected' : 'Not Connected'"
+                        dense
+                      />
+                      <q-badge
+                        v-if="pendingKb[kb.key] !== kb.connected"
+                        color="amber-8"
+                        class="q-ml-xs"
+                        :label="pendingKb[kb.key] ? 'will connect' : 'will disconnect'"
+                      />
+                    </div>
+                  </div>
+
+                  <div v-if="kbHasStagedChanges" class="q-mt-sm">
+                    <q-btn
+                      label="Index Now"
+                      color="primary"
+                      icon="bolt"
+                      :loading="kbApplyBusy"
+                      :disable="kbApplyBusy"
+                      @click="applyKbChanges"
+                    />
+                    <span class="text-caption text-grey-7 q-ml-sm">
+                      Applies the staged connect/disconnect and indexes if needed.
+                    </span>
                   </div>
                 </div>
-              </div>
 
-              <div v-else-if="secondaryDeployStatus === 'timeout'" class="q-mb-md">
-                <q-banner class="bg-orange-1 text-orange-9 rounded-borders">
-                  <template v-slot:avatar><q-icon name="schedule" color="orange" /></template>
-                  Deployment timed out after 3 minutes. The agent may still be starting up on DigitalOcean.
-                </q-banner>
-                <div v-if="secondaryDeploySteps.length" class="q-mt-sm q-ml-md">
-                  <div v-for="(step, i) in secondaryDeploySteps" :key="i" class="text-caption" :class="step.ok === false ? 'text-red' : step.ok ? 'text-green-8' : 'text-grey-7'">
-                    {{ step.label }}{{ step.elapsed ? ` (${step.elapsed}s)` : '' }}
+                <div v-if="kbInfo" class="q-mt-md">
+                  <div class="q-mt-md">
+                    <div class="text-caption text-grey-7 q-mb-xs">Indexed Files:</div>
+                    <div
+                      v-if="indexedFileNames.length === 0"
+                      class="text-caption text-grey-5"
+                    >
+                      No files indexed yet
+                    </div>
+                    <q-list
+                      v-else
+                      dense
+                      :class="{ 'text-grey-5': !kbInfo.connected }"
+                    >
+                      <q-item
+                        v-for="(fileName, index) in indexedFileNames"
+                        :key="index"
+                        dense
+                      >
+                        <q-item-section>
+                          <q-item-label
+                            :class="{ 'text-grey-5': !kbInfo.connected }"
+                            class="text-caption"
+                          >
+                            {{ fileName }}
+                          </q-item-label>
+                        </q-item-section>
+                      </q-item>
+                    </q-list>
                   </div>
                 </div>
-              </div>
 
-              <!-- Deploy button (shown when not deployed and not currently deploying) -->
-              <div v-if="secondaryDeployStatus === 'idle' || secondaryDeployStatus === 'failed' || secondaryDeployStatus === 'timeout'" class="q-mb-md">
-                <q-btn
-                  :label="`Deploy Secondary Agent (Kimi K2.5)`"
-                  color="primary"
-                  icon="rocket_launch"
-                  @click="startSecondaryDeploy"
-                />
-              </div>
-
-              <!-- Instructions (read-only display) -->
-              <div class="q-mb-md">
-                <div class="text-subtitle2 q-mb-xs">Agent Instructions</div>
-                <div class="q-pa-sm bg-grey-1 rounded-borders text-body2">
-                  Do not hallucinate.
-                </div>
-                <div class="text-caption text-grey-6 q-mt-xs">
-                  The secondary AI uses minimal instructions. Patient Summaries are generated by the Primary AI only.
+                <div v-else-if="!loadingAgent" class="q-mt-lg text-center text-grey-7">
+                  <div class="text-caption">No knowledge base configured</div>
                 </div>
               </div>
+
+              <div v-else class="text-center q-pa-md text-grey">
+                <q-icon name="smart_toy" size="3em" />
+                <div class="q-mt-sm">No agent found</div>
+              </div>
+              </template>
             </template>
           </q-tab-panel>
 
