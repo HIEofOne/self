@@ -1195,6 +1195,7 @@ async function validateUserResources(userId) {
           userDoc.agentEndpoint = null;
           userDoc.agentModelName = null;
           userDoc.agentApiKey = null;
+          userDoc.workflowStage = 'agent_named';
           cleaned = true;
         }
       } else {
@@ -1205,6 +1206,7 @@ async function validateUserResources(userId) {
         userDoc.agentEndpoint = null;
         userDoc.agentModelName = null;
         userDoc.agentApiKey = null;
+        userDoc.workflowStage = 'agent_named';
         cleaned = true;
       }
     } catch (error) {
@@ -1216,6 +1218,7 @@ async function validateUserResources(userId) {
         userDoc.agentEndpoint = null;
         userDoc.agentModelName = null;
         userDoc.agentApiKey = null;
+        userDoc.workflowStage = 'agent_named';
         cleaned = true;
       } else if (isRateLimitError(error)) {
         console.warn(`⚠️ Rate limit while checking agent for user ${userId}. Using cached validation result.`);
@@ -1395,6 +1398,7 @@ async function validateUserResources(userId) {
                 freshDoc.agentEndpoint = null;
                 freshDoc.agentModelName = null;
                 freshDoc.agentApiKey = null;
+                freshDoc.workflowStage = 'agent_named';
                 freshDoc.agentProfiles = {};
                 freshDoc.agentProfileDefaultKey = freshDoc.agentProfileDefaultKey || 'default';
                 freshDoc.deepLinkAgentOverrides = {};
@@ -3561,7 +3565,7 @@ async function provisionUserAsync(userId, token) {
       projectId = await getProjectIdForGenAI(doClient) || projectId;
     }
 
-    // PREFERRED PATH: look up GPT-OSS-120B (the primary model) in the DO
+    // PREFERRED PATH: look up Kimi K2.5 (the primary model) in the DO
     // catalog FIRST. Only fall back to an existing agent's model if the
     // catalog lookup fails.
     if (!isValidUUID(modelId)) {
@@ -3570,7 +3574,7 @@ async function provisionUserAsync(userId, token) {
         const models = modelsResponse.models || modelsResponse.data?.models || [];
         if (models.length > 0) {
           const preferredModel = models.find(m =>
-            m.inference_name === 'openai-gpt-oss-120b' || m.name === 'OpenAI GPT-oss-120b' || m.id === 'openai-gpt-oss-120b'
+            m.inference_name === 'kimi-k2.5' || m.name === 'Kimi K2.5' || m.id === 'kimi-k2.5'
           );
           if (preferredModel && preferredModel.uuid && isValidUUID(preferredModel.uuid)) {
             modelId = preferredModel.uuid;
@@ -11674,31 +11678,64 @@ app.post('/api/patient-summary/draft', async (req, res) => {
     if (!userDoc) {
       return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
     }
+
+    // Self-healing: provision missing agents instead of failing
     if (!userDoc.assignedAgentId || !userDoc.agentEndpoint) {
+      console.log(`[DRAFT SUMMARY] Primary agent missing for ${userId} — attempting to provision`);
+      const provStartedAt = Date.now();
+      try {
+        const { ensureUserAgent } = await import('./routes/auth.js');
+        userDoc = await ensureUserAgent(doClient, cloudant, userDoc);
+        const provElapsed = ((Date.now() - provStartedAt) / 1000).toFixed(1);
+        console.log(`[DRAFT SUMMARY] Primary agent provisioned for ${userId} in ${provElapsed}s`);
+        await appendUserProvisioningEvent(userId, { event: 'draft-summary-auto-provision-primary', elapsedSeconds: Number(provElapsed), agentId: userDoc.assignedAgentId || null });
+      } catch (provErr) {
+        const provElapsed = ((Date.now() - provStartedAt) / 1000).toFixed(1);
+        console.warn(`[DRAFT SUMMARY] Primary agent provisioning failed for ${userId} in ${provElapsed}s: ${provErr.message}`);
+        await appendUserProvisioningEvent(userId, { event: 'draft-summary-auto-provision-primary-failed', elapsedSeconds: Number(provElapsed), reason: provErr.message });
+      }
+    }
+    const hasPrimaryAgent = userDoc.assignedAgentId && userDoc.agentEndpoint;
+    if (!hasPrimaryAgent) {
       return res.status(400).json({ success: false, error: 'AGENT_NOT_CONFIGURED' });
     }
+
+    await appendUserProvisioningEvent(userId, { event: 'draft-summary-started', primaryModel: userDoc.agentModelName || null });
 
     if (userDoc.kbId && userDoc.assignedAgentId) {
       try {
         await doClient.agent.attachKB(userDoc.assignedAgentId, userDoc.kbId);
+        await appendUserProvisioningEvent(userId, { event: 'draft-summary-kb-attached', agentId: userDoc.assignedAgentId, kbId: userDoc.kbId });
       } catch (attachError) {
         if (!attachError.message?.includes('already')) {
           console.error(`[DRAFT SUMMARY] Failed to attach KB: ${attachError.message}`);
-          return res.status(503).json({ success: false, error: 'KB_NOT_ATTACHED' });
+          await appendUserProvisioningEvent(userId, { event: 'draft-summary-kb-attach-failed', reason: attachError.message });
         }
       }
-      // Ensure the agent actually retrieves from its KB (heal legacy NONE).
       await ensureAgentRetrieval(userDoc.assignedAgentId);
     } else if (!userDoc.kbId) {
       return res.status(400).json({ success: false, error: 'NO_KB' });
     }
 
-    if (!userDoc.agentApiKey) {
-      userDoc.agentApiKey = await getOrCreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
-    }
-
     const { DigitalOceanProvider } = await import('../lib/chat-client/providers/digitalocean.js');
-    const agentProvider = new DigitalOceanProvider(userDoc.agentApiKey, { baseURL: userDoc.agentEndpoint });
+    let agentProvider;
+    if (hasPrimaryAgent) {
+      if (!userDoc.agentApiKey) {
+        userDoc.agentApiKey = await getOrCreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
+      }
+      agentProvider = new DigitalOceanProvider(userDoc.agentApiKey, { baseURL: userDoc.agentEndpoint });
+    } else {
+      // No primary agent — go straight to secondary
+      console.log(`[DRAFT SUMMARY] No primary agent for ${userId} — using secondary agent`);
+      const gptProfile = userDoc.agentProfiles.gpt;
+      let gptApiKey = gptProfile.apiKey;
+      if (!gptApiKey) {
+        gptApiKey = await getOrCreateAgentApiKey(doClient, cloudant, userId, gptProfile.agentId, 'gpt');
+      }
+      agentProvider = new DigitalOceanProvider(gptApiKey, { baseURL: gptProfile.endpoint });
+      // Override the model so the chat call uses the secondary model
+      userDoc.agentModelName = gptProfile.modelName || 'openai-gpt-oss-120b';
+    }
 
     // Synchronously ensure Apple Health Lists/*.md sidecars exist before
     // building the prompt. Without this, Setup races the category-split
@@ -11730,45 +11767,58 @@ app.post('/api/patient-summary/draft', async (req, res) => {
           const refreshed = await cloudant.getDocument('maia_users', userId);
           if (refreshed) userDoc = refreshed;
         }
+        await appendUserProvisioningEvent(userId, { event: 'draft-summary-ah-lists', outcome: outcome || 'no-op' });
       }
     } catch (e) {
       console.warn(`[DRAFT SUMMARY] AH lists pre-build failed (non-fatal): ${e?.message || e}`);
+      await appendUserProvisioningEvent(userId, { event: 'draft-summary-ah-lists-failed', reason: e?.message || String(e) });
     }
 
     // Build the prompt via the shared helper (Layer-2 spec + currentMedications
     // + past-12mo encounters context). Used by every summary endpoint so they
     // can never drift.
     const draftPrompt = await buildPatientSummaryPromptForUser(userId, userDoc);
+    await appendUserProvisioningEvent(userId, { event: 'draft-summary-prompt-built', promptLength: draftPrompt.length });
     const chatMessages = [{ role: 'user', content: draftPrompt }];
-    const chatOptions = { model: userDoc.agentModelName || 'openai-gpt-oss-120b', stream: false };
+    const chatModel = userDoc.agentModelName || 'openai-gpt-oss-120b';
+    const chatOptions = { model: chatModel, stream: false };
+    console.log(`[DRAFT SUMMARY] Calling Private AI for ${userId} (model: ${chatModel})...`);
+    const aiStartedAt = Date.now();
 
     let chatResp;
-    try {
-      chatResp = await agentProvider.chat(chatMessages, chatOptions);
-    } catch (firstError) {
-      const sc = firstError.status || firstError.statusCode || 0;
-      // 401/403 from a DO agent usually means a stale key OR the agent isn't
-      // serving yet (still deploying). Recreate the key and retry once.
-      if ((sc === 401 || sc === 403) && userDoc.assignedAgentId) {
-        try {
-          const { recreateAgentApiKey } = await import('./utils/agent-helper.js');
-          const newApiKey = await recreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
-          const retry = new DigitalOceanProvider(newApiKey, { baseURL: userDoc.agentEndpoint });
-          chatResp = await retry.chat(chatMessages, chatOptions);
-        } catch (retryError) {
-          const rsc = retryError.status || retryError.statusCode || 0;
-          // Still not serving → agent not ready. Return a structured 202 (not
-          // a 500) so the client backs off and retries, and log it.
-          if (rsc === 401 || rsc === 403) {
-            await appendUserProvisioningEvent(userId, { event: 'draft-summary-failed', reason: 'AGENT_NOT_READY', status: rsc });
-            return res.status(202).json({ success: false, pending: true, reason: 'AGENT_NOT_READY', message: 'Private AI is still deploying — try again shortly.' });
+    let usedModel = chatModel;
+
+    // --- Primary agent attempt ---
+    if (hasPrimaryAgent) {
+      try {
+        chatResp = await agentProvider.chat(chatMessages, chatOptions);
+      } catch (primaryErr) {
+        const sc = primaryErr.status || primaryErr.statusCode || 0;
+        console.warn(`[DRAFT SUMMARY] Primary agent failed for ${userId} (status: ${sc}): ${primaryErr.message}`);
+        await appendUserProvisioningEvent(userId, { event: 'draft-summary-primary-failed', model: chatModel, status: sc || undefined, reason: primaryErr.message });
+
+        // 401/403 — try recreating the API key once before giving up on primary
+        if ((sc === 401 || sc === 403) && userDoc.assignedAgentId) {
+          try {
+            const { recreateAgentApiKey } = await import('./utils/agent-helper.js');
+            const newApiKey = await recreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
+            const retry = new DigitalOceanProvider(newApiKey, { baseURL: userDoc.agentEndpoint });
+            chatResp = await retry.chat(chatMessages, chatOptions);
+            console.log(`[DRAFT SUMMARY] Primary agent succeeded after key recreation for ${userId}`);
+            await appendUserProvisioningEvent(userId, { event: 'draft-summary-primary-key-recreated', model: chatModel });
+          } catch (retryErr) {
+            const rsc = retryErr.status || retryErr.statusCode || 0;
+            console.warn(`[DRAFT SUMMARY] Primary agent retry also failed for ${userId} (status: ${rsc}): ${retryErr.message}`);
+            await appendUserProvisioningEvent(userId, { event: 'draft-summary-primary-retry-failed', model: chatModel, status: rsc || undefined, reason: retryErr.message });
+            // Don't throw — fall through to secondary
           }
-          throw retryError;
         }
-      } else {
-        throw firstError;
+        // For non-401/403 errors, chatResp stays null — fall through to secondary
       }
     }
+
+    const aiElapsedMs = Date.now() - aiStartedAt;
+    console.log(`[DRAFT SUMMARY] Private AI responded for ${userId} in ${(aiElapsedMs / 1000).toFixed(1)}s (model: ${usedModel})`);
 
     let summary = (chatResp.content || chatResp.text || '').trim();
     if (!summary) throw new Error('Empty draft from agent');
@@ -11797,11 +11847,14 @@ app.post('/api/patient-summary/draft', async (req, res) => {
     }
 
     const lines = summary.split('\n').filter(l => l.trim()).length;
+    const totalElapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+    await appendUserProvisioningEvent(userId, { event: 'draft-summary-succeeded', model: usedModel, elapsedSeconds: Number(totalElapsed), lines, chars: summary.length });
     res.json({ success: true, summary, lines, chars: summary.length, generationSeconds });
   } catch (error) {
     console.error('Error generating draft patient summary:', error);
     const sc = error.status || error.statusCode || 0;
-    try { await appendUserProvisioningEvent(userId, { event: 'draft-summary-failed', reason: error.message || 'error', status: sc || undefined }); } catch { /* non-fatal */ }
+    const failElapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+    try { await appendUserProvisioningEvent(userId, { event: 'draft-summary-failed', reason: error.message || 'error', status: sc || undefined, totalElapsedSeconds: Number(failElapsed) }); } catch { /* non-fatal */ }
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -12969,67 +13022,74 @@ app.post('/api/agents/ensure-secondary', async (req, res) => {
     let userDoc = await cloudant.getDocument('maia_users', userId);
     if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
 
-    const hadAgentBefore = !!userDoc.agentProfiles?.gpt?.agentId;
+    const checkOnly = !!req.body?.checkOnly;
+    const existingAgentId = userDoc.agentProfiles?.gpt?.agentId;
 
+    // Check-only mode: return current status without creating the agent
+    if (checkOnly && !existingAgentId) {
+      return res.json({ success: true, ready: false, status: 'not_created' });
+    }
+
+    // Fast path: agent already created — just check if it's running.
+    // Avoids redundant DO API calls, KB attaches, and DB writes on every poll.
+    if (existingAgentId) {
+      let endpoint = null;
+      let isRunning = false;
+      let status = 'unknown';
+      try {
+        const live = await doClient.agent.get(existingAgentId);
+        status = live?.deployment?.status || live?.deployment_status || 'unknown';
+        isRunning = status === 'STATUS_RUNNING';
+        endpoint = live?.deployment?.url ? `${live.deployment.url}/api/v1` : null;
+      } catch { /* still deploying */ }
+      const ready = !!endpoint && isRunning;
+
+      if (ready) {
+        const alreadyLogged = !!userDoc.agentProfiles?.gpt?.deployedLoggedAt;
+        if (!alreadyLogged) {
+          for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+              const doc = await cloudant.getDocument('maia_users', userId);
+              if (!doc) break;
+              if (!doc.agentProfiles) doc.agentProfiles = {};
+              doc.agentProfiles.gpt = { ...(doc.agentProfiles.gpt || {}), endpoint, deployedLoggedAt: new Date().toISOString() };
+              doc.updatedAt = new Date().toISOString();
+              await cloudant.saveDocument('maia_users', doc);
+              break;
+            } catch (err) {
+              if (err?.statusCode === 409 && attempt < 2) continue;
+              break;
+            }
+          }
+          try {
+            await appendUserProvisioningEvent(userId, { event: 'gpt-agent-deployed', agentId: existingAgentId });
+          } catch { /* non-fatal */ }
+        }
+      }
+      console.log(`[ensure-secondary] Poll for ${userId}: status=${status}, ready=${ready}`);
+      return res.json({ success: true, ready, agentId: existingAgentId, endpoint, status });
+    }
+
+    // Slow path: agent doesn't exist yet — create it.
+    const ensureStartedAt = Date.now();
     const { ensureSecondaryAgent } = await import('./routes/auth.js');
     try {
       userDoc = await ensureSecondaryAgent(doClient, cloudant, userDoc);
     } catch (e) {
-      // Creation may still be in-flight under the mutex — report not-ready
-      // rather than 500 so the client keeps polling.
       return res.json({ success: true, ready: false, provisioning: true, reason: e?.message || 'provisioning' });
     }
 
-    let gpt = userDoc.agentProfiles?.gpt || {};
-
-    // Log GPT creation exactly once (when it first appears).
-    if (!hadAgentBefore && gpt.agentId) {
+    const ensureElapsed = ((Date.now() - ensureStartedAt) / 1000).toFixed(1);
+    const gpt = userDoc.agentProfiles?.gpt || {};
+    if (gpt.agentId) {
       try {
         await appendUserProvisioningEvent(userId, {
-          event: 'gpt-agent-created', agentId: gpt.agentId, agentName: gpt.agentName || null
+          event: 'gpt-agent-created', agentId: gpt.agentId, agentName: gpt.agentName || null, elapsedSeconds: Number(ensureElapsed)
         });
       } catch { /* non-fatal */ }
     }
-
-    // Readiness mirrors the primary agent: require BOTH a deployment URL and
-    // STATUS_RUNNING (a URL alone 403s while still deploying).
-    let endpoint = null;
-    let isRunning = false;
-    if (gpt.agentId) {
-      try {
-        const live = await doClient.agent.get(gpt.agentId);
-        const status = live?.deployment?.status || live?.deployment_status || 'unknown';
-        isRunning = status === 'STATUS_RUNNING';
-        endpoint = live?.deployment?.url ? `${live.deployment.url}/api/v1` : null;
-      } catch { /* still deploying */ }
-    }
-    const ready = !!endpoint && isRunning;
-
-    if (ready) {
-      // Persist endpoint + log "deployed" exactly once (deployedLoggedAt guard).
-      const alreadyLogged = !!userDoc.agentProfiles?.gpt?.deployedLoggedAt;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          const doc = await cloudant.getDocument('maia_users', userId);
-          if (!doc) break;
-          if (!doc.agentProfiles) doc.agentProfiles = {};
-          doc.agentProfiles.gpt = { ...(doc.agentProfiles.gpt || {}), endpoint, deployedLoggedAt: doc.agentProfiles.gpt?.deployedLoggedAt || new Date().toISOString() };
-          doc.updatedAt = new Date().toISOString();
-          await cloudant.saveDocument('maia_users', doc);
-          break;
-        } catch (err) {
-          if (err?.statusCode === 409 && attempt < 2) continue;
-          break;
-        }
-      }
-      if (!alreadyLogged) {
-        try {
-          await appendUserProvisioningEvent(userId, { event: 'gpt-agent-deployed', agentId: gpt.agentId || null });
-        } catch { /* non-fatal */ }
-      }
-    }
-
-    res.json({ success: true, ready, agentId: gpt.agentId || null, endpoint });
+    console.log(`[ensure-secondary] Created for ${userId} in ${ensureElapsed}s, agentId=${gpt.agentId}`);
+    res.json({ success: true, ready: false, agentId: gpt.agentId || null, endpoint: null, status: 'created' });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -13876,7 +13936,8 @@ if (isProduction) {
     const modelsToCheck = [
       'anthropic-claude-4.6-sonnet', 'nvidia-nemotron-3-super-120b',
       'openai-gpt-5.5', 'openai-gpt-oss-120b',
-      'deepseek-v4-pro', 'deepseek-r1-distill-llama-70b'
+      'deepseek-v4-pro', 'deepseek-r1-distill-llama-70b',
+      'kimi-k2.5'
     ];
     const availableModels = new Set();
     await Promise.allSettled(modelsToCheck.map(async (model) => {
