@@ -818,7 +818,7 @@ const worksheetCardTitle = (profileKey: string): string => {
     const short = profileStr.replace(/^Private AI\s*/, '').replace(/^\(/, '').replace(/\)$/, '');
     return `Current Medications Worksheet (${short})`;
   }
-  return `Current Medications Worksheet (${profileKey === 'default' ? 'Primary' : 'Secondary'})`;
+  return `Current Medications Worksheet (${profileKey === 'default' ? 'GPT' : 'Kimi'})`;
 };
 
 const worksheetSpecsOrdered = computed(() => {
