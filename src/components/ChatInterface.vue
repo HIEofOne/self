@@ -5367,9 +5367,29 @@ const handlePageLinkClick = async (event: Event) => {
   
   const pageNum = link.getAttribute('data-page');
   if (!pageNum) return;
-  
+
   const pageNumber = parseInt(pageNum, 10);
-  
+
+  // Fast path: if processFileNCitations already resolved the link with
+  // data-bucket-key and data-filename, open the file directly — no need
+  // to match against availableUserFiles or show the chooser dialog.
+  const resolvedKey = link.getAttribute('data-bucket-key');
+  const resolvedName = link.getAttribute('data-filename');
+  if (resolvedKey && resolvedName) {
+    const userFile: UploadedFile = {
+      id: `user-file-${resolvedKey}`,
+      name: resolvedName,
+      size: 0,
+      type: detectFileTypeFromMetadata(resolvedName),
+      content: '',
+      originalFile: null as any,
+      bucketKey: resolvedKey,
+      uploadedAt: new Date()
+    };
+    viewFile(userFile, pageNumber);
+    return;
+  }
+
   // Late-binding legend-tag resolution: if the link's visible text
   // matches `File N p.<page>` (a Patient Summary Radiology citation
   // emitted by the server's legend-tag prompt), resolve File N against
