@@ -1970,7 +1970,7 @@ const handleShowPatientSummary = () => {
 
 const handleCurrentMedicationsSaved = (payload: { value: string; edited: boolean; changed?: boolean; source?: string; verified?: boolean }) => {
   emit('current-medications-saved', payload);
-  if (payload.changed) {
+  if (payload.changed && payload.verified) {
     showUpdateSummaryDialog.value = true;
     summaryNeedsVerify.value = true;
   } else if (payload.verified) {
