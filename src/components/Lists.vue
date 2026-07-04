@@ -2945,6 +2945,7 @@ const loadCurrentMedications = async (forceRefresh = false) => {
       persistVerifyState();
       wizardMedsExtractionFailed.value = true;
       clearWizardAutoFlow();
+      startEditingCurrentMedications();
     } else {
       pathsTried.push('manual');
       const lastError = unifiedError;
