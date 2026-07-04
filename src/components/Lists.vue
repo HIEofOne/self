@@ -57,8 +57,10 @@
              a trash icon (delete) + pencil icon (inline edit, cursor
              at end). A blank row at the bottom with a pencil lets the
              user add a new med. Bulk-edit textarea is gone — the row
-             UI covers all edit cases. -->
-        <div v-else-if="!isEditingCurrentMedications && currentMedications">
+             UI covers all edit cases. Also shown when wizard extraction
+             failed (0 meds) so the user gets the "Add a medication"
+             pencil instead of a blank textarea. -->
+        <div v-else-if="!isEditingCurrentMedications && (currentMedications || wizardMedsExtractionFailed)">
           <div v-if="currentMedicationsSourceLabel" class="text-caption text-grey-7 q-mb-sm">
             Source: {{ currentMedicationsSourceLabel }}
           </div>
@@ -133,7 +135,7 @@
               <span v-else class="col q-ml-sm text-caption text-grey-6">Add a medication…</span>
             </div>
           </div>
-          <div class="text-caption text-grey-7 q-mt-md q-pt-md" style="border-top: 1px solid #e0e0e0;">
+          <div v-if="currentMedRows.length > 0" class="text-caption text-grey-7 q-mt-md q-pt-md" style="border-top: 1px solid #e0e0e0;">
             Please edit this AI suggestion to reflect your actual prescription drug use.
           </div>
         </div>
@@ -2945,7 +2947,9 @@ const loadCurrentMedications = async (forceRefresh = false) => {
       persistVerifyState();
       wizardMedsExtractionFailed.value = true;
       clearWizardAutoFlow();
-      startEditingCurrentMedications();
+      // Open the inline "Add a medication" row so the user sees the
+      // pencil + blinking cursor, same UX as Apple Health with meds.
+      nextTick(() => startInlineEditRow(-1));
     } else {
       pathsTried.push('manual');
       const lastError = unifiedError;
