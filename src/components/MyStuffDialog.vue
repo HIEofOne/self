@@ -5513,13 +5513,45 @@ const filterCurrentChat = () => {
         });
       }
     }
-    
+
+    // Filename-variant pass: catch ALL-CAPS underscore-separated names in file legend footers
+    // e.g. GROPPER_ADRIAN in "GROPPER_ADRIAN_05-12-2026_to2016.PDF"
+    for (const mapping of enhancedMappings) {
+      if (!mapping.isFullName || !mapping.lastName) continue;
+      const nameParts = mapping.original.split(/\s+/).filter(Boolean);
+      if (nameParts.length < 2) continue;
+      const firstName = nameParts[0];
+      const lastName = mapping.lastName;
+      const pseudonymParts = mapping.pseudonym.split(/\s+/).filter(Boolean);
+      const pseudoFirst = pseudonymParts[0] || mapping.pseudonym;
+      const pseudoLast = pseudonymParts.length >= 2 ? pseudonymParts[pseudonymParts.length - 1] : pseudoFirst;
+
+      // LASTNAME_FIRSTNAME and FIRSTNAME_LASTNAME (case-insensitive)
+      const lastFirst = new RegExp(`${lastName}[_\\s]${firstName}`, 'gi');
+      const firstLast = new RegExp(`${firstName}[_\\s]${lastName}`, 'gi');
+      filteredContent = filteredContent.replace(lastFirst, `${pseudoLast}_${pseudoFirst}`);
+      filteredContent = filteredContent.replace(firstLast, `${pseudoFirst}_${pseudoLast}`);
+
+      // Standalone ALL-CAPS last name adjacent to underscore/dot (filename context)
+      const lastNameUpper = lastName.toUpperCase();
+      if (lastNameUpper.length >= 3) {
+        const filenameLast = new RegExp(`(?<=[_./])${lastNameUpper}(?=[_./])`, 'g');
+        filteredContent = filteredContent.replace(filenameLast, pseudoLast.toUpperCase());
+      }
+      // Standalone ALL-CAPS first name adjacent to underscore/dot (filename context)
+      const firstNameUpper = firstName.toUpperCase();
+      if (firstNameUpper.length >= 3) {
+        const filenameFirst = new RegExp(`(?<=[_./])${firstNameUpper}(?=[_./])`, 'g');
+        filteredContent = filteredContent.replace(filenameFirst, pseudoFirst.toUpperCase());
+      }
+    }
+
     return {
       ...msg,
       content: filteredContent
     };
   });
-  
+
   // Check if any names were actually replaced
   const namesReplaced = pseudonymizedNames.length > 0;
   
