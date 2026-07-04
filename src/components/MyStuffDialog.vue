@@ -1802,12 +1802,30 @@
               @click="handleReplaceSummaryByIndex(index)"
             />
           </template>
-          <q-btn 
-            flat 
-            label="Close without saving" 
-            color="grey-8" 
+          <q-btn
+            flat
+            label="Close without saving"
+            color="grey-8"
             @click="showReplaceSummaryDialog = false; newSummaryToReplace = ''"
           />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
+    <!-- Update Patient Summary after meds change dialog -->
+    <q-dialog v-model="showUpdateSummaryDialog" persistent>
+      <q-card style="min-width: 380px; max-width: 500px;">
+        <q-card-section>
+          <div class="text-h6">Update Patient Summary?</div>
+        </q-card-section>
+        <q-card-section class="q-pt-none">
+          <div class="text-body1">
+            Your Current Medications have changed. Would you like to regenerate the Patient Summary to reflect the update?
+          </div>
+        </q-card-section>
+        <q-card-actions align="right" class="q-pa-md">
+          <q-btn flat label="Not Now" color="grey-8" @click="showUpdateSummaryDialog = false" />
+          <q-btn flat label="Update Summary" color="primary" @click="handleAcceptUpdateSummary" />
         </q-card-actions>
       </q-card>
     </q-dialog>
@@ -1952,12 +1970,20 @@ const handleShowPatientSummary = () => {
 
 const handleCurrentMedicationsSaved = (payload: { value: string; edited: boolean; changed?: boolean; source?: string; verified?: boolean }) => {
   emit('current-medications-saved', payload);
-  // Only mark PS unverified when the user explicitly clicked Edit
-  // or Verify. Per-row edits/deletes should NOT trigger a Patient
-  // Summary update — the user may still be editing more rows.
-  if (payload.verified) {
+  if (payload.verified && payload.changed) {
+    showUpdateSummaryDialog.value = true;
+    summaryNeedsVerify.value = true;
+  } else if (payload.verified) {
     summaryNeedsVerify.value = true;
   }
+};
+
+const handleAcceptUpdateSummary = () => {
+  showUpdateSummaryDialog.value = false;
+  currentTab.value = 'summary';
+  loadingSummary.value = true;
+  pendingSummaryRegeneration.value = true;
+  requestNewSummary();
 };
 
 const handleMedicationsOffered = (payload: {
@@ -2562,6 +2588,7 @@ const kbNeedsUpdate = ref(false); // Track if KB needs to be updated (files move
 const kbSummaryTokens = ref<string | number | null>(null);
 const kbSummaryFiles = ref<number | null>(null);
 const summaryNeedsVerify = ref(false);
+const showUpdateSummaryDialog = ref(false);
 /** Once the user dismisses the summary tab without verifying this session, don't auto-reopen. */
 const summaryDismissedThisSession = ref(false);
 const showSummaryAttention = computed(() => summaryNeedsVerify.value);
