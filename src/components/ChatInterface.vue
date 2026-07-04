@@ -7247,7 +7247,6 @@ watch(
       wizardPreparingRecords.value = true;
       wizardPreparingStartedAt.value = Date.now();
       startStage3ElapsedTimer();
-      console.log('[Wizard] Transitioning to preparation phase (draft PS + medications)');
       logProvisioningEvent({ event: 'preparation-phase-started' });
       wizardPreparingMessage.value = 'Confirming knowledge base is attached to your agent...';
       if (wizardTimeoutTimer) {
@@ -7265,7 +7264,6 @@ watch(
       // Step 1: Generate and save the draft Patient Summary.
       preGeneratedSummary.value = null;
       if (props.user?.userId) {
-        console.log('[Wizard] Starting draft Patient Summary generation...');
         logProvisioningEvent({ event: 'draft-summary-call-started' });
         wizardDraftPsStatus.value = 'running';
         wizardDraftPsStartedAt.value = Date.now();
@@ -7299,7 +7297,6 @@ watch(
             wizardDraftPsStatus.value = 'done';
             wizardDraftPsCompletedAt.value = Date.now();
             stopStage3ElapsedTimer();
-            console.log(`[Wizard] Draft Patient Summary generated: ${summaryLines} lines, ${text.length} chars, ${generationSeconds}s`);
             logProvisioningEvent({
               event: 'draft-summary-generated',
               lines: summaryLines,
@@ -7328,7 +7325,6 @@ watch(
       // Users can generate them on demand from the Lists tab.
 
       // Step 3: open My Lists → Current Medications for the user to VERIFY.
-      console.log('[Wizard] Advancing to medications phase — opening My Lists');
       logProvisioningEvent({ event: 'medications-phase-opened' });
       wizardFlowPhase.value = 'medications';
       wizardPreparingMessage.value = 'Opening Current Medications for review...';
@@ -7797,7 +7793,6 @@ const handleCurrentMedicationsSaved = async (payload?: { value?: string; edited?
   // Only advance when the user explicitly clicked Verify (verified=true).
   // Per-row edits/deletes should NOT close the medications view.
   if (wizardFlowPhase.value === 'medications' && payload?.verified) {
-    console.log('[Wizard] Medications verified — advancing to summary phase');
     logProvisioningEvent({ event: 'medications-verified' });
     wizardFlowPhase.value = 'summary';
     guidedFlowDismissCount.value = 0;

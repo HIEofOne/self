@@ -6463,28 +6463,14 @@ const dismissSummaryPair = () => {
 };
 
 const requestNewSummary = async () => {
-  console.log('[MyStuff] requestNewSummary START', { userId: props.userId });
-  // Guard: verify session is ready before calling agent endpoint
-  if (!props.userId) {
-    console.warn('[MyStuff] requestNewSummary skipped — no userId');
-    return;
-  }
+  if (!props.userId) return;
   try {
-    console.log('[MyStuff] requestNewSummary: session check GET /api/user-status');
     const sessionCheck = await fetch(`/api/user-status?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
-    console.log('[MyStuff] requestNewSummary: session check response', { ok: sessionCheck.ok, status: sessionCheck.status });
     if (!sessionCheck.ok) {
-      console.warn(`[MyStuff] Session not ready (${sessionCheck.status}), falling back to loading existing summary`);
       await loadPatientSummary();
       return;
     }
-    // Peek at what the server thinks currentMedications is RIGHT NOW.
-    try {
-      const j = await sessionCheck.clone().json();
-      console.log('[MyStuff] requestNewSummary: userDoc.currentMedications @ regen time', { present: !!j?.currentMedications, len: (j?.currentMedications || '').length });
-    } catch { /* body already consumed elsewhere is fine */ }
-  } catch (e) {
-    console.warn('[MyStuff] Session check failed, falling back to loading existing summary', e);
+  } catch {
     await loadPatientSummary();
     return;
   }
@@ -6495,7 +6481,6 @@ const requestNewSummary = async () => {
   startSummaryProgress();
 
   try {
-    console.log('[MyStuff] requestNewSummary: POST /api/generate-patient-summary');
     const response = await fetch('/api/generate-patient-summary', {
       method: 'POST',
       headers: {
@@ -6506,15 +6491,12 @@ const requestNewSummary = async () => {
         userId: props.userId
       })
     });
-    console.log('[MyStuff] requestNewSummary: /api/generate-patient-summary response', { ok: response.ok, status: response.status });
-
     if (!response.ok) {
       const errorData = await response.json();
       throw new Error(errorData.message || 'Failed to generate patient summary');
     }
 
     const result = await response.json();
-    console.log('[MyStuff] requestNewSummary: got result', { summaryLen: (result?.summary || '').length, summariesCount: result?.summaries?.length, snippet: (result?.summary || '').slice(0, 300) });
 
     // Use server's summary count (from generate response) so we don't rely on stale client state
     const summaryCount = result.summaries?.length ?? patientSummaries.value.length;
@@ -7241,7 +7223,6 @@ const rebuildListsAfterIndexing = async () => {
           force: true
         })
       });
-      console.log('[MyStuff] Rebuilt Apple Health sidecars after indexing');
     }
     // Regenerate Encounters and OOR Labs worksheets
     await Promise.allSettled([
@@ -7256,7 +7237,6 @@ const rebuildListsAfterIndexing = async () => {
         credentials: 'include'
       })
     ]);
-    console.log('[MyStuff] Regenerated worksheets after indexing');
     // Tell the Lists component to reload all its data
     if (listsComponentRef.value) {
       listsComponentRef.value.reloadAll();

@@ -1439,10 +1439,7 @@ const copyItemToClipboard = async (item: any, categoryName: string) => {
 
 const processInitialFile = async (overrideFile?: { bucketKey: string; fileName?: string }) => {
   // Prevent duplicate concurrent calls (race between onMounted and watchers)
-  if (isProcessing.value) {
-    console.log('[Lists] processInitialFile skipped — already processing');
-    return;
-  }
+  if (isProcessing.value) return;
   logWizardEvent('lists_processing_start');
   wizardAutoStartPending.value = false;
   isProcessing.value = true;
@@ -1664,7 +1661,6 @@ const attemptAutoProcessInitialFile = async () => {
     sessionStorage.removeItem('autoProcessInitialFile');
     logWizardEvent('lists_auto_start_failed', { hasInitialFile: false });
     if (!currentMedications.value && !isCurrentMedicationsEdited.value) {
-      console.log('[Lists] No Apple Health file found after retries — falling back to loadCurrentMedications');
       loadCurrentMedications();
     }
   }
@@ -2830,16 +2826,11 @@ let mountInitializing = true;
 const loadCurrentMedications = async (forceRefresh = false) => {
   // Guard: already edited — never recalculate
   if (isCurrentMedicationsEdited.value && !forceRefresh) {
-    console.log('[Lists] Current Medications already verified/edited — skipping');
     isInitialMedsLoading.value = false;
     return;
   }
 
-  // Mutex: prevent duplicate concurrent calls
-  if (loadCurrentMedicationsRunning) {
-    console.log('[Lists] loadCurrentMedications already running — skipping duplicate call');
-    return;
-  }
+  if (loadCurrentMedicationsRunning) return;
   loadCurrentMedicationsRunning = true;
 
   logWizardEvent('current_meds_load_start', { forceRefresh });
