@@ -21,7 +21,7 @@
         <div class="text-h6 q-mb-md">{{ currentMedicationsBlockTitle }}</div>
         
         <!-- Initial loading spinner (covers flash before medications state is known) -->
-        <div v-if="isInitialMedsLoading && !isEditingCurrentMedications" class="q-pa-md text-center">
+        <div v-if="isInitialMedsLoading" class="q-pa-md text-center">
           <q-spinner-dots color="primary" size="2em" />
           <div class="text-caption text-grey-7 q-mt-sm">Loading medications...</div>
         </div>
@@ -53,14 +53,9 @@
           </div>
         </div>
         
-        <!-- Display Mode: row-based inline edit. Each med line has
-             a trash icon (delete) + pencil icon (inline edit, cursor
-             at end). A blank row at the bottom with a pencil lets the
-             user add a new med. Bulk-edit textarea is gone — the row
-             UI covers all edit cases. Also shown when wizard extraction
-             failed (0 meds) so the user gets the "Add a medication"
-             pencil instead of a blank textarea. -->
-        <div v-else-if="!isEditingCurrentMedications && (currentMedications || wizardMedsExtractionFailed)">
+        <!-- Row-based inline edit: always shown after loading completes.
+             Each med has trash + pencil; bottom row adds new meds. -->
+        <div v-else>
           <div v-if="currentMedicationsSourceLabel" class="text-caption text-grey-7 q-mb-sm">
             Source: {{ currentMedicationsSourceLabel }}
           </div>
@@ -140,60 +135,10 @@
           </div>
         </div>
         
-        <!-- Empty State -->
-        <div v-else-if="!isEditingCurrentMedications && !currentMedications" class="text-body2 text-grey-7 q-pa-md text-center">
-          <div v-if="wizardPreparingMeds">
-            <q-spinner color="primary" size="1.5em" class="q-mr-sm" />
-            Current medications are being prepared...
-          </div>
-          <div v-else-if="hasMedicationRecords">
-            No current medications identified yet. Click "Generate" to review your medication records.
-          </div>
-          <div v-else>
-            No medication records found. Upload a health record file to extract medication information.
-          </div>
-          <div v-if="appleHealthFileInfo && !wizardPreparingMeds" class="q-mt-md">
-            <q-btn
-              color="primary"
-              icon="create"
-              :label="`Create categories list and current medications from ${appleHealthFileInfo.fileName}`"
-              @click="processInitialFile(appleHealthFileInfo)"
-              :loading="isProcessing"
-            />
-          </div>
-        </div>
-        
-        <!-- Edit Mode -->
-        <div v-else>
-          <textarea 
-            v-model="editingCurrentMedications" 
-            rows="8"
-            class="full-width q-pa-sm"
-            style="border: 1px solid #ccc; border-radius: 4px; resize: vertical; font-family: inherit;"
-          />
-          <div class="q-mt-sm">
-            <q-btn
-              size="sm"
-              icon="save"
-              color="primary"
-              label="Save"
-              @click="saveCurrentMedications"
-              :loading="isSavingCurrentMedications"
-            />
-            <q-btn
-              size="sm"
-              icon="close"
-              color="grey-7"
-              label="Cancel"
-              @click="cancelEditingCurrentMedications"
-              class="q-ml-sm"
-            />
-          </div>
-        </div>
         
         <div class="q-mt-sm">
           <q-btn
-            v-if="!isEditingCurrentMedications && !currentMedications && hasMedicationRecords && !wizardAutoFlow && !wizardPreparingMeds"
+            v-if="!currentMedications && hasMedicationRecords && !wizardAutoFlow && !wizardPreparingMeds"
             flat
             dense
             icon="play_arrow"
@@ -204,17 +149,7 @@
             class="q-mr-sm"
           />
           <q-btn
-            v-if="!isEditingCurrentMedications && currentMedications"
-            flat
-            dense
-            icon="edit"
-            label="Edit"
-            @click="startEditingCurrentMedications"
-            class="q-mr-sm"
-            :class="{ 'verify-highlight': needsVerifyAction }"
-          />
-          <q-btn
-            v-if="!isEditingCurrentMedications && currentMedications"
+            v-if="currentMedications || needsVerifyAction"
             flat
             dense
             icon="verified"
@@ -224,7 +159,7 @@
             :class="{ 'verify-highlight': needsVerifyAction }"
           />
           <q-btn
-            v-if="hasMedicationRecords && !isEditingCurrentMedications && currentMedications"
+            v-if="hasMedicationRecords && currentMedications"
             flat
             dense
             icon="refresh"
@@ -2522,7 +2457,6 @@ const countObservationsByPageRange = (markedMarkdown: string): void => {
       isInitialMedsLoading.value = false;
       currentMedicationsStatus.value = '';
       currentMedicationsBlockTitle.value = 'Current Medications as reported by the user';
-      startEditingCurrentMedications();
     }
   }
 
@@ -2768,7 +2702,7 @@ onMounted(async () => {
     // Wait a bit for the dialog to fully open, then start editing
     await nextTick();
     setTimeout(() => {
-      startEditingCurrentMedications();
+      startInlineEditRow(-1);
     }, 500);
   }
 
@@ -2961,7 +2895,8 @@ const loadCurrentMedications = async (forceRefresh = false) => {
         outcome: lastError ? 'extract-error' : 'no-source',
         detail: lastError || undefined
       });
-      startEditingCurrentMedications();
+      needsVerifyAction.value = true;
+      persistVerifyState();
     }
     return;
   } finally {
