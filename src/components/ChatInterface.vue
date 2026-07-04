@@ -970,6 +970,7 @@ const providers = ref<string[]>([]);
 const selectedProvider = ref<string>('Private AI');
 const messages = ref<Message[]>([]);
 const originalMessages = ref<Message[]>([]); // Store original unfiltered messages for privacy filtering
+const privacyNameMapping = ref<Array<{ original: string; pseudonym: string }>>([]);
 const trulyOriginalMessages = ref<Message[]>([]); // Store truly original messages that never get overwritten (for filtering)
 const inputMessage = ref('');
 const isStreaming = ref(false);
@@ -1816,6 +1817,9 @@ watch(() => showPdfViewer.value, (isOpen) => {
   }
 });
 
+// Raw model name for each provider key — populated from providerModels API response
+const providerModelNames: Record<string, string> = {};
+
 // Provider labels map — updated dynamically from providerModels API response
 const providerLabels: Record<string, string> = {
   digitalocean: 'Private AI',
@@ -1853,18 +1857,25 @@ const defaultPrivateAiLabel = () =>
 // entry per ready Private AI profile.
 const providerOptions = computed(() => {
   const opts: Array<{ label: string; value: string }> = [];
+  const seen = new Set<string>();
+  const privateAiModels = new Set(privateAiProfiles.value.map(pr => pr.model).filter(Boolean));
   for (const p of providers.value) {
     if (p === 'digitalocean') {
       if (privateAiProfiles.value.length > 0) {
         for (const prof of privateAiProfiles.value) {
           opts.push({ label: prof.label, value: prof.label });
+          seen.add(prof.label);
         }
       } else {
         opts.push({ label: providerLabels.digitalocean, value: providerLabels.digitalocean });
+        seen.add(providerLabels.digitalocean);
       }
     } else {
+      if (providerModelNames[p] && privateAiModels.has(providerModelNames[p])) continue;
       const label = providerLabels[p] || p.charAt(0).toUpperCase() + p.slice(1);
+      if (seen.has(label)) continue;
       opts.push({ label, value: label });
+      seen.add(label);
     }
   }
   return opts;
@@ -2194,8 +2205,11 @@ const loadProviders = async () => {
 
     if (data.providerModels) {
       for (const [key, model] of Object.entries(data.providerModels)) {
-        if (model && modelDisplayNames[model as string]) {
-          providerLabels[key] = modelDisplayNames[model as string];
+        if (model) {
+          providerModelNames[key] = model as string;
+          if (modelDisplayNames[model as string]) {
+            providerLabels[key] = modelDisplayNames[model as string];
+          }
         }
       }
     }
@@ -5129,6 +5143,26 @@ const viewFile = (file: UploadedFile, page?: number) => {
   }
 };
 
+const buildPrivacyNameFilter = (): ((text: string) => string) | undefined => {
+  const mapping = privacyNameMapping.value;
+  if (!mapping || mapping.length === 0) return undefined;
+  return (text: string) => {
+    let out = text;
+    for (const { original, pseudonym } of mapping) {
+      const parts = original.split(/\s+/).filter(Boolean);
+      if (parts.length < 2) continue;
+      const firstName = parts[0];
+      const lastName = parts[parts.length - 1];
+      const pseudoParts = pseudonym.split(/\s+/).filter(Boolean);
+      const pseudoFirst = pseudoParts[0] || pseudonym;
+      const pseudoLast = pseudoParts.length >= 2 ? pseudoParts[pseudoParts.length - 1] : pseudoFirst;
+      out = out.replace(new RegExp(`${lastName}[_\\s]${firstName}`, 'gi'), `${pseudoLast}_${pseudoFirst}`);
+      out = out.replace(new RegExp(`${firstName}[_\\s]${lastName}`, 'gi'), `${pseudoFirst}_${pseudoLast}`);
+    }
+    return out;
+  };
+};
+
 // Process markdown content to convert page references to clickable links
 // Strategy: Find "page"/"Page" + number in markdown, insert HTML links before parsing
 const processPageReferences = (content: string): string => {
@@ -5145,7 +5179,7 @@ const processPageReferences = (content: string): string => {
   // the short `File N p.<page>` label.
   // File-N citation rewrite + wrap + legend-footer is shared with
   // MyStuffDialog (Patient Summary tab) via src/utils/fileNCitations.
-  content = processFileNCitations(content, availableUserFiles.value);
+  content = processFileNCitations(content, availableUserFiles.value, buildPrivacyNameFilter());
   
   // Find all occurrences of a page reference: full word `Page`/`page`
   // OR the abbreviated `p.` form. The abbreviated form is what the
@@ -5354,9 +5388,29 @@ const handlePageLinkClick = async (event: Event) => {
   
   const pageNum = link.getAttribute('data-page');
   if (!pageNum) return;
-  
+
   const pageNumber = parseInt(pageNum, 10);
-  
+
+  // Fast path: if processFileNCitations already resolved the link with
+  // data-bucket-key and data-filename, open the file directly — no need
+  // to match against availableUserFiles or show the chooser dialog.
+  const resolvedKey = link.getAttribute('data-bucket-key');
+  const resolvedName = link.getAttribute('data-filename');
+  if (resolvedKey && resolvedName) {
+    const userFile: UploadedFile = {
+      id: `user-file-${resolvedKey}`,
+      name: resolvedName,
+      size: 0,
+      type: detectFileTypeFromMetadata(resolvedName),
+      content: '',
+      originalFile: null as any,
+      bucketKey: resolvedKey,
+      uploadedAt: new Date()
+    };
+    viewFile(userFile, pageNumber);
+    return;
+  }
+
   // Late-binding legend-tag resolution: if the link's visible text
   // matches `File N p.<page>` (a Patient Summary Radiology citation
   // emitted by the server's legend-tag prompt), resolve File N against
@@ -6460,7 +6514,26 @@ const saveLocally = async () => {
     const now = new Date();
     const filename = `MAIA chat ${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}-${String(now.getMinutes()).padStart(2, '0')}.pdf`;
 
-    // Prefer the File System Access API when available
+    // Prefer writing to localFolderHandle/chats/ so the file stays
+    // in the patient folder but won't be indexed (scanner skips subdirs).
+    if (localFolderHandle.value) {
+      try {
+        // @ts-ignore - getDirectoryHandle not in TS libs
+        const chatsDir = await localFolderHandle.value.getDirectoryHandle('chats', { create: true });
+        const fileHandle = await chatsDir.getFileHandle(filename, { create: true });
+        const writable = await fileHandle.createWritable();
+        await writable.write(await doc.output('blob'));
+        await writable.close();
+
+        alert('Chat saved successfully!');
+        lastLocalSaveSnapshot.value = currentChatSnapshot.value;
+        return;
+      } catch (err: any) {
+        console.warn('Failed to write to chats/ subfolder, falling back to save picker.', err);
+      }
+    }
+
+    // Fall back to the File System Access save picker
     // @ts-ignore - File System Access API types not in TypeScript libs
     if ('showSaveFilePicker' in window) {
       try {
@@ -6474,11 +6547,11 @@ const saveLocally = async () => {
             }
           ]
         });
-        
+
         const writable = await fileHandle.createWritable();
         await writable.write(await doc.output('blob'));
         await writable.close();
-        
+
         alert('Chat saved successfully!');
         lastLocalSaveSnapshot.value = currentChatSnapshot.value;
         return;
@@ -7218,15 +7291,18 @@ watch(
   }
 );
 
-// Guided flow: when indexing completes AND agent is ready, close wizard and start medications flow
+// Guided flow: when indexing completes AND agent is ready, close wizard and start medications flow.
+// Also watches wizardFlowPhase so that a re-run (where KB and agent are already ready)
+// triggers the preparation phase as soon as the wizard sets flowPhase to 'running'.
 watch(
-  [() => indexingStatus.value?.phase, () => wizardStage1Complete.value],
-  async ([phase, agentReady]) => {
+  [() => indexingStatus.value?.phase, () => wizardStage1Complete.value, () => wizardFlowPhase.value],
+  async ([phase, agentReady, flowPhase]) => {
     if (
       phase === 'complete' &&
       agentReady &&
       (localFolderHandle.value || safariFolderName.value) &&
-      wizardFlowPhase.value === 'running'
+      flowPhase === 'running' &&
+      !wizardPreparingRecords.value
     ) {
       // Both indexing and agent are done — transition to medications phase.
       // Keep the wizard dialog OPEN with spinners so the user doesn't see a zombie chat.
@@ -7234,7 +7310,6 @@ watch(
       wizardPreparingRecords.value = true;
       wizardPreparingStartedAt.value = Date.now();
       startStage3ElapsedTimer();
-      console.log('[Wizard] Transitioning to preparation phase (draft PS + medications)');
       logProvisioningEvent({ event: 'preparation-phase-started' });
       wizardPreparingMessage.value = 'Confirming knowledge base is attached to your agent...';
       if (wizardTimeoutTimer) {
@@ -7252,7 +7327,6 @@ watch(
       // Step 1: Generate and save the draft Patient Summary.
       preGeneratedSummary.value = null;
       if (props.user?.userId) {
-        console.log('[Wizard] Starting draft Patient Summary generation...');
         logProvisioningEvent({ event: 'draft-summary-call-started' });
         wizardDraftPsStatus.value = 'running';
         wizardDraftPsStartedAt.value = Date.now();
@@ -7286,7 +7360,6 @@ watch(
             wizardDraftPsStatus.value = 'done';
             wizardDraftPsCompletedAt.value = Date.now();
             stopStage3ElapsedTimer();
-            console.log(`[Wizard] Draft Patient Summary generated: ${summaryLines} lines, ${text.length} chars, ${generationSeconds}s`);
             logProvisioningEvent({
               event: 'draft-summary-generated',
               lines: summaryLines,
@@ -7315,7 +7388,6 @@ watch(
       // Users can generate them on demand from the Lists tab.
 
       // Step 3: open My Lists → Current Medications for the user to VERIFY.
-      console.log('[Wizard] Advancing to medications phase — opening My Lists');
       logProvisioningEvent({ event: 'medications-phase-opened' });
       wizardFlowPhase.value = 'medications';
       wizardPreparingMessage.value = 'Opening Current Medications for review...';
@@ -7633,7 +7705,8 @@ const handleFileAddedToKb = async (data: { fileName: string; bucketKey: string }
   }
 };
 
-const handleMessagesFiltered = async (filteredMessages: Message[]) => {
+const handleMessagesFiltered = async (filteredMessages: Message[], nameMapping?: Array<{ original: string; pseudonym: string }>) => {
+  privacyNameMapping.value = nameMapping || [];
   // Replace current messages with filtered messages
   messages.value = filteredMessages;
   
@@ -7784,7 +7857,6 @@ const handleCurrentMedicationsSaved = async (payload?: { value?: string; edited?
   // Only advance when the user explicitly clicked Verify (verified=true).
   // Per-row edits/deletes should NOT close the medications view.
   if (wizardFlowPhase.value === 'medications' && payload?.verified) {
-    console.log('[Wizard] Medications verified — advancing to summary phase');
     logProvisioningEvent({ event: 'medications-verified' });
     wizardFlowPhase.value = 'summary';
     guidedFlowDismissCount.value = 0;
@@ -7861,13 +7933,12 @@ const handlePatientSummaryVerified = async (payload?: { userId?: string; summary
   // Secondary agent provisioning continues in the background — don't block.
   if (wizardFlowPhase.value === 'summary') {
     wizardFlowPhase.value = 'done';
-    myStuffInitialTab.value = 'files';
     try { sessionStorage.setItem('wizardSetupCompleted', 'true'); } catch { /* ignore */ }
     logProvisioningEvent({ event: 'setup-complete' });
     void generateSetupLogPdf();
     setTimeout(() => void generateSetupLogPdf(), 15000);
     emit('wizard-complete');
-    showWorkbookClosePrompt.value = true;
+    showMyStuffDialog.value = false;
   }
 };
 

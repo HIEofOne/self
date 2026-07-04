@@ -1449,7 +1449,7 @@
                 <div class="row q-gutter-sm q-mt-sm">
                   <q-btn flat label="Discard both" color="grey-7" @click="dismissSummaryPair" />
                   <q-space />
-                  <q-btn flat label="Regenerate" color="primary" icon="refresh" @click="requestNewSummaryPair" />
+                  <q-btn flat label="Regenerate" color="primary" icon="refresh" @click="handleRequestNewSummary" />
                 </div>
               </template>
             </div>
@@ -1604,10 +1604,10 @@
                 <q-btn
                   label="Request New Summary"
                   color="primary"
-                  @click="requestNewSummaryPair"
+                  @click="handleRequestNewSummary"
                   icon="refresh"
-                  :disable="isEditingSummaryTab || isSavingSummary || loadingPair"
-                  :loading="loadingPair"
+                  :disable="isEditingSummaryTab || isSavingSummary || loadingSummary"
+                  :loading="loadingSummary"
                 />
               </div>
             </div>
@@ -1619,9 +1619,9 @@
                 <q-btn
                   label="Request Summary"
                   color="primary"
-                  @click="requestNewSummaryPair"
+                  @click="handleRequestNewSummary"
                   icon="add"
-                  :loading="loadingPair"
+                  :loading="loadingSummary"
                 />
               </div>
             </div>
@@ -1924,7 +1924,7 @@ const emit = defineEmits<{
   'indexing-status-update': [data: { jobId: string; phase: string; tokens: string; filesIndexed: number; progress: number }];
   'indexing-finished': [data: { jobId: string; phase: string; error?: string }];
   'files-archived': [archivedFiles: string[]]; // Emit bucketKeys of archived files
-  'messages-filtered': [messages: Message[]]; // Emit filtered messages with pseudonyms
+  'messages-filtered': [messages: Message[], nameMapping?: Array<{ original: string; pseudonym: string }>]; // Emit filtered messages with pseudonyms
   'diary-posted': [content: string]; // Emit diary content to add to chat
   'reference-file-added': [file: { fileName: string; bucketKey: string; fileSize: number; uploadedAt: string; fileType?: string; fileUrl?: string; isReference: boolean }]; // Emit reference file to add to chat
   'current-medications-saved': [data: { value: string; edited: boolean; source?: string }];
@@ -1970,7 +1970,7 @@ const handleShowPatientSummary = () => {
 
 const handleCurrentMedicationsSaved = (payload: { value: string; edited: boolean; changed?: boolean; source?: string; verified?: boolean }) => {
   emit('current-medications-saved', payload);
-  if (payload.changed) {
+  if (payload.changed && payload.verified) {
     showUpdateSummaryDialog.value = true;
     summaryNeedsVerify.value = true;
   } else if (payload.verified) {
@@ -2557,7 +2557,10 @@ const renderPsHtml = (text: string | null | undefined): string => {
   const processed = processFileNCitations(txt, userFiles.value as any);
   return psMarkdown.render(processed);
 };
-const patientSummaryHtml = computed(() => renderPsHtml(patientSummary.value));
+const patientSummaryHtml = computed(() => {
+  void userFiles.value;
+  return renderPsHtml(patientSummary.value);
+});
 const handlePsCitationClick = (event: Event) => {
   const target = event.target as HTMLElement;
   const link = target.closest('.page-link') as HTMLElement | null;
@@ -5510,13 +5513,45 @@ const filterCurrentChat = () => {
         });
       }
     }
-    
+
+    // Filename-variant pass: catch ALL-CAPS underscore-separated names in file legend footers
+    // e.g. GROPPER_ADRIAN in "GROPPER_ADRIAN_05-12-2026_to2016.PDF"
+    for (const mapping of enhancedMappings) {
+      if (!mapping.isFullName || !mapping.lastName) continue;
+      const nameParts = mapping.original.split(/\s+/).filter(Boolean);
+      if (nameParts.length < 2) continue;
+      const firstName = nameParts[0];
+      const lastName = mapping.lastName;
+      const pseudonymParts = mapping.pseudonym.split(/\s+/).filter(Boolean);
+      const pseudoFirst = pseudonymParts[0] || mapping.pseudonym;
+      const pseudoLast = pseudonymParts.length >= 2 ? pseudonymParts[pseudonymParts.length - 1] : pseudoFirst;
+
+      // LASTNAME_FIRSTNAME and FIRSTNAME_LASTNAME (case-insensitive)
+      const lastFirst = new RegExp(`${lastName}[_\\s]${firstName}`, 'gi');
+      const firstLast = new RegExp(`${firstName}[_\\s]${lastName}`, 'gi');
+      filteredContent = filteredContent.replace(lastFirst, `${pseudoLast}_${pseudoFirst}`);
+      filteredContent = filteredContent.replace(firstLast, `${pseudoFirst}_${pseudoLast}`);
+
+      // Standalone ALL-CAPS last name adjacent to underscore/dot (filename context)
+      const lastNameUpper = lastName.toUpperCase();
+      if (lastNameUpper.length >= 3) {
+        const filenameLast = new RegExp(`(?<=[_./])${lastNameUpper}(?=[_./])`, 'g');
+        filteredContent = filteredContent.replace(filenameLast, pseudoLast.toUpperCase());
+      }
+      // Standalone ALL-CAPS first name adjacent to underscore/dot (filename context)
+      const firstNameUpper = firstName.toUpperCase();
+      if (firstNameUpper.length >= 3) {
+        const filenameFirst = new RegExp(`(?<=[_./])${firstNameUpper}(?=[_./])`, 'g');
+        filteredContent = filteredContent.replace(filenameFirst, pseudoFirst.toUpperCase());
+      }
+    }
+
     return {
       ...msg,
       content: filteredContent
     };
   });
-  
+
   // Check if any names were actually replaced
   const namesReplaced = pseudonymizedNames.length > 0;
   
@@ -5566,8 +5601,8 @@ const filterCurrentChat = () => {
     return;
   }
   
-  // Emit filtered messages to parent component
-  emit('messages-filtered', filteredMessages);
+  // Emit filtered messages to parent component (include mapping for filename filtering)
+  emit('messages-filtered', filteredMessages, privacyFilterMapping.value);
   
   const namesList = pseudonymizedNames.map(n => `${n.original} → ${n.pseudonym}`).join(', ');
   
@@ -6462,29 +6497,22 @@ const dismissSummaryPair = () => {
   pairError.value = '';
 };
 
+const handleRequestNewSummary = () => {
+  summaryPair.value = null;
+  currentTab.value = 'summary';
+  pendingSummaryRegeneration.value = true;
+  requestNewSummary();
+};
+
 const requestNewSummary = async () => {
-  console.log('[MyStuff] requestNewSummary START', { userId: props.userId });
-  // Guard: verify session is ready before calling agent endpoint
-  if (!props.userId) {
-    console.warn('[MyStuff] requestNewSummary skipped — no userId');
-    return;
-  }
+  if (!props.userId) return;
   try {
-    console.log('[MyStuff] requestNewSummary: session check GET /api/user-status');
     const sessionCheck = await fetch(`/api/user-status?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
-    console.log('[MyStuff] requestNewSummary: session check response', { ok: sessionCheck.ok, status: sessionCheck.status });
     if (!sessionCheck.ok) {
-      console.warn(`[MyStuff] Session not ready (${sessionCheck.status}), falling back to loading existing summary`);
       await loadPatientSummary();
       return;
     }
-    // Peek at what the server thinks currentMedications is RIGHT NOW.
-    try {
-      const j = await sessionCheck.clone().json();
-      console.log('[MyStuff] requestNewSummary: userDoc.currentMedications @ regen time', { present: !!j?.currentMedications, len: (j?.currentMedications || '').length });
-    } catch { /* body already consumed elsewhere is fine */ }
-  } catch (e) {
-    console.warn('[MyStuff] Session check failed, falling back to loading existing summary', e);
+  } catch {
     await loadPatientSummary();
     return;
   }
@@ -6495,7 +6523,6 @@ const requestNewSummary = async () => {
   startSummaryProgress();
 
   try {
-    console.log('[MyStuff] requestNewSummary: POST /api/generate-patient-summary');
     const response = await fetch('/api/generate-patient-summary', {
       method: 'POST',
       headers: {
@@ -6506,15 +6533,12 @@ const requestNewSummary = async () => {
         userId: props.userId
       })
     });
-    console.log('[MyStuff] requestNewSummary: /api/generate-patient-summary response', { ok: response.ok, status: response.status });
-
     if (!response.ok) {
       const errorData = await response.json();
       throw new Error(errorData.message || 'Failed to generate patient summary');
     }
 
     const result = await response.json();
-    console.log('[MyStuff] requestNewSummary: got result', { summaryLen: (result?.summary || '').length, summariesCount: result?.summaries?.length, snippet: (result?.summary || '').slice(0, 300) });
 
     // Use server's summary count (from generate response) so we don't rely on stale client state
     const summaryCount = result.summaries?.length ?? patientSummaries.value.length;
@@ -7241,7 +7265,6 @@ const rebuildListsAfterIndexing = async () => {
           force: true
         })
       });
-      console.log('[MyStuff] Rebuilt Apple Health sidecars after indexing');
     }
     // Regenerate Encounters and OOR Labs worksheets
     await Promise.allSettled([
@@ -7256,7 +7279,6 @@ const rebuildListsAfterIndexing = async () => {
         credentials: 'include'
       })
     ]);
-    console.log('[MyStuff] Regenerated worksheets after indexing');
     // Tell the Lists component to reload all its data
     if (listsComponentRef.value) {
       listsComponentRef.value.reloadAll();

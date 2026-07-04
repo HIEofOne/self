@@ -21,7 +21,7 @@
         <div class="text-h6 q-mb-md">{{ currentMedicationsBlockTitle }}</div>
         
         <!-- Initial loading spinner (covers flash before medications state is known) -->
-        <div v-if="isInitialMedsLoading && !isEditingCurrentMedications" class="q-pa-md text-center">
+        <div v-if="isInitialMedsLoading" class="q-pa-md text-center">
           <q-spinner-dots color="primary" size="2em" />
           <div class="text-caption text-grey-7 q-mt-sm">Loading medications...</div>
         </div>
@@ -53,12 +53,9 @@
           </div>
         </div>
         
-        <!-- Display Mode: row-based inline edit. Each med line has
-             a trash icon (delete) + pencil icon (inline edit, cursor
-             at end). A blank row at the bottom with a pencil lets the
-             user add a new med. Bulk-edit textarea is gone — the row
-             UI covers all edit cases. -->
-        <div v-else-if="!isEditingCurrentMedications && currentMedications">
+        <!-- Row-based inline edit: always shown after loading completes.
+             Each med has trash + pencil; bottom row adds new meds. -->
+        <div v-else>
           <div v-if="currentMedicationsSourceLabel" class="text-caption text-grey-7 q-mb-sm">
             Source: {{ currentMedicationsSourceLabel }}
           </div>
@@ -133,65 +130,15 @@
               <span v-else class="col q-ml-sm text-caption text-grey-6">Add a medication…</span>
             </div>
           </div>
-          <div class="text-caption text-grey-7 q-mt-md q-pt-md" style="border-top: 1px solid #e0e0e0;">
+          <div v-if="currentMedRows.length > 0" class="text-caption text-grey-7 q-mt-md q-pt-md" style="border-top: 1px solid #e0e0e0;">
             Please edit this AI suggestion to reflect your actual prescription drug use.
           </div>
         </div>
         
-        <!-- Empty State -->
-        <div v-else-if="!isEditingCurrentMedications && !currentMedications" class="text-body2 text-grey-7 q-pa-md text-center">
-          <div v-if="wizardPreparingMeds">
-            <q-spinner color="primary" size="1.5em" class="q-mr-sm" />
-            Current medications are being prepared...
-          </div>
-          <div v-else-if="hasMedicationRecords">
-            No current medications identified yet. Click "Generate" to review your medication records.
-          </div>
-          <div v-else>
-            No medication records found. Upload a health record file to extract medication information.
-          </div>
-          <div v-if="appleHealthFileInfo && !wizardPreparingMeds" class="q-mt-md">
-            <q-btn
-              color="primary"
-              icon="create"
-              :label="`Create categories list and current medications from ${appleHealthFileInfo.fileName}`"
-              @click="processInitialFile(appleHealthFileInfo)"
-              :loading="isProcessing"
-            />
-          </div>
-        </div>
-        
-        <!-- Edit Mode -->
-        <div v-else>
-          <textarea 
-            v-model="editingCurrentMedications" 
-            rows="8"
-            class="full-width q-pa-sm"
-            style="border: 1px solid #ccc; border-radius: 4px; resize: vertical; font-family: inherit;"
-          />
-          <div class="q-mt-sm">
-            <q-btn
-              size="sm"
-              icon="save"
-              color="primary"
-              label="Save"
-              @click="saveCurrentMedications"
-              :loading="isSavingCurrentMedications"
-            />
-            <q-btn
-              size="sm"
-              icon="close"
-              color="grey-7"
-              label="Cancel"
-              @click="cancelEditingCurrentMedications"
-              class="q-ml-sm"
-            />
-          </div>
-        </div>
         
         <div class="q-mt-sm">
           <q-btn
-            v-if="!isEditingCurrentMedications && !currentMedications && hasMedicationRecords && !wizardAutoFlow && !wizardPreparingMeds"
+            v-if="!currentMedications && hasMedicationRecords && !wizardAutoFlow && !wizardPreparingMeds"
             flat
             dense
             icon="play_arrow"
@@ -202,17 +149,7 @@
             class="q-mr-sm"
           />
           <q-btn
-            v-if="!isEditingCurrentMedications && currentMedications"
-            flat
-            dense
-            icon="edit"
-            label="Edit"
-            @click="startEditingCurrentMedications"
-            class="q-mr-sm"
-            :class="{ 'verify-highlight': needsVerifyAction }"
-          />
-          <q-btn
-            v-if="!isEditingCurrentMedications && currentMedications"
+            v-if="currentMedications || needsVerifyAction"
             flat
             dense
             icon="verified"
@@ -222,7 +159,7 @@
             :class="{ 'verify-highlight': needsVerifyAction }"
           />
           <q-btn
-            v-if="hasMedicationRecords && !isEditingCurrentMedications && currentMedications"
+            v-if="hasMedicationRecords && currentMedications"
             flat
             dense
             icon="refresh"
@@ -1439,10 +1376,7 @@ const copyItemToClipboard = async (item: any, categoryName: string) => {
 
 const processInitialFile = async (overrideFile?: { bucketKey: string; fileName?: string }) => {
   // Prevent duplicate concurrent calls (race between onMounted and watchers)
-  if (isProcessing.value) {
-    console.log('[Lists] processInitialFile skipped — already processing');
-    return;
-  }
+  if (isProcessing.value) return;
   logWizardEvent('lists_processing_start');
   wizardAutoStartPending.value = false;
   isProcessing.value = true;
@@ -1620,13 +1554,16 @@ const clearWizardAutoFlow = () => {
   }
 };
 
+let autoProcessRunning = false;
 const attemptAutoProcessInitialFile = async () => {
+  if (autoProcessRunning) return;
   if (isProcessing.value) return;
   if (hasSavedResults.value) return; // Already processed — don't redo
   const autoProcess = sessionStorage.getItem('autoProcessInitialFile');
   const shouldAutoProcess = autoProcess === 'true' || wizardAutoFlow.value;
   if (!shouldAutoProcess) return;
 
+  autoProcessRunning = true;
   logWizardEvent('lists_auto_start_attempt', {
     attempt: autoProcessAttempts.value + 1,
     hasSavedResults: hasSavedResults.value
@@ -1655,13 +1592,12 @@ const attemptAutoProcessInitialFile = async () => {
 
   if (autoProcessAttempts.value < 10) {
     autoProcessAttempts.value += 1;
-    setTimeout(attemptAutoProcessInitialFile, 1000);
+    setTimeout(() => { autoProcessRunning = false; attemptAutoProcessInitialFile(); }, 1000);
   } else {
+    autoProcessRunning = false;
     sessionStorage.removeItem('autoProcessInitialFile');
     logWizardEvent('lists_auto_start_failed', { hasInitialFile: false });
-    // No Apple Health file — try to load/generate Current Medications (if not already loaded)
-    if (!currentMedications.value && !isCurrentMedicationsEdited.value) {
-      console.log('[Lists] No Apple Health file found after retries — falling back to loadCurrentMedications');
+    if (!currentMedications.value && !isCurrentMedicationsEdited.value && !wizardMedsExtractionFailed.value) {
       loadCurrentMedications();
     }
   }
@@ -2505,7 +2441,7 @@ const countObservationsByPageRange = (markedMarkdown: string): void => {
   
   // After processing categories: if Medication Records exist, load current medications from file; otherwise open block for editing with user-reported title
   // Guard: skip if medications are already loaded/edited, currently being loaded, already present, or mount still initializing
-  if (!isCurrentMedicationsEdited.value && !currentMedications.value && !loadCurrentMedicationsRunning && !mountInitializing) {
+  if (!isCurrentMedicationsEdited.value && !currentMedications.value && !loadCurrentMedicationsRunning && !mountInitializing && !wizardMedsExtractionFailed.value) {
     const medicationCategory = categoriesList.value.find(cat =>
       cat.name.toLowerCase().includes('medication')
     );
@@ -2521,7 +2457,6 @@ const countObservationsByPageRange = (markedMarkdown: string): void => {
       isInitialMedsLoading.value = false;
       currentMedicationsStatus.value = '';
       currentMedicationsBlockTitle.value = 'Current Medications as reported by the user';
-      startEditingCurrentMedications();
     }
   }
 
@@ -2767,7 +2702,7 @@ onMounted(async () => {
     // Wait a bit for the dialog to fully open, then start editing
     await nextTick();
     setTimeout(() => {
-      startEditingCurrentMedications();
+      startInlineEditRow(-1);
     }, 500);
   }
 
@@ -2827,16 +2762,11 @@ let mountInitializing = true;
 const loadCurrentMedications = async (forceRefresh = false) => {
   // Guard: already edited — never recalculate
   if (isCurrentMedicationsEdited.value && !forceRefresh) {
-    console.log('[Lists] Current Medications already verified/edited — skipping');
     isInitialMedsLoading.value = false;
     return;
   }
 
-  // Mutex: prevent duplicate concurrent calls
-  if (loadCurrentMedicationsRunning) {
-    console.log('[Lists] loadCurrentMedications already running — skipping duplicate call');
-    return;
-  }
+  if (loadCurrentMedicationsRunning) return;
   loadCurrentMedicationsRunning = true;
 
   logWizardEvent('current_meds_load_start', { forceRefresh });
@@ -2951,6 +2881,9 @@ const loadCurrentMedications = async (forceRefresh = false) => {
       persistVerifyState();
       wizardMedsExtractionFailed.value = true;
       clearWizardAutoFlow();
+      // Open the inline "Add a medication" row so the user sees the
+      // pencil + blinking cursor, same UX as Apple Health with meds.
+      nextTick(() => startInlineEditRow(-1));
     } else {
       pathsTried.push('manual');
       const lastError = unifiedError;
@@ -2962,7 +2895,8 @@ const loadCurrentMedications = async (forceRefresh = false) => {
         outcome: lastError ? 'extract-error' : 'no-source',
         detail: lastError || undefined
       });
-      startEditingCurrentMedications();
+      needsVerifyAction.value = true;
+      persistVerifyState();
     }
     return;
   } finally {

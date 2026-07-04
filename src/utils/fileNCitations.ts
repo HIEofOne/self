@@ -45,7 +45,8 @@ const escRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
  */
 export function processFileNCitations(
   content: string,
-  availableFiles: FileNFile[]
+  availableFiles: FileNFile[],
+  nameFilter?: (text: string) => string
 ): string {
   if (!content || typeof content !== 'string') return content || '';
   const pdfs = (availableFiles || []).filter(f => /\.pdf$/i.test(f.fileName || ''));
@@ -100,7 +101,8 @@ export function processFileNCitations(
     const sorted = [...referenced].sort((a, b) => a - b);
     const lines = sorted.map(idx => {
       const f = pdfs[idx];
-      return `- **File ${idx + 1}**: ${f?.fileName || '(unknown)'}`;
+      const displayName = f?.fileName || '(unknown)';
+      return `- **File ${idx + 1}**: ${nameFilter ? nameFilter(displayName) : displayName}`;
     }).join('\n');
     out = `${out}\n\n---\n**File legend**\n${lines}`;
   }
