@@ -2307,7 +2307,10 @@ watch(
   () => props.restoreActive,
   (active, wasActive) => {
     if (!active && wasActive) {
-      // Restore just completed — reload providers to pick up newly deployed agent
+      // Restore just completed — reset to bare "Private AI" so loadProviders
+      // selects the Primary profile instead of preserving a stale secondary
+      // selection from a mid-restore loadProviders call.
+      selectedProvider.value = providerLabels.digitalocean;
       loadProviders();
     }
   }
