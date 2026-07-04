@@ -6473,7 +6473,26 @@ const saveLocally = async () => {
     const now = new Date();
     const filename = `MAIA chat ${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}-${String(now.getMinutes()).padStart(2, '0')}.pdf`;
 
-    // Prefer the File System Access API when available
+    // Prefer writing to localFolderHandle/chats/ so the file stays
+    // in the patient folder but won't be indexed (scanner skips subdirs).
+    if (localFolderHandle.value) {
+      try {
+        // @ts-ignore - getDirectoryHandle not in TS libs
+        const chatsDir = await localFolderHandle.value.getDirectoryHandle('chats', { create: true });
+        const fileHandle = await chatsDir.getFileHandle(filename, { create: true });
+        const writable = await fileHandle.createWritable();
+        await writable.write(await doc.output('blob'));
+        await writable.close();
+
+        alert('Chat saved successfully!');
+        lastLocalSaveSnapshot.value = currentChatSnapshot.value;
+        return;
+      } catch (err: any) {
+        console.warn('Failed to write to chats/ subfolder, falling back to save picker.', err);
+      }
+    }
+
+    // Fall back to the File System Access save picker
     // @ts-ignore - File System Access API types not in TypeScript libs
     if ('showSaveFilePicker' in window) {
       try {
@@ -6487,11 +6506,11 @@ const saveLocally = async () => {
             }
           ]
         });
-        
+
         const writable = await fileHandle.createWritable();
         await writable.write(await doc.output('blob'));
         await writable.close();
-        
+
         alert('Chat saved successfully!');
         lastLocalSaveSnapshot.value = currentChatSnapshot.value;
         return;
@@ -7872,13 +7891,12 @@ const handlePatientSummaryVerified = async (payload?: { userId?: string; summary
   // Secondary agent provisioning continues in the background — don't block.
   if (wizardFlowPhase.value === 'summary') {
     wizardFlowPhase.value = 'done';
-    myStuffInitialTab.value = 'files';
     try { sessionStorage.setItem('wizardSetupCompleted', 'true'); } catch { /* ignore */ }
     logProvisioningEvent({ event: 'setup-complete' });
     void generateSetupLogPdf();
     setTimeout(() => void generateSetupLogPdf(), 15000);
     emit('wizard-complete');
-    showWorkbookClosePrompt.value = true;
+    showMyStuffDialog.value = false;
   }
 };
 
