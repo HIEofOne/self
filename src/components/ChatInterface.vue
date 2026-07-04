@@ -1816,6 +1816,9 @@ watch(() => showPdfViewer.value, (isOpen) => {
   }
 });
 
+// Raw model name for each provider key — populated from providerModels API response
+const providerModelNames: Record<string, string> = {};
+
 // Provider labels map — updated dynamically from providerModels API response
 const providerLabels: Record<string, string> = {
   digitalocean: 'Private AI',
@@ -1853,18 +1856,25 @@ const defaultPrivateAiLabel = () =>
 // entry per ready Private AI profile.
 const providerOptions = computed(() => {
   const opts: Array<{ label: string; value: string }> = [];
+  const seen = new Set<string>();
+  const privateAiModels = new Set(privateAiProfiles.value.map(pr => pr.model).filter(Boolean));
   for (const p of providers.value) {
     if (p === 'digitalocean') {
       if (privateAiProfiles.value.length > 0) {
         for (const prof of privateAiProfiles.value) {
           opts.push({ label: prof.label, value: prof.label });
+          seen.add(prof.label);
         }
       } else {
         opts.push({ label: providerLabels.digitalocean, value: providerLabels.digitalocean });
+        seen.add(providerLabels.digitalocean);
       }
     } else {
+      if (providerModelNames[p] && privateAiModels.has(providerModelNames[p])) continue;
       const label = providerLabels[p] || p.charAt(0).toUpperCase() + p.slice(1);
+      if (seen.has(label)) continue;
       opts.push({ label, value: label });
+      seen.add(label);
     }
   }
   return opts;
@@ -2194,8 +2204,11 @@ const loadProviders = async () => {
 
     if (data.providerModels) {
       for (const [key, model] of Object.entries(data.providerModels)) {
-        if (model && modelDisplayNames[model as string]) {
-          providerLabels[key] = modelDisplayNames[model as string];
+        if (model) {
+          providerModelNames[key] = model as string;
+          if (modelDisplayNames[model as string]) {
+            providerLabels[key] = modelDisplayNames[model as string];
+          }
         }
       }
     }

@@ -1620,13 +1620,16 @@ const clearWizardAutoFlow = () => {
   }
 };
 
+let autoProcessRunning = false;
 const attemptAutoProcessInitialFile = async () => {
+  if (autoProcessRunning) return;
   if (isProcessing.value) return;
   if (hasSavedResults.value) return; // Already processed — don't redo
   const autoProcess = sessionStorage.getItem('autoProcessInitialFile');
   const shouldAutoProcess = autoProcess === 'true' || wizardAutoFlow.value;
   if (!shouldAutoProcess) return;
 
+  autoProcessRunning = true;
   logWizardEvent('lists_auto_start_attempt', {
     attempt: autoProcessAttempts.value + 1,
     hasSavedResults: hasSavedResults.value
@@ -1655,11 +1658,11 @@ const attemptAutoProcessInitialFile = async () => {
 
   if (autoProcessAttempts.value < 10) {
     autoProcessAttempts.value += 1;
-    setTimeout(attemptAutoProcessInitialFile, 1000);
+    setTimeout(() => { autoProcessRunning = false; attemptAutoProcessInitialFile(); }, 1000);
   } else {
+    autoProcessRunning = false;
     sessionStorage.removeItem('autoProcessInitialFile');
     logWizardEvent('lists_auto_start_failed', { hasInitialFile: false });
-    // No Apple Health file — try to load/generate Current Medications (if not already loaded)
     if (!currentMedications.value && !isCurrentMedicationsEdited.value) {
       console.log('[Lists] No Apple Health file found after retries — falling back to loadCurrentMedications');
       loadCurrentMedications();
