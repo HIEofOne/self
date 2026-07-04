@@ -10,3 +10,5 @@ dist/
 .idea/
 
 KBs.txt
+.claude/worktrees/
+.claude/launch.json

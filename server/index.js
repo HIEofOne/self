@@ -72,12 +72,32 @@ async function getOrCreateModelAccessKey(cloudant) {
   // Ensure the config database exists
   try { await cloudant.createDatabase(configDb); } catch (_) { /* already exists */ }
 
-  // Try to read cached key from CouchDB
+  // Try to read cached key from CouchDB, then validate it
   try {
     const doc = await cloudant.getDocument(configDb, docId);
     if (doc.secret_key) {
-      originalConsoleLog('[DO Inference] Using cached Model Access Key');
-      return doc.secret_key;
+      // Validate the cached key with a lightweight models list call
+      try {
+        const check = await fetch('https://inference.do-ai.run/v1/models', {
+          headers: { 'Authorization': `Bearer ${doc.secret_key}` }
+        });
+        if (check.ok) {
+          try {
+            const modelsData = await check.json();
+            const ids = (modelsData.data || []).map(m => m.id);
+            originalConsoleLog(`[DO Inference] Using cached Model Access Key (validated). Available models: ${ids.join(', ')}`);
+          } catch (_) {
+            originalConsoleLog('[DO Inference] Using cached Model Access Key (validated)');
+          }
+          return doc.secret_key;
+        }
+        originalConsoleLog(`[DO Inference] Cached key returned ${check.status} — rotating`);
+        // Delete the stale doc so we create a fresh key below
+        try { await cloudant.deleteDocument(configDb, docId, doc._rev); } catch (_) { /* ignore */ }
+      } catch (valErr) {
+        originalConsoleLog(`[DO Inference] Cached key validation failed: ${valErr.message} — rotating`);
+        try { await cloudant.deleteDocument(configDb, docId, doc._rev); } catch (_) { /* ignore */ }
+      }
     }
   } catch (_) { /* doc doesn't exist — create below */ }
 
@@ -1175,6 +1195,7 @@ async function validateUserResources(userId) {
           userDoc.agentEndpoint = null;
           userDoc.agentModelName = null;
           userDoc.agentApiKey = null;
+          userDoc.workflowStage = 'agent_named';
           cleaned = true;
         }
       } else {
@@ -1185,6 +1206,7 @@ async function validateUserResources(userId) {
         userDoc.agentEndpoint = null;
         userDoc.agentModelName = null;
         userDoc.agentApiKey = null;
+        userDoc.workflowStage = 'agent_named';
         cleaned = true;
       }
     } catch (error) {
@@ -1196,6 +1218,7 @@ async function validateUserResources(userId) {
         userDoc.agentEndpoint = null;
         userDoc.agentModelName = null;
         userDoc.agentApiKey = null;
+        userDoc.workflowStage = 'agent_named';
         cleaned = true;
       } else if (isRateLimitError(error)) {
         console.warn(`⚠️ Rate limit while checking agent for user ${userId}. Using cached validation result.`);
@@ -1375,6 +1398,7 @@ async function validateUserResources(userId) {
                 freshDoc.agentEndpoint = null;
                 freshDoc.agentModelName = null;
                 freshDoc.agentApiKey = null;
+                freshDoc.workflowStage = 'agent_named';
                 freshDoc.agentProfiles = {};
                 freshDoc.agentProfileDefaultKey = freshDoc.agentProfileDefaultKey || 'default';
                 freshDoc.deepLinkAgentOverrides = {};
@@ -1517,7 +1541,7 @@ app.use(session({
 setupAuthRoutes(app, passkeyService, cloudant, doClient, auditLog, { invalidateResourceCache });
 
 // Chat routes
-setupChatRoutes(app, chatClient, cloudant, doClient);
+setupChatRoutes(app, chatClient, cloudant, doClient, appendUserProvisioningEvent);
 
 // File routes
 setupFileRoutes(app, cloudant, doClient);
@@ -3541,7 +3565,7 @@ async function provisionUserAsync(userId, token) {
       projectId = await getProjectIdForGenAI(doClient) || projectId;
     }
 
-    // PREFERRED PATH: look up GPT-OSS-120B (the primary model) in the DO
+    // PREFERRED PATH: look up Kimi K2.5 (the primary model) in the DO
     // catalog FIRST. Only fall back to an existing agent's model if the
     // catalog lookup fails.
     if (!isValidUUID(modelId)) {
@@ -3550,7 +3574,7 @@ async function provisionUserAsync(userId, token) {
         const models = modelsResponse.models || modelsResponse.data?.models || [];
         if (models.length > 0) {
           const preferredModel = models.find(m =>
-            m.inference_name === 'openai-gpt-oss-120b' || m.name === 'OpenAI GPT-oss-120b' || m.id === 'openai-gpt-oss-120b'
+            m.inference_name === 'kimi-k2.5' || m.name === 'Kimi K2.5' || m.id === 'kimi-k2.5'
           );
           if (preferredModel && preferredModel.uuid && isValidUUID(preferredModel.uuid)) {
             modelId = preferredModel.uuid;
@@ -6611,18 +6635,52 @@ app.delete('/api/delete-file', async (req, res) => {
     });
     console.log(`✅ Deleted file from Spaces: ${bucketKey}`);
 
+    // Check if the deleted file is the Apple Health source
+    const deletedFile = (userDoc.files || []).find(f => f.bucketKey === bucketKey);
+    const wasAppleHealth = deletedFile?.isAppleHealth;
+
     // Update user document
     if (userDoc.files) {
       // Remove file from userDoc.files
       userDoc.files = userDoc.files.filter(f => f.bucketKey !== bucketKey);
-      
-      await cloudant.saveDocument('maia_users', userDoc);
-      console.log(`✅ Removed file metadata from user document: ${bucketKey}`);
     }
+
+    if (wasAppleHealth) {
+      // Clear stale Apple Health metadata so the next AH upload rebuilds
+      delete userDoc.appleHealthCategoriesBuiltAt;
+      delete userDoc.appleHealthCategoriesSourceKey;
+      // Clear cached worksheet data derived from the old AH file
+      delete userDoc.oorLabsWorksheet;
+      delete userDoc.encountersWorksheet;
+      delete userDoc.medsWorksheets;
+      console.log(`🧹 Cleared Apple Health metadata and cached worksheets for ${userId}`);
+
+      // Delete Lists sidecars from Spaces (best-effort)
+      try {
+        const { ListObjectsV2Command } = await import('@aws-sdk/client-s3');
+        const listsPrefix = `${userId}/Lists/`;
+        const listResp = await s3Client.send(new ListObjectsV2Command({
+          Bucket: bucketName,
+          Prefix: listsPrefix
+        }));
+        if (listResp.Contents?.length) {
+          for (const obj of listResp.Contents) {
+            await deleteObjectWithLog({ s3Client, bucketName, key: obj.Key });
+          }
+          console.log(`🧹 Deleted ${listResp.Contents.length} Lists sidecar(s) for ${userId}`);
+        }
+      } catch (listsErr) {
+        console.warn(`[delete-file] Lists sidecar cleanup failed (non-fatal): ${listsErr?.message}`);
+      }
+    }
+
+    await cloudant.saveDocument('maia_users', userDoc);
+    console.log(`✅ Removed file metadata from user document: ${bucketKey}`);
 
     res.json({
       success: true,
-      message: 'File deleted successfully'
+      message: 'File deleted successfully',
+      wasAppleHealth: !!wasAppleHealth
     });
   } catch (error) {
     console.error('❌ Error deleting file:', error);
@@ -11654,31 +11712,64 @@ app.post('/api/patient-summary/draft', async (req, res) => {
     if (!userDoc) {
       return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
     }
+
+    // Self-healing: provision missing agents instead of failing
     if (!userDoc.assignedAgentId || !userDoc.agentEndpoint) {
+      console.log(`[DRAFT SUMMARY] Primary agent missing for ${userId} — attempting to provision`);
+      const provStartedAt = Date.now();
+      try {
+        const { ensureUserAgent } = await import('./routes/auth.js');
+        userDoc = await ensureUserAgent(doClient, cloudant, userDoc);
+        const provElapsed = ((Date.now() - provStartedAt) / 1000).toFixed(1);
+        console.log(`[DRAFT SUMMARY] Primary agent provisioned for ${userId} in ${provElapsed}s`);
+        await appendUserProvisioningEvent(userId, { event: 'draft-summary-auto-provision-primary', elapsedSeconds: Number(provElapsed), agentId: userDoc.assignedAgentId || null });
+      } catch (provErr) {
+        const provElapsed = ((Date.now() - provStartedAt) / 1000).toFixed(1);
+        console.warn(`[DRAFT SUMMARY] Primary agent provisioning failed for ${userId} in ${provElapsed}s: ${provErr.message}`);
+        await appendUserProvisioningEvent(userId, { event: 'draft-summary-auto-provision-primary-failed', elapsedSeconds: Number(provElapsed), reason: provErr.message });
+      }
+    }
+    const hasPrimaryAgent = userDoc.assignedAgentId && userDoc.agentEndpoint;
+    if (!hasPrimaryAgent) {
       return res.status(400).json({ success: false, error: 'AGENT_NOT_CONFIGURED' });
     }
+
+    await appendUserProvisioningEvent(userId, { event: 'draft-summary-started', primaryModel: userDoc.agentModelName || null });
 
     if (userDoc.kbId && userDoc.assignedAgentId) {
       try {
         await doClient.agent.attachKB(userDoc.assignedAgentId, userDoc.kbId);
+        await appendUserProvisioningEvent(userId, { event: 'draft-summary-kb-attached', agentId: userDoc.assignedAgentId, kbId: userDoc.kbId });
       } catch (attachError) {
         if (!attachError.message?.includes('already')) {
           console.error(`[DRAFT SUMMARY] Failed to attach KB: ${attachError.message}`);
-          return res.status(503).json({ success: false, error: 'KB_NOT_ATTACHED' });
+          await appendUserProvisioningEvent(userId, { event: 'draft-summary-kb-attach-failed', reason: attachError.message });
         }
       }
-      // Ensure the agent actually retrieves from its KB (heal legacy NONE).
       await ensureAgentRetrieval(userDoc.assignedAgentId);
     } else if (!userDoc.kbId) {
       return res.status(400).json({ success: false, error: 'NO_KB' });
     }
 
-    if (!userDoc.agentApiKey) {
-      userDoc.agentApiKey = await getOrCreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
-    }
-
     const { DigitalOceanProvider } = await import('../lib/chat-client/providers/digitalocean.js');
-    const agentProvider = new DigitalOceanProvider(userDoc.agentApiKey, { baseURL: userDoc.agentEndpoint });
+    let agentProvider;
+    if (hasPrimaryAgent) {
+      if (!userDoc.agentApiKey) {
+        userDoc.agentApiKey = await getOrCreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
+      }
+      agentProvider = new DigitalOceanProvider(userDoc.agentApiKey, { baseURL: userDoc.agentEndpoint });
+    } else {
+      // No primary agent — go straight to secondary
+      console.log(`[DRAFT SUMMARY] No primary agent for ${userId} — using secondary agent`);
+      const gptProfile = userDoc.agentProfiles.gpt;
+      let gptApiKey = gptProfile.apiKey;
+      if (!gptApiKey) {
+        gptApiKey = await getOrCreateAgentApiKey(doClient, cloudant, userId, gptProfile.agentId, 'gpt');
+      }
+      agentProvider = new DigitalOceanProvider(gptApiKey, { baseURL: gptProfile.endpoint });
+      // Override the model so the chat call uses the secondary model
+      userDoc.agentModelName = gptProfile.modelName || 'openai-gpt-oss-120b';
+    }
 
     // Synchronously ensure Apple Health Lists/*.md sidecars exist before
     // building the prompt. Without this, Setup races the category-split
@@ -11710,45 +11801,58 @@ app.post('/api/patient-summary/draft', async (req, res) => {
           const refreshed = await cloudant.getDocument('maia_users', userId);
           if (refreshed) userDoc = refreshed;
         }
+        await appendUserProvisioningEvent(userId, { event: 'draft-summary-ah-lists', outcome: outcome || 'no-op' });
       }
     } catch (e) {
       console.warn(`[DRAFT SUMMARY] AH lists pre-build failed (non-fatal): ${e?.message || e}`);
+      await appendUserProvisioningEvent(userId, { event: 'draft-summary-ah-lists-failed', reason: e?.message || String(e) });
     }
 
     // Build the prompt via the shared helper (Layer-2 spec + currentMedications
     // + past-12mo encounters context). Used by every summary endpoint so they
     // can never drift.
     const draftPrompt = await buildPatientSummaryPromptForUser(userId, userDoc);
+    await appendUserProvisioningEvent(userId, { event: 'draft-summary-prompt-built', promptLength: draftPrompt.length });
     const chatMessages = [{ role: 'user', content: draftPrompt }];
-    const chatOptions = { model: userDoc.agentModelName || 'openai-gpt-oss-120b', stream: false };
+    const chatModel = userDoc.agentModelName || 'openai-gpt-oss-120b';
+    const chatOptions = { model: chatModel, stream: false };
+    console.log(`[DRAFT SUMMARY] Calling Private AI for ${userId} (model: ${chatModel})...`);
+    const aiStartedAt = Date.now();
 
     let chatResp;
-    try {
-      chatResp = await agentProvider.chat(chatMessages, chatOptions);
-    } catch (firstError) {
-      const sc = firstError.status || firstError.statusCode || 0;
-      // 401/403 from a DO agent usually means a stale key OR the agent isn't
-      // serving yet (still deploying). Recreate the key and retry once.
-      if ((sc === 401 || sc === 403) && userDoc.assignedAgentId) {
-        try {
-          const { recreateAgentApiKey } = await import('./utils/agent-helper.js');
-          const newApiKey = await recreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
-          const retry = new DigitalOceanProvider(newApiKey, { baseURL: userDoc.agentEndpoint });
-          chatResp = await retry.chat(chatMessages, chatOptions);
-        } catch (retryError) {
-          const rsc = retryError.status || retryError.statusCode || 0;
-          // Still not serving → agent not ready. Return a structured 202 (not
-          // a 500) so the client backs off and retries, and log it.
-          if (rsc === 401 || rsc === 403) {
-            await appendUserProvisioningEvent(userId, { event: 'draft-summary-failed', reason: 'AGENT_NOT_READY', status: rsc });
-            return res.status(202).json({ success: false, pending: true, reason: 'AGENT_NOT_READY', message: 'Private AI is still deploying — try again shortly.' });
+    let usedModel = chatModel;
+
+    // --- Primary agent attempt ---
+    if (hasPrimaryAgent) {
+      try {
+        chatResp = await agentProvider.chat(chatMessages, chatOptions);
+      } catch (primaryErr) {
+        const sc = primaryErr.status || primaryErr.statusCode || 0;
+        console.warn(`[DRAFT SUMMARY] Primary agent failed for ${userId} (status: ${sc}): ${primaryErr.message}`);
+        await appendUserProvisioningEvent(userId, { event: 'draft-summary-primary-failed', model: chatModel, status: sc || undefined, reason: primaryErr.message });
+
+        // 401/403 — try recreating the API key once before giving up on primary
+        if ((sc === 401 || sc === 403) && userDoc.assignedAgentId) {
+          try {
+            const { recreateAgentApiKey } = await import('./utils/agent-helper.js');
+            const newApiKey = await recreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
+            const retry = new DigitalOceanProvider(newApiKey, { baseURL: userDoc.agentEndpoint });
+            chatResp = await retry.chat(chatMessages, chatOptions);
+            console.log(`[DRAFT SUMMARY] Primary agent succeeded after key recreation for ${userId}`);
+            await appendUserProvisioningEvent(userId, { event: 'draft-summary-primary-key-recreated', model: chatModel });
+          } catch (retryErr) {
+            const rsc = retryErr.status || retryErr.statusCode || 0;
+            console.warn(`[DRAFT SUMMARY] Primary agent retry also failed for ${userId} (status: ${rsc}): ${retryErr.message}`);
+            await appendUserProvisioningEvent(userId, { event: 'draft-summary-primary-retry-failed', model: chatModel, status: rsc || undefined, reason: retryErr.message });
+            // Don't throw — fall through to secondary
           }
-          throw retryError;
         }
-      } else {
-        throw firstError;
+        // For non-401/403 errors, chatResp stays null — fall through to secondary
       }
     }
+
+    const aiElapsedMs = Date.now() - aiStartedAt;
+    console.log(`[DRAFT SUMMARY] Private AI responded for ${userId} in ${(aiElapsedMs / 1000).toFixed(1)}s (model: ${usedModel})`);
 
     let summary = (chatResp.content || chatResp.text || '').trim();
     if (!summary) throw new Error('Empty draft from agent');
@@ -11777,11 +11881,14 @@ app.post('/api/patient-summary/draft', async (req, res) => {
     }
 
     const lines = summary.split('\n').filter(l => l.trim()).length;
+    const totalElapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+    await appendUserProvisioningEvent(userId, { event: 'draft-summary-succeeded', model: usedModel, elapsedSeconds: Number(totalElapsed), lines, chars: summary.length });
     res.json({ success: true, summary, lines, chars: summary.length, generationSeconds });
   } catch (error) {
     console.error('Error generating draft patient summary:', error);
     const sc = error.status || error.statusCode || 0;
-    try { await appendUserProvisioningEvent(userId, { event: 'draft-summary-failed', reason: error.message || 'error', status: sc || undefined }); } catch { /* non-fatal */ }
+    const failElapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+    try { await appendUserProvisioningEvent(userId, { event: 'draft-summary-failed', reason: error.message || 'error', status: sc || undefined, totalElapsedSeconds: Number(failElapsed) }); } catch { /* non-fatal */ }
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -12700,10 +12807,10 @@ app.get('/api/encounters/worksheet', async (req, res) => {
 });
 
 // Deterministic Out-Of-Range labs worksheet from NON-Apple-Health PDFs
-// (Epic / MGB / etc). Apple Health PDFs already feed the OOR section
-// of the Patient Summary directly; this endpoint serves accounts that
-// have only Epic-style exports — same UX as the Encounters worksheet
-// (POST to (re)build, GET to read the cached doc).
+// Deterministic OOR labs scan — Apple Health Lab Results only.
+// Uses extractPdfWithPages (pdfjs) to get page-segmented markdown that
+// preserves the "OUT OF RANGE" annotations, then extractAppleHealthOorLabs
+// to parse them. POST to (re)build, GET to read the cached doc.
 app.post('/api/labs/oor-worksheet', async (req, res) => {
   try {
     const userId = resolveUserId(req, res);
@@ -12711,54 +12818,36 @@ app.post('/api/labs/oor-worksheet', async (req, res) => {
     const userDoc = await cloudant.getDocument('maia_users', userId);
     if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
 
-    const kbName = getKBNameFromUserDoc(userDoc, userId);
-    const kbPrefix = kbName ? `${userId}/${kbName}/` : null;
-    // Non-AH PDFs only — AH OOR labs are already extracted into the PS
-    // pipeline by extractAppleHealthOorLabs (which has the structured
-    // "[OUT OF RANGE]" markdown to work from). Here we cover the
-    // accounts where AH is absent.
-    const pdfFiles = (userDoc.files || []).filter(f =>
-      f?.fileName &&
-      !f.isAppleHealth &&
-      (!kbPrefix || (f.bucketKey || '').startsWith(kbPrefix)) &&
-      (/\.pdf$/i.test(f.fileName) || /pdf/i.test(f.fileType || ''))
-    );
-    if (pdfFiles.length === 0) {
+    const ahFile = (userDoc.files || []).find(f => f?.isAppleHealth && f?.bucketKey);
+    if (!ahFile) {
       return res.status(400).json({
         success: false,
-        error: 'NO_EPIC_PDFS',
-        message: 'No non-Apple-Health PDF files to scan for out-of-range labs.'
+        error: 'NO_APPLE_HEALTH',
+        message: 'No Apple Health file with Lab Results found. Upload an Apple Health export first.'
       });
     }
 
-    const legend = pdfFiles.map((f, i) => ({ tag: `File ${i + 1}`, fileName: f.fileName, bucketKey: f.bucketKey || null }));
-
-    const { extractEpicOorLabs } = await import('./utils/epic-oor-extractor.js');
-    const { buildLinePageMap } = await import('./utils/encounters-extractor.js');
-    const pdfParse = (await import('pdf-parse')).default;
-
-    const allRows = [];
-    const modes = {};
-    for (let i = 0; i < pdfFiles.length; i++) {
-      const f = pdfFiles[i];
-      const tag = `File ${i + 1}`;
-      if (!f.bucketKey) { modes[tag] = 'missing-key'; continue; }
-      const buf = await readSpacesObjectBuffer(f.bucketKey);
-      if (!buf) { modes[tag] = 'download-failed'; continue; }
-      try {
-        const data = await pdfParse(buf);
-        const lines = (data.text || '').split('\n');
-        const linePage = buildLinePageMap(lines, data.numpages);
-        const rows = extractEpicOorLabs(lines, linePage, tag);
-        modes[tag] = `ok (${rows.length})`;
-        allRows.push(...rows);
-      } catch (e) {
-        modes[tag] = 'parse-error';
-        console.warn(`[oor-worksheet] parse failed for ${f.fileName}: ${e?.message || e}`);
-      }
+    const buf = await readSpacesObjectBuffer(ahFile.bucketKey);
+    if (!buf) {
+      return res.status(500).json({ success: false, error: 'DOWNLOAD_FAILED', message: 'Could not download the Apple Health file.' });
     }
 
-    // Sort newest-first by isoDate (empty dates at the end).
+    const { extractPdfWithPages } = await import('./utils/pdf-parser.js');
+    const parsed = await extractPdfWithPages(buf);
+    const fullMarkdown = (parsed.pages || []).map(p => `## Page ${p.page}\n\n${p.markdown}`).join('\n\n---\n\n');
+
+    const oors = extractAppleHealthOorLabs(fullMarkdown);
+    const legend = [{ tag: 'AH', fileName: ahFile.fileName, bucketKey: ahFile.bucketKey }];
+
+    const allRows = oors.map(o => ({
+      analyte: o.line,
+      value: '',
+      flag: 'OUT OF RANGE',
+      isoDate: o.isoDate || '',
+      page: o.page,
+      fileTag: 'AH'
+    }));
+
     allRows.sort((a, b) => {
       if (!a.isoDate && !b.isoDate) return 0;
       if (!a.isoDate) return 1;
@@ -12771,9 +12860,8 @@ app.post('/api/labs/oor-worksheet', async (req, res) => {
       rows: allRows,
       legend,
       generatedAt,
-      fileCount: pdfFiles.length,
-      rowCount: allRows.length,
-      modes
+      fileCount: 1,
+      rowCount: allRows.length
     };
 
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -12793,7 +12881,7 @@ app.post('/api/labs/oor-worksheet', async (req, res) => {
 
     await appendUserProvisioningEvent(userId, {
       event: 'oor-labs-worksheet-generated',
-      fileCount: pdfFiles.length,
+      fileCount: 1,
       rowCount: allRows.length
     });
 
@@ -12949,67 +13037,74 @@ app.post('/api/agents/ensure-secondary', async (req, res) => {
     let userDoc = await cloudant.getDocument('maia_users', userId);
     if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
 
-    const hadAgentBefore = !!userDoc.agentProfiles?.gpt?.agentId;
+    const checkOnly = !!req.body?.checkOnly;
+    const existingAgentId = userDoc.agentProfiles?.gpt?.agentId;
 
+    // Check-only mode: return current status without creating the agent
+    if (checkOnly && !existingAgentId) {
+      return res.json({ success: true, ready: false, status: 'not_created' });
+    }
+
+    // Fast path: agent already created — just check if it's running.
+    // Avoids redundant DO API calls, KB attaches, and DB writes on every poll.
+    if (existingAgentId) {
+      let endpoint = null;
+      let isRunning = false;
+      let status = 'unknown';
+      try {
+        const live = await doClient.agent.get(existingAgentId);
+        status = live?.deployment?.status || live?.deployment_status || 'unknown';
+        isRunning = status === 'STATUS_RUNNING';
+        endpoint = live?.deployment?.url ? `${live.deployment.url}/api/v1` : null;
+      } catch { /* still deploying */ }
+      const ready = !!endpoint && isRunning;
+
+      if (ready) {
+        const alreadyLogged = !!userDoc.agentProfiles?.gpt?.deployedLoggedAt;
+        if (!alreadyLogged) {
+          for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+              const doc = await cloudant.getDocument('maia_users', userId);
+              if (!doc) break;
+              if (!doc.agentProfiles) doc.agentProfiles = {};
+              doc.agentProfiles.gpt = { ...(doc.agentProfiles.gpt || {}), endpoint, deployedLoggedAt: new Date().toISOString() };
+              doc.updatedAt = new Date().toISOString();
+              await cloudant.saveDocument('maia_users', doc);
+              break;
+            } catch (err) {
+              if (err?.statusCode === 409 && attempt < 2) continue;
+              break;
+            }
+          }
+          try {
+            await appendUserProvisioningEvent(userId, { event: 'gpt-agent-deployed', agentId: existingAgentId });
+          } catch { /* non-fatal */ }
+        }
+      }
+      console.log(`[ensure-secondary] Poll for ${userId}: status=${status}, ready=${ready}`);
+      return res.json({ success: true, ready, agentId: existingAgentId, endpoint, status });
+    }
+
+    // Slow path: agent doesn't exist yet — create it.
+    const ensureStartedAt = Date.now();
     const { ensureSecondaryAgent } = await import('./routes/auth.js');
     try {
       userDoc = await ensureSecondaryAgent(doClient, cloudant, userDoc);
     } catch (e) {
-      // Creation may still be in-flight under the mutex — report not-ready
-      // rather than 500 so the client keeps polling.
       return res.json({ success: true, ready: false, provisioning: true, reason: e?.message || 'provisioning' });
     }
 
-    let gpt = userDoc.agentProfiles?.gpt || {};
-
-    // Log GPT creation exactly once (when it first appears).
-    if (!hadAgentBefore && gpt.agentId) {
+    const ensureElapsed = ((Date.now() - ensureStartedAt) / 1000).toFixed(1);
+    const gpt = userDoc.agentProfiles?.gpt || {};
+    if (gpt.agentId) {
       try {
         await appendUserProvisioningEvent(userId, {
-          event: 'gpt-agent-created', agentId: gpt.agentId, agentName: gpt.agentName || null
+          event: 'gpt-agent-created', agentId: gpt.agentId, agentName: gpt.agentName || null, elapsedSeconds: Number(ensureElapsed)
         });
       } catch { /* non-fatal */ }
     }
-
-    // Readiness mirrors the primary agent: require BOTH a deployment URL and
-    // STATUS_RUNNING (a URL alone 403s while still deploying).
-    let endpoint = null;
-    let isRunning = false;
-    if (gpt.agentId) {
-      try {
-        const live = await doClient.agent.get(gpt.agentId);
-        const status = live?.deployment?.status || live?.deployment_status || 'unknown';
-        isRunning = status === 'STATUS_RUNNING';
-        endpoint = live?.deployment?.url ? `${live.deployment.url}/api/v1` : null;
-      } catch { /* still deploying */ }
-    }
-    const ready = !!endpoint && isRunning;
-
-    if (ready) {
-      // Persist endpoint + log "deployed" exactly once (deployedLoggedAt guard).
-      const alreadyLogged = !!userDoc.agentProfiles?.gpt?.deployedLoggedAt;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          const doc = await cloudant.getDocument('maia_users', userId);
-          if (!doc) break;
-          if (!doc.agentProfiles) doc.agentProfiles = {};
-          doc.agentProfiles.gpt = { ...(doc.agentProfiles.gpt || {}), endpoint, deployedLoggedAt: doc.agentProfiles.gpt?.deployedLoggedAt || new Date().toISOString() };
-          doc.updatedAt = new Date().toISOString();
-          await cloudant.saveDocument('maia_users', doc);
-          break;
-        } catch (err) {
-          if (err?.statusCode === 409 && attempt < 2) continue;
-          break;
-        }
-      }
-      if (!alreadyLogged) {
-        try {
-          await appendUserProvisioningEvent(userId, { event: 'gpt-agent-deployed', agentId: gpt.agentId || null });
-        } catch { /* non-fatal */ }
-      }
-    }
-
-    res.json({ success: true, ready, agentId: gpt.agentId || null, endpoint });
+    console.log(`[ensure-secondary] Created for ${userId} in ${ensureElapsed}s, agentId=${gpt.agentId}`);
+    res.json({ success: true, ready: false, agentId: gpt.agentId || null, endpoint: null, status: 'created' });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -13847,11 +13942,44 @@ if (isProduction) {
 
 }
 
-// Resolve DO Inference Model Access Key (upgrades providers that lack direct API keys)
-if (process.env.DIGITALOCEAN_TOKEN) {
-  const inferenceKey = await getOrCreateModelAccessKey(cloudant);
+// Resolve DO Inference key: prefer explicit DO_INFERENCE_KEY, then auto-create via DO API
+{
+  const inferenceKey = process.env.DO_INFERENCE_KEY || (process.env.DIGITALOCEAN_TOKEN ? await getOrCreateModelAccessKey(cloudant) : null);
   if (inferenceKey) {
-    chatClient.enableDOInference(inferenceKey);
+    const source = process.env.DO_INFERENCE_KEY ? 'DO_INFERENCE_KEY env var' : 'auto-created via DO API';
+    console.log(`[DO Inference] Using key from ${source}`);
+    const modelsToCheck = [
+      'anthropic-claude-4.6-sonnet', 'nvidia-nemotron-3-super-120b',
+      'openai-gpt-5.5', 'openai-gpt-oss-120b',
+      'deepseek-v4-pro', 'deepseek-r1-distill-llama-70b',
+      'kimi-k2.5'
+    ];
+    const availableModels = new Set();
+    await Promise.allSettled(modelsToCheck.map(async (model) => {
+      try {
+        const resp = await fetch('https://inference.do-ai.run/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${inferenceKey}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model, messages: [{ role: 'user', content: 'Hi' }], max_tokens: 1 }),
+          signal: AbortSignal.timeout(8000)
+        });
+        if (resp.ok) {
+          availableModels.add(model);
+        } else {
+          const body = await resp.json().catch(() => ({}));
+          console.log(`[DO Inference] Model ${model}: ${resp.status} — ${body.message || 'unavailable'}`);
+        }
+      } catch (e) {
+        if (e.name === 'TimeoutError' || e.name === 'AbortError') {
+          availableModels.add(model);
+          console.log(`[DO Inference] Model ${model}: OK (accepted, response timed out)`);
+        } else {
+          console.log(`[DO Inference] Model ${model}: ${e.message}`);
+        }
+      }
+    }));
+    console.log(`[DO Inference] Accessible models: ${[...availableModels].join(', ') || 'none'}`);
+    chatClient.enableDOInference(inferenceKey, availableModels);
   }
 }
 
@@ -13859,6 +13987,11 @@ if (process.env.DIGITALOCEAN_TOKEN) {
 console.log(`User app server ready on port ${PORT}`);
 console.log(`Passkey (from PUBLIC_APP_URL): origin=${passkeyService.origin} rpID=${passkeyService.rpID}`);
 const providers = chatClient.getAvailableProviders();
-console.log(`📊 Available Chat Providers: ${providers.join(', ')}`);
+const providerModels = chatClient.getProviderModels();
+const providerSummary = providers.map(p => {
+  const m = providerModels[p];
+  return m ? `${p} (${m})` : p;
+}).join(', ');
+console.log(`📊 Available Chat Providers: ${providerSummary}`);
 
 export default app;

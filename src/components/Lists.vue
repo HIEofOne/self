@@ -293,25 +293,39 @@
       <q-card-section>
         <div class="row items-center justify-between q-mb-sm">
           <div class="text-h6">{{ worksheetCardTitle(ws.profileKey) }}</div>
-          <q-btn
-            :label="worksheets[ws.profileKey] ? 'Refresh' : 'Generate'"
-            color="primary"
-            dense
-            :loading="worksheetBusy === ws.profileKey"
-            :disable="!!worksheetBusy"
-            @click="generateWorksheet(ws.profileKey)"
-          />
+          <div class="row items-center q-gutter-xs">
+            <q-btn
+              v-if="worksheetBusy === ws.profileKey"
+              label="Cancel"
+              color="negative"
+              flat
+              dense
+              @click="cancelWorksheet"
+            />
+            <q-btn
+              :label="worksheets[ws.profileKey] ? 'Refresh' : 'Generate'"
+              color="primary"
+              dense
+              :loading="worksheetBusy === ws.profileKey"
+              :disable="!!worksheetBusy"
+              @click="generateWorksheet(ws.profileKey)"
+            />
+          </div>
+        </div>
+        <div v-if="worksheetBusy === ws.profileKey" class="text-caption text-grey-7 q-mb-sm">
+          <q-spinner-dots size="14px" class="q-mr-xs" />
+          Querying agent knowledge base... {{ worksheetElapsed }}s
         </div>
         <div v-if="worksheets[ws.profileKey]" class="text-caption text-grey-7 q-mb-sm">
           {{ worksheets[ws.profileKey].model }} ·
           generated {{ formatWorksheetTime(worksheets[ws.profileKey].generatedAt) }}
         </div>
 
-        <div v-if="!worksheets[ws.profileKey]" class="text-body2 text-grey-7">
+        <div v-if="!worksheets[ws.profileKey] && worksheetBusy !== ws.profileKey" class="text-body2 text-grey-7">
           No worksheet yet. Press <strong>Generate</strong> to build it from this agent's knowledge base.
         </div>
 
-        <template v-else>
+        <template v-else-if="worksheets[ws.profileKey]">
           <q-markup-table v-if="worksheetView(ws.profileKey).rows.length" flat bordered dense wrap-cells>
             <thead>
               <tr>
@@ -324,7 +338,7 @@
                   <template v-if="ci === worksheetView(ws.profileKey).sourceIdx && parseSourceTokens(cell).length">
                     <template v-for="(tok, ti) in parseSourceTokens(cell)" :key="ti">
                       <span v-if="ti > 0">, </span>
-                      <a href="#" class="text-primary" @click.prevent="openWorksheetSource(tok.raw, worksheets[ws.profileKey].legend)">{{ tok.raw }}</a>
+                      <a href="#" class="text-primary" @click.prevent="openWorksheetSource(tok.raw, worksheets[ws.profileKey]?.legend)">{{ tok.raw }}</a>
                     </template>
                   </template>
                   <span v-else>{{ cell }}</span>
@@ -333,11 +347,11 @@
             </tbody>
           </q-markup-table>
           <!-- Fallback if the model didn't return a parseable table -->
-          <pre v-else style="white-space: pre-wrap; font-family: monospace; font-size: 12px;">{{ worksheets[ws.profileKey].table }}</pre>
+          <pre v-else style="white-space: pre-wrap; font-family: monospace; font-size: 12px;">{{ worksheets[ws.profileKey]?.table }}</pre>
 
           <!-- File legend footnote -->
-          <div v-if="worksheets[ws.profileKey].legend?.length" class="q-mt-sm text-caption text-grey-7">
-            <div v-for="(l, li) in worksheets[ws.profileKey].legend" :key="li">
+          <div v-if="worksheets[ws.profileKey]?.legend?.length" class="q-mt-sm text-caption text-grey-7">
+            <div v-for="(l, li) in worksheets[ws.profileKey]?.legend" :key="li">
               {{ l.tag }} = {{ l.fileName }}
             </div>
           </div>
@@ -404,11 +418,7 @@
       </q-card-section>
     </q-card>
 
-    <!-- Out of Range Labs worksheet (Epic / non-Apple-Health PDFs only).
-         AH PDFs feed the Patient Summary's OOR section directly via the
-         server-side extractAppleHealthOorLabs path; this card exists for
-         accounts that have ONLY Epic-style exports — same UX as the
-         Encounters card above. -->
+    <!-- Out of Range Labs worksheet — Apple Health Lab Results only. -->
     <q-card class="q-mb-md">
       <q-card-section>
         <div class="row items-center justify-between q-mb-sm">
@@ -422,7 +432,7 @@
           />
         </div>
         <div class="text-caption text-grey-7 q-mb-sm">
-          Deterministic scan of non-Apple-Health PDFs for labs flagged H / L / HIGH / LOW / * or whose value falls outside an inline reference range. Apple Health files feed the Patient Summary's OOR section directly — this card covers the remaining files.
+          Deterministic scan of Apple Health Lab Results for labs flagged OUT OF RANGE. Requires an Apple Health export file.
         </div>
         <div v-if="oorLabsWorksheet" class="text-caption text-grey-7 q-mb-sm">
           {{ oorLabsWorksheet.rowCount || 0 }} out-of-range labs from
@@ -431,7 +441,7 @@
         </div>
 
         <div v-if="!oorLabsWorksheet" class="text-body2 text-grey-7">
-          No out-of-range labs scan yet. Press <strong>Generate</strong> to scan your non-Apple-Health PDF files.
+          No out-of-range labs scan yet. Press <strong>Generate</strong> to scan your Apple Health Lab Results.
         </div>
 
         <template v-else>
@@ -677,6 +687,7 @@ const $q = useQuasar();
 
 interface Props {
   userId: string;
+  profileLabels?: Record<string, string>;
 }
 
 const props = defineProps<Props>();
@@ -785,31 +796,33 @@ const worksheetSpecs = [
 ];
 const worksheets = ref<Record<string, WorksheetEntry>>({});
 const worksheetBusy = ref<string | null>(null);
+const worksheetElapsed = ref(0);
+let worksheetTimer: ReturnType<typeof setInterval> | null = null;
+let worksheetAbort: AbortController | null = null;
 
-/** Derive the card title from the actual model name stored on the
- *  worksheet (e.g. "openai-gpt-oss-120b" → "Current Medications
- *  Worksheet (GPT)"). When no worksheet exists yet for this slot —
- *  the user has not pressed Generate — fall back to the slot-key
- *  convention used for NEW accounts ('default' = GPT, 'gpt' =
- *  Deepseek). */
-const worksheetCardTitle = (profileKey: string): string => {
-  const model = String(worksheets.value[profileKey]?.model || '').toLowerCase();
-  let label = '';
-  if (model.includes('gpt')) label = 'GPT';
-  else if (model.includes('deepseek')) label = 'Deepseek';
-  else label = profileKey === 'gpt' ? 'Deepseek' : 'GPT';
-  return `Current Medications Worksheet (${label})`;
+const modelShortNames: Record<string, string> = {
+  'openai-gpt-oss-120b': 'GPT 120B',
+  'kimi-k2.5': 'Kimi K2.5',
+  'deepseek-v4-pro': 'DeepSeek V4 Pro',
+  'deepseek-r1-distill-llama-70b': 'DeepSeek R1 70B',
+  'nvidia-nemotron-3-super-120b': 'Nemotron 120B',
 };
 
-/** Sort the worksheet cards so the GPT-backed slot renders first
- *  regardless of which slot key it lives in for this account. */
+const worksheetCardTitle = (profileKey: string): string => {
+  const model = String(worksheets.value[profileKey]?.model || '').toLowerCase();
+  if (model && modelShortNames[model]) return `Current Medications Worksheet (${modelShortNames[model]})`;
+  if (model.includes('gpt')) return 'Current Medications Worksheet (GPT)';
+  if (model.includes('kimi')) return 'Current Medications Worksheet (Kimi)';
+  const profileStr = props.profileLabels?.[profileKey];
+  if (profileStr) {
+    const short = profileStr.replace(/^Private AI\s*/, '').replace(/^\(/, '').replace(/\)$/, '');
+    return `Current Medications Worksheet (${short})`;
+  }
+  return `Current Medications Worksheet (${profileKey === 'default' ? 'GPT' : 'Kimi'})`;
+};
+
 const worksheetSpecsOrdered = computed(() => {
-  const rank = (profileKey: string) => {
-    const t = worksheetCardTitle(profileKey);
-    if (/\(GPT\)$/.test(t)) return 0;
-    if (/\(Deepseek\)$/.test(t)) return 1;
-    return 2;
-  };
+  const rank = (profileKey: string) => profileKey === 'default' ? 0 : 1;
   return [...worksheetSpecs].sort((a, b) => rank(a.profileKey) - rank(b.profileKey));
 });
 
@@ -824,15 +837,26 @@ const loadWorksheets = async () => {
   } catch { /* non-fatal */ }
 };
 
+const cancelWorksheet = () => {
+  if (worksheetAbort) { worksheetAbort.abort(); worksheetAbort = null; }
+  if (worksheetTimer) { clearInterval(worksheetTimer); worksheetTimer = null; }
+  worksheetBusy.value = null;
+  worksheetElapsed.value = 0;
+};
+
 const generateWorksheet = async (profileKey: string) => {
   if (worksheetBusy.value) return;
   worksheetBusy.value = profileKey;
+  worksheetElapsed.value = 0;
+  worksheetAbort = new AbortController();
+  worksheetTimer = setInterval(() => { worksheetElapsed.value++; }, 1000);
   try {
     const r = await fetch('/api/medications/worksheet', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify({ userId: props.userId, agentProfileKey: profileKey })
+      body: JSON.stringify({ userId: props.userId, agentProfileKey: profileKey }),
+      signal: worksheetAbort.signal,
     });
     const d = await r.json().catch(() => ({}));
     if (r.status === 202 && d.pending) {
@@ -846,12 +870,19 @@ const generateWorksheet = async (profileKey: string) => {
       ...worksheets.value,
       [profileKey]: { table: d.table, legend: d.legend || [], model: d.model, generatedAt: d.generatedAt }
     };
-    if ($q?.notify) $q.notify({ type: 'positive', message: 'Worksheet generated', timeout: 2500 });
+    if ($q?.notify) $q.notify({ type: 'positive', message: `Worksheet generated (${worksheetElapsed.value}s)`, timeout: 2500 });
   } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      if ($q?.notify) $q.notify({ type: 'warning', message: 'Worksheet generation cancelled', timeout: 3000 });
+      return;
+    }
     const msg = err instanceof Error ? err.message : 'Failed to generate worksheet';
     if ($q?.notify) $q.notify({ type: 'negative', message: msg, timeout: 5000 });
   } finally {
+    if (worksheetTimer) { clearInterval(worksheetTimer); worksheetTimer = null; }
+    worksheetAbort = null;
     worksheetBusy.value = null;
+    worksheetElapsed.value = 0;
   }
 };
 
@@ -904,7 +935,7 @@ const generateEncounters = async () => {
   }
 };
 
-// ── Out-of-Range Labs worksheet (Epic / non-AH PDFs only) ──────────
+// ── Out-of-Range Labs worksheet (Apple Health Lab Results) ──────────
 interface OorLabsRow {
   analyte: string;
   value: string;
@@ -3203,8 +3234,20 @@ watch(markdownContent, (newMarkdown) => {
 
 // Expose method to reload categories (can be called from parent)
 // Must be after reloadCategories is defined
+const reloadAll = async () => {
+  await checkInitialFile();
+  await loadAppleHealthStatus();
+  await loadCurrentMedications();
+  isInitialMedsLoading.value = false;
+  await loadSavedResults();
+  void loadWorksheets();
+  void loadEncounters();
+  void loadOorLabs();
+};
+
 defineExpose({
   reloadCategories,
+  reloadAll,
   loadWizardAutoFlow,
   attemptAutoProcessInitialFile,
   checkInitialFile

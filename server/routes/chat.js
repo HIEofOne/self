@@ -70,7 +70,7 @@ export async function getOwnerIdForDeepLinkSession(req, cloudant) {
   return chat ? resolveAgentOwnerId(chat) : null;
 }
 
-export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
+export default function setupChatRoutes(app, chatClient, cloudant, doClient, appendUserProvisioningEvent) {
   /**
    * Main chat endpoint - routes to appropriate provider
    * POST /api/chat/:provider
@@ -288,6 +288,31 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
             await userAgentProvider.chat(messages, { ...options, stream: true }, writeUpdate);
           } else {
             await chatClient.chat(provider, messages, { ...options, stream: true }, writeUpdate);
+          }
+        } catch (streamErr) {
+          // Send the error to the client as a visible SSE event so the
+          // chat bubble shows the message instead of staying blank.
+          const errMsg = streamErr?.message || streamErr?.error?.message || 'Chat request failed';
+          console.error(`[chat/${provider}] streaming error:`, errMsg);
+          if (!completedFromProvider && !res.writableEnded) {
+            try {
+              res.write(`data: ${JSON.stringify({
+                delta: `Error: ${errMsg}`,
+                isComplete: true,
+                error: true
+              })}\n\n`);
+            } catch { /* connection closed */ }
+            completedFromProvider = true;
+            try { res.end(); } catch { /* already ended */ }
+          }
+          // Log to maia-log so the error appears in the setup log PDF
+          const chatUserId = agentOwnerId || userId || req.body?.userId || req.session?.userId;
+          if (chatUserId && appendUserProvisioningEvent) {
+            appendUserProvisioningEvent(chatUserId, {
+              event: 'chat-error',
+              provider,
+              error: errMsg
+            }).catch(() => {});
           }
         } finally {
           // Fallback: provider returned but never reported isComplete.
@@ -569,23 +594,21 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
   // The frontend renders one dropdown entry per ready profile and sends
   // `agentProfileKey` alongside provider 'digitalocean'.
   // Label is derived from the ACTUAL model behind each profile, not from
-  // the profile key. Profile keys 'default' / 'gpt' are historical slots
-  // — for accounts created before the GPT/Deepseek swap, profile key
-  // 'default' still points at a Deepseek agent and 'gpt' at GPT. We must
-  // not mis-label them. The dropdown is then sorted so GPT comes first
-  // (primary), Deepseek second, regardless of which slot each happens to
-  // live in for this user.
+  // the profile key. Profile keys 'default' / 'gpt' are historical slots.
+  // The dropdown is sorted so Kimi comes first (primary), GPT second.
   const labelForModel = (modelName) => {
     const m = String(modelName || '').toLowerCase();
+    if (m.includes('kimi')) return 'Private AI (Kimi)';
     if (m.includes('gpt')) return 'Private AI (GPT)';
     if (m.includes('deepseek')) return 'Private AI (Deepseek)';
     return 'Private AI';
   };
   const sortKeyForModel = (modelName) => {
     const m = String(modelName || '').toLowerCase();
-    if (m.includes('gpt')) return 0; // GPT first (primary)
-    if (m.includes('deepseek')) return 1;
-    return 2;
+    if (m.includes('kimi')) return 0; // Kimi first (primary)
+    if (m.includes('gpt')) return 1;
+    if (m.includes('deepseek')) return 2;
+    return 3;
   };
 
   const buildPrivateAiProfiles = async (doc) => {
@@ -605,14 +628,14 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
       out.push({ key: 'default', label: labelForModel(model), model });
     }
 
-    // 'gpt' slot (historical name — may now be a Deepseek agent).
+    // 'gpt' slot (historical name — may hold GPT, Deepseek, or other model).
     const gpt = profiles.gpt || {};
     if (gpt.agentId && gpt.endpoint && await verifyAgentLive(gpt.agentId)) {
       const model = gpt.modelName || 'deepseek-v4-pro';
       out.push({ key: 'gpt', label: labelForModel(model), model });
     }
 
-    // Sort so the user always sees GPT (primary) first.
+    // Sort so the user always sees Kimi (primary) first.
     out.sort((a, b) => sortKeyForModel(a.model) - sortKeyForModel(b.model));
     return out;
   };
@@ -675,24 +698,23 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
           }
           providers = providers.filter((p) => p !== 'digitalocean');
         } else {
-          // Lazily provision (or REPAIR) the secondary "Private AI
-          // (GPT)" agent once the primary is up and a KB exists. This
-          // also backfills existing single-agent accounts and self-
-          // heals a stale gpt profile after a Restore: re-ensure when
-          // there is no gpt endpoint yet OR the recorded gpt agent is
-          // not actually live in DO (destroyed agent → stale profile).
-          // The dropdown only lists GPT once verifyAgentLive passes, so
-          // the user never selects a dead agent (no more 403s).
+          // REPAIR (not create) the secondary agent if it was previously
+          // deployed but is now stale (destroyed agent, missing endpoint
+          // after Restore). Only repair when agentProfiles.gpt.agentId
+          // already exists — first creation is the user's action via the
+          // Deploy button in My AI Agent.
           if (userDoc?.kbId) {
             const gptProf = userDoc?.agentProfiles?.gpt;
-            const gptLive = gptProf?.agentId ? await verifyAgentLive(gptProf.agentId) : false;
-            if (!gptProf?.endpoint || !gptLive) {
-              try {
-                userDoc = await ensureSecondaryAgent(doClient, cloudant, userDoc);
-                const newId = userDoc?.agentProfiles?.gpt?.agentId;
-                if (newId) agentLiveCache.delete(newId); // re-check fresh
-              } catch (gptErr) {
-                console.warn('[chat/providers] ensureSecondaryAgent failed:', gptErr?.message);
+            if (gptProf?.agentId) {
+              const gptLive = await verifyAgentLive(gptProf.agentId);
+              if (!gptProf?.endpoint || !gptLive) {
+                try {
+                  userDoc = await ensureSecondaryAgent(doClient, cloudant, userDoc);
+                  const newId = userDoc?.agentProfiles?.gpt?.agentId;
+                  if (newId) agentLiveCache.delete(newId);
+                } catch (gptErr) {
+                  console.warn('[chat/providers] ensureSecondaryAgent repair failed:', gptErr?.message);
+                }
               }
             }
           }
@@ -705,6 +727,6 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
     } else {
       providers = providers.filter((p) => p !== 'digitalocean');
     }
-    res.json({ providers, privateAiProfiles });
+    res.json({ providers, privateAiProfiles, providerModels: chatClient.getProviderModels() });
   });
 }
