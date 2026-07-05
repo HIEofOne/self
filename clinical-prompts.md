@@ -149,7 +149,7 @@ Output ONLY the list of current medications — one medication per line (name an
 ---
 
 ### prompt: patient-summary.draft
-<!-- placeholders: {patientIdentity} {currentMedications} {stoppedMedications} {encounters} {allergies} {outOfRangeLabs} {medicalHistory} {socialHistory} {radiology} -->
+<!-- placeholders: {patientIdentity} {currentMedications} {stoppedMedications} {encounters} {allergies} {outOfRangeLabs} {medicalHistory} {socialHistory} {radiology} {fileTags} -->
 ```text
 You are creating a Patient Summary for an on-call physician who has never seen this patient. Use ONLY information found in this patient's knowledge base; never fabricate. Apply your system instructions for any items that must be omitted or redacted.
 
@@ -166,7 +166,10 @@ For each section, in order of preference:
 2. Otherwise, **search the knowledge base** for that topic and summarize what you find. Do this BEFORE giving up — the absence of an authoritative block does NOT mean the data is missing; it just means it wasn't extracted deterministically.
 3. ONLY if BOTH an authoritative block is absent AND the knowledge base has nothing on the topic, write the heading followed by exactly: "Not documented in the available records."
 
-**Citations.** Whenever you state a fact drawn from the knowledge base, cite its source immediately after the fact in square brackets, formatted EXACTLY as `[<source PDF filename> p.<page number>]` — for example `[Health Records.pdf p.12]`. Use the source filename exactly as it appears in the knowledge base and include the page number when available. Do NOT add a "Source:" label, quotation marks, or any other text inside the brackets — just the filename and page.
+**Citations.** Whenever you state a fact drawn from the knowledge base, cite its source immediately after the fact in square brackets, formatted EXACTLY as `[File N p.<page number>]` — for example `[File 1 p.12]`. Use ONLY the File-number tags listed below; NEVER spell out a raw filename (many are long Epic export strings that render unreadably and cannot be linked). Include the page number when available. Do NOT add a "Source:" label, quotation marks, or any other text inside the brackets — just the File tag and the page.
+
+**File tags — use these exact tags in every citation:**
+{fileTags}
 
 - Medical History — a concise narrative including surgical history.
 - Recent Visits (past 12 months) — providers seen and the diagnoses from those visits.

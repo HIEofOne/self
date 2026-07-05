@@ -5362,7 +5362,25 @@ const processPageReferences = (content: string): string => {
     if (beforeMatch.includes('<a ') && !beforeMatch.includes('</a>')) {
       continue;
     }
-    
+
+    // Renderer unification: leave filename-citation page refs to
+    // processFileNCitations (the single authority, shared with the Patient
+    // Summary tab). If this `p.<N>` sits inside an unclosed `[ … .pdf … `
+    // citation that processFileNCitations did NOT rewrite to `File N`
+    // (because the spelled-out filename didn't match a known file), do NOT
+    // fabricate a raw-filename page link here — that produced a second link
+    // style that disagreed with the workbook. Leaving it as plain text
+    // matches the Patient Summary tab exactly, and avoids confidently
+    // linking a citation whose filename we couldn't resolve. Bare page
+    // references (not inside a `.pdf` citation) are unaffected.
+    const citeStart = processedContent.lastIndexOf('[', index);
+    if (citeStart !== -1) {
+      const citeSlice = processedContent.substring(citeStart, index);
+      if (!citeSlice.includes(']') && /\.pdf/i.test(citeSlice)) {
+        continue;
+      }
+    }
+
     // Find the closest PDF filename before or after this page reference
     // If there's only one filename in the context (within 200 chars before/after), use it regardless of label
     let matchedFilename: string | null = null;

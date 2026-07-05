@@ -11445,6 +11445,18 @@ async function buildPatientSummaryPromptForUser(userId, userDoc, profileKey = 'd
     }
   }
 
+  // GLOBAL File N tag list for the whole-summary citation rule (not just
+  // Radiology). Same PDF-only, References-excluded ordering the client
+  // renderer uses to resolve File N back to a real file, so `[File N p.X]`
+  // citations link everywhere. Injected via the {fileTags} placeholder.
+  // Having the AI cite File N directly (instead of spelling filenames)
+  // avoids the failure where it invents a filename that no exact-match
+  // rewrite can map — the root of the "same summary, different links in
+  // chat vs workbook" bug.
+  const fileTags = pdfFilesForLegend.length > 0
+    ? pdfFilesForLegend.map((f, i) => `File ${i + 1} = ${f.fileName}`).join('\n')
+    : '(no source files available — cite page numbers only)';
+
   // Stopped or Inactive Medications block: same deterministic source as
   // Current Medications (`resolvePatientMedicationSource` — Apple Health
   // medication_records.md or Epic Medication List). Splits on the 18-
@@ -11489,7 +11501,8 @@ async function buildPatientSummaryPromptForUser(userId, userDoc, profileKey = 'd
     outOfRangeLabs,
     medicalHistory,
     socialHistory,
-    radiology
+    radiology,
+    fileTags
   };
   // Per-agent override (My Stuff → Patient Summary → "Instructions for
   // <Agent>"). When set, takes precedence over the Layer-2 default; the
