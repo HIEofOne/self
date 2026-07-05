@@ -2429,6 +2429,15 @@ const sendMessage = async () => {
               authorLabel: existingProviderLabel,
               name: existingProviderLabel
             };
+            // Ensure the file list is loaded so File N citations in the stored
+            // summary render as links (with the file legend) on the FIRST paint.
+            // availableUserFiles can be stale-empty from mount (it loads before
+            // files are uploaded during setup); without this, links and the
+            // footer only appear ~3s later when messageDisplayHtml's lazy-loader
+            // re-fetches.
+            if (availableUserFiles.value.length === 0) {
+              await loadUserFilesForChooser(false);
+            }
             messages.value.push(summaryMessage);
             // Update originalMessages and trulyOriginalMessages when loading summary from storage
             originalMessages.value = JSON.parse(JSON.stringify(messages.value));
@@ -7669,6 +7678,11 @@ const handleIndexingFinished = (_data: { jobId: string; phase: string; error?: s
   // Update status tip to show normal status
   updateContextualTip();
   refreshWizardState();
+  // Files now exist in the KB — refresh the chat's file list so File N
+  // citations (in AI responses and the stored Patient Summary shown via SEND)
+  // resolve to links immediately instead of after a lazy re-fetch. The list
+  // was likely loaded empty at mount, before any file was uploaded.
+  void loadUserFilesForChooser(false);
   // DO API continues tokenizing after the indexing job reports complete.
   // Refresh again after delays to pick up the final token count.
   setTimeout(() => refreshWizardState(), 30_000);
