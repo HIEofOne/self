@@ -1,8 +1,15 @@
 # Wizard Issues: Current State and Restructuring Plan
 
-**Date:** 2026-07-03
-**Version at time of writing:** 1.4.65
+**Date:** 2026-07-05
+**Version at time of writing:** 1.4.98
 **Related docs:** `Wizards.md` (lifecycle flows), `Wizards2.md` (API inventory)
+
+> **Status note (v1.4.98):** The single-source-of-truth restructuring in
+> sections 3.1–3.7 is still the correct long-term plan and remains **unstarted**.
+> The reload-resume fix in v1.4.96 (section 5) is a targeted mitigation of the
+> most visible symptom, not the structural cure. See section 6 for how File N
+> citation links are handled across the app — a related area that had its own
+> "renders as plain text, then links appear seconds later" class of bugs.
 
 ---
 
@@ -525,9 +532,154 @@ All data functions (`loadAgent`, `saveInstructions`, `applyKbChanges`) already
 used `activeAgentProfile.value` for per-agent scoping, so only the template
 needed to change.
 
+### v1.4.86–v1.4.98 — Medication data flow, citations, verify, reload-resume
+
+This range reworked the medication half of the guided flow and fixed several
+File N citation bugs (the latter documented in section 6).
+
+**Medication data flow (v1.4.90–v1.4.96).** After KB indexing the wizard now
+merges two medication sources for verification:
+
+- the deterministic Apple Health list (`/api/medications/current`, with the
+  18-month "Current" cutoff), and
+- medications extracted from the draft Patient Summary. `ChatInterface`
+  extracts them (`extractMedsFromDraftPS`) and passes them through
+  `MyStuffDialog` to `Lists` as the `draftPsMeds` prop.
+
+The merge dedups by **generic drug name** (first alphabetic token, after
+stripping dose/date/citation) so the same drug extracted two ways — e.g.
+`levothyroxine 137 MCG tablet` (Apple Health) vs `Levothyroxine 137 µg tablet
+(most recent 15 Jun 2026) [File 1 p.127]` (draft PS) — no longer appears twice.
+The clean Apple Health entry is kept; draft-PS-only drugs are appended. When
+Apple Health returns nothing, the draft-PS meds are the fallback. Zero-med
+patients verify "None" (`handleVerifyCurrentMedications` saves `'None'`).
+
+The redundant "Update Patient Summary?" modal is suppressed during the wizard —
+`ChatInterface` patches the draft PS directly via the `update-summary-meds`
+action, so there is no second AI regeneration.
+
+**Verify Patient Summary (v1.4.95).** `handleVerifySummaryTab` now compares the
+PS's Current Medications against the **server's** verified list
+(`/api/user-status`), not the `Lists` component ref. Because `q-tab-panels` has
+no `keep-alive`, the Lists panel is unmounted while the Summary tab is active, so
+that ref was `null` and produced a phantom "Custom Medications" mismatch modal on
+every verify. The warning now fires only on a genuine manual PS edit.
+
+**Draft PS prompt (v1.4.92, v1.4.95).** `clinical-prompts.md`
+`patient-summary.draft` now tells the AI a medication is "Current" only if
+prescribed/refilled within 18 months (matching `/api/medications/current`), and
+to cite sources as `[<filename> p.<page>]` with no `Source:` label.
+
+**Wizard reload-resume (v1.4.96).** If the user reloaded after verifying meds but
+before verifying the summary, the wizard reopened into a dead state: "Draft
+Patient Summary" shown incomplete (though it was generated) plus a perpetual
+"Verify your Patient Summary to continue." spinner going nowhere. Cause: on
+reload `refreshWizardState` restored `wizardCurrentMedications` and the committed
+summary but never rehydrated the draft PS (`preGeneratedSummary` /
+`wizardDraftPsStatus`), and `wizardFlowPhase` stayed its default `'done'`, so no
+phase watcher resumed — a direct instance of the section 2 root cause (state
+assembled from many refs, only a subset restored on reload).
+
+Fix (client-only — `GET /api/patient-summary` already returns the hidden `draft`,
+and `loadPatientSummary` already displays it): rehydrate the draft in
+`refreshWizardState`, and `maybeResumeInterruptedWizard` re-enters the correct
+phase and opens the workbook at the finishing step (Patient Summary if meds are
+verified, else Current Medications). It fires at most once per session
+(`wizardResumeAttempted`) and never mid-live-flow (only when
+`wizardFlowPhase === 'done'`). This is a targeted mitigation, **not** the
+sections 3.1–3.7 cure.
+
+**Chat citation timing (v1.4.98).** Covered in section 6.4.
+
 ---
 
-## 6. General Observations
+## 6. File Links (File N Citations): How They Work
+
+File N citation links have their own recurring bug class — "renders as plain
+text, then links appear a few seconds later" — with the same shape as the wizard
+state bugs (a render that depends on async state that hasn't loaded yet). This
+section documents the pipeline so those bugs stop recurring.
+
+### 6.1 What a File N citation is
+
+The AI cites sources it found in the knowledge base. It does **not** know the
+app's "File N" numbering — it only sees filenames in the KB chunk metadata — so
+it emits citations by filename, in inconsistent shapes:
+
+```
+[medications.pdf p.12]
+[Source: GROPPER_ADRIAN_05-12-2026_to2016.PDF p.75]
+【Health Records.pdf p.3】        (CJK brackets)
+[See labs.pdf, page 9]
+```
+
+A shared post-processor normalizes all of these into clickable `File N` links
+plus a legend footer.
+
+### 6.2 The shared processor — `src/utils/fileNCitations.ts`
+
+`processFileNCitations(content, availableFiles, nameFilter?)` runs four passes
+over the markdown before it is rendered to HTML:
+
+0. **Raw filename → `File N`.** For each PDF (matched against both the display
+   name AND the sanitized bucket-key form the KB stores), rewrite
+   `[<filename> p.N]` → `[File N p.N]`. Tolerant of an optional label prefix
+   (`Source:` / `See` / `Ref:` / …), CJK `【 】` brackets, and a comma before the
+   page number.
+1. **Bracketed `[File N p.N]` → anchor** — `<a class="page-link" data-filename
+   data-page data-bucket-key>`.
+2. **Bare `File N p.N` → anchor** — for citations the AI wove into prose without
+   brackets.
+3. **Legend footer** — appends `**File legend**` listing only the File N's
+   actually referenced, so `File 3` etc. can be identified without hovering.
+
+`File N` maps to the Nth entry of the user's **PDF-only, References-excluded**
+file list. The optional `nameFilter` runs each display name through the privacy
+filter so the legend shows the pseudonymized filename.
+
+### 6.3 Where it is applied (three render sites)
+
+| Site | Entry point | File-list source |
+|------|-------------|------------------|
+| Chat messages | `processPageReferences` → `messageDisplayHtml` (`ChatInterface.vue`) | `availableUserFiles` |
+| Workbook → Patient Summary tab | `renderPsHtml` → `patientSummaryHtml` (`MyStuffDialog.vue`) | `userFiles` |
+| Workbook → Lists → Current Medications rows | `medRowsHtml` + `medsFileLegend` (`Lists.vue`) | `userFiles` prop (passed from `MyStuffDialog`) |
+
+Every `.page-link` anchor carries `data-filename` / `data-page` /
+`data-bucket-key`; each site wires a click handler
+(`handlePageLinkClick` / `handlePsCitationClick` / `handleMedCitationClick`) that
+opens the PDF viewer at that page.
+
+### 6.4 The critical dependency: the file list must be loaded FIRST
+
+`processFileNCitations` returns the content **unchanged** when the file list is
+empty (no PDFs → nothing to map). So if a citation-bearing message renders before
+its file list has loaded, it shows as **plain text with no links and no legend**,
+then gains links a few seconds later when the list loads and the computed
+re-renders. Fixes:
+
+- **Chat (`availableUserFiles`):** it is loaded once at mount — which, for a
+  fresh setup, happens *before* any file is uploaded. It is now also refreshed in
+  `handleIndexingFinished` (files exist once the KB is indexed) and awaited in the
+  stored-Patient-Summary SEND path before the message is pushed. (v1.4.98)
+- **Workbook (`userFiles`):** loaded eagerly when the Workbook dialog opens, not
+  only when the Files tab is visited. (v1.4.94)
+- **Lists rows:** `userFiles` is a prop from `MyStuffDialog`, so it is present as
+  soon as the workbook has loaded its file list.
+
+### 6.5 Adding new citation sources
+
+Because the AI invents citation shapes, Pass 0 must stay liberal. If a new shape
+appears that Pass 0 does not recognize, the citation silently stays as plain text
+(no error is thrown). When adding a source of citations, do **both**: teach the
+prompt the canonical `[<filename> p.<page>]` form (see `clinical-prompts.md`),
+and keep Pass 0's prefix/bracket tolerance as the safety net. Always confirm the
+render site has its file list loaded before the cited content can appear
+(section 6.4).
+
+---
+
+## 7. General Observations
 
 The tactical fixes in section 5 address specific symptoms but don't address the
 underlying architectural problem of multiple independent state systems. The
