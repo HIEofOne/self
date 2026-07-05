@@ -663,6 +663,7 @@
       :rehydration-active="props.rehydrationActive"
       :wizard-active="wizardActive"
       :meds-needs-verify="medsNeedsVerify"
+      :draft-ps-meds="draftPsMeds"
       :show-close-prompt="showWorkbookClosePrompt"
       :saved-chat-count="savedChatCount"
       @chat-selected="handleChatSelected"
@@ -1154,10 +1155,32 @@ const wizardFlowPhase = ref<'running' | 'medications' | 'summary' | 'done'>('don
 /** Pre-generated Patient Summary text created at the start of the guided flow.
  *  Generated in the background so it's available if Lists needs Current Medications. */
 const preGeneratedSummary = ref<string | null>(null);
+const draftPsMeds = ref<string[]>([]);
 /** True while the wizard is generating Patient Summary and preparing to open My Lists.
  *  Keeps the wizard dialog visible so the user doesn't see a zombie chat. */
 const wizardPreparingRecords = ref(false);
 const wizardPreparingMessage = ref<string>('');
+
+const extractMedsFromDraftPS = (psText: string): string[] => {
+  const lines = psText.split('\n');
+  let inMedsSection = false;
+  const meds: string[] = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (/^#{1,3}\s*\**\s*Current\s+Medications/i.test(trimmed) || /^\*\*Current\s+Medications\*\*/i.test(trimmed)) {
+      inMedsSection = true;
+      continue;
+    }
+    if (inMedsSection) {
+      if (/^#{1,3}\s/.test(trimmed) || /^\*\*[A-Z]/.test(trimmed)) break;
+      const medLine = trimmed.replace(/^[-*•]\s*/, '').trim();
+      if (medLine && !/^not documented/i.test(medLine) && !/^no current/i.test(medLine) && !/^none/i.test(medLine)) {
+        meds.push(medLine);
+      }
+    }
+  }
+  return meds;
+};
 
 // ── Provisioning log ────
 // Coalesce duplicate log events (two code paths occasionally emit the same
@@ -5630,7 +5653,6 @@ const loadUserFilesForChooser = async (showChooser = true) => {
 const closeDocumentChooser = () => {
   showDocumentChooser.value = false;
   pendingPageLink.value = null;
-  availableUserFiles.value = [];
 };
 
 // Handle document selection from chooser
@@ -7353,6 +7375,8 @@ watch(
             // the user verifies medications and the summary. We keep the text in
             // a local ref so downstream code can read it without re-fetching.
             preGeneratedSummary.value = text;
+            // Extract meds from draft PS so Lists can merge them with Apple Health meds
+            draftPsMeds.value = extractMedsFromDraftPS(text);
             const summaryLines = text.split('\n').filter((l: string) => l.trim()).length;
             const generationSeconds = typeof genResult.generationSeconds === 'number'
               ? genResult.generationSeconds

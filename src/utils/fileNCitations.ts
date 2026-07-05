@@ -65,9 +65,12 @@ export function processFileNCitations(
     if (clean && clean !== display && !seen.has(clean)) { seen.add(clean); candidates.push({ idx: i, name: clean }); }
   });
   candidates.sort((a, b) => b.name.length - a.name.length);
+  // Optional label the LLM sometimes prefixes inside the bracket, e.g.
+  // `[Source: <filename> p.12]` / `[See <filename>, page 3]`. We strip it.
+  const LABEL = `(?:(?:source|src|see|ref|reference|from|citation|cite)\\s*:?\\s*)?`;
   for (const { idx, name } of candidates) {
     const re = new RegExp(
-      `[\\[\\u3010]\\s*${escRegex(name)}\\s+(?:Page|page|p\\.?)\\s*(\\d+)\\s*[\\]\\u3011]`,
+      `[\\[\\u3010]\\s*${LABEL}${escRegex(name)}\\s*[,;]?\\s+(?:Page|page|pg|p\\.?)\\s*(\\d+)\\s*[\\]\\u3011]`,
       'gi'
     );
     out = out.replace(re, (_full, page) => `[File ${idx + 1} p.${page}]`);

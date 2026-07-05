@@ -98,8 +98,11 @@
                 @keyup.esc="cancelInlineEditRow"
                 @blur="commitInlineEditRow"
               />
+              <span v-else-if="hasCitations && medRowsHtml[idx]" class="col q-ml-sm text-body2" v-html="medRowsHtml[idx]" @click="handleMedCitationClick($event)"></span>
               <span v-else class="col q-ml-sm text-body2">{{ med }}</span>
             </div>
+            <!-- File legend for citation links in medication rows -->
+            <div v-if="medsFileLegend" class="text-caption text-grey-7 q-mt-sm q-pt-sm" style="border-top: 1px solid #e0e0e0;" v-html="medsFileLegendHtml" @click="handleMedCitationClick($event)"></div>
             <!-- "Add new medication" row: pencil only. Clicking it
                  opens the inline input at the bottom of the list. -->
             <div class="row items-center no-wrap q-py-xs" style="min-height: 32px;">
@@ -132,6 +135,9 @@
           </div>
           <div v-if="currentMedRows.length > 0" class="text-caption text-grey-7 q-mt-md q-pt-md" style="border-top: 1px solid #e0e0e0;">
             Please edit this AI suggestion to reflect your actual prescription drug use.
+          </div>
+          <div v-else-if="needsVerifyAction" class="text-caption text-grey-7 q-mt-sm">
+            If you have no current medications, click <strong>Verify</strong> to confirm "None."
           </div>
         </div>
         
@@ -619,12 +625,15 @@
 import PdfViewerModal from './PdfViewerModal.vue';
 import { ref, computed, onMounted, watch, onActivated, onDeactivated, nextTick } from 'vue';
 import { useQuasar } from 'quasar';
+import { processFileNCitations, type FileNFile } from '../utils/fileNCitations';
 
 const $q = useQuasar();
 
 interface Props {
   userId: string;
   profileLabels?: Record<string, string>;
+  draftPsMeds?: string[];
+  userFiles?: FileNFile[];
 }
 
 const props = defineProps<Props>();
@@ -1496,11 +1505,8 @@ const clearVerifyRequirement = () => {
 };
 
 const handleVerifyCurrentMedications = async () => {
-  if (!currentMedications.value) {
-    clearVerifyRequirement();
-    return;
-  }
-  await saveCurrentMedicationsValue(currentMedications.value, true, true, true);
+  const medsToSave = currentMedications.value || 'None';
+  await saveCurrentMedicationsValue(medsToSave, true, true, true);
 };
 
 /** User dismisses the verify prompt without verifying — don't show the dialog again this session,
@@ -2838,16 +2844,42 @@ const loadCurrentMedications = async (forceRefresh = false) => {
     isLoadingCurrentMedications.value = false;
     currentMedicationsStatus.value = '';
 
-    if (unifiedMeds.length > 0) {
-      const medsText = unifiedMeds.map(m => `- ${m.name}`).join('\n');
+    // Merge: combine Apple Health meds with draft Patient Summary meds.
+    // Both are often extractions of the SAME source (the Apple Health file),
+    // formatted differently — e.g. "levothyroxine 137 MCG tablet" (deterministic)
+    // vs "Levothyroxine 137 µg tablet (most recent 15 Jun 2026) [File 1 p.127]"
+    // (AI). Deduping on the full string fails and shows both. So we dedup by
+    // the GENERIC DRUG NAME (first alphabetic token, after stripping any
+    // trailing dose/date/citation), keeping the clean Apple Health version and
+    // adding only draft-PS meds that name a drug not already present.
+    const drugKey = (s: string): string => {
+      const base = s.replace(/[([【].*$/, '').trim().toLowerCase();
+      const firstToken = (base.split(/\s+/)[0] || base).replace(/[^a-z]/g, '');
+      return firstToken;
+    };
+    const psMeds = props.draftPsMeds || [];
+    let mergedNames: string[] = unifiedMeds.map(m => m.name);
+    if (psMeds.length > 0) {
+      const existing = new Set(mergedNames.map(drugKey).filter(Boolean));
+      for (const pm of psMeds) {
+        const key = drugKey(pm);
+        if (key && !existing.has(key)) {
+          mergedNames.push(pm);
+          existing.add(key);
+        }
+      }
+    }
+
+    if (mergedNames.length > 0) {
+      const medsText = mergedNames.map(m => `- ${m}`).join('\n');
       currentMedications.value = medsText;
       isCurrentMedicationsEdited.value = false;
       isEditingCurrentMedications.value = false;
       currentMedicationsBlockTitle.value = 'Current Medications';
-      currentMedicationsSource.value = unifiedSource;
+      currentMedicationsSource.value = unifiedMeds.length > 0 ? unifiedSource : 'patient-summary';
       emit('medications-offered', {
-        lines: unifiedMeds.length,
-        source: unifiedSource as any,
+        lines: mergedNames.length,
+        source: (unifiedMeds.length > 0 ? unifiedSource : 'patient-summary') as any,
         outcome: 'success'
       });
       needsVerifyAction.value = true;
@@ -2951,6 +2983,53 @@ const serializeMedLines = (lines: string[]): string =>
 
 const currentMedRows = computed<string[]>(() => parseMedLines(cleanedCurrentMedications.value));
 
+const hasCitations = computed(() => {
+  return currentMedRows.value.some(m => /[\[【]File\s+\d+/i.test(m));
+});
+
+const medRowsHtml = computed<string[]>(() => {
+  if (!props.userFiles?.length || !hasCitations.value) return [];
+  return currentMedRows.value.map(med => {
+    if (!/[\[【]File\s+\d+/i.test(med)) return med;
+    // Process without legend (we'll add it separately)
+    const processed = processFileNCitations(med, props.userFiles!);
+    // Strip the legend footer that processFileNCitations appends per-line
+    return processed.replace(/\n\n---\n\*\*File legend\*\*[\s\S]*$/, '');
+  });
+});
+
+const medsFileLegend = computed<string>(() => {
+  if (!props.userFiles?.length || !hasCitations.value) return '';
+  const allMeds = currentMedRows.value.join('\n');
+  const processed = processFileNCitations(allMeds, props.userFiles!);
+  const legendMatch = processed.match(/\n\n---\n(\*\*File legend\*\*[\s\S]*)$/);
+  return legendMatch ? legendMatch[1] : '';
+});
+
+const medsFileLegendHtml = computed<string>(() => {
+  if (!medsFileLegend.value) return '';
+  return medsFileLegend.value
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\n/g, '<br>');
+});
+
+const handleMedCitationClick = (event: Event) => {
+  const target = event.target as HTMLElement;
+  const link = target.closest('.page-link') as HTMLElement | null;
+  if (!link) return;
+  event.preventDefault();
+  const bucketKey = link.getAttribute('data-bucket-key');
+  const fileName = link.getAttribute('data-filename');
+  const pageStr = link.getAttribute('data-page');
+  if (!bucketKey || !fileName) return;
+  viewingPdfFile.value = {
+    bucketKey,
+    name: fileName.toLowerCase().endsWith('.pdf') ? fileName : `${fileName}.pdf`
+  };
+  pdfInitialPage.value = pageStr ? parseInt(pageStr, 10) : undefined;
+  showPdfViewer.value = true;
+};
+
 // Which row (0-based index) is currently in inline edit mode.
 // null = none. -1 = the "add new" row at the bottom.
 const editingRowIndex = ref<number | null>(null);
@@ -2959,7 +3038,8 @@ const inlineInputRef = ref<HTMLInputElement | null>(null);
 
 const startInlineEditRow = async (idx: number) => {
   editingRowIndex.value = idx;
-  editingRowText.value = idx >= 0 ? (currentMedRows.value[idx] || '') : '';
+  const raw = idx >= 0 ? (currentMedRows.value[idx] || '') : '';
+  editingRowText.value = raw.replace(/\s*[\[【]File\s+\d+[^\]】]*[\]】]/gi, '').trim();
   // Do NOT clearVerifyRequirement() here — a single-row edit is
   // not the same as VERIFYING the whole list. The red borders on
   // Edit/Verify stay until the user explicitly clicks the Verify
@@ -3165,7 +3245,9 @@ defineExpose({
   reloadAll,
   loadWizardAutoFlow,
   attemptAutoProcessInitialFile,
-  checkInitialFile
+  checkInitialFile,
+  currentMedications,
+  saveCurrentMedicationsValue
 });
 </script>
 

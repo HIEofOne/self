@@ -1056,6 +1056,8 @@
               ref="listsComponentRef"
               :userId="userId"
               :profile-labels="agentProfileLabelsMap"
+              :draft-ps-meds="draftPsMeds"
+              :user-files="userFiles"
               @back-to-chat="closeDialog"
               @show-patient-summary="handleShowPatientSummary"
               @current-medications-saved="handleCurrentMedicationsSaved"
@@ -1902,6 +1904,7 @@ interface Props {
   // outline on the My Lists rail icon AND the navigation gate on
   // Patient Summary ("must verify meds first").
   medsNeedsVerify?: boolean;
+  draftPsMeds?: string[];
   showClosePrompt?: boolean;
   savedChatCount?: number;
 }
@@ -1912,6 +1915,7 @@ const props = withDefaults(defineProps<Props>(), {
   originalMessages: () => [],
   wizardActive: false,
   medsNeedsVerify: false,
+  draftPsMeds: () => [],
   showClosePrompt: false,
   savedChatCount: 0,
 });
@@ -1970,7 +1974,9 @@ const handleShowPatientSummary = () => {
 
 const handleCurrentMedicationsSaved = (payload: { value: string; edited: boolean; changed?: boolean; source?: string; verified?: boolean }) => {
   emit('current-medications-saved', payload);
-  if (payload.changed && payload.verified) {
+  if (payload.changed && payload.verified && !props.wizardActive) {
+    // Only show "Update Patient Summary?" outside the wizard — during the wizard,
+    // ChatInterface patches the draft PS directly via update-summary-meds.
     showUpdateSummaryDialog.value = true;
     summaryNeedsVerify.value = true;
   } else if (payload.verified) {
@@ -2057,24 +2063,10 @@ const railTabs = computed(() => [
 // If the panel is already open AND showing this tab, close it
 // (toggle parity with the chevron header button).
 const railClick = (name: string) => {
-  // Gate: Patient Summary requires verified Current Medications.
-  // Even browsing to the tab to review the summary is blocked —
-  // we want the user to confirm meds first so the summary's
-  // "Current Medications" section is built from a verified list.
-  // The yellow outline on the My Lists rail icon points to where
-  // they need to go.
-  if (name === 'summary' && props.medsNeedsVerify) {
-    if ($q && typeof $q.dialog === 'function') {
-      $q.dialog({
-        title: 'Verify Current Medications first',
-        message: 'You must verify or edit your current medications before verifying the rest of the patient summary.',
-        ok: { label: 'OK', color: 'primary' }
-      });
-    } else {
-      window.alert('You must verify or edit your current medications before verifying the rest of the patient summary.');
-    }
-    return;
-  }
+  // Note: the PS tab gate was removed in v1.4.89. The Patient
+  // Summary may contain correct medications from the KB even when
+  // Lists hasn't been verified. On PS verify, if meds differ,
+  // the user is offered to sync PS meds → Lists.
 
   if (isOpen.value && currentTab.value === name) {
     closeDialog();
@@ -7005,10 +6997,78 @@ const saveSummaryFromTab = async () => {
   }
 };
 
-const handleVerifySummaryTab = () => {
+const extractMedsFromPS = (psText: string): string[] => {
+  const lines = psText.split('\n');
+  let inMedsSection = false;
+  const meds: string[] = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (/^#{1,3}\s*\**\s*Current\s+Medications/i.test(trimmed) || /^\*\*Current\s+Medications\*\*/i.test(trimmed)) {
+      inMedsSection = true;
+      continue;
+    }
+    if (inMedsSection) {
+      if (/^#{1,3}\s/.test(trimmed) || /^\*\*[A-Z]/.test(trimmed)) break;
+      const medLine = trimmed.replace(/^[-*•]\s*/, '').trim();
+      if (medLine && !/^not documented/i.test(medLine) && !/^no current/i.test(medLine) && !/^none/i.test(medLine)) {
+        meds.push(medLine);
+      }
+    }
+  }
+  return meds;
+};
+
+const handleVerifySummaryTab = async () => {
   if (!props.userId || !patientSummary.value) return;
+
+  // Compare the PS's Current Medications against the SERVER's verified list
+  // (userDoc.currentMedications — the source of truth). We do NOT read the
+  // Lists component ref: the Lists tab panel is UNMOUNTED while the Summary
+  // tab is active (q-tab-panels has no keep-alive), so that ref is null here
+  // and produced a phantom "meds differ" every time. During the wizard the
+  // PS was just patched from the verified list, so they match by construction
+  // → no modal. Only a genuine manual PS edit trips the warning.
+  const psMeds = extractMedsFromPS(patientSummary.value);
+  let verifiedMeds = '';
+  try {
+    const res = await fetch(`/api/user-status?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
+    if (res.ok) {
+      const status = await res.json();
+      verifiedMeds = String(status.currentMedications || '').trim();
+    }
+  } catch { /* treat as no verified list */ }
+
+  const verifiedLines = verifiedMeds.split('\n').map(l => l.replace(/^[-*•]\s*/, '').trim()).filter(Boolean);
+  const verifiedIsNone = !verifiedMeds || verifiedMeds.toLowerCase() === 'none' || verifiedLines.length === 0;
+
+  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim();
+  const psSorted = [...psMeds].map(norm).sort().join('|');
+  const verifiedSorted = [...verifiedLines].map(norm).sort().join('|');
+  const medsMatch = psSorted === verifiedSorted;
+
+  // Warn only if the PS's Current Medications genuinely differ from the verified list.
+  if (!medsMatch && (psMeds.length > 0 || !verifiedIsNone)) {
+    if ($q && typeof $q.dialog === 'function') {
+      $q.dialog({
+        title: 'Custom Medications in Patient Summary',
+        message: 'The Current Medications in your Patient Summary differ from your verified medication list. ' +
+          'This is allowed — the next time a Patient Summary is generated, it will use your verified list again.',
+        ok: { label: 'Keep custom & verify', color: 'primary' },
+        cancel: { label: 'Cancel', flat: true },
+        persistent: false
+      }).onOk(() => {
+        finishVerifySummary();
+      });
+      return;
+    }
+  }
+
+  finishVerifySummary();
+};
+
+const finishVerifySummary = () => {
   summaryNeedsVerify.value = false;
-  emit('patient-summary-verified', { userId: props.userId });
+  emit('patient-summary-verified', { userId: props.userId! });
   if ($q && typeof $q.notify === 'function') {
     $q.notify({
       type: 'positive',
@@ -7090,6 +7150,12 @@ watch(() => props.modelValue, async (newValue) => {
   if (newValue) {
     // Reset per-open state
     medsMismatchAcknowledged.value = false;
+
+    // Eagerly load files so processFileNCitations can resolve citations
+    // on any tab (Patient Summary, Lists) without waiting for the files tab.
+    if (userFiles.value.length === 0) {
+      loadFiles();
+    }
 
     // Honor a newly-supplied initialTab from the parent (a
     // programmatic open like "open at Patient Summary after a

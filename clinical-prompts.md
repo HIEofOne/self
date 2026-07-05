@@ -166,10 +166,12 @@ For each section, in order of preference:
 2. Otherwise, **search the knowledge base** for that topic and summarize what you find. Do this BEFORE giving up — the absence of an authoritative block does NOT mean the data is missing; it just means it wasn't extracted deterministically.
 3. ONLY if BOTH an authoritative block is absent AND the knowledge base has nothing on the topic, write the heading followed by exactly: "Not documented in the available records."
 
+**Citations.** Whenever you state a fact drawn from the knowledge base, cite its source immediately after the fact in square brackets, formatted EXACTLY as `[<source PDF filename> p.<page number>]` — for example `[Health Records.pdf p.12]`. Use the source filename exactly as it appears in the knowledge base and include the page number when available. Do NOT add a "Source:" label, quotation marks, or any other text inside the brackets — just the filename and page.
+
 - Medical History — a concise narrative including surgical history.
 - Recent Visits (past 12 months) — providers seen and the diagnoses from those visits.
-- Current Medications — the patient's currently-taken medications.
-- Stopped or Inactive Medications — meds explicitly discontinued or clearly no longer current.
+- Current Medications — medications the patient is CURRENTLY taking. A medication is current ONLY if it was prescribed, ordered, or refilled within the past 18 months. Medications whose most recent date is older than 18 months belong in Stopped or Inactive Medications, even if never explicitly discontinued.
+- Stopped or Inactive Medications — meds explicitly discontinued, OR whose most recent date is more than 18 months ago (no longer current by age alone).
 - Allergies
 - Social History — brief: employment/school, living situation, tobacco/alcohol/drug use.
 - Radiology
