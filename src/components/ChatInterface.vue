@@ -1156,6 +1156,9 @@ const wizardFlowPhase = ref<'running' | 'medications' | 'summary' | 'done'>('don
  *  Generated in the background so it's available if Lists needs Current Medications. */
 const preGeneratedSummary = ref<string | null>(null);
 const draftPsMeds = ref<string[]>([]);
+/** Set once we auto-resume an interrupted wizard on reload, so the resume
+ *  fires at most once per session (refreshWizardState runs many times). */
+const wizardResumeAttempted = ref(false);
 /** True while the wizard is generating Patient Summary and preparing to open My Lists.
  *  Keeps the wizard dialog visible so the user doesn't see a zombie chat. */
 const wizardPreparingRecords = ref(false);
@@ -2888,6 +2891,7 @@ const refreshWizardState = async () => {
   let indexedCountFromFiles: number | null = null;
   let indexingJobIdFromFiles: string | null = null;
   let tokensFromFiles: string | null = null;
+  let resumeSnapshot: { hasSummary: boolean; hasDraft: boolean } | null = null;
   try {
     const [statusResponse, filesResponse, summaryResponse] = await Promise.all([
       fetch(`/api/user-status?userId=${encodeURIComponent(props.user.userId)}`, {
@@ -3052,6 +3056,20 @@ const refreshWizardState = async () => {
     if (summaryResponse.ok) {
       const summaryData = await summaryResponse.json();
       const hasSummary = !!(summaryData?.summary && summaryData.summary.trim());
+      // A hidden draft (userDoc.draftPatientSummary) is returned alongside the
+      // committed summary. On a reload the draft is the ONLY record that the
+      // wizard already generated a Patient Summary — rehydrate it so the
+      // checklist shows "Draft Patient Summary" complete and the resume logic
+      // below has text to present for verification. Without this the draft step
+      // renders incomplete even though it ran, producing the limbo state.
+      const draftText = (summaryData?.draft && summaryData.draft.text)
+        ? String(summaryData.draft.text).trim() : '';
+      if (draftText && !preGeneratedSummary.value) {
+        preGeneratedSummary.value = draftText;
+        if (wizardDraftPsStatus.value === 'idle') {
+          wizardDraftPsStatus.value = 'done';
+        }
+      }
       // If server already has a committed patient summary, mark wizard as complete.
       // BUT during the guided flow (phases running/medications/summary), the user
       // must explicitly verify — don't auto-set from server state, or "Setup
@@ -3072,6 +3090,11 @@ const refreshWizardState = async () => {
           hasPatientSummary: hasSummary
         };
       }
+      // Resume an interrupted wizard (e.g. reload after verifying meds but
+      // before verifying the summary). Runs after indexing state is finalized
+      // just below, so it's deferred to the end of this function via a captured
+      // snapshot.
+      resumeSnapshot = { hasSummary, hasDraft: !!draftText };
     }
 
     if (wizardStage2NoDevice.value && (wizardStage2FileName.value || wizardCurrentMedications.value)) {
@@ -3222,8 +3245,59 @@ const refreshWizardState = async () => {
         }
       }
       persistWizardCompletion();
+      // All server state is now applied (meds, committed summary, draft,
+      // indexing). Resume an interrupted wizard if needed — deferred to here so
+      // the kb-complete check sees finalized indexingStatus.
+      if (resumeSnapshot) {
+        maybeResumeInterruptedWizard(resumeSnapshot);
+      }
   } catch (error) {
     console.warn('Failed to refresh setup wizard state:', error);
+  }
+};
+
+/**
+ * Resume an interrupted setup wizard on reload.
+ *
+ * The wizard flow is: prep (draft PS) → verify meds → verify PS → done. If the
+ * user reloads partway (e.g. after verifying meds but before verifying the
+ * summary), the phase refs reset to their defaults while the server still holds
+ * a draft PS and verified meds. Left alone, the wizard reopens showing a
+ * consistent-looking-but-dead checklist with a spinner that goes nowhere. This
+ * re-enters the correct phase and opens the workbook at the step to finish,
+ * so the wizard is always either done or actively working — never in limbo.
+ */
+const maybeResumeInterruptedWizard = (snapshot: { hasSummary: boolean; hasDraft: boolean }) => {
+  if (wizardResumeAttempted.value) return;
+  if (isPostRestoreLocked()) return;
+  if (props.user?.isAdmin || props.suppressWizard) return;
+  // Only resume from a fresh load — never interrupt an in-progress live flow.
+  if (wizardFlowPhase.value !== 'done') return;
+  // Setup already complete (committed, verified PS) → nothing to resume.
+  if (snapshot.hasSummary) return;
+  // Must be past the prep/indexing stage to resume verification.
+  const kbDone = indexingStatus.value?.phase === 'complete' || !stage3HasFiles.value;
+  if (!kbDone || !wizardStage1Complete.value) return;
+  // Only resume once we actually have a draft to work from.
+  if (!snapshot.hasDraft) return;
+
+  const medsVerified = !!wizardCurrentMedications.value;
+  if (medsVerified) {
+    // Meds done, summary not verified → present the draft PS for verification.
+    wizardResumeAttempted.value = true;
+    wizardFlowPhase.value = 'summary';
+    myStuffInitialTab.value = 'summary';
+    showMyStuffDialog.value = true;
+    showAgentSetupDialog.value = false;
+    logProvisioningEvent({ event: 'wizard-resumed', phase: 'summary' });
+  } else {
+    // Draft exists but meds not verified → resume at Current Medications.
+    wizardResumeAttempted.value = true;
+    wizardFlowPhase.value = 'medications';
+    myStuffInitialTab.value = 'lists';
+    showMyStuffDialog.value = true;
+    showAgentSetupDialog.value = false;
+    logProvisioningEvent({ event: 'wizard-resumed', phase: 'medications' });
   }
 };
 
