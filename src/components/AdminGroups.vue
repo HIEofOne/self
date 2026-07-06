@@ -53,6 +53,16 @@
                 flat
                 dense
                 round
+                icon="person_add"
+                color="primary"
+                @click="openMembersDialog(g)"
+              >
+                <q-tooltip>Members &amp; invites</q-tooltip>
+              </q-btn>
+              <q-btn
+                flat
+                dense
+                round
                 icon="key"
                 :color="g.recoveryKitLastExportedAt ? 'grey-7' : 'orange-9'"
                 @click="confirmRecoveryKit(g)"
@@ -118,6 +128,101 @@
         </q-card-actions>
       </q-card>
     </q-dialog>
+
+    <!-- Members & invites dialog -->
+    <q-dialog v-model="showMembersDialog">
+      <q-card style="min-width: 480px; max-width: 640px">
+        <q-card-section>
+          <div class="text-h6">Members — {{ membersGroup?.name }}</div>
+        </q-card-section>
+
+        <q-card-section class="q-pt-none">
+          <div class="row items-center q-gutter-sm">
+            <q-input
+              v-model="inviteEmail"
+              dense
+              outlined
+              type="email"
+              label="Invite by email"
+              style="flex: 1; min-width: 220px"
+              :disable="sendingInvite"
+              @keyup.enter="sendInvite"
+            />
+            <q-btn
+              unelevated
+              dense
+              color="primary"
+              label="Send invite"
+              :loading="sendingInvite"
+              :disable="!inviteEmail.trim()"
+              @click="sendInvite"
+            />
+          </div>
+          <q-banner v-if="lastInviteLink" class="bg-green-1 q-mt-sm" rounded dense>
+            <div class="text-caption">
+              Invite {{ lastInviteEmailSent ? 'emailed' : 'created (email not configured)' }} — link
+              valid 14 days:
+            </div>
+            <div class="row items-center no-wrap q-mt-xs">
+              <div class="text-caption ellipsis" style="max-width: 440px">{{ lastInviteLink }}</div>
+              <q-btn flat dense round size="sm" icon="content_copy" @click="copyInviteLink">
+                <q-tooltip>Copy link</q-tooltip>
+              </q-btn>
+            </div>
+          </q-banner>
+        </q-card-section>
+
+        <q-card-section class="q-pt-none">
+          <div v-if="loadingMembers" class="text-body2 text-grey-7">Loading members…</div>
+          <div v-else-if="members.length === 0" class="text-body2 text-grey-7">
+            No members yet — send the first invite above.
+          </div>
+          <q-list v-else separator dense>
+            <q-item v-for="m in members" :key="m.pairwiseId">
+              <q-item-section>
+                <q-item-label>
+                  {{ m.alias || m.inviteEmail || m.pairwiseId }}
+                  <q-badge
+                    class="q-ml-sm"
+                    :color="m.status === 'active' ? 'green' : m.status === 'invited' ? 'orange' : 'grey'"
+                    :label="m.status"
+                  />
+                  <q-badge v-if="m.mentor" class="q-ml-xs" color="teal" label="mentor" />
+                </q-item-label>
+                <q-item-label caption>
+                  <template v-if="m.status === 'invited'">
+                    Invited {{ formatDate(m.invitedAt) }} · expires {{ formatDate(m.inviteExpiresAt) }}
+                  </template>
+                  <template v-else-if="m.status === 'active'">
+                    Joined {{ formatDate(m.joinedAt) }}
+                  </template>
+                  <template v-else>
+                    Revoked {{ formatDate(m.revokedAt) }}
+                  </template>
+                </q-item-label>
+              </q-item-section>
+              <q-item-section side v-if="m.status !== 'revoked'">
+                <q-btn
+                  flat
+                  dense
+                  round
+                  size="sm"
+                  :icon="m.status === 'invited' ? 'close' : 'person_remove'"
+                  color="negative"
+                  @click="confirmRemoveMember(m)"
+                >
+                  <q-tooltip>{{ m.status === 'invited' ? 'Cancel invite' : 'Revoke membership' }}</q-tooltip>
+                </q-btn>
+              </q-item-section>
+            </q-item>
+          </q-list>
+        </q-card-section>
+
+        <q-card-actions align="right">
+          <q-btn flat label="Close" v-close-popup />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
   </q-card>
 </template>
 
@@ -150,7 +255,7 @@ const saving = ref(false);
 const editingGroupId = ref<string | null>(null);
 const form = ref({ name: '', description: '', tags: '' });
 
-const formatDate = (iso: string): string => {
+const formatDate = (iso: string | null | undefined): string => {
   if (!iso) return '';
   try {
     return new Date(iso).toLocaleDateString();
@@ -280,6 +385,122 @@ const downloadRecoveryKit = async (g: GroupSummary) => {
       type: 'negative',
       message: err instanceof Error ? err.message : 'Failed to download recovery kit'
     });
+  }
+};
+
+// ── Members & invites ─────────────────────────────────────────────
+
+interface MemberSummary {
+  pairwiseId: string;
+  alias: string | null;
+  status: 'invited' | 'active' | 'revoked';
+  invitedAt: string | null;
+  joinedAt: string | null;
+  revokedAt: string | null;
+  inviteEmail: string | null;
+  inviteExpiresAt: string | null;
+  mentor: boolean;
+}
+
+const showMembersDialog = ref(false);
+const membersGroup = ref<GroupSummary | null>(null);
+const members = ref<MemberSummary[]>([]);
+const loadingMembers = ref(false);
+const inviteEmail = ref('');
+const sendingInvite = ref(false);
+const lastInviteLink = ref('');
+const lastInviteEmailSent = ref(false);
+
+const openMembersDialog = async (g: GroupSummary) => {
+  membersGroup.value = g;
+  members.value = [];
+  inviteEmail.value = '';
+  lastInviteLink.value = '';
+  showMembersDialog.value = true;
+  await loadMembers();
+};
+
+const loadMembers = async () => {
+  if (!membersGroup.value) return;
+  loadingMembers.value = true;
+  try {
+    const res = await fetch(`/api/groups/${encodeURIComponent(membersGroup.value.groupId)}/members`, {
+      credentials: 'include'
+    });
+    const data = await res.json();
+    if (res.ok && data.success) members.value = data.members || [];
+  } catch {
+    /* dialog shows empty state */
+  } finally {
+    loadingMembers.value = false;
+  }
+};
+
+const sendInvite = async () => {
+  if (!membersGroup.value || !inviteEmail.value.trim()) return;
+  sendingInvite.value = true;
+  try {
+    const res = await fetch(`/api/groups/${encodeURIComponent(membersGroup.value.groupId)}/invites`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ email: inviteEmail.value.trim() })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    lastInviteLink.value = data.invite?.inviteLink || '';
+    lastInviteEmailSent.value = !!data.invite?.emailSent;
+    inviteEmail.value = '';
+    await loadMembers();
+    await loadGroups(); // refresh member counts on the card
+    $q.notify({
+      type: 'positive',
+      message: lastInviteEmailSent.value ? 'Invitation emailed.' : 'Invite created — copy the link below.'
+    });
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to send invite' });
+  } finally {
+    sendingInvite.value = false;
+  }
+};
+
+const copyInviteLink = async () => {
+  try {
+    await navigator.clipboard.writeText(lastInviteLink.value);
+    $q.notify({ type: 'positive', message: 'Invite link copied.' });
+  } catch {
+    $q.notify({ type: 'negative', message: 'Could not copy — select the link text manually.' });
+  }
+};
+
+const confirmRemoveMember = (m: MemberSummary) => {
+  const isInvite = m.status === 'invited';
+  $q.dialog({
+    title: isInvite ? 'Cancel invite' : 'Revoke membership',
+    message: isInvite
+      ? `Cancel the pending invite for ${m.inviteEmail || 'this member'}?`
+      : `Revoke ${m.alias || m.pairwiseId}? Their membership credential stops refreshing and expires within 24 hours.`,
+    ok: { label: isInvite ? 'Cancel invite' : 'Revoke', color: 'negative' },
+    cancel: { label: 'Keep', flat: true }
+  }).onOk(() => {
+    void removeMember(m);
+  });
+};
+
+const removeMember = async (m: MemberSummary) => {
+  if (!membersGroup.value) return;
+  try {
+    const res = await fetch(
+      `/api/groups/${encodeURIComponent(membersGroup.value.groupId)}/members/${encodeURIComponent(m.pairwiseId)}`,
+      { method: 'DELETE', credentials: 'include' }
+    );
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    await loadMembers();
+    await loadGroups();
+    $q.notify({ type: 'positive', message: data.action === 'invite_cancelled' ? 'Invite cancelled.' : 'Membership revoked.' });
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to remove member' });
   }
 };
 

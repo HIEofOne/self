@@ -416,3 +416,25 @@ and any design decisions resolved.
   confirmation, offered automatically at group creation; the group row
   warns in orange until the first export. Operations note added to
   `Documentation/Environment.md` (CouchDB droplet snapshots required).
+- **2026-07-06** — **PR-2: invites & join flow.** Registry side: single-use
+  invite tokens (only the SHA-256 hash is stored; 14-day TTL; re-invite
+  replaces), invite email via Resend with copyable-link fallback when email
+  is unconfigured, `POST /join` redeems the token — activates the member,
+  DELETES the invite email and token hash (registry-minimalism enforced at
+  the moment of join), and returns a signed 24 h membership credential
+  (`maia-group-credential-v1`: base64url(JSON) + '.' + base64url(Ed25519
+  sig), §6.1/§7.2 interim format). Member management: admin members list
+  (email visible only while invited), cancel-invite (entry removed) vs
+  revoke (status kept for audit attribution). Patient side:
+  `POST /api/user-groups/join` generates per-group Ed25519 + X25519
+  keypairs, redeems at the registry over HTTP (the federation seam — same
+  host in Phase 1), stores the membership + private keys on the userDoc,
+  assigns `asId` on first join; `GET /api/user-groups` returns memberships
+  with no private-key material. Frontend: Groups rail tab in the Workbook
+  (`GroupsPanel.vue`) with membership list and pending-invite banner;
+  invite capture in App.vue stores the link params in localStorage so the
+  invite survives the setup wizard (join-group ≡ get-a-MAIA) with zero
+  wizard code changes; AdminGroups members/invites dialog (invite by email,
+  copy link, cancel/revoke). Tested end-to-end locally including offline
+  Ed25519 credential verification against the member-cached group key,
+  token single-use across users, and registry email deletion at join.
