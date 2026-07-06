@@ -149,20 +149,9 @@ Tracked here until resolved; resolution gets recorded in the Implementation Log.
 All six initial design decisions are resolved. New open items get added here
 as implementation surfaces them.
 
-7. **Group signing-key durability & recovery** (surfaced during PR-1 review,
-   2026-07-06). The per-group private key lives only in the `maia_groups`
-   doc. Server restarts and app rebuilds are safe (the app server is
-   stateless; state lives in CouchDB), but loss of CouchDB kills the group:
-   no credential refreshes can be signed, so all memberships expire within
-   24 h (§6.1), and registry-minimalism (invite emails deleted at join)
-   means re-invites require out-of-band contact. Deriving the key from the
-   DO token was rejected: token rotation would break group identity, and a
-   derived key contradicts §6.6 group portability. Proposed resolution:
-   (a) **admin recovery kit** — one-time download of group key material at
-   creation, held by the admin (Phase 1); (b) document that the CouchDB
-   droplet needs snapshots — `maia_groups` is the one database not
-   reconstructible from derivation or patient-side backups; (c) the Phase 4
-   key-rotation protocol doubles as graceful recovery.
+7. ~~Group signing-key durability & recovery~~ — **RESOLVED 2026-07-06**,
+   see Implementation Log (admin recovery kit in PR-2; CouchDB snapshot
+   requirement; Phase 4 rotation doubles as recovery)
 
 ## 7. Phase 1 Implementation Plan
 
@@ -395,3 +384,22 @@ and any design decisions resolved.
   endpoint surface (registry + session-authed inbox; no public inbound AS
   endpoint until Phase 2), frontend (AdminGroups.vue, patient Groups tab
   with Requests inbox, invite-through-wizard), and a 5-PR work breakdown.
+- **2026-07-06** — **§6.7 RESOLVED: group signing-key durability &
+  recovery.** The per-group private key lives only in the `maia_groups` doc
+  (random entropy — deliberately NOT derived from the DO token: token
+  rotation would break group identity, and a derived key contradicts §6.6
+  portability). Server restarts and app rebuilds are safe (stateless app;
+  state in CouchDB). Loss of CouchDB without backup kills the group within
+  24 h (§6.1 refresh stops). Resolution: (a) **admin recovery kit** — a
+  one-time download of the group's key material offered at group creation,
+  held by the admin; ships in PR-2 (added to its scope); (b) **operations
+  requirement**: the CouchDB droplet must have snapshots enabled —
+  `maia_groups` is the one database reconstructible from neither derivation
+  nor patient-side backups; (c) the Phase 4 key-rotation protocol doubles
+  as graceful recovery.
+- **2026-07-06** — **PR-1 opened** ([#141], v1.5.1 — starts the 1.5.x minor
+  line for the Groups feature): group registry (`maia_groups`), admin CRUD
+  endpoints, per-group Ed25519 signing keys (private key never leaves the
+  server), public `/api/groups/:groupId/info` well-known endpoint, tag
+  vocabulary normalization, audit-log events, `AdminGroups.vue` embedded in
+  the admin page.
