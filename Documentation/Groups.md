@@ -149,6 +149,21 @@ Tracked here until resolved; resolution gets recorded in the Implementation Log.
 All six initial design decisions are resolved. New open items get added here
 as implementation surfaces them.
 
+7. **Group signing-key durability & recovery** (surfaced during PR-1 review,
+   2026-07-06). The per-group private key lives only in the `maia_groups`
+   doc. Server restarts and app rebuilds are safe (the app server is
+   stateless; state lives in CouchDB), but loss of CouchDB kills the group:
+   no credential refreshes can be signed, so all memberships expire within
+   24 h (§6.1), and registry-minimalism (invite emails deleted at join)
+   means re-invites require out-of-band contact. Deriving the key from the
+   DO token was rejected: token rotation would break group identity, and a
+   derived key contradicts §6.6 group portability. Proposed resolution:
+   (a) **admin recovery kit** — one-time download of group key material at
+   creation, held by the admin (Phase 1); (b) document that the CouchDB
+   droplet needs snapshots — `maia_groups` is the one database not
+   reconstructible from derivation or patient-side backups; (c) the Phase 4
+   key-rotation protocol doubles as graceful recovery.
+
 ## 7. Phase 1 Implementation Plan
 
 Scoped 2026-07-06 from the resolved §6 decisions. Each work item is a
