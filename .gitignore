@@ -12,3 +12,6 @@ dist/
 KBs.txt
 .claude/worktrees/
 .claude/launch.json
+
+# Internal design docs — not for publication
+Documentation/Groups_Design.md
