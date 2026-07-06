@@ -54,7 +54,8 @@ const memberCounts = (doc) => {
 };
 
 /** Admin-facing view: everything except the private signing key and any
- *  invite emails. The private key NEVER leaves the server. */
+ *  invite emails. The private key NEVER leaves the server via this view —
+ *  the sole, deliberate exception is the recovery-kit export (§6.7). */
 const adminGroupView = (doc) => ({
   groupId: doc._id,
   name: doc.name,
@@ -64,7 +65,9 @@ const adminGroupView = (doc) => ({
   policyPackVersion: doc.policyPackVersion ?? 0,
   memberCounts: memberCounts(doc),
   createdAt: doc.createdAt,
-  updatedAt: doc.updatedAt
+  updatedAt: doc.updatedAt,
+  recoveryKitLastExportedAt: doc.recoveryKit?.lastExportedAt || null,
+  recoveryKitExportCount: doc.recoveryKit?.exportCount || 0
 });
 
 /** Public well-known view (Groups.md §7.3): enough for a prospective or
@@ -205,6 +208,60 @@ export default function setupGroupRoutes(app, cloudant, auditLog) {
     } catch (error) {
       console.error('[groups] info failed:', error);
       res.status(500).json({ success: false, error: 'Failed to fetch group info' });
+    }
+  });
+
+  // GET /api/groups/:groupId/recovery-kit — admin recovery kit (Groups.md
+  // §6.7). Downloads the group's key material as a JSON file so group
+  // continuity survives loss of CouchDB. This is the ONLY code path that
+  // ever exports the private signing key. Deliberately re-downloadable
+  // (a strictly one-time export bricks recovery if the first download
+  // fails, and adds no security — the admin can read CouchDB anyway);
+  // every export is audit-logged and counted, and the admin UI shows the
+  // last export time so unexpected exports are visible.
+  app.get('/api/groups/:groupId/recovery-kit', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const doc = await cloudant.getDocument(GROUPS_DB, req.params.groupId);
+      if (!doc || doc.type !== 'group') {
+        return res.status(404).json({ success: false, error: 'Group not found' });
+      }
+      const now = new Date().toISOString();
+      const kit = {
+        format: 'maia-group-recovery-kit-v1',
+        exportedAt: now,
+        warning: 'Contains the group PRIVATE signing key. Store offline and securely. Anyone holding this file can issue membership credentials for this group.',
+        groupId: doc._id,
+        name: doc.name,
+        createdAt: doc.createdAt,
+        signingKey: {
+          publicKeyJwk: doc.signingKey?.publicKeyJwk || null,
+          privateKeyJwk: doc.signingKey?.privateKeyJwk || null
+        }
+      };
+      // Record the export before returning it (best-effort — the download
+      // must not fail because the bookkeeping write conflicted).
+      try {
+        doc.recoveryKit = {
+          lastExportedAt: now,
+          exportCount: (doc.recoveryKit?.exportCount || 0) + 1
+        };
+        await cloudant.saveDocument(GROUPS_DB, doc);
+      } catch (bookkeepErr) {
+        console.warn('[groups] recovery-kit bookkeeping failed:', bookkeepErr?.message || bookkeepErr);
+      }
+      auditLog.logEvent({
+        type: 'group_recovery_kit_exported',
+        userId: req.session?.userId || 'admin-local',
+        ip: req.ip,
+        details: { groupId: doc._id, exportCount: doc.recoveryKit?.exportCount || 1 }
+      });
+      res.setHeader('Content-Type', 'application/json');
+      res.setHeader('Content-Disposition', `attachment; filename="maia-group-recovery-${doc._id}.json"`);
+      res.send(JSON.stringify(kit, null, 2));
+    } catch (error) {
+      console.error('[groups] recovery-kit export failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to export recovery kit' });
     }
   });
 }

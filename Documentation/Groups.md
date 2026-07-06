@@ -391,15 +391,28 @@ and any design decisions resolved.
   portability). Server restarts and app rebuilds are safe (stateless app;
   state in CouchDB). Loss of CouchDB without backup kills the group within
   24 h (§6.1 refresh stops). Resolution: (a) **admin recovery kit** — a
-  one-time download of the group's key material offered at group creation,
-  held by the admin; ships in PR-2 (added to its scope); (b) **operations
+  download of the group's key material offered at group creation,
+  held by the admin; ships in its own dedicated PR; (b) **operations
   requirement**: the CouchDB droplet must have snapshots enabled —
   `maia_groups` is the one database reconstructible from neither derivation
   nor patient-side backups; (c) the Phase 4 key-rotation protocol doubles
   as graceful recovery.
-- **2026-07-06** — **PR-1 opened** ([#141], v1.5.1 — starts the 1.5.x minor
+- **2026-07-06** — **PR-1 merged** (#141, v1.5.1 — starts the 1.5.x minor
   line for the Groups feature): group registry (`maia_groups`), admin CRUD
   endpoints, per-group Ed25519 signing keys (private key never leaves the
   server), public `/api/groups/:groupId/info` well-known endpoint, tag
   vocabulary normalization, audit-log events, `AdminGroups.vue` embedded in
-  the admin page.
+  the admin page. (Docs PR #140 merged the same day; this log's §6.7
+  entries were recovered into the recovery-kit PR after a merge race.)
+- **2026-07-06** — **Recovery kit implemented (§6.7(a) and (b))**:
+  `GET /api/groups/:groupId/recovery-kit` (admin-gated) downloads the
+  group's key material as `maia-group-recovery-<groupId>.json` — the ONLY
+  code path that exports the private signing key. Deliberately
+  re-downloadable rather than strictly one-time (a failed first download
+  must not brick recovery; the admin can read CouchDB regardless); every
+  export is audit-logged (`group_recovery_kit_exported`) and counted, and
+  the admin UI shows last-export time and count so unexpected exports are
+  visible. AdminGroups.vue: key-icon download button with an explanatory
+  confirmation, offered automatically at group creation; the group row
+  warns in orange until the first export. Operations note added to
+  `Documentation/Environment.md` (CouchDB droplet snapshots required).

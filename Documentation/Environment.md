@@ -45,6 +45,18 @@ When `PUBLIC_APP_URL` starts with `https://` (i.e., a cloud deployment), the ser
 - **Credentials:** `admin` / derived password (see token derivations above)
 - **Startup:** The server retries the CouchDB connection up to 10 times at 30-second intervals while the droplet warms up
 
+**Backups / snapshots (required once Groups exist).** Most secrets are
+derived from the DO token and most user data can be restored from
+patient-side backups, but `maia_groups` is the exception: each group's
+private signing key is random entropy that exists only in that database
+(deliberately not token-derived — see `Documentation/Groups.md` §6.7). If
+the CouchDB droplet is lost without a backup, every group it hosts becomes
+unrecoverable within 24 hours (membership credentials stop refreshing).
+Enable DigitalOcean Droplet snapshots (or equivalent) on the CouchDB
+droplet, and ensure each group's admin has downloaded its **recovery kit**
+(admin page → Patient Groups → key icon), which is the off-server escrow of
+the group's key material.
+
 ### Local (Docker)
 
 For local development, CouchDB runs in a Docker container:

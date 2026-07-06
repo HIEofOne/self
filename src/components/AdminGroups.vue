@@ -31,6 +31,9 @@
               Members: {{ g.memberCounts.active }} active<span v-if="g.memberCounts.invited">, {{ g.memberCounts.invited }} invited</span><span v-if="g.memberCounts.revoked">, {{ g.memberCounts.revoked }} revoked</span>
               · Created {{ formatDate(g.createdAt) }}
             </q-item-label>
+            <q-item-label caption :class="g.recoveryKitLastExportedAt ? 'text-grey-7' : 'text-orange-9'">
+              Recovery kit: {{ g.recoveryKitLastExportedAt ? `exported ${formatDate(g.recoveryKitLastExportedAt)} (${g.recoveryKitExportCount}×)` : 'never exported — download and store it securely' }}
+            </q-item-label>
             <div v-if="g.tagVocabulary.length" class="q-mt-xs">
               <q-chip
                 v-for="tag in g.tagVocabulary"
@@ -45,16 +48,28 @@
             </div>
           </q-item-section>
           <q-item-section side>
-            <q-btn
-              flat
-              dense
-              round
-              icon="edit"
-              color="grey-7"
-              @click="openEditDialog(g)"
-            >
-              <q-tooltip>Edit group</q-tooltip>
-            </q-btn>
+            <div class="row no-wrap">
+              <q-btn
+                flat
+                dense
+                round
+                icon="key"
+                :color="g.recoveryKitLastExportedAt ? 'grey-7' : 'orange-9'"
+                @click="confirmRecoveryKit(g)"
+              >
+                <q-tooltip>Download recovery kit</q-tooltip>
+              </q-btn>
+              <q-btn
+                flat
+                dense
+                round
+                icon="edit"
+                color="grey-7"
+                @click="openEditDialog(g)"
+              >
+                <q-tooltip>Edit group</q-tooltip>
+              </q-btn>
+            </div>
           </q-item-section>
         </q-item>
       </q-list>
@@ -122,6 +137,8 @@ interface GroupSummary {
   memberCounts: { active: number; invited: number; revoked: number };
   createdAt: string;
   updatedAt: string;
+  recoveryKitLastExportedAt: string | null;
+  recoveryKitExportCount: number;
 }
 
 const groups = ref<GroupSummary[]>([]);
@@ -198,11 +215,18 @@ const saveGroup = async () => {
       throw new Error(data.error || `HTTP ${res.status}`);
     }
     showDialog.value = false;
+    const wasCreate = !editingGroupId.value;
     await loadGroups();
     $q.notify({
       type: 'positive',
-      message: editingGroupId.value ? 'Group updated.' : `Group created: ${data.group?.groupId}`
+      message: wasCreate ? `Group created: ${data.group?.groupId}` : 'Group updated.'
     });
+    // §6.7: the recovery kit is OFFERED AT CREATION — the group's private
+    // signing key lives only in CouchDB, so the admin should hold an
+    // offline copy from day one.
+    if (wasCreate && data.group?.groupId) {
+      confirmRecoveryKit(data.group as GroupSummary, true);
+    }
   } catch (err) {
     $q.notify({
       type: 'negative',
@@ -210,6 +234,52 @@ const saveGroup = async () => {
     });
   } finally {
     saving.value = false;
+  }
+};
+
+/** Confirmation before exporting the group's private key material. */
+const confirmRecoveryKit = (g: GroupSummary, justCreated = false) => {
+  $q.dialog({
+    title: 'Download recovery kit',
+    message:
+      (justCreated ? `Your group "${g.name}" was created. ` : '') +
+      'The recovery kit contains the group\'s PRIVATE signing key — the only copy outside the server database. ' +
+      'If the database is ever lost without it, the group cannot recover: all memberships expire within 24 hours. ' +
+      'Store the file offline and securely; anyone holding it can issue membership credentials for this group. ' +
+      'Every export is audit-logged.',
+    ok: { label: 'Download', color: 'primary' },
+    cancel: { label: justCreated ? 'Later' : 'Cancel', flat: true },
+    persistent: justCreated
+  }).onOk(() => {
+    void downloadRecoveryKit(g);
+  });
+};
+
+const downloadRecoveryKit = async (g: GroupSummary) => {
+  try {
+    const res = await fetch(`/api/groups/${encodeURIComponent(g.groupId)}/recovery-kit`, {
+      credentials: 'include'
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `maia-group-recovery-${g.groupId}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    await loadGroups(); // refresh lastExportedAt display
+    $q.notify({ type: 'positive', message: 'Recovery kit downloaded — store it securely offline.' });
+  } catch (err) {
+    $q.notify({
+      type: 'negative',
+      message: err instanceof Error ? err.message : 'Failed to download recovery kit'
+    });
   }
 };
 
