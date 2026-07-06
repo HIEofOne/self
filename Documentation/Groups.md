@@ -141,8 +141,8 @@ Tracked here until resolved; resolution gets recorded in the Implementation Log.
    Implementation Log (includes E2E-encryption amendment to §3.2)
 4. ~~Autonomous resource ceiling~~ — **RESOLVED 2026-07-06**, see
    Implementation Log (asymmetric ceiling; pack-validation constraint)
-5. Match-query expressiveness: free text evaluated by private AI vs. a
-   controlled vocabulary
+5. ~~Match-query expressiveness~~ — **RESOLVED 2026-07-06**, see
+   Implementation Log (group-curated tags + free-text elaboration)
 6. Registry multi-tenancy: one deployment hosting many groups (lean yes)
 
 ## 7. Implementation Log
@@ -222,3 +222,17 @@ and any design decisions resolved.
   Principle: defaults never release; admins can never release; patients may
   deliberately pre-authorize release of their own existing records;
   AI-generated clinical content to others always has a human in the loop.
+- **2026-07-06** — **§6.5 RESOLVED: match-query expressiveness — hybrid.**
+  A match query = one topic tag from a small group-curated vocabulary
+  (maintained by the group admin, versioned with the policy pack; ~a dozen
+  condition-appropriate entries) + optional free-text elaboration. Division
+  of labor: Cedar filters deterministically on the tag (the patient overlay
+  tunes which tags may reach notification); the patient's private AI judges
+  relevance of the full query against the KB; match → notify patient,
+  no-match → silence (unchanged). Security note recorded: the three-outcome
+  pipeline structurally contains prompt-injection blast radius — a match
+  evaluation has no outward channel (its only outputs are notify-patient or
+  silence), so hostile queries can annoy but cannot extract. Notification
+  cards render attacker-controlled text defensively (sanitized AI summary;
+  raw text behind a tap). Queries are signed, attributable to a pairwiseId,
+  and rate-limited by the relay's existing counters.
