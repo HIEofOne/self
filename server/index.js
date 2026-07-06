@@ -1547,8 +1547,19 @@ setupChatRoutes(app, chatClient, cloudant, doClient, appendUserProvisioningEvent
 // File routes
 setupFileRoutes(app, cloudant, doClient);
 
-// Group registry routes (Groups & AS feature — see Documentation/Groups.md)
-setupGroupRoutes(app, cloudant, auditLog);
+// Group registry routes (Groups & AS feature — see Documentation/Groups.md).
+// sendEmail is injected lazily: initResend is a hoisted function declaration
+// defined further down; it resolves the Resend client (or null when
+// RESEND_API_KEY is unset — invites then rely on the copyable link).
+setupGroupRoutes(app, cloudant, auditLog, {
+  sendEmail: async (to, subject, text) => {
+    const resend = await initResend();
+    if (!resend) return false;
+    const from = process.env.RESEND_FROM_EMAIL || 'noreply@maia.healthurl.com';
+    await resend.emails.send({ from, to, subject, text });
+    return true;
+  }
+});
 
 const DEEP_LINK_COOKIE = 'maia_deep_link_user';
 const DEEP_LINK_COOKIE_MAX_AGE = 30 * 24 * 60 * 60 * 1000;

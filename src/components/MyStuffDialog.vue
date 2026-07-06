@@ -1065,6 +1065,11 @@
             />
           </q-tab-panel>
 
+          <!-- Groups Tab (Groups & AS feature — Documentation/Groups.md §7.4) -->
+          <q-tab-panel name="groups" class="q-pa-none">
+            <GroupsPanel :userId="userId" />
+          </q-tab-panel>
+
           <!-- Privacy Filter Tab -->
           <q-tab-panel name="privacy">
             <!-- Filter Current Chat Button -->
@@ -1842,6 +1847,7 @@ import MarkdownIt from 'markdown-it';
 import PdfViewerModal from './PdfViewerModal.vue';
 import TextViewerModal from './TextViewerModal.vue';
 import Lists from './Lists.vue';
+import GroupsPanel from './GroupsPanel.vue';
 import { useQuasar } from 'quasar';
 import { deleteChatById } from '../utils/chatApi';
 import { processFileNCitations } from '../utils/fileNCitations';
@@ -2054,6 +2060,7 @@ const railTabs = computed(() => [
   { name: 'chats',      icon: 'chat',         label: 'Saved Chats',     alertCount: props.savedChatCount || 0, alertOutline: false },
   { name: 'summary',    icon: 'description',  label: 'Patient Summary', alertCount: 0, alertOutline: summaryNeedsVerify.value },
   { name: 'lists',      icon: 'list',         label: 'Lists',           alertCount: 0, alertOutline: !!props.medsNeedsVerify },
+  { name: 'groups',     icon: 'groups',       label: 'Groups',          alertCount: 0, alertOutline: false },
   { name: 'privacy',    icon: 'privacy_tip',  label: 'Privacy Filter',  alertCount: 0, alertOutline: false },
   { name: 'diary',      icon: 'book',         label: 'Patient Diary',   alertCount: 0, alertOutline: false },
   { name: 'references', icon: 'link',         label: 'References',      alertCount: 0, alertOutline: false }

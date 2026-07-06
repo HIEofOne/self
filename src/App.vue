@@ -3211,12 +3211,38 @@ onMounted(async () => {
     params.delete('editMedications');
     params.delete('userId');
     const newSearch = params.toString();
-    const newUrl = newSearch 
+    const newUrl = newSearch
       ? `${window.location.pathname}?${newSearch}${window.location.hash}`
       : `${window.location.pathname}${window.location.hash}`;
     window.history.replaceState({}, '', newUrl);
   }
-  
+
+  // Group invite link (Groups & AS feature — Documentation/Groups.md §7.4).
+  // Stored in localStorage (not sessionStorage) so it survives the setup
+  // wizard for brand-new users, including a closed tab between clicking the
+  // invite and finishing setup (join-group ≡ get-a-MAIA). The Groups tab in
+  // the Workbook surfaces it as a pending-invite banner.
+  const groupInviteToken = params.get('groupInvite');
+  const groupInviteGroupId = params.get('groupId');
+  if (groupInviteToken && groupInviteGroupId) {
+    try {
+      localStorage.setItem('maiaGroupInvite', JSON.stringify({
+        token: groupInviteToken,
+        groupId: groupInviteGroupId,
+        registry: params.get('registry') || window.location.origin,
+        capturedAt: new Date().toISOString()
+      }));
+    } catch { /* storage unavailable — invite link can be re-clicked */ }
+    params.delete('groupInvite');
+    params.delete('groupId');
+    params.delete('registry');
+    const cleanedSearch = params.toString();
+    const cleanedUrl = cleanedSearch
+      ? `${window.location.pathname}?${cleanedSearch}${window.location.hash}`
+      : `${window.location.pathname}${window.location.hash}`;
+    window.history.replaceState({}, '', cleanedUrl);
+  }
+
   let share: string | null = null;
   const queryShare = params.get('share');
   if (queryShare) {
