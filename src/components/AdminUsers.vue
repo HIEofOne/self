@@ -38,6 +38,9 @@
         </div>
       </q-card-section>
     </q-card>
+
+    <!-- Patient Groups management (Groups & AS feature — Documentation/Groups.md) -->
+    <AdminGroups />
     </div>
 
     <q-table
@@ -159,6 +162,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue';
 import { useQuasar } from 'quasar';
+import AdminGroups from './AdminGroups.vue';
 
 const $q = useQuasar();
 

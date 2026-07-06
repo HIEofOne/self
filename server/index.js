@@ -33,6 +33,7 @@ import setupAuthRoutes from './routes/auth.js';
 import setupChatRoutes, { getOwnerIdForDeepLinkSession } from './routes/chat.js';
 import setupFileRoutes from './routes/files.js';
 import { getUserBucketSize } from './routes/files.js';
+import setupGroupRoutes from './routes/groups.js';
 import {
   S3Client,
   HeadBucketCommand,
@@ -838,7 +839,7 @@ ensureBucketExists();
     return;
   }
 
-  const databases = ['maia_sessions', 'maia_users', 'maia_audit_log', 'maia_chats'];
+  const databases = ['maia_sessions', 'maia_users', 'maia_audit_log', 'maia_chats', 'maia_groups'];
 
   for (const dbName of databases) {
     try {
@@ -1545,6 +1546,9 @@ setupChatRoutes(app, chatClient, cloudant, doClient, appendUserProvisioningEvent
 
 // File routes
 setupFileRoutes(app, cloudant, doClient);
+
+// Group registry routes (Groups & AS feature — see Documentation/Groups.md)
+setupGroupRoutes(app, cloudant, auditLog);
 
 const DEEP_LINK_COOKIE = 'maia_deep_link_user';
 const DEEP_LINK_COOKIE_MAX_AGE = 30 * 24 * 60 * 60 * 1000;
