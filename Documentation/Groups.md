@@ -139,9 +139,8 @@ Tracked here until resolved; resolution gets recorded in the Implementation Log.
    Log
 3. ~~Relay mailbox retention policy~~ — **RESOLVED 2026-07-06**, see
    Implementation Log (includes E2E-encryption amendment to §3.2)
-4. Autonomous resource ceiling: standing posture is "autonomy for
-   communication and access mediation; humans for clinical records" — confirm
-   as a permanent principle or define an exception process
+4. ~~Autonomous resource ceiling~~ — **RESOLVED 2026-07-06**, see
+   Implementation Log (asymmetric ceiling; pack-validation constraint)
 5. Match-query expressiveness: free text evaluated by private AI vs. a
    controlled vocabulary
 6. Registry multi-tenancy: one deployment hosting many groups (lean yes)
@@ -199,3 +198,27 @@ and any design decisions resolved.
      liquidity statistics — no per-message logs after disposition.
   6. The daily mailbox poll piggybacks on the §6.1 daily credential-refresh
      heartbeat (one trip).
+- **2026-07-06** — **§6.4 RESOLVED: autonomous resource ceiling —
+  asymmetric.** Who authors a permit determines what it can say:
+  1. **Group packs and shipped templates can never grant autonomous
+     clinical-resource release.** Enforced structurally: pack validation
+     rejects any policy permitting `request-resource`-class autonomous
+     actions on clinical resources (schema-level constraint in the pack
+     publishing pipeline, built into Phase 2 validation from the start).
+     Joining a group can never open a member's records.
+  2. **The patient overlay CAN pre-authorize release of the patient's own
+     existing records** — via a deliberate, high-friction, per-resource,
+     per-principal-class opt-in flow (names the resource and principal
+     class, shows a sample matching request, requires typed confirmation).
+  3. **Break-glass is the flagship application**: a patient-authored
+     standing permit granting, e.g., a verified emergency clinician
+     autonomous access to the Patient Summary, with immediate notification
+     and full audit. The policy slot exists from the start; the emergency
+     credential proof is defined in a later phase.
+  4. **The absolute line:** autonomous release means disclosure of existing
+     records with citations — AI-synthesized clinical content is never
+     delivered to a third party without patient review, regardless of any
+     policy. (This is the method-to-device boundary applied to the AS.)
+  Principle: defaults never release; admins can never release; patients may
+  deliberately pre-authorize release of their own existing records;
+  AI-generated clinical content to others always has a human in the loop.
