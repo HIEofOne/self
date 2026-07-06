@@ -135,9 +135,8 @@ Tracked here until resolved; resolution gets recorded in the Implementation Log.
 
 1. ~~Membership credential lifetime / refresh cadence~~ — **RESOLVED
    2026-07-06**, see Implementation Log
-2. First-contact handshake: does `relay-message` from a group member escalate
-   on first contact per sender, going autonomous only after the patient
-   accepts once?
+2. ~~First-contact handshake~~ — **RESOLVED 2026-07-06**, see Implementation
+   Log
 3. Relay mailbox retention policy (store-and-forward duration and deletion)
 4. Autonomous resource ceiling: standing posture is "autonomy for
    communication and access mediation; humans for clinical records" — confirm
@@ -166,3 +165,15 @@ and any design decisions resolved.
   forbid. A dormant MAIA stops refreshing and fades out fail-safe, matching
   MAIA's existing dormancy model. Dial-down option if abuse patterns warrant:
   shorten lifetime to 4–6 h; architecture unchanged.
+- **2026-07-06** — **§6.2 RESOLVED: first-contact handshake.** Pairwise
+  handshake ON by default: the first `relay-message` from a sender the
+  patient has not dealt with escalates (notification card: sender alias +
+  group + private-AI one-line summary, full text one tap away); subsequent
+  messages from an accepted sender flow autonomously. Accept / Decline /
+  Block are one-click inbox actions that write durable policy facts: Accept
+  adds the sender's pairwiseId to the patient's accepted-senders entity set;
+  Block writes an overlay forbid. The default is a patient-overlay toggle;
+  the mentor policy pack auto-accepts first contact by design (volunteering
+  to be reachable is what the mentor role means). Side effect: during the
+  ≤24 h credential revocation tail (§6.1), a revoked member can only send
+  connection requests, not deliver content to non-accepted members.
