@@ -143,9 +143,138 @@ Tracked here until resolved; resolution gets recorded in the Implementation Log.
    Implementation Log (asymmetric ceiling; pack-validation constraint)
 5. ~~Match-query expressiveness~~ — **RESOLVED 2026-07-06**, see
    Implementation Log (group-curated tags + free-text elaboration)
-6. Registry multi-tenancy: one deployment hosting many groups (lean yes)
+6. ~~Registry multi-tenancy~~ — **RESOLVED 2026-07-06**, see Implementation
+   Log (multi-group from day one; per-group signing keys)
 
-## 7. Implementation Log
+All six initial design decisions are resolved. New open items get added here
+as implementation surfaces them.
+
+## 7. Phase 1 Implementation Plan
+
+Scoped 2026-07-06 from the resolved §6 decisions. Each work item is a
+PR-sized unit landing on `main` behind natural gating (Groups UI only appears
+when a deployment has a group or the user has a membership), so `main` stays
+releasable throughout.
+
+### 7.1 Data model
+
+**`maia_groups`** (new db, on the group host) — one doc per group:
+
+```json
+{
+  "_id": "<groupId>",
+  "type": "group",
+  "name": "…", "description": "…",
+  "signingKey": { "publicKeyJwk": {}, "privateKeyJwk": {} },
+  "tagVocabulary": ["mentorship", "newly-diagnosed", "…"],
+  "policyPackVersion": 0,
+  "members": [{
+    "pairwiseId": "…",
+    "alias": "…",
+    "signingPublicKeyJwk": {},
+    "encryptionPublicKeyJwk": {},
+    "status": "invited | active | revoked",
+    "invitedAt": "…", "joinedAt": "…",
+    "inviteEmail": "(retained only while status=invited; deleted at join)",
+    "mentor": false,
+    "lastRefreshAt": "…"
+  }]
+}
+```
+
+Registry-minimalism rule: the invite email is deleted the moment the member
+joins — after that, the registry knows only alias, keys, status, and the
+refresh heartbeat. All member contact is mediated (relay), never direct.
+
+**`maia_relay`** (new db, on the group host) — transient mailbox messages:
+`{groupId, toPairwiseId, fromPairwiseId, ciphertext, createdAt, expiresAt}`.
+Deleted on acknowledged pull; TTL-swept at 30 days (§6.3).
+
+**`maia_as_requests`** (new db, on the member's deployment) — the patient's
+AS inbox: `{userId, requester{kind, groupId, pairwiseId, alias}, action,
+computationClass, payload, receivedAt, status, aiSummary?, decidedAt?,
+decidedBy: 'patient'|'policy'}`. Statuses per §3.2.
+
+**`maia_users` userDoc additions** (member side): `asId` (opaque, generated
+once), `groupMemberships[]` — per group: registry URL, pairwiseId, alias,
+signing + encryption keypairs, current credential (refreshed daily),
+mentor flag, receipt switches, accepted-senders list, blocked list.
+
+### 7.2 Cryptography (Phase 1)
+
+- **Signing:** Ed25519 (Node built-in). The group key signs membership
+  credentials; member keys sign requests/refresh calls.
+- **Encryption:** X25519 ECDH + AES-256-GCM (sealed-box pattern) to the
+  recipient's per-group encryption key. Members therefore hold two keypairs
+  per group (sign + encrypt), both public halves in the registry.
+- **Interim request signing:** detached JWS-style signature over the JSON
+  body. RFC 9421 HTTP Message Signatures replace this in Phase 2; the
+  envelope shape (incl. the reserved `computationClass` field) is final now.
+
+### 7.3 Endpoint surface
+
+Group registry (host deployment):
+
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `POST /api/groups` | admin session | Create group (generates signing keypair) |
+| `GET /api/groups` | admin session | List groups |
+| `PUT /api/groups/:groupId` | admin session | Update metadata / tag vocabulary |
+| `POST /api/groups/:groupId/invites` | admin session | Email invite w/ one-time token (Resend) |
+| `DELETE /api/groups/:groupId/members/:pairwiseId` | admin session | Revoke membership |
+| `GET /api/groups/:groupId/info` | public | Metadata + group public key (well-known) |
+| `POST /api/groups/:groupId/join` | invite token | Submit keys + alias → signed credential |
+| `POST /api/groups/:groupId/refresh` | member signature | Daily heartbeat: fresh credential + receipt-prefs sync + mailbox pull |
+| `POST /api/groups/:groupId/relay` | member signature | Send `{toPairwiseId, ciphertext}` |
+| `GET /api/groups/:groupId/directory` | member signature | Aliases + mentor flags |
+| `GET /api/groups/:groupId/stats` | member signature | Aggregate liquidity only |
+
+Patient AS (member deployment) — session-authenticated UI endpoints only:
+`GET /api/as/requests`, `POST /api/as/requests/:id/decision`
+(accept / decline / block — decisions write durable policy facts to the
+userDoc per §6.2). **Phase 1 has no public inbound AS endpoint**: all intake
+is via the member's own MAIA pulling the relay, so nothing listens for
+unsolicited traffic until Phase 2 introduces the signed public endpoint.
+
+Server cron: daily per-membership refresh+poll; TTL sweeps (relay messages,
+expired invites, expired pending requests).
+
+### 7.4 Frontend
+
+- **Admin:** new `AdminGroups.vue` alongside AdminUsers — create group, edit
+  tag vocabulary, invite by email, member list with revoke.
+- **Patient:** new Workbook rail tab **Groups** containing: memberships
+  (join via invite link, alias choice, mentor toggle, receipt switches),
+  member directory, and the **Requests** inbox (pending cards with sender
+  alias + group + AI summary, full text behind a tap; Accept / Decline /
+  Block).
+- **Invite → join flow:** invite email links to the host deployment with the
+  token. Existing user: sign in → choose alias → join. New user: the token
+  rides through the setup wizard, membership finalizes when setup completes
+  (join-group ≡ get-a-MAIA).
+- Email notification (Resend) to the patient on each new pending request.
+
+### 7.5 Work breakdown (PR-sized, in order)
+
+1. **PR-1 — Registry & admin UI:** `maia_groups`, group CRUD endpoints,
+   per-group signing keys, `AdminGroups.vue` (create / tags / list).
+2. **PR-2 — Invites & join:** invite emails + tokens, join endpoint
+   (keys/alias/credential), patient Groups tab skeleton with membership
+   list, invite-through-wizard path.
+3. **PR-3 — Relay & heartbeat:** `maia_relay`, relay/refresh endpoints,
+   E2E encryption, daily cron (refresh + poll + TTL sweeps).
+4. **PR-4 — Requests inbox:** `maia_as_requests`, poller→inbox conversion,
+   inbox UI cards, accept/decline/block writing policy facts, Resend
+   notifications, private-AI request summaries.
+5. **PR-5 — Directory & liquidity:** member directory view, mentor flag,
+   receipt switches, aggregate stats.
+
+Micro-decisions embedded above, flagged for veto: (a) invite email deleted
+from the registry at join; (b) no public inbound AS endpoint until Phase 2;
+(c) two keypairs per membership (sign + encrypt); (d) interim detached
+signature before RFC 9421.
+
+## 8. Implementation Log
 
 Entries are appended as work lands: date, version, branch/PR, what changed,
 and any design decisions resolved.
@@ -236,3 +365,18 @@ and any design decisions resolved.
   cards render attacker-controlled text defensively (sanitized AI summary;
   raw text behind a tap). Queries are signed, attributable to a pairwiseId,
   and rate-limited by the relay's existing counters.
+- **2026-07-06** — **§6.6 RESOLVED: registry multi-tenancy — yes, from day
+  one.** One deployment hosts many groups. Two commitments pinned: (1)
+  **signing keys are per-group, not per-deployment** — credentials verify
+  against the group's own key, so a group can migrate hosts without
+  re-keying members; (2) **pairwise IDs remain per-group even when groups
+  share a host** — the protocol never links a patient's identities across
+  groups. Phase 1: group admin = deployment admin; delegated per-group
+  admin roles are a noted future enhancement (the per-group key
+  architecture already accommodates them).
+- **2026-07-06** — **§7 Phase 1 Implementation Plan drafted** — data model
+  (`maia_groups`, `maia_relay`, `maia_as_requests`, userDoc additions),
+  cryptography (Ed25519 + X25519/AES-GCM, interim detached signatures),
+  endpoint surface (registry + session-authed inbox; no public inbound AS
+  endpoint until Phase 2), frontend (AdminGroups.vue, patient Groups tab
+  with Requests inbox, invite-through-wizard), and a 5-PR work breakdown.
