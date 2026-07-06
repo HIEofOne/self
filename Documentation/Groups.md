@@ -133,7 +133,8 @@ actually resides on another domain.
 
 Tracked here until resolved; resolution gets recorded in the Implementation Log.
 
-1. Membership credential lifetime / refresh cadence (revocation latency)
+1. ~~Membership credential lifetime / refresh cadence~~ — **RESOLVED
+   2026-07-06**, see Implementation Log
 2. First-contact handshake: does `relay-message` from a group member escalate
    on first contact per sender, going autonomous only after the patient
    accepts once?
@@ -153,3 +154,15 @@ and any design decisions resolved.
 - **2026-07-06** — Document created; feature branch `claude/group-feature`
   cut from main at v1.4.99. No implementation yet; design discussion in
   progress.
+- **2026-07-06** — **§6.1 RESOLVED: membership credential lifetime.**
+  24-hour credentials with automatic server-side daily refresh. Offline
+  verification preserved (registry never observes member-to-member
+  interactions; refresh heartbeats are the only registry contact and double
+  as the liveness signal for aggregate liquidity stats). Revocation
+  characteristics: relayed traffic revokes instantly (the relay lives on the
+  registry's own deployment and checks live membership); direct AS-to-AS
+  contact honors the credential for at most 24 h after revocation; any
+  patient can instantly and unilaterally block a pairwiseId via an overlay
+  forbid. A dormant MAIA stops refreshing and fades out fail-safe, matching
+  MAIA's existing dormancy model. Dial-down option if abuse patterns warrant:
+  shorten lifetime to 4–6 h; architecture unchanged.
