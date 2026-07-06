@@ -137,7 +137,8 @@ Tracked here until resolved; resolution gets recorded in the Implementation Log.
    2026-07-06**, see Implementation Log
 2. ~~First-contact handshake~~ — **RESOLVED 2026-07-06**, see Implementation
    Log
-3. Relay mailbox retention policy (store-and-forward duration and deletion)
+3. ~~Relay mailbox retention policy~~ — **RESOLVED 2026-07-06**, see
+   Implementation Log (includes E2E-encryption amendment to §3.2)
 4. Autonomous resource ceiling: standing posture is "autonomy for
    communication and access mediation; humans for clinical records" — confirm
    as a permanent principle or define an exception process
@@ -177,3 +178,24 @@ and any design decisions resolved.
   to be reachable is what the mentor role means). Side effect: during the
   ≤24 h credential revocation tail (§6.1), a revoked member can only send
   connection requests, not deliver content to non-accepted members.
+- **2026-07-06** — **§6.3 RESOLVED: relay mailbox retention** (with a
+  structural amendment to §3.2):
+  1. **E2E encryption (amendment):** relayed payloads are encrypted to the
+     recipient's per-group public key (already published in the registry);
+     the relay stores ciphertext + routing envelope only. The content
+     honeypot is eliminated by construction, not by retention policy.
+  2. Delivered messages are deleted on acknowledged pull; messages then live
+     only at the edges (sender's and recipient's own MAIAs, each
+     audit-logging locally).
+  3. Undelivered TTL: 30 days, then silent deletion.
+  4. **Receipts are recipient policy** (AG amendment): per-patient overlay
+     switches for delivery and read receipts, default OFF; receipts are only
+     ever issued to accepted senders (first-contact strangers always get
+     silence — no probe oracle); expiry notices are issued by the relay per
+     the recipient's preference, synced privately at refresh time; the
+     mentor pack defaults receipts ON. Receipt issuance is expressed as
+     Cedar actions (`issue-delivery-receipt`, `issue-read-receipt`).
+  5. Relay retains only rolling per-sender rate-limit counters and aggregate
+     liquidity statistics — no per-message logs after disposition.
+  6. The daily mailbox poll piggybacks on the §6.1 daily credential-refresh
+     heartbeat (one trip).
