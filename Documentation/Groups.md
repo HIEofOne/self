@@ -104,6 +104,14 @@ Core principles:
 - **State, not weights:** personalization of any per-patient agent behavior
   comes from the patient's evolving record (state), never from fine-tuning
   (weights).
+- **Payment slot** in the AS request envelope: a proof-format-agnostic field
+  reserved so request-attached payments ("stamps") can arrive in a later
+  phase without re-architecture — a payment proof is just another credential
+  in the envelope. The Cedar context vocabulary likewise reserves `price` /
+  `stampValue` so pricing is policy (group packs set defaults; the patient
+  overlay can price their own attention). An unpaid request that policy
+  prices above zero receives an HTTP 402 challenge — a parameterized deny,
+  not a new pipeline outcome. See §6.8.
 
 ## 4. Data Model (planned)
 
@@ -152,6 +160,37 @@ as implementation surfaces them.
 7. ~~Group signing-key durability & recovery~~ — **RESOLVED 2026-07-06**,
    see Implementation Log (admin recovery kit in PR-2; CouchDB snapshot
    requirement; Phase 4 rotation doubles as recovery)
+
+8. **Payments** — direction accepted 2026-07-06; per-phase implementation
+   decisions remain open. The accepted invariants:
+   1. **Payment identity binds to the hosting relationship (userId ↔ host),
+      never to the group protocol (pairwiseId).** No payment data in the
+      registry, the relay, or any AS message — payments must never become
+      the correlation vector that deanonymizes pairwise membership.
+   2. **No pairwise amounts persist in the middle.** Request-attached
+      payments ("stamps") are flat-rate per request class and accounted as
+      counters only (stamps-spent / stamps-earned per member) — the same
+      privacy class as the §6.3 rate-limit counters. Cross-domain
+      settlement is periodic host-to-host netting, never member-to-member.
+   3. **Price is Cedar context; payment proof is an envelope credential**
+      (see §3.4 reserved shapes). Group packs set default prices; the
+      patient overlay prices the patient's own attention. Unpaid requests
+      get an HTTP 402 challenge. One mechanism serves spam economics
+      (no stamp, no escalation), mentor compensation, and consent-gated
+      research queries ("answers, never data").
+   4. **Credits redeem in service, never cash** (hosting offsets, AI usage,
+      request fees) — keeps the group outside money-transmitter scope until
+      a deliberate, counseled bearer-token/mint phase (L402/blinded ecash
+      is the standards-track endgame for unlinkable request payments).
+   5. Revenue objects and payer models: hosting share (seat-based group
+      billing via the host as the default for the group archetype;
+      member-pays-host for solo/practice archetypes), metered AI use
+      (per-user usage ledger on the member's own deployment; pooled group
+      token budgets preferred over per-member overage), and
+      requester-pays stamps.
+   Phasing: P0 usage ledger + reserved shapes (rides Phase 1–2) →
+   P1 seat billing → P2 metered AI → P3 stamps/402/Cedar pricing (with
+   Phase 3 matching) → P4 bearer tokens + federation netting.
 
 ## 7. Phase 1 Implementation Plan
 
