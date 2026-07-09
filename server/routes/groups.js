@@ -1385,6 +1385,32 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     }
   });
 
+  // GET /api/user-groups/alerts?userId= — lightweight counts that feed the
+  // Groups rail-icon indicator (the blue triangle) so the UI can flag
+  // "something is waiting for you in Groups" without opening the tab:
+  //   - pendingRequests: first-contact AS requests still awaiting a decision
+  //   - messageCount:    total decrypted peer messages across memberships
+  // (Pending invitations are a client-side signal — localStorage — so they
+  // are not included here.) Cheap: one AS_REQUESTS scan + one userDoc read.
+  app.get('/api/user-groups/alerts', async (req, res) => {
+    const userId = requireMatchingUser(req, res);
+    if (!userId) return;
+    try {
+      const all = await cloudant.getAllDocuments(AS_REQUESTS_DB);
+      const pendingRequests = (all || []).filter(
+        (r) => r && r.type === 'as_request' && r.userId === userId && r.status === 'pending'
+      ).length;
+      const userDoc = await cloudant.getDocument(USERS_DB, userId);
+      const messageCount = (userDoc?.groupMemberships || []).reduce(
+        (n, m) => n + ((m.inbox || []).length), 0
+      );
+      res.json({ success: true, pendingRequests, messageCount });
+    } catch (error) {
+      console.error('[user-groups] alerts failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to load alerts' });
+    }
+  });
+
   // POST /api/user-groups/requests/:id/decision — accept / decline / block.
   // Writes the Phase-1 policy facts (§6.2): accept adds the sender to the
   // membership's acceptedSenders; block adds to blockedSenders (future
