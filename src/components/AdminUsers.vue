@@ -1,7 +1,15 @@
 <template>
   <q-page class="q-pa-md">
     <div class="q-mb-lg">
-      <div class="row items-center justify-between q-mb-sm">
+      <!-- Single combined status line, just before the header -->
+      <div class="text-caption text-grey-7 q-mb-xs">
+        Total Users: {{ totalUsers }} &nbsp;•&nbsp; Deep Link Users: {{ totalDeepLinkUsers }}
+        <template v-if="passkeyConfig">
+          &nbsp;•&nbsp; Passkey rpID: {{ passkeyConfig.rpID }}
+          &nbsp;•&nbsp; Origin: {{ passkeyConfig.origin }}
+        </template>
+      </div>
+      <div class="row items-center justify-between q-mb-xs">
         <div class="text-h4">
           User Administration
           <span class="text-caption text-grey-6 q-ml-sm">v{{ appVersion }}</span>
@@ -16,31 +24,20 @@
           @click="signOutAdmin"
         />
       </div>
-      <div class="text-body2 text-grey-7 q-mb-xs">
-        Total Users: {{ totalUsers }} | Deep Link Users: {{ totalDeepLinkUsers }}
+      <!-- Customer balance collapsed to a single line just below the header -->
+      <div class="text-caption text-grey-7 q-mb-md">
+        <template v-if="balanceLoading">Customer balance: loading…</template>
+        <template v-else-if="balanceError">
+          <span class="text-negative">Customer balance: {{ balanceError }}</span>
+          <span v-if="balanceHint" class="text-orange-9">&nbsp;({{ balanceHint }})</span>
+        </template>
+        <template v-else>
+          Customer balance —
+          <template v-for="(entry, i) in balanceEntries" :key="entry.key">
+            <span v-if="i > 0">&nbsp;•&nbsp;</span><strong>{{ entry.label }}:</strong> {{ entry.value }}
+          </template>
+        </template>
       </div>
-    <div class="text-body2 text-grey-7" v-if="passkeyConfig">
-        Passkey rpID: {{ passkeyConfig.rpID }} | Passkey Origin: {{ passkeyConfig.origin }}
-      </div>
-    <q-card class="q-mt-md">
-      <q-card-section>
-        <div class="text-h6 q-mb-sm">Customer Balance</div>
-        <div v-if="balanceLoading" class="text-body2 text-grey-7">
-          Loading customer balance...
-        </div>
-        <div v-else-if="balanceError">
-          <div class="text-body2 text-negative">{{ balanceError }}</div>
-          <div v-if="balanceHint" class="text-caption text-orange-9 q-mt-xs">
-            {{ balanceHint }}
-          </div>
-        </div>
-        <div v-else>
-          <div v-for="entry in balanceEntries" :key="entry.key" class="text-body2">
-            <strong>{{ entry.label }}:</strong> {{ entry.value }}
-          </div>
-        </div>
-      </q-card-section>
-    </q-card>
 
     <!-- Patient Groups management (Groups & AS feature — Documentation/Groups.md) -->
     <AdminGroups />

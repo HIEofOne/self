@@ -503,3 +503,22 @@ and any design decisions resolved.
   welcome page and the Groups tab, including the join-failure path; the
   admin invite-result note now states that a new invite replaces older
   links.
+- **2026-07-08** — **PR-2.3: admin UX + banner overflow + admin session.**
+  From AG's v1.5.5 test: (1) Welcome-page invite banners overflowed their
+  box — root cause was flexbox `min-width: auto` preventing shrink;
+  rewritten as plain flex divs with `min-width: 0` + `word-break`. (2)
+  Admin header collapsed: a single combined status line (users, deep-link
+  users, passkey rpID/origin) just before the header; Customer Balance
+  collapsed to a single line just below it. (3) Patient Groups redesigned
+  from cards+modal to an inline table: one single-line header per group
+  (name, id, counts, tags, created, recovery-kit state, action icons)
+  with member rows beneath (email/alias · status · accepted/invited/opened
+  dates · mentor) and a red trash per member (cancel invite / revoke /
+  remove revoked entry, each behind a confirm). Server DELETE now
+  hard-removes an already-revoked member (`member_removed`) so the trash
+  is meaningful in every state. (4) **Admin session reuse**: the `/admin`
+  route now checks `/api/current-user` before prompting for a passkey, so
+  a tab reload within the 24 h session (including Chrome incognito, where
+  the cookie persists for the window's life) no longer re-prompts. No new
+  cookie was needed — the 24 h express-session cookie already existed; the
+  frontend simply wasn't consulting it on the admin route.
