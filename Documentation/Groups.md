@@ -493,3 +493,13 @@ and any design decisions resolved.
   fields (registry-minimalism). (4) Admin user list gains a **Groups**
   column (group-name badges from `userDoc.groupMemberships`). (5) App
   version shown in the admin page header.
+- **2026-07-07** — **PR-2.2: dead invite tokens explain themselves** (from
+  AG's re-test: the invite banner flashed sub-second and vanished in both
+  browsers). Cause: when `invite-info` reported the token invalid, the
+  banner was cleared silently — and the tested link was dead because a
+  newer invite to the same address had replaced it (single-active-invite
+  design). Fix: invalid tokens now swap the banner for a persistent,
+  dismissible explanation (used/replaced vs expired wording) on both the
+  welcome page and the Groups tab, including the join-failure path; the
+  admin invite-result note now states that a new invite replaces older
+  links.

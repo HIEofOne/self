@@ -42,6 +42,17 @@
       </div>
     </q-banner>
 
+    <!-- Dead invite token: persistent explanation, dismissible -->
+    <q-banner v-if="invalidInviteMessage" class="bg-red-1 q-mb-md" rounded>
+      <template v-slot:avatar>
+        <q-icon name="link_off" color="negative" />
+      </template>
+      <div class="text-body2">{{ invalidInviteMessage }}</div>
+      <template v-slot:action>
+        <q-btn flat dense color="negative" label="Dismiss" @click="invalidInviteMessage = ''" />
+      </template>
+    </q-banner>
+
     <!-- Memberships -->
     <div v-if="loading" class="text-center q-pa-md">
       <q-spinner size="2em" />
@@ -99,6 +110,8 @@ const INVITE_LS_KEY = 'maiaGroupInvite';
 const memberships = ref<Membership[]>([]);
 const loading = ref(false);
 const pendingInvite = ref<PendingInvite | null>(null);
+/** Persistent explanation when the invite token is dead (used/replaced/expired). */
+const invalidInviteMessage = ref('');
 const inviteGroupName = ref('');
 const inviteGroupDescription = ref('');
 const aliasInput = ref('');
@@ -158,9 +171,13 @@ const loadPendingInvite = async () => {
         inviteGroupName.value = data.group?.name || '';
         inviteGroupDescription.value = data.group?.description || '';
         if (data.invite && data.invite.valid === false) {
-          // Dead token (used or expired) — drop the banner.
+          // Dead token — persistent explanation, never a silent vanish.
           localStorage.removeItem(INVITE_LS_KEY);
           pendingInvite.value = null;
+          const label = data.group?.name ? `"${data.group.name}"` : 'a patient group';
+          invalidInviteMessage.value = data.invite.expired
+            ? `Your invitation to join ${label} has expired. Ask your group administrator to send a new one.`
+            : `This invitation link to join ${label} is no longer valid — it may have already been used, or a newer invitation replaced it (only the most recent invitation link works). Check your email for a newer invitation, or ask your group administrator to send one.`;
           return;
         }
       }
@@ -199,10 +216,13 @@ const joinPendingGroup = async () => {
     $q.notify({ type: 'positive', message: `Welcome to ${data.membership?.groupName || 'the group'}!` });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Failed to join group';
-    // A dead token can't succeed on retry — clear the banner.
+    // A dead token can't succeed on retry — swap the join banner for a
+    // persistent explanation.
     if (/invalid|already|expired/i.test(msg)) {
       localStorage.removeItem(INVITE_LS_KEY);
       pendingInvite.value = null;
+      invalidInviteMessage.value =
+        `${msg}. Ask your group administrator to send a new invitation if needed.`;
     }
     $q.notify({ type: 'negative', message: msg });
   } finally {

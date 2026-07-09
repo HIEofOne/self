@@ -72,6 +72,18 @@
                   </template>
                 </q-banner>
 
+                <!-- Dead invite token: persistent explanation (never a
+                     silent sub-second flash). Dismissible. -->
+                <q-banner v-if="invalidInviteMessage" class="bg-red-1 q-mb-md" rounded>
+                  <template v-slot:avatar>
+                    <q-icon name="link_off" color="negative" />
+                  </template>
+                  <div class="text-body2">{{ invalidInviteMessage }}</div>
+                  <template v-slot:action>
+                    <q-btn flat dense color="negative" label="Dismiss" @click="invalidInviteMessage = ''" />
+                  </template>
+                </q-banner>
+
                 <!-- Account status cards derived from IndexedDB + .webloc -->
                 <div v-if="discoveredUsers.length > 0" class="q-mb-md">
                   <div
@@ -852,6 +864,10 @@ const user = ref<User | null>(null);
 // here knows what to do — including "continue in Chrome" guidance.
 const pendingGroupInvite = ref<{ token: string; groupId: string; registry: string } | null>(null);
 const pendingInviteGroupName = ref('');
+/** Set when the invite token turns out to be dead (used, replaced by a
+ *  newer invite, or expired). Drives a PERSISTENT explanatory banner —
+ *  silently clearing produced an unreadable sub-second flash. */
+const invalidInviteMessage = ref('');
 // File System Access API is MAIA's storage requirement (Chrome 122+).
 const isChromeCapable = typeof (window as unknown as { showDirectoryPicker?: unknown }).showDirectoryPicker === 'function';
 
@@ -876,9 +892,14 @@ const loadPendingGroupInvite = async () => {
       if (res.ok && data.success) {
         pendingInviteGroupName.value = data.group?.name || '';
         if (data.invite && data.invite.valid === false) {
-          // Dead token (used or expired) — drop the banner.
+          // Dead token — replace the invite banner with a persistent
+          // explanation instead of silently vanishing.
           localStorage.removeItem('maiaGroupInvite');
           pendingGroupInvite.value = null;
+          const groupLabel = data.group?.name ? `"${data.group.name}"` : 'a patient group';
+          invalidInviteMessage.value = data.invite.expired
+            ? `Your invitation to join ${groupLabel} has expired. Ask your group administrator to send a new one.`
+            : `This invitation link to join ${groupLabel} is no longer valid — it may have already been used, or a newer invitation was sent to you (only the most recent invitation link works). Check your email for a newer invitation, or ask your group administrator to send one.`;
         }
       }
     } catch { /* banner shows generic text */ }

@@ -161,7 +161,7 @@
           <q-banner v-if="lastInviteLink" class="bg-green-1 q-mt-sm" rounded dense>
             <div class="text-caption">
               Invite {{ lastInviteEmailSent ? 'emailed' : 'created (email not configured)' }} — link
-              valid 14 days:
+              valid 14 days. Replaces any earlier invite to this address (older links stop working):
             </div>
             <div class="row items-center no-wrap q-mt-xs">
               <div class="text-caption ellipsis" style="max-width: 440px">{{ lastInviteLink }}</div>
