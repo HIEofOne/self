@@ -839,7 +839,7 @@ ensureBucketExists();
     return;
   }
 
-  const databases = ['maia_sessions', 'maia_users', 'maia_audit_log', 'maia_chats', 'maia_groups', 'maia_relay'];
+  const databases = ['maia_sessions', 'maia_users', 'maia_audit_log', 'maia_chats', 'maia_groups', 'maia_relay', 'maia_as_requests'];
 
   for (const dbName of databases) {
     try {

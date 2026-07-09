@@ -53,6 +53,40 @@
       </template>
     </q-banner>
 
+    <!-- Requests inbox (AS, Phase 1 — every request escalates to you) -->
+    <div v-if="requests.length" class="q-mb-md">
+      <div class="row items-center q-mb-xs">
+        <div class="text-subtitle2">Requests</div>
+        <q-btn flat dense round size="sm" icon="refresh" :loading="loadingRequests" class="q-ml-xs" @click="loadRequests">
+          <q-tooltip>Refresh requests</q-tooltip>
+        </q-btn>
+      </div>
+      <div
+        v-for="r in requests"
+        :key="r.id"
+        class="q-pa-sm q-mb-xs"
+        style="border: 1px solid #e0e0e0; border-radius: 8px"
+      >
+        <div class="text-body2">
+          A member of <strong>{{ r.groupName }}</strong> sent a request
+          <span class="text-grey-7">({{ r.action }})</span>
+        </div>
+        <div v-if="r.aiSummary" class="text-caption text-grey-8 q-mt-xs">{{ r.aiSummary }}</div>
+        <div v-else-if="r.payload" class="text-caption text-grey-8 q-mt-xs" style="white-space: pre-wrap; word-break: break-word">
+          {{ typeof r.payload === 'string' ? r.payload : JSON.stringify(r.payload) }}
+        </div>
+        <div class="text-caption text-grey-6 q-mt-xs">{{ formatDate(r.receivedAt) }}</div>
+        <div v-if="r.status === 'pending'" class="q-mt-xs q-gutter-sm">
+          <q-btn dense unelevated size="sm" color="primary" label="Accept" :loading="deciding === r.id" @click="decide(r, 'accept')" />
+          <q-btn dense flat size="sm" color="grey-8" label="Decline" :loading="deciding === r.id" @click="decide(r, 'decline')" />
+          <q-btn dense flat size="sm" color="negative" label="Block sender" :loading="deciding === r.id" @click="decide(r, 'block')" />
+        </div>
+        <div v-else class="q-mt-xs">
+          <q-badge :color="r.status === 'accepted' ? 'green' : r.status === 'blocked' ? 'negative' : 'grey'" :label="r.status" />
+        </div>
+      </div>
+    </div>
+
     <!-- Memberships -->
     <div v-if="loading" class="text-center q-pa-md">
       <q-spinner size="2em" />
@@ -185,6 +219,22 @@ const showReplyDialog = ref(false);
 const replyText = ref('');
 const replyTo = ref<{ groupId: string; toPairwiseId: string } | null>(null);
 const sendingReply = ref(false);
+
+interface AsRequest {
+  id: string;
+  groupId: string;
+  groupName: string;
+  fromPairwiseId: string;
+  action: string;
+  resource: string;
+  payload: unknown;
+  receivedAt: string;
+  status: string;
+  aiSummary: string | null;
+}
+const requests = ref<AsRequest[]>([]);
+const loadingRequests = ref(false);
+const deciding = ref<string | null>(null);
 
 const formatDate = (iso: string): string => {
   if (!iso) return '';
@@ -387,10 +437,14 @@ const refreshMessages = async (m: Membership) => {
     if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
     await loadMessages(m.groupId);
     await loadMemberships(); // a revoked membership would drop off here
+    await loadRequests(); // AS requests arrive via the same pull
     if (expandedGroup.value !== m.groupId) expandedGroup.value = m.groupId;
+    const bits = [];
+    if (data.newMessages) bits.push(`${data.newMessages} message(s)`);
+    if (data.newRequests) bits.push(`${data.newRequests} request(s)`);
     $q.notify({
-      type: data.newMessages ? 'positive' : 'info',
-      message: data.newMessages ? `${data.newMessages} new message(s).` : 'No new messages.'
+      type: bits.length ? 'positive' : 'info',
+      message: bits.length ? `New: ${bits.join(', ')}.` : 'Nothing new.'
     });
   } catch (err) {
     $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to check messages' });
@@ -431,8 +485,44 @@ const sendReply = async () => {
   }
 };
 
+const loadRequests = async () => {
+  loadingRequests.value = true;
+  try {
+    const res = await fetch(`/api/user-groups/requests?userId=${encodeURIComponent(props.userId)}`, {
+      credentials: 'include'
+    });
+    const data = await res.json();
+    if (res.ok && data.success) requests.value = data.requests || [];
+  } catch {
+    /* keep prior list */
+  } finally {
+    loadingRequests.value = false;
+  }
+};
+
+const decide = async (r: AsRequest, decision: 'accept' | 'decline' | 'block') => {
+  deciding.value = r.id;
+  try {
+    const res = await fetch(`/api/user-groups/requests/${encodeURIComponent(r.id)}/decision`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ userId: props.userId, decision })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    await loadRequests();
+    $q.notify({ type: 'positive', message: `Request ${data.status}.` });
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to record decision' });
+  } finally {
+    deciding.value = null;
+  }
+};
+
 onMounted(async () => {
   await loadMemberships();
+  await loadRequests();
   await loadPendingInvite();
 });
 </script>
