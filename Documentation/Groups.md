@@ -563,3 +563,27 @@ and any design decisions resolved.
   member refresh drops membership → relay to revoked member blocked;
   forged-signature relay/refresh rejected. Deferred to PR-5 (directory):
   first-contact compose to arbitrary members (PR-3 supports reply-to-sender).
+- **2026-07-09** — **PR-4: AS requests inbox** (§4 three-outcome pipeline,
+  Phase-1 "escalate everything" — no Cedar yet). New `maia_as_requests` db.
+  Per §7.3 there is no public inbound AS endpoint in Phase 1: **AS requests
+  travel over the PR-3 relay**. A request is a sealed envelope with
+  `maiaType:'as-request'` carrying `action`, `resource`, and the reserved
+  `computationClass` + `payment` slots (§3.4); the kind lives INSIDE the
+  sealed payload, so the relay still can't tell a request from a message.
+  On refresh, the member's MAIA decrypts and routes: as-request →
+  `maia_as_requests` (status `pending`), plain text → message inbox.
+  Dispatch is Phase-1 simple: every request escalates to the patient
+  (stored pending + best-effort email to `userDoc.email`); a request from a
+  **blocked** sender is silently spam-dropped on ingest (the Phase-1
+  stand-in for a Cedar forbid). Endpoints: `POST /api/user-groups/request`
+  (send an AS request — envelope, not text), `GET /api/user-groups/requests`
+  (patient inbox), `POST /api/user-groups/requests/:id/decision`
+  (accept / decline / block). accept→acceptedSenders, block→blockedSenders
+  on the membership — the §6.2 policy facts Cedar will formalize in Phase 2.
+  GroupsPanel gains a Requests section (cards + accept/decline/block).
+  Tested locally: AS request routed to requests (plain message to inbox);
+  block sets status + spam-drops the sender's next request (newRequests 0).
+  Deferred: server-side private-AI request summaries (best-effort AI on the
+  escalation path, §4) — the deterministic pipeline lands first.
+  NOTE: built stacked on PR-3 (#149, still open); the PR will be retargeted
+  to a clean branch off main once #149 merges.

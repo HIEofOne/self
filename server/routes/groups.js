@@ -22,6 +22,7 @@ import {
 const GROUPS_DB = 'maia_groups';
 const USERS_DB = 'maia_users';
 const RELAY_DB = 'maia_relay';
+const AS_REQUESTS_DB = 'maia_as_requests';
 
 /** Invite tokens are single-use and expire after 14 days. */
 const INVITE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
@@ -1118,14 +1119,18 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     if (!res.ok || !data.success) {
       throw new Error(data.error || `Registry refresh failed (HTTP ${res.status})`);
     }
-    if (data.revoked) return { revoked: true, newMessages: 0 };
+    if (data.revoked) return { revoked: true, newMessages: 0, asRequests: [] };
 
     if (data.credential) membership.credential = data.credential;
     membership.lastRefreshAt = new Date().toISOString();
 
-    // Decrypt newly-pulled messages and append to the stored inbox.
+    // Decrypt newly-pulled messages. Two kinds share the relay transport:
+    // plain member-to-member messages (stored in the inbox) and AS requests
+    // (an envelope the caller routes to maia_as_requests — PR-4). The kind
+    // is inside the SEALED payload, so the relay never sees which is which.
     const existingIds = new Set((membership.inbox || []).map((m) => m.id));
     let added = 0;
+    const asRequests = [];
     for (const m of data.messages || []) {
       if (existingIds.has(m.id)) continue;
       let text = null;
@@ -1135,6 +1140,31 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         text = null; // undecryptable — skip rather than store garbage
       }
       if (text == null) continue;
+
+      // AS request envelope? (sealed JSON with maiaType === 'as-request')
+      let envelope = null;
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed && parsed.maiaType === 'as-request') envelope = parsed;
+      } catch { /* plain text message */ }
+
+      if (envelope) {
+        asRequests.push({
+          relayId: m.id,
+          fromPairwiseId: m.fromPairwiseId,
+          receivedAt: m.createdAt,
+          action: String(envelope.action || 'message'),
+          resource: String(envelope.resource || ''),
+          computationClass: envelope.computationClass || null,
+          payment: envelope.payment || null, // reserved (§3.4); unused in Phase 1
+          nonce: envelope.nonce || null,
+          created: envelope.created || null,
+          payload: envelope.payload ?? null
+        });
+        added++;
+        continue;
+      }
+
       membership.inbox = membership.inbox || [];
       membership.inbox.push({ id: m.id, fromPairwiseId: m.fromPairwiseId, text, receivedAt: m.createdAt });
       added++;
@@ -1143,7 +1173,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     if (membership.inbox && membership.inbox.length > INBOX_MAX) {
       membership.inbox = membership.inbox.slice(-INBOX_MAX);
     }
-    return { revoked: false, newMessages: added };
+    return { revoked: false, newMessages: added, asRequests };
   };
 
   // POST /api/user-groups/refresh — refresh all of a user's memberships
@@ -1164,9 +1194,40 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     }
   });
 
-  // POST /api/user-groups/send — seal a message to another member and relay
-  // it. Reply-to-sender needs no directory: the recipient's key is looked
-  // up from the registry (signed) at send time.
+  /** Look up the recipient's encryption key (signed), seal `plaintext` to
+   *  it, and relay. Shared by plain messages (/send) and AS requests
+   *  (/request). Returns { ok } or { ok:false, status, error }. */
+  const deliverSealed = async (membership, toPairwiseId, plaintext) => {
+    const base = registryBase(membership);
+    const kq = signWithMembership(membership, {
+      action: 'member-key', groupId: membership.groupId, caller: membership.pairwiseId, ts: new Date().toISOString()
+    });
+    const keyRes = await fetch(
+      `${base}/api/groups/${encodeURIComponent(membership.groupId)}/member-key/${encodeURIComponent(toPairwiseId)}` +
+      `?caller=${encodeURIComponent(membership.pairwiseId)}&payload=${encodeURIComponent(kq.payload)}&signature=${encodeURIComponent(kq.signature)}`
+    );
+    const keyData = await keyRes.json().catch(() => ({}));
+    if (!keyRes.ok || !keyData.success) {
+      return { ok: false, status: keyRes.status === 404 ? 404 : 502, error: keyData.error || 'Recipient not found' };
+    }
+    const box = sealTo(keyData.encryptionPublicKeyJwk, plaintext);
+    const rq = signWithMembership(membership, {
+      action: 'relay', groupId: membership.groupId, fromPairwiseId: membership.pairwiseId, toPairwiseId, ts: new Date().toISOString()
+    });
+    const relayRes = await fetch(`${base}/api/groups/${encodeURIComponent(membership.groupId)}/relay`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fromPairwiseId: membership.pairwiseId, toPairwiseId, box, payload: rq.payload, signature: rq.signature })
+    });
+    const relayData = await relayRes.json().catch(() => ({}));
+    if (!relayRes.ok || !relayData.success) {
+      return { ok: false, status: 502, error: relayData.error || 'Relay failed' };
+    }
+    return { ok: true };
+  };
+
+  // POST /api/user-groups/send — seal a plain message to another member and
+  // relay it. Reply-to-sender needs no directory.
   app.post('/api/user-groups/send', async (req, res) => {
     const userId = requireMatchingUser(req, res);
     if (!userId) return;
@@ -1178,45 +1239,115 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       const userDoc = await cloudant.getDocument(USERS_DB, userId);
       const membership = (userDoc?.groupMemberships || []).find((m) => m.groupId === groupId);
       if (!membership) return res.status(404).json({ success: false, error: 'Not a member of this group' });
-      const base = registryBase(membership);
-
-      // Look up the recipient's encryption key (signed).
-      const kq = signWithMembership(membership, {
-        action: 'member-key', groupId, caller: membership.pairwiseId, ts: new Date().toISOString()
-      });
-      const keyRes = await fetch(
-        `${base}/api/groups/${encodeURIComponent(groupId)}/member-key/${encodeURIComponent(toPairwiseId)}` +
-        `?caller=${encodeURIComponent(membership.pairwiseId)}&payload=${encodeURIComponent(kq.payload)}&signature=${encodeURIComponent(kq.signature)}`
-      );
-      const keyData = await keyRes.json().catch(() => ({}));
-      if (!keyRes.ok || !keyData.success) {
-        return res.status(keyRes.status === 404 ? 404 : 502).json({ success: false, error: keyData.error || 'Recipient not found' });
-      }
-
-      // Seal and relay.
-      const box = sealTo(keyData.encryptionPublicKeyJwk, String(text));
-      const rq = signWithMembership(membership, {
-        action: 'relay', groupId, fromPairwiseId: membership.pairwiseId, toPairwiseId, ts: new Date().toISOString()
-      });
-      const relayRes = await fetch(`${base}/api/groups/${encodeURIComponent(groupId)}/relay`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fromPairwiseId: membership.pairwiseId, toPairwiseId, box, payload: rq.payload, signature: rq.signature })
-      });
-      const relayData = await relayRes.json().catch(() => ({}));
-      if (!relayRes.ok || !relayData.success) {
-        return res.status(502).json({ success: false, error: relayData.error || 'Relay failed' });
-      }
-      auditLog.logEvent({
-        type: 'user_group_message_sent',
-        userId,
-        ip: req.ip,
-        details: { groupId, toPairwiseId }
-      });
+      const result = await deliverSealed(membership, toPairwiseId, String(text));
+      if (!result.ok) return res.status(result.status).json({ success: false, error: result.error });
+      auditLog.logEvent({ type: 'user_group_message_sent', userId, ip: req.ip, details: { groupId, toPairwiseId } });
       res.json({ success: true });
     } catch (error) {
       console.error('[user-groups] send failed:', error);
       res.status(500).json({ success: false, error: 'Failed to send message' });
+    }
+  });
+
+  // POST /api/user-groups/request — send an AS request (an envelope, not a
+  // plain message) to another member. Delivered via the relay; the
+  // recipient's MAIA routes it to maia_as_requests on refresh (Phase-1
+  // "escalate everything"). The envelope carries the reserved
+  // computationClass + payment slots (§3.4) for later phases.
+  app.post('/api/user-groups/request', async (req, res) => {
+    const userId = requireMatchingUser(req, res);
+    if (!userId) return;
+    try {
+      const { groupId, toPairwiseId, action, resource, payload } = req.body || {};
+      if (!groupId || !toPairwiseId) {
+        return res.status(400).json({ success: false, error: 'groupId and toPairwiseId are required' });
+      }
+      const userDoc = await cloudant.getDocument(USERS_DB, userId);
+      const membership = (userDoc?.groupMemberships || []).find((m) => m.groupId === groupId);
+      if (!membership) return res.status(404).json({ success: false, error: 'Not a member of this group' });
+      const envelope = JSON.stringify({
+        maiaType: 'as-request',
+        action: String(action || 'relay-message'),
+        resource: String(resource || 'inbox'),
+        computationClass: 'answer-from-record', // §3.4 action ladder (Phase 1 floor)
+        payment: null, // §3.4 reserved payment slot; unused in Phase 1
+        nonce: randomBytes(8).toString('hex'),
+        created: new Date().toISOString(),
+        payload: payload ?? null
+      });
+      const result = await deliverSealed(membership, toPairwiseId, envelope);
+      if (!result.ok) return res.status(result.status).json({ success: false, error: result.error });
+      auditLog.logEvent({ type: 'user_group_request_sent', userId, ip: req.ip, details: { groupId, toPairwiseId, action } });
+      res.json({ success: true });
+    } catch (error) {
+      console.error('[user-groups] request failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to send request' });
+    }
+  });
+
+  // GET /api/user-groups/requests?userId= — the patient's AS request inbox.
+  app.get('/api/user-groups/requests', async (req, res) => {
+    const userId = requireMatchingUser(req, res);
+    if (!userId) return;
+    try {
+      const all = await cloudant.getAllDocuments(AS_REQUESTS_DB);
+      const requests = (all || [])
+        .filter((r) => r && r.type === 'as_request' && r.userId === userId)
+        .sort((a, b) => String(b.receivedAt).localeCompare(String(a.receivedAt)))
+        .map((r) => ({
+          id: r._id,
+          groupId: r.groupId,
+          groupName: r.groupName,
+          fromPairwiseId: r.fromPairwiseId,
+          action: r.action,
+          resource: r.resource,
+          payload: r.payload,
+          receivedAt: r.receivedAt,
+          status: r.status,
+          aiSummary: r.aiSummary || null
+        }));
+      res.json({ success: true, requests });
+    } catch (error) {
+      console.error('[user-groups] requests list failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to load requests' });
+    }
+  });
+
+  // POST /api/user-groups/requests/:id/decision — accept / decline / block.
+  // Writes the Phase-1 policy facts (§6.2): accept adds the sender to the
+  // membership's acceptedSenders; block adds to blockedSenders (future
+  // requests from them are spam-dropped on ingest). Cedar replaces these
+  // lists with real policies in Phase 2.
+  app.post('/api/user-groups/requests/:id/decision', async (req, res) => {
+    const userId = requireMatchingUser(req, res);
+    if (!userId) return;
+    try {
+      const { decision } = req.body || {};
+      if (!['accept', 'decline', 'block'].includes(decision)) {
+        return res.status(400).json({ success: false, error: 'decision must be accept, decline or block' });
+      }
+      const reqDoc = await cloudant.getDocument(AS_REQUESTS_DB, req.params.id);
+      if (!reqDoc || reqDoc.type !== 'as_request' || reqDoc.userId !== userId) {
+        return res.status(404).json({ success: false, error: 'Request not found' });
+      }
+      reqDoc.status = decision === 'accept' ? 'accepted' : decision === 'block' ? 'blocked' : 'declined';
+      reqDoc.decidedAt = new Date().toISOString();
+      await cloudant.saveDocument(AS_REQUESTS_DB, reqDoc);
+
+      if (decision === 'accept' || decision === 'block') {
+        const userDoc = await cloudant.getDocument(USERS_DB, userId);
+        const membership = (userDoc?.groupMemberships || []).find((m) => m.groupId === reqDoc.groupId);
+        if (membership) {
+          const list = decision === 'accept' ? 'acceptedSenders' : 'blockedSenders';
+          membership[list] = Array.from(new Set([...(membership[list] || []), reqDoc.fromPairwiseId]));
+          userDoc.updatedAt = new Date().toISOString();
+          await cloudant.saveDocument(USERS_DB, userDoc);
+        }
+      }
+      res.json({ success: true, status: reqDoc.status });
+    } catch (error) {
+      console.error('[user-groups] decision failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to record decision' });
     }
   });
 
@@ -1236,15 +1367,77 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     }
   });
 
-  /** Refresh every membership on a userDoc; drop revoked ones. Mutates
-   *  userDoc.groupMemberships. Returns { changed, summary }. */
+  /**
+   * Persist AS requests pulled during a refresh (Phase-1 "escalate
+   * everything" dispatch — no Cedar yet): store each as a pending
+   * maia_as_requests doc and best-effort notify the patient. A blocked
+   * sender is silently dropped (spam), the Phase-1 stand-in for a Cedar
+   * forbid. Returns the number stored.
+   */
+  const ingestAsRequests = async (userDoc, membership, requests) => {
+    let stored = 0;
+    const blocked = new Set(membership.blockedSenders || []);
+    for (const r of requests) {
+      if (blocked.has(r.fromPairwiseId)) continue; // spam-drop
+      const now = Date.now();
+      const doc = {
+        _id: `asreq_${now}_${randomBytes(6).toString('hex')}`,
+        type: 'as_request',
+        userId: userDoc.userId,
+        groupId: membership.groupId,
+        groupName: membership.groupName,
+        toPairwiseId: membership.pairwiseId,
+        fromPairwiseId: r.fromPairwiseId,
+        action: r.action,
+        resource: r.resource,
+        computationClass: r.computationClass,
+        payment: r.payment, // reserved (§3.4)
+        payload: r.payload,
+        nonce: r.nonce,
+        createdAt: r.created || new Date(now).toISOString(),
+        receivedAt: new Date(now).toISOString(),
+        status: 'pending' // Phase 1: every request escalates to the patient
+      };
+      try {
+        await cloudant.saveDocument(AS_REQUESTS_DB, doc);
+        stored++;
+      } catch (e) {
+        console.warn('[as-requests] store failed:', e?.message || e);
+      }
+    }
+    // Best-effort patient notification (in-app inbox is the primary channel).
+    if (stored > 0 && userDoc.email && typeof sendEmail === 'function') {
+      try {
+        const appUrl = (process.env.PUBLIC_APP_URL || '').replace(/\/$/, '');
+        await sendEmail(
+          userDoc.email,
+          `New request in your MAIA group "${membership.groupName}"`,
+          [
+            `You have ${stored} new request from a member of "${membership.groupName}".`,
+            '',
+            'Open MAIA → Workbook → Groups → Requests to review and respond.',
+            appUrl ? `\n${appUrl}` : ''
+          ].join('\n')
+        );
+      } catch (e) {
+        console.warn('[as-requests] notify failed:', e?.message || e);
+      }
+    }
+    return stored;
+  };
+
+  /** Refresh every membership on a userDoc; drop revoked ones; ingest any
+   *  AS requests. Mutates userDoc.groupMemberships. Returns { changed, summary }. */
   const refreshUserMemberships = async (userDoc) => {
     const memberships = userDoc.groupMemberships || [];
-    if (memberships.length === 0) return { changed: false, summary: { refreshed: 0, revoked: 0, newMessages: 0 } };
+    if (memberships.length === 0) {
+      return { changed: false, summary: { refreshed: 0, revoked: 0, newMessages: 0, newRequests: 0 } };
+    }
     let changed = false;
     let refreshed = 0;
     let revoked = 0;
     let newMessages = 0;
+    let newRequests = 0;
     const kept = [];
     for (const membership of memberships) {
       try {
@@ -1255,8 +1448,13 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
           continue; // drop this membership
         }
         refreshed++;
-        newMessages += r.newMessages;
-        if (r.newMessages > 0 || membership.credential) changed = true;
+        if (Array.isArray(r.asRequests) && r.asRequests.length) {
+          newRequests += await ingestAsRequests(userDoc, membership, r.asRequests);
+        }
+        // asRequests count toward newMessages in refreshMembership, but the
+        // inbox itself only grew by plain messages.
+        newMessages += r.newMessages - (r.asRequests ? r.asRequests.length : 0);
+        changed = true;
       } catch (e) {
         console.warn(`[user-groups] refresh failed for ${membership.groupId}:`, e?.message || e);
       }
@@ -1264,7 +1462,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     }
     userDoc.groupMemberships = kept;
     if (changed) userDoc.updatedAt = new Date().toISOString();
-    return { changed, summary: { refreshed, revoked, newMessages } };
+    return { changed, summary: { refreshed, revoked, newMessages, newRequests } };
   };
 
   /**
