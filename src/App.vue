@@ -1134,7 +1134,12 @@ const handleUserCardRestore = async (du: DiscoveredUser) => {
       try {
         const { pickLocalFolder, readStateFile: readState } = await import('./utils/localFolder');
         const picked = await pickLocalFolder(du.userId);
-        if (picked) {
+        if (picked?.conflict?.severity === 'block') {
+          // Selected a folder that is another account's MAIA home — refuse.
+          // (A 'warn' is expected when restoring into an existing folder, so
+          // only 'block' — a different account's state file — stops us here.)
+          $q.notify({ type: 'negative', message: picked.conflict.message, timeout: 9000 });
+        } else if (picked) {
           localFolderHandle.value = picked.handle;
           localFolderName.value = picked.folderName;
           localState = await readState(picked.handle);
