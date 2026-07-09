@@ -537,6 +537,11 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       if (member.status === 'invited') {
         doc.members = doc.members.filter((m) => m !== member);
         action = 'invite_cancelled';
+      } else if (member.status === 'revoked') {
+        // Already revoked — the trash can now hard-removes the entry for
+        // list cleanup (its credential already died at revocation).
+        doc.members = doc.members.filter((m) => m !== member);
+        action = 'member_removed';
       } else {
         member.status = 'revoked';
         member.revokedAt = new Date().toISOString();

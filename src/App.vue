@@ -45,44 +45,50 @@
 
                 <!-- Pending group invitation banner (Groups & AS feature).
                      Shown pre-auth so an invitee landing from the email
-                     knows exactly what to do next. -->
-                <q-banner v-if="pendingGroupInvite" class="bg-blue-1 q-mb-md" rounded>
-                  <template v-slot:avatar>
-                    <q-icon name="mail" color="primary" />
-                  </template>
-                  <div class="text-body2">
-                    You've been invited to join the patient group
-                    <strong>{{ pendingInviteGroupName || pendingGroupInvite.groupId }}</strong>.
-                  </div>
-                  <template v-if="isChromeCapable">
-                    <div class="text-body2 q-mt-xs">
+                     knows exactly what to do next. Plain flex div with
+                     min-width:0 so long content wraps instead of
+                     overflowing the box. -->
+                <div
+                  v-if="pendingGroupInvite"
+                  class="q-mb-md"
+                  style="display: flex; gap: 12px; align-items: flex-start; padding: 12px 16px; border-radius: 8px; background: #e3f2fd;"
+                >
+                  <q-icon name="mail" color="primary" size="24px" style="flex: 0 0 auto; margin-top: 2px;" />
+                  <div style="flex: 1 1 auto; min-width: 0; word-break: break-word;">
+                    <div class="text-body2">
+                      You've been invited to join the patient group
+                      <strong>{{ pendingInviteGroupName || pendingGroupInvite.groupId }}</strong>.
+                    </div>
+                    <div v-if="isChromeCapable" class="text-body2 q-mt-xs">
                       <strong>Sign in below</strong> (or create your MAIA) to accept.
                       After signing in, open <strong>Workbook → Groups</strong> to join.
                     </div>
-                  </template>
-                  <template v-else>
-                    <div class="text-body2 text-orange-9 q-mt-xs">
-                      MAIA needs <strong>Google Chrome</strong> to store your records.
-                      Copy this invite link and open it in Chrome to continue:
-                    </div>
-                    <div class="row items-center no-wrap q-mt-xs">
-                      <div class="text-caption ellipsis" style="max-width: 70%">{{ pendingInviteLink() }}</div>
-                      <q-btn flat dense size="sm" icon="content_copy" label="Copy" @click="copyPendingInviteLink" />
-                    </div>
-                  </template>
-                </q-banner>
+                    <template v-else>
+                      <div class="text-body2 text-orange-9 q-mt-xs">
+                        MAIA needs <strong>Google Chrome</strong> to store your records.
+                        Copy this invite link and open it in Chrome to continue:
+                      </div>
+                      <div class="row items-center q-mt-xs q-gutter-sm">
+                        <div class="text-caption" style="flex: 1 1 auto; min-width: 0; word-break: break-all;">{{ pendingInviteLink() }}</div>
+                        <q-btn flat dense size="sm" icon="content_copy" label="Copy" style="flex: 0 0 auto;" @click="copyPendingInviteLink" />
+                      </div>
+                    </template>
+                  </div>
+                </div>
 
                 <!-- Dead invite token: persistent explanation (never a
                      silent sub-second flash). Dismissible. -->
-                <q-banner v-if="invalidInviteMessage" class="bg-red-1 q-mb-md" rounded>
-                  <template v-slot:avatar>
-                    <q-icon name="link_off" color="negative" />
-                  </template>
-                  <div class="text-body2">{{ invalidInviteMessage }}</div>
-                  <template v-slot:action>
-                    <q-btn flat dense color="negative" label="Dismiss" @click="invalidInviteMessage = ''" />
-                  </template>
-                </q-banner>
+                <div
+                  v-if="invalidInviteMessage"
+                  class="q-mb-md"
+                  style="display: flex; gap: 12px; align-items: flex-start; padding: 12px 16px; border-radius: 8px; background: #ffebee;"
+                >
+                  <q-icon name="link_off" color="negative" size="24px" style="flex: 0 0 auto; margin-top: 2px;" />
+                  <div class="text-body2" style="flex: 1 1 auto; min-width: 0; word-break: break-word;">
+                    {{ invalidInviteMessage }}
+                  </div>
+                  <q-btn flat dense color="negative" label="Dismiss" style="flex: 0 0 auto;" @click="invalidInviteMessage = ''" />
+                </div>
 
                 <!-- Account status cards derived from IndexedDB + .webloc -->
                 <div v-if="discoveredUsers.length > 0" class="q-mb-md">
@@ -3284,7 +3290,23 @@ onMounted(async () => {
       authenticated.value = true;
       return;
     }
-    // Non-localhost: require passkey authentication for admin
+    // Non-localhost: reuse an existing admin session before prompting for a
+    // passkey. The session cookie lasts 24h (server: express-session
+    // maxAge), so a tab reload — including in Chrome incognito, where the
+    // cookie persists for the life of the incognito window — should NOT
+    // re-prompt. Only fall back to the passkey prompt when there's no live
+    // admin session.
+    try {
+      const meRes = await fetch('/api/current-user', { credentials: 'include' });
+      if (meRes.ok) {
+        const me = await meRes.json();
+        if (me.authenticated && me.user?.isAdmin) {
+          setAuthenticatedUser(me.user, null);
+          showAdminPage.value = true;
+          return;
+        }
+      }
+    } catch { /* fall through to passkey prompt */ }
     // (showAdminPage will be set to true in handleAuthenticated after successful admin auth)
     try {
       const adminRes = await fetch('/api/admin-username');

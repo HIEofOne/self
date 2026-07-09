@@ -19,70 +19,80 @@
         No groups yet. Create one to invite members.
       </div>
 
-      <q-list v-else separator>
-        <q-item v-for="g in groups" :key="g.groupId">
-          <q-item-section>
-            <q-item-label>
+      <div v-else>
+        <div v-for="g in groups" :key="g.groupId" class="q-mb-md">
+          <!-- Group header: single line -->
+          <div class="row items-center no-wrap group-header q-py-sm q-px-sm">
+            <div class="col" style="min-width: 0">
               <span class="text-weight-bold">{{ g.name }}</span>
-              <span class="text-grey-7 text-caption q-ml-sm">{{ g.groupId }}</span>
-            </q-item-label>
-            <q-item-label caption v-if="g.description">{{ g.description }}</q-item-label>
-            <q-item-label caption>
-              Members: {{ g.memberCounts.active }} active<span v-if="g.memberCounts.invited">, {{ g.memberCounts.invited }} invited</span><span v-if="g.memberCounts.revoked">, {{ g.memberCounts.revoked }} revoked</span>
-              · Created {{ formatDate(g.createdAt) }}
-            </q-item-label>
-            <q-item-label caption :class="g.recoveryKitLastExportedAt ? 'text-grey-7' : 'text-orange-9'">
-              Recovery kit: {{ g.recoveryKitLastExportedAt ? `exported ${formatDate(g.recoveryKitLastExportedAt)} (${g.recoveryKitExportCount}×)` : 'never exported — download and store it securely' }}
-            </q-item-label>
-            <div v-if="g.tagVocabulary.length" class="q-mt-xs">
-              <q-chip
-                v-for="tag in g.tagVocabulary"
-                :key="tag"
-                dense
-                size="sm"
-                color="blue-1"
-                text-color="primary"
-              >
-                {{ tag }}
-              </q-chip>
+              <span class="text-grey-6 text-caption q-ml-sm">{{ g.groupId }}</span>
+              <span class="text-caption text-grey-7 q-ml-sm">
+                · {{ g.memberCounts.active }} active / {{ g.memberCounts.invited }} invited / {{ g.memberCounts.revoked }} revoked
+                · created {{ formatDate(g.createdAt) }}
+                <template v-if="g.tagVocabulary.length"> · tags: {{ g.tagVocabulary.join(', ') }}</template>
+                <span :class="g.recoveryKitLastExportedAt ? 'text-grey-7' : 'text-orange-9 text-weight-medium'">
+                  · recovery kit: {{ g.recoveryKitLastExportedAt ? 'exported' : 'NOT exported' }}
+                </span>
+              </span>
             </div>
-          </q-item-section>
-          <q-item-section side>
-            <div class="row no-wrap">
-              <q-btn
-                flat
-                dense
-                round
-                icon="person_add"
-                color="primary"
-                @click="openMembersDialog(g)"
-              >
-                <q-tooltip>Members &amp; invites</q-tooltip>
+            <div class="col-auto row no-wrap items-center">
+              <q-btn flat dense round icon="person_add" color="primary" @click="openInviteDialog(g)">
+                <q-tooltip>Invite a member</q-tooltip>
               </q-btn>
-              <q-btn
-                flat
-                dense
-                round
-                icon="key"
-                :color="g.recoveryKitLastExportedAt ? 'grey-7' : 'orange-9'"
-                @click="confirmRecoveryKit(g)"
-              >
+              <q-btn flat dense round icon="key" :color="g.recoveryKitLastExportedAt ? 'grey-7' : 'orange-9'" @click="confirmRecoveryKit(g)">
                 <q-tooltip>Download recovery kit</q-tooltip>
               </q-btn>
-              <q-btn
-                flat
-                dense
-                round
-                icon="edit"
-                color="grey-7"
-                @click="openEditDialog(g)"
-              >
+              <q-btn flat dense round icon="edit" color="grey-7" @click="openEditDialog(g)">
                 <q-tooltip>Edit group</q-tooltip>
               </q-btn>
             </div>
-          </q-item-section>
-        </q-item>
-      </q-list>
+          </div>
+
+          <!-- Member rows -->
+          <div v-if="loadingMembers[g.groupId]" class="text-caption text-grey-6 q-pl-md q-py-xs">
+            Loading members…
+          </div>
+          <div v-else-if="!(membersByGroup[g.groupId] || []).length" class="text-caption text-grey-6 q-pl-md q-py-xs">
+            No members yet — use the invite button to add one.
+          </div>
+          <div
+            v-for="m in (membersByGroup[g.groupId] || [])"
+            :key="m.pairwiseId"
+            class="row items-center no-wrap member-row q-py-xs"
+          >
+            <div class="member-cell" style="flex: 2 1 0; min-width: 0">
+              <span class="ellipsis">{{ m.inviteEmail || m.alias || m.pairwiseId }}</span>
+            </div>
+            <div class="member-cell" style="flex: 0 0 130px">
+              <q-badge
+                :color="m.status === 'active' ? 'green' : m.status === 'invited' ? 'orange' : 'grey'"
+                :label="m.status"
+              />
+              <q-badge v-if="m.mentor" color="teal" label="mentor" class="q-ml-xs" />
+            </div>
+            <div class="member-cell text-caption text-grey-7" style="flex: 3 1 0; min-width: 0">
+              <template v-if="m.status === 'active'">
+                accepted {{ formatDate(m.joinedAt) }}
+              </template>
+              <template v-else-if="m.status === 'invited'">
+                invited {{ formatDate(m.invitedAt) }}
+                · {{ m.inviteOpenedAt ? 'link opened ' + formatDate(m.inviteOpenedAt) : 'link not opened' }}
+                · expires {{ formatDate(m.inviteExpiresAt) }}
+              </template>
+              <template v-else>
+                revoked {{ formatDate(m.revokedAt) }}
+              </template>
+            </div>
+            <div class="member-cell" style="flex: 0 0 44px; text-align: right">
+              <q-btn flat dense round size="sm" icon="delete" color="negative" @click="confirmRemoveMember(g, m)">
+                <q-tooltip>
+                  {{ m.status === 'invited' ? 'Cancel invite' : m.status === 'active' ? 'Revoke membership' : 'Remove entry' }}
+                </q-tooltip>
+              </q-btn>
+            </div>
+          </div>
+        </div>
+      </div>
     </q-card-section>
 
     <!-- Create / Edit dialog -->
@@ -100,14 +110,7 @@
             autofocus
             :rules="[(v) => !!(v && v.trim()) || 'Name is required']"
           />
-          <q-input
-            v-model="form.description"
-            label="Description"
-            dense
-            outlined
-            type="textarea"
-            autogrow
-          />
+          <q-input v-model="form.description" label="Description" dense outlined type="textarea" autogrow />
           <q-input
             v-model="form.tags"
             label="Match-query tags (comma-separated)"
@@ -129,13 +132,12 @@
       </q-card>
     </q-dialog>
 
-    <!-- Members & invites dialog -->
-    <q-dialog v-model="showMembersDialog">
-      <q-card style="min-width: 480px; max-width: 640px">
+    <!-- Compact invite dialog -->
+    <q-dialog v-model="showInviteDialog">
+      <q-card style="min-width: 460px; max-width: 620px">
         <q-card-section>
-          <div class="text-h6">Members — {{ membersGroup?.name }}</div>
+          <div class="text-h6">Invite to {{ inviteGroup?.name }}</div>
         </q-card-section>
-
         <q-card-section class="q-pt-none">
           <div class="row items-center q-gutter-sm">
             <q-input
@@ -158,68 +160,23 @@
               @click="sendInvite"
             />
           </div>
-          <q-banner v-if="lastInviteLink" class="bg-green-1 q-mt-sm" rounded dense>
+          <div
+            v-if="lastInviteLink"
+            class="q-mt-sm"
+            style="padding: 12px; border-radius: 8px; background: #e8f5e9;"
+          >
             <div class="text-caption">
-              Invite {{ lastInviteEmailSent ? 'emailed' : 'created (email not configured)' }} — link
-              valid 14 days. Replaces any earlier invite to this address (older links stop working):
+              Invite {{ lastInviteEmailSent ? 'emailed' : 'created (email not configured)' }} — link valid
+              14 days. Replaces any earlier invite to this address (older links stop working):
             </div>
-            <div class="row items-center no-wrap q-mt-xs">
-              <div class="text-caption ellipsis" style="max-width: 440px">{{ lastInviteLink }}</div>
-              <q-btn flat dense round size="sm" icon="content_copy" @click="copyInviteLink">
+            <div class="row items-center q-gutter-sm q-mt-xs">
+              <div class="text-caption" style="flex: 1 1 auto; min-width: 0; word-break: break-all">{{ lastInviteLink }}</div>
+              <q-btn flat dense round size="sm" icon="content_copy" style="flex: 0 0 auto" @click="copyInviteLink">
                 <q-tooltip>Copy link</q-tooltip>
               </q-btn>
             </div>
-          </q-banner>
-        </q-card-section>
-
-        <q-card-section class="q-pt-none">
-          <div v-if="loadingMembers" class="text-body2 text-grey-7">Loading members…</div>
-          <div v-else-if="members.length === 0" class="text-body2 text-grey-7">
-            No members yet — send the first invite above.
           </div>
-          <q-list v-else separator dense>
-            <q-item v-for="m in members" :key="m.pairwiseId">
-              <q-item-section>
-                <q-item-label>
-                  {{ m.alias || m.inviteEmail || m.pairwiseId }}
-                  <q-badge
-                    class="q-ml-sm"
-                    :color="m.status === 'active' ? 'green' : m.status === 'invited' ? 'orange' : 'grey'"
-                    :label="m.status"
-                  />
-                  <q-badge v-if="m.mentor" class="q-ml-xs" color="teal" label="mentor" />
-                </q-item-label>
-                <q-item-label caption>
-                  <template v-if="m.status === 'invited'">
-                    Invited {{ formatDate(m.invitedAt) }}
-                    · {{ m.inviteOpenedAt ? `link opened ${formatDate(m.inviteOpenedAt)}` : 'link not opened yet' }}
-                    · expires {{ formatDate(m.inviteExpiresAt) }}
-                  </template>
-                  <template v-else-if="m.status === 'active'">
-                    Joined {{ formatDate(m.joinedAt) }}
-                  </template>
-                  <template v-else>
-                    Revoked {{ formatDate(m.revokedAt) }}
-                  </template>
-                </q-item-label>
-              </q-item-section>
-              <q-item-section side v-if="m.status !== 'revoked'">
-                <q-btn
-                  flat
-                  dense
-                  round
-                  size="sm"
-                  :icon="m.status === 'invited' ? 'close' : 'person_remove'"
-                  color="negative"
-                  @click="confirmRemoveMember(m)"
-                >
-                  <q-tooltip>{{ m.status === 'invited' ? 'Cancel invite' : 'Revoke membership' }}</q-tooltip>
-                </q-btn>
-              </q-item-section>
-            </q-item>
-          </q-list>
         </q-card-section>
-
         <q-card-actions align="right">
           <q-btn flat label="Close" v-close-popup />
         </q-card-actions>
@@ -248,14 +205,36 @@ interface GroupSummary {
   recoveryKitExportCount: number;
 }
 
+interface MemberSummary {
+  pairwiseId: string;
+  alias: string | null;
+  status: 'invited' | 'active' | 'revoked';
+  invitedAt: string | null;
+  joinedAt: string | null;
+  revokedAt: string | null;
+  inviteEmail: string | null;
+  inviteExpiresAt: string | null;
+  inviteOpenedAt: string | null;
+  mentor: boolean;
+}
+
 const groups = ref<GroupSummary[]>([]);
 const loading = ref(false);
 const loadError = ref('');
+const membersByGroup = ref<Record<string, MemberSummary[]>>({});
+const loadingMembers = ref<Record<string, boolean>>({});
 
 const showDialog = ref(false);
 const saving = ref(false);
 const editingGroupId = ref<string | null>(null);
 const form = ref({ name: '', description: '', tags: '' });
+
+const showInviteDialog = ref(false);
+const inviteGroup = ref<GroupSummary | null>(null);
+const inviteEmail = ref('');
+const sendingInvite = ref(false);
+const lastInviteLink = ref('');
+const lastInviteEmailSent = ref(false);
 
 const formatDate = (iso: string | null | undefined): string => {
   if (!iso) return '';
@@ -266,16 +245,31 @@ const formatDate = (iso: string | null | undefined): string => {
   }
 };
 
+const loadMembers = async (groupId: string) => {
+  loadingMembers.value = { ...loadingMembers.value, [groupId]: true };
+  try {
+    const res = await fetch(`/api/groups/${encodeURIComponent(groupId)}/members`, { credentials: 'include' });
+    const data = await res.json();
+    if (res.ok && data.success) {
+      membersByGroup.value = { ...membersByGroup.value, [groupId]: data.members || [] };
+    }
+  } catch {
+    /* row shows empty state */
+  } finally {
+    loadingMembers.value = { ...loadingMembers.value, [groupId]: false };
+  }
+};
+
 const loadGroups = async () => {
   loading.value = true;
   loadError.value = '';
   try {
     const res = await fetch('/api/groups', { credentials: 'include' });
     const data = await res.json();
-    if (!res.ok || !data.success) {
-      throw new Error(data.error || `HTTP ${res.status}`);
-    }
+    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
     groups.value = data.groups || [];
+    // Load members for every group inline.
+    await Promise.all(groups.value.map((g) => loadMembers(g.groupId)));
   } catch (err) {
     loadError.value = err instanceof Error ? err.message : 'Failed to load groups';
   } finally {
@@ -291,11 +285,7 @@ const openCreateDialog = () => {
 
 const openEditDialog = (g: GroupSummary) => {
   editingGroupId.value = g.groupId;
-  form.value = {
-    name: g.name,
-    description: g.description,
-    tags: g.tagVocabulary.join(', ')
-  };
+  form.value = { name: g.name, description: g.description, tags: g.tagVocabulary.join(', ') };
   showDialog.value = true;
 };
 
@@ -318,9 +308,7 @@ const saveGroup = async () => {
       body: JSON.stringify(body)
     });
     const data = await res.json();
-    if (!res.ok || !data.success) {
-      throw new Error(data.error || `HTTP ${res.status}`);
-    }
+    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
     showDialog.value = false;
     const wasCreate = !editingGroupId.value;
     await loadGroups();
@@ -328,29 +316,24 @@ const saveGroup = async () => {
       type: 'positive',
       message: wasCreate ? `Group created: ${data.group?.groupId}` : 'Group updated.'
     });
-    // §6.7: the recovery kit is OFFERED AT CREATION — the group's private
-    // signing key lives only in CouchDB, so the admin should hold an
-    // offline copy from day one.
+    // §6.7: offer the recovery kit at creation.
     if (wasCreate && data.group?.groupId) {
       confirmRecoveryKit(data.group as GroupSummary, true);
     }
   } catch (err) {
-    $q.notify({
-      type: 'negative',
-      message: err instanceof Error ? err.message : 'Failed to save group'
-    });
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to save group' });
   } finally {
     saving.value = false;
   }
 };
 
-/** Confirmation before exporting the group's private key material. */
+/** Confirmation before exporting the group's private key material (§6.7). */
 const confirmRecoveryKit = (g: GroupSummary, justCreated = false) => {
   $q.dialog({
     title: 'Download recovery kit',
     message:
       (justCreated ? `Your group "${g.name}" was created. ` : '') +
-      'The recovery kit contains the group\'s PRIVATE signing key — the only copy outside the server database. ' +
+      "The recovery kit contains the group's PRIVATE signing key — the only copy outside the server database. " +
       'If the database is ever lost without it, the group cannot recover: all memberships expire within 24 hours. ' +
       'Store the file offline and securely; anyone holding it can issue membership credentials for this group. ' +
       'Every export is audit-logged.',
@@ -364,9 +347,7 @@ const confirmRecoveryKit = (g: GroupSummary, justCreated = false) => {
 
 const downloadRecoveryKit = async (g: GroupSummary) => {
   try {
-    const res = await fetch(`/api/groups/${encodeURIComponent(g.groupId)}/recovery-kit`, {
-      credentials: 'include'
-    });
+    const res = await fetch(`/api/groups/${encodeURIComponent(g.groupId)}/recovery-kit`, { credentials: 'include' });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       throw new Error(data.error || `HTTP ${res.status}`);
@@ -380,70 +361,25 @@ const downloadRecoveryKit = async (g: GroupSummary) => {
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
-    await loadGroups(); // refresh lastExportedAt display
+    await loadGroups();
     $q.notify({ type: 'positive', message: 'Recovery kit downloaded — store it securely offline.' });
   } catch (err) {
-    $q.notify({
-      type: 'negative',
-      message: err instanceof Error ? err.message : 'Failed to download recovery kit'
-    });
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to download recovery kit' });
   }
 };
 
-// ── Members & invites ─────────────────────────────────────────────
-
-interface MemberSummary {
-  pairwiseId: string;
-  alias: string | null;
-  status: 'invited' | 'active' | 'revoked';
-  invitedAt: string | null;
-  joinedAt: string | null;
-  revokedAt: string | null;
-  inviteEmail: string | null;
-  inviteExpiresAt: string | null;
-  inviteOpenedAt: string | null;
-  mentor: boolean;
-}
-
-const showMembersDialog = ref(false);
-const membersGroup = ref<GroupSummary | null>(null);
-const members = ref<MemberSummary[]>([]);
-const loadingMembers = ref(false);
-const inviteEmail = ref('');
-const sendingInvite = ref(false);
-const lastInviteLink = ref('');
-const lastInviteEmailSent = ref(false);
-
-const openMembersDialog = async (g: GroupSummary) => {
-  membersGroup.value = g;
-  members.value = [];
+const openInviteDialog = (g: GroupSummary) => {
+  inviteGroup.value = g;
   inviteEmail.value = '';
   lastInviteLink.value = '';
-  showMembersDialog.value = true;
-  await loadMembers();
-};
-
-const loadMembers = async () => {
-  if (!membersGroup.value) return;
-  loadingMembers.value = true;
-  try {
-    const res = await fetch(`/api/groups/${encodeURIComponent(membersGroup.value.groupId)}/members`, {
-      credentials: 'include'
-    });
-    const data = await res.json();
-    if (res.ok && data.success) members.value = data.members || [];
-  } catch {
-    /* dialog shows empty state */
-  } finally {
-    loadingMembers.value = false;
-  }
+  showInviteDialog.value = true;
 };
 
 const sendInvite = async () => {
-  if (!membersGroup.value || !inviteEmail.value.trim()) return;
+  if (!inviteGroup.value || !inviteEmail.value.trim()) return;
   sendingInvite.value = true;
   try {
-    const res = await fetch(`/api/groups/${encodeURIComponent(membersGroup.value.groupId)}/invites`, {
+    const res = await fetch(`/api/groups/${encodeURIComponent(inviteGroup.value.groupId)}/invites`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
@@ -454,8 +390,7 @@ const sendInvite = async () => {
     lastInviteLink.value = data.invite?.inviteLink || '';
     lastInviteEmailSent.value = !!data.invite?.emailSent;
     inviteEmail.value = '';
-    await loadMembers();
-    await loadGroups(); // refresh member counts on the card
+    await loadGroups();
     $q.notify({
       type: 'positive',
       message: lastInviteEmailSent.value ? 'Invitation emailed.' : 'Invite created — copy the link below.'
@@ -476,32 +411,48 @@ const copyInviteLink = async () => {
   }
 };
 
-const confirmRemoveMember = (m: MemberSummary) => {
-  const isInvite = m.status === 'invited';
+const confirmRemoveMember = (g: GroupSummary, m: MemberSummary) => {
+  const who = m.inviteEmail || m.alias || m.pairwiseId;
+  let title: string;
+  let message: string;
+  let okLabel: string;
+  if (m.status === 'invited') {
+    title = 'Cancel invite';
+    message = `Cancel the pending invite for ${who}?`;
+    okLabel = 'Cancel invite';
+  } else if (m.status === 'active') {
+    title = 'Revoke membership';
+    message = `Revoke ${who}? Their membership credential stops refreshing and expires within 24 hours.`;
+    okLabel = 'Revoke';
+  } else {
+    title = 'Remove entry';
+    message = `Remove the revoked entry for ${who} from this group?`;
+    okLabel = 'Remove';
+  }
   $q.dialog({
-    title: isInvite ? 'Cancel invite' : 'Revoke membership',
-    message: isInvite
-      ? `Cancel the pending invite for ${m.inviteEmail || 'this member'}?`
-      : `Revoke ${m.alias || m.pairwiseId}? Their membership credential stops refreshing and expires within 24 hours.`,
-    ok: { label: isInvite ? 'Cancel invite' : 'Revoke', color: 'negative' },
+    title,
+    message,
+    ok: { label: okLabel, color: 'negative' },
     cancel: { label: 'Keep', flat: true }
   }).onOk(() => {
-    void removeMember(m);
+    void removeMember(g, m);
   });
 };
 
-const removeMember = async (m: MemberSummary) => {
-  if (!membersGroup.value) return;
+const removeMember = async (g: GroupSummary, m: MemberSummary) => {
   try {
     const res = await fetch(
-      `/api/groups/${encodeURIComponent(membersGroup.value.groupId)}/members/${encodeURIComponent(m.pairwiseId)}`,
+      `/api/groups/${encodeURIComponent(g.groupId)}/members/${encodeURIComponent(m.pairwiseId)}`,
       { method: 'DELETE', credentials: 'include' }
     );
     const data = await res.json();
     if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
-    await loadMembers();
     await loadGroups();
-    $q.notify({ type: 'positive', message: data.action === 'invite_cancelled' ? 'Invite cancelled.' : 'Membership revoked.' });
+    const msg =
+      data.action === 'invite_cancelled' ? 'Invite cancelled.'
+      : data.action === 'member_removed' ? 'Entry removed.'
+      : 'Membership revoked.';
+    $q.notify({ type: 'positive', message: msg });
   } catch (err) {
     $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to remove member' });
   }
@@ -509,3 +460,18 @@ const removeMember = async (m: MemberSummary) => {
 
 onMounted(loadGroups);
 </script>
+
+<style scoped>
+.group-header {
+  background: #f5f5f5;
+  border-radius: 6px;
+}
+.member-row {
+  border-bottom: 1px solid #eee;
+  padding-left: 24px;
+  padding-right: 8px;
+}
+.member-cell {
+  padding-right: 8px;
+}
+</style>
