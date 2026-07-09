@@ -13,7 +13,7 @@
  *       and the patient-side /api/user-groups endpoints.
  * PR-3 (relay/heartbeat), PR-4 (requests inbox), PR-5 (directory) follow.
  */
-import { generateKeyPairSync, createHash, createPrivateKey, randomBytes, sign as edSign } from 'crypto';
+import { generateKeyPairSync, createHash, createPrivateKey, createPublicKey, randomBytes, sign as edSign, verify as edVerify } from 'crypto';
 
 const GROUPS_DB = 'maia_groups';
 const USERS_DB = 'maia_users';
@@ -562,6 +562,58 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     }
   });
 
+  // POST /api/groups/:groupId/leave — member-initiated departure. Unlike the
+  // admin DELETE, this is authenticated by the MEMBER's own pairwise signing
+  // key (an early, minimal instance of the signed member→registry requests
+  // that RFC 9421 formalizes in a later phase). The member's MAIA signs
+  // {action:'leave', groupId, pairwiseId, ts} with its Ed25519 pairwise key;
+  // the registry verifies against the stored member.signingPublicKeyJwk and
+  // removes the entry. No admin involvement — a member can always leave.
+  app.post('/api/groups/:groupId/leave', async (req, res) => {
+    try {
+      const doc = await cloudant.getDocument(GROUPS_DB, req.params.groupId);
+      if (!doc || doc.type !== 'group') {
+        return res.status(404).json({ success: false, error: 'Group not found' });
+      }
+      const { pairwiseId, payload, signature } = req.body || {};
+      if (!pairwiseId || !payload || !signature) {
+        return res.status(400).json({ success: false, error: 'pairwiseId, payload and signature are required' });
+      }
+      const member = (doc.members || []).find((m) => m.pairwiseId === pairwiseId);
+      if (!member || member.status === 'invited' || !member.signingPublicKeyJwk) {
+        return res.status(404).json({ success: false, error: 'Member not found' });
+      }
+      // Verify the signature against the member's registered pairwise key.
+      let ok = false;
+      try {
+        const pub = createPublicKey({ key: member.signingPublicKeyJwk, format: 'jwk' });
+        ok = edVerify(null, Buffer.from(String(payload)), pub, Buffer.from(String(signature), 'base64url'));
+      } catch { ok = false; }
+      if (!ok) {
+        return res.status(403).json({ success: false, error: 'Invalid signature' });
+      }
+      // Validate the signed payload binds to THIS action, group, and member.
+      let claim;
+      try { claim = JSON.parse(String(payload)); } catch { claim = null; }
+      if (!claim || claim.action !== 'leave' || claim.groupId !== doc._id || claim.pairwiseId !== pairwiseId) {
+        return res.status(400).json({ success: false, error: 'Payload does not match request' });
+      }
+      doc.members = (doc.members || []).filter((m) => m !== member);
+      doc.updatedAt = new Date().toISOString();
+      await cloudant.saveDocument(GROUPS_DB, doc);
+      auditLog.logEvent({
+        type: 'group_member_left',
+        userId: null, // self-initiated; registry does not learn the userId
+        ip: req.ip,
+        details: { groupId: doc._id, pairwiseId }
+      });
+      res.json({ success: true });
+    } catch (error) {
+      console.error('[groups] leave failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to leave group' });
+    }
+  });
+
   // ── PR-2: patient-side membership endpoints ────────────────────────
   // Session pattern matches existing user endpoints: userId comes from the
   // request; when a session exists it must match (403 on mismatch).
@@ -686,6 +738,68 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     } catch (error) {
       console.error('[user-groups] list failed:', error);
       res.status(500).json({ success: false, error: 'Failed to list memberships' });
+    }
+  });
+
+  // POST /api/user-groups/leave — the patient leaves a group. Signs a leave
+  // request with the membership's pairwise Ed25519 key, tells the registry
+  // to remove the entry, then drops the membership from the userDoc. The
+  // registry call is best-effort: even if it fails (e.g. group host down),
+  // we still remove the local membership so the user isn't stuck, and the
+  // credential dies within 24 h (§6.1) without refresh.
+  app.post('/api/user-groups/leave', async (req, res) => {
+    const userId = requireMatchingUser(req, res);
+    if (!userId) return;
+    try {
+      const { groupId } = req.body || {};
+      if (!groupId) {
+        return res.status(400).json({ success: false, error: 'groupId is required' });
+      }
+      const userDoc = await cloudant.getDocument(USERS_DB, userId);
+      if (!userDoc) {
+        return res.status(404).json({ success: false, error: 'User not found' });
+      }
+      const membership = (userDoc.groupMemberships || []).find((m) => m.groupId === groupId);
+      if (!membership) {
+        return res.status(404).json({ success: false, error: 'Not a member of this group' });
+      }
+
+      // Sign a leave claim with the pairwise signing key, then notify the
+      // registry so the member entry is removed there too.
+      let registryNotified = false;
+      try {
+        const payload = JSON.stringify({
+          action: 'leave',
+          groupId,
+          pairwiseId: membership.pairwiseId,
+          ts: new Date().toISOString()
+        });
+        const priv = createPrivateKey({ key: membership.signingKeyPair.privateKeyJwk, format: 'jwk' });
+        const signature = edSign(null, Buffer.from(payload), priv).toString('base64url');
+        const base = String(membership.registryUrl || `http://localhost:${process.env.PORT || 3001}`).replace(/\/$/, '');
+        const r = await fetch(`${base}/api/groups/${encodeURIComponent(groupId)}/leave`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pairwiseId: membership.pairwiseId, payload, signature })
+        });
+        registryNotified = r.ok;
+      } catch (e) {
+        console.warn('[user-groups] registry leave notify failed:', e?.message || e);
+      }
+
+      userDoc.groupMemberships = (userDoc.groupMemberships || []).filter((m) => m.groupId !== groupId);
+      userDoc.updatedAt = new Date().toISOString();
+      await cloudant.saveDocument(USERS_DB, userDoc);
+      auditLog.logEvent({
+        type: 'user_group_left',
+        userId,
+        ip: req.ip,
+        details: { groupId, pairwiseId: membership.pairwiseId, registryNotified }
+      });
+      res.json({ success: true, registryNotified });
+    } catch (error) {
+      console.error('[user-groups] leave failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to leave group' });
     }
   });
 }

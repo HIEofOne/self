@@ -74,6 +74,9 @@
             <q-badge v-if="m.mentor" color="teal" label="Mentor" class="q-ml-sm" />
           </q-item-label>
         </q-item-section>
+        <q-item-section side>
+          <q-btn flat dense color="negative" label="Leave" :loading="leaving === m.groupId" @click="confirmLeave(m)" />
+        </q-item-section>
       </q-item>
     </q-list>
   </div>
@@ -116,6 +119,7 @@ const inviteGroupName = ref('');
 const inviteGroupDescription = ref('');
 const aliasInput = ref('');
 const joining = ref(false);
+const leaving = ref<string | null>(null);
 
 const formatDate = (iso: string): string => {
   if (!iso) return '';
@@ -153,9 +157,17 @@ const loadPendingInvite = async () => {
       localStorage.removeItem(INVITE_LS_KEY);
       return;
     }
-    // Already a member (e.g., invite re-clicked)? Drop it silently.
-    if (memberships.value.some((m) => m.groupId === invite.groupId)) {
+    // Already a member of this group? A MAIA holds one membership per
+    // group, so a second invite (e.g. to a different email) can't be
+    // accepted as a new identity. Explain that clearly instead of silently
+    // dropping it — and tell them how to switch aliases (leave, then use
+    // the new invite).
+    const existing = memberships.value.find((m) => m.groupId === invite.groupId);
+    if (existing) {
       localStorage.removeItem(INVITE_LS_KEY);
+      invalidInviteMessage.value =
+        `You're already a member of this group as "${existing.alias}". ` +
+        `A new invitation isn't needed. To join under a different name, use Leave on the group below, then open the new invitation.`;
       return;
     }
     pendingInvite.value = invite;
@@ -233,6 +245,44 @@ const joinPendingGroup = async () => {
 const dismissInvite = () => {
   localStorage.removeItem(INVITE_LS_KEY);
   pendingInvite.value = null;
+};
+
+const confirmLeave = (m: Membership) => {
+  $q.dialog({
+    title: `Leave ${m.groupName}?`,
+    message:
+      `You'll no longer be reachable through this group, and you'll need a new invitation to rejoin. ` +
+      `Your health records are unaffected — they never left your MAIA.`,
+    ok: { label: 'Leave group', color: 'negative' },
+    cancel: { label: 'Stay', flat: true }
+  }).onOk(() => {
+    void leaveGroup(m);
+  });
+};
+
+const leaveGroup = async (m: Membership) => {
+  leaving.value = m.groupId;
+  try {
+    const res = await fetch('/api/user-groups/leave', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ userId: props.userId, groupId: m.groupId })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    await loadMemberships();
+    $q.notify({
+      type: 'positive',
+      message: data.registryNotified
+        ? `You've left ${m.groupName}.`
+        : `You've left ${m.groupName} (the group registry will finalize within 24 hours).`
+    });
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to leave group' });
+  } finally {
+    leaving.value = null;
+  }
 };
 
 onMounted(async () => {

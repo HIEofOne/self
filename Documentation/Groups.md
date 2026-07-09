@@ -522,3 +522,21 @@ and any design decisions resolved.
   the cookie persists for the window's life) no longer re-prompts. No new
   cookie was needed — the 24 h express-session cookie already existed; the
   frontend simply wasn't consulting it on the admin route.
+- **2026-07-09** — **PR-2.4: leave a group + clearer re-invite handling.**
+  From AG's test: a user re-invited to a group they already belong to got
+  silently blocked (a MAIA holds one membership per group), leaving them
+  stuck under the old alias while the registry accumulated a second entry.
+  Added the missing primitive — **leaving a group**: `POST
+  /api/user-groups/leave` signs a `{action:'leave',groupId,pairwiseId,ts}`
+  claim with the membership's pairwise Ed25519 key and calls the new
+  registry endpoint `POST /api/groups/:groupId/leave`, which verifies the
+  signature against the stored member public key and removes the entry
+  (a minimal early instance of the RFC 9421 signed member→registry
+  requests coming in a later phase). The local membership is dropped even
+  if the registry call fails (credential then dies within 24 h). The
+  Groups tab now shows a **Leave** button per membership (with confirm),
+  and a pending invite for a group you're already in shows a clear
+  "already a member as {alias} — Leave first to switch names" message
+  instead of vanishing. Tested locally: join → leave (signature verified,
+  registry entry removed) → membership gone; forged-signature leave
+  rejected with 403 and the member stays active.
