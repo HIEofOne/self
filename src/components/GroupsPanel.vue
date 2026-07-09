@@ -146,14 +146,23 @@ const loadPendingInvite = async () => {
       return;
     }
     pendingInvite.value = invite;
-    // Best-effort group metadata for the banner.
+    // Group metadata for the banner + invite validity. invite-info also
+    // marks the invite "opened" at the registry (admin-visible progress).
     try {
       const base = (invite.registry || window.location.origin).replace(/\/$/, '');
-      const res = await fetch(`${base}/api/groups/${encodeURIComponent(invite.groupId)}/info`);
+      const res = await fetch(
+        `${base}/api/groups/${encodeURIComponent(invite.groupId)}/invite-info?token=${encodeURIComponent(invite.token)}`
+      );
       const data = await res.json();
       if (res.ok && data.success) {
         inviteGroupName.value = data.group?.name || '';
         inviteGroupDescription.value = data.group?.description || '';
+        if (data.invite && data.invite.valid === false) {
+          // Dead token (used or expired) — drop the banner.
+          localStorage.removeItem(INVITE_LS_KEY);
+          pendingInvite.value = null;
+          return;
+        }
       }
     } catch {
       /* banner falls back to generic text */

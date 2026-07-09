@@ -245,6 +245,46 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     }
   });
 
+  // GET /api/groups/:groupId/invite-info?token=… — public. Called by the
+  // invite landing page (welcome banner) and the Groups tab banner: returns
+  // the group's public view plus the invite's validity, and marks
+  // `inviteOpenedAt` on the invited entry the first time the link is
+  // opened, so the admin's members dialog can show invited → opened →
+  // joined progress. Token is matched by hash; nothing sensitive returns.
+  app.get('/api/groups/:groupId/invite-info', async (req, res) => {
+    try {
+      const doc = await cloudant.getDocument(GROUPS_DB, req.params.groupId);
+      if (!doc || doc.type !== 'group') {
+        return res.status(404).json({ success: false, error: 'Group not found' });
+      }
+      const token = String(req.query?.token || '');
+      let invite = { valid: false };
+      if (token) {
+        const tokenHash = sha256hex(token);
+        const member = (doc.members || []).find(
+          (m) => m.status === 'invited' && m.inviteTokenHash === tokenHash
+        );
+        if (member) {
+          const expired = member.inviteExpiresAt && new Date(member.inviteExpiresAt).getTime() < Date.now();
+          invite = { valid: !expired, expiresAt: member.inviteExpiresAt || null, expired: !!expired };
+          if (!member.inviteOpenedAt) {
+            member.inviteOpenedAt = new Date().toISOString();
+            try {
+              await cloudant.saveDocument(GROUPS_DB, doc);
+            } catch (e) {
+              // Best-effort bookkeeping — never fail the landing page over it.
+              console.warn('[groups] invite-opened bookkeeping failed:', e?.message || e);
+            }
+          }
+        }
+      }
+      res.json({ success: true, group: publicGroupView(doc), invite });
+    } catch (error) {
+      console.error('[groups] invite-info failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to fetch invite info' });
+    }
+  });
+
   // GET /api/groups/:groupId/recovery-kit — admin recovery kit (Groups.md
   // §6.7). Downloads the group's key material as a JSON file so group
   // continuity survives loss of CouchDB. This is the ONLY code path that
@@ -312,6 +352,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     revokedAt: m.revokedAt || null,
     inviteEmail: m.status === 'invited' ? (m.inviteEmail || null) : null,
     inviteExpiresAt: m.status === 'invited' ? (m.inviteExpiresAt || null) : null,
+    inviteOpenedAt: m.status === 'invited' ? (m.inviteOpenedAt || null) : null,
     mentor: !!m.mentor
   });
 
@@ -449,6 +490,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       delete member.inviteEmail;
       delete member.inviteTokenHash;
       delete member.inviteExpiresAt;
+      delete member.inviteOpenedAt;
       doc.updatedAt = member.joinedAt;
       await cloudant.saveDocument(GROUPS_DB, doc);
 

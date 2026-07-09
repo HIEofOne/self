@@ -8585,7 +8585,13 @@ app.get('/api/admin/users', async (req, res) => {
       });
       
       const deepLinkUsersCount = uniqueDeepLinkUserIds.size;
-      
+
+      // Group memberships (Groups & AS feature): names only, for the
+      // admin user list's Groups column.
+      const groupNames = (userDoc.groupMemberships || [])
+        .map((m) => m?.groupName || m?.groupId)
+        .filter(Boolean);
+
       return {
         userId: userId,
         domain: userDoc.domain || null,
@@ -8596,7 +8602,8 @@ app.get('/api/admin/users', async (req, res) => {
         filesIndexed: filesIndexed,
         savedChatsCount: savedChatsCount,
         deepLinkUsersCount: deepLinkUsersCount,
-        hasPasskey: !!userDoc.credentialID
+        hasPasskey: !!userDoc.credentialID,
+        groupNames: groupNames
       };
     }));
     

@@ -477,3 +477,19 @@ and any design decisions resolved.
   copy link, cancel/revoke). Tested end-to-end locally including offline
   Ed25519 credential verification against the member-cached group key,
   token single-use across users, and registry email deletion at join.
+- **2026-07-07** — **PR-2.1: invite UX polish** (from AG's live test of
+  v1.5.3 on test.agropper.xyz). (1) Welcome-page invite banner: an invitee
+  landing from the email now sees the group name and what to do next; when
+  the browser lacks the File System Access API (e.g. Safari opening the
+  email link), the banner explains MAIA needs Chrome and offers a
+  copy-link button — the token is durable, so re-opening in Chrome works.
+  (2) Post-auth notification with an "Open Groups" action (suppressed
+  while the setup wizard is active — the invite waits in localStorage).
+  (3) New public `GET /api/groups/:groupId/invite-info?token=…` returns
+  group metadata + invite validity and marks `inviteOpenedAt` (first
+  open); the admin members dialog now shows invited → link-opened →
+  joined progress, and dead tokens clear the patient-side banner
+  immediately. `inviteOpenedAt` is deleted at join with the other invite
+  fields (registry-minimalism). (4) Admin user list gains a **Groups**
+  column (group-name badges from `userDoc.groupMemberships`). (5) App
+  version shown in the admin page header.

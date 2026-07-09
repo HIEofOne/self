@@ -2,7 +2,10 @@
   <q-page class="q-pa-md">
     <div class="q-mb-lg">
       <div class="row items-center justify-between q-mb-sm">
-        <div class="text-h4">User Administration</div>
+        <div class="text-h4">
+          User Administration
+          <span class="text-caption text-grey-6 q-ml-sm">v{{ appVersion }}</span>
+        </div>
         <q-btn
           flat
           dense
@@ -88,6 +91,22 @@
         </q-td>
       </template>
 
+      <template v-slot:body-cell-groups="props">
+        <q-td :props="props">
+          <template v-if="props.row.groupNames && props.row.groupNames.length">
+            <q-badge
+              v-for="name in props.row.groupNames"
+              :key="name"
+              color="blue-1"
+              text-color="primary"
+              :label="name"
+              class="q-mr-xs"
+            />
+          </template>
+          <span v-else class="text-grey-5">—</span>
+        </q-td>
+      </template>
+
       <template v-slot:body-cell-actions="props">
         <q-td :props="props">
           <q-btn
@@ -163,6 +182,9 @@
 import { ref, onMounted, computed } from 'vue';
 import { useQuasar } from 'quasar';
 import AdminGroups from './AdminGroups.vue';
+import packageJson from '../../package.json';
+
+const appVersion = packageJson.version;
 
 const $q = useQuasar();
 
@@ -177,6 +199,7 @@ interface User {
   savedChatsCount: number;
   deepLinkUsersCount: number;
   hasPasskey: boolean;
+  groupNames: string[];
 }
 
 interface PasskeyConfig {
@@ -276,6 +299,13 @@ const columns = [
     align: 'center' as const,
     field: 'deepLinkUsersCount',
     sortable: true
+  },
+  {
+    name: 'groups',
+    label: 'Groups',
+    align: 'left' as const,
+    field: 'groupNames',
+    sortable: false
   }
 ];
 

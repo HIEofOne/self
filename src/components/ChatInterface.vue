@@ -8414,6 +8414,36 @@ onMounted(async () => {
   if (canAccessMyStuff.value && props.user?.userId && availableUserFiles.value.length === 0) {
     loadUserFilesForChooser(false);
   }
+
+  // Pending group invitation (Groups & AS feature): if the user arrived via
+  // an invite link, offer to open the Groups tab. A notification with an
+  // action button — deliberately NOT auto-opening the workbook, and skipped
+  // while the setup wizard is on screen (the invite waits in localStorage
+  // and the Groups tab banner remains available afterwards).
+  if (canAccessMyStuff.value && props.user?.userId) {
+    setTimeout(() => {
+      try {
+        if (!localStorage.getItem('maiaGroupInvite')) return;
+        if (showAgentSetupDialog.value || wizardFlowPhase.value !== 'done') return;
+        $q.notify({
+          type: 'info',
+          message: 'You have a pending invitation to join a patient group.',
+          timeout: 15000,
+          actions: [
+            {
+              label: 'Open Groups',
+              color: 'white',
+              handler: () => {
+                myStuffInitialTab.value = 'groups';
+                showMyStuffDialog.value = true;
+              }
+            },
+            { label: 'Later', color: 'white' }
+          ]
+        });
+      } catch { /* non-fatal */ }
+    }, 3000);
+  }
 });
 
 // Cleanup on unmount (must be at top level, not inside onMounted)

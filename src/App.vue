@@ -42,6 +42,36 @@
                 <div class="text-h6 text-center q-mb-sm">
                   Welcome to MAIA
                 </div>
+
+                <!-- Pending group invitation banner (Groups & AS feature).
+                     Shown pre-auth so an invitee landing from the email
+                     knows exactly what to do next. -->
+                <q-banner v-if="pendingGroupInvite" class="bg-blue-1 q-mb-md" rounded>
+                  <template v-slot:avatar>
+                    <q-icon name="mail" color="primary" />
+                  </template>
+                  <div class="text-body2">
+                    You've been invited to join the patient group
+                    <strong>{{ pendingInviteGroupName || pendingGroupInvite.groupId }}</strong>.
+                  </div>
+                  <template v-if="isChromeCapable">
+                    <div class="text-body2 q-mt-xs">
+                      <strong>Sign in below</strong> (or create your MAIA) to accept.
+                      After signing in, open <strong>Workbook → Groups</strong> to join.
+                    </div>
+                  </template>
+                  <template v-else>
+                    <div class="text-body2 text-orange-9 q-mt-xs">
+                      MAIA needs <strong>Google Chrome</strong> to store your records.
+                      Copy this invite link and open it in Chrome to continue:
+                    </div>
+                    <div class="row items-center no-wrap q-mt-xs">
+                      <div class="text-caption ellipsis" style="max-width: 70%">{{ pendingInviteLink() }}</div>
+                      <q-btn flat dense size="sm" icon="content_copy" label="Copy" @click="copyPendingInviteLink" />
+                    </div>
+                  </template>
+                </q-banner>
+
                 <!-- Account status cards derived from IndexedDB + .webloc -->
                 <div v-if="discoveredUsers.length > 0" class="q-mb-md">
                   <div
@@ -815,6 +845,60 @@ const DEFAULT_TITLE = 'MAIA User App';
 const authenticated = ref(false);
 const showAuth = ref(false);
 const user = ref<User | null>(null);
+
+// ── Pending group invite (Groups & AS feature) ─────────────────────
+// Populated from localStorage 'maiaGroupInvite' (set by the URL-param
+// capture below). Drives the welcome-page banner so an invitee landing
+// here knows what to do — including "continue in Chrome" guidance.
+const pendingGroupInvite = ref<{ token: string; groupId: string; registry: string } | null>(null);
+const pendingInviteGroupName = ref('');
+// File System Access API is MAIA's storage requirement (Chrome 122+).
+const isChromeCapable = typeof (window as unknown as { showDirectoryPicker?: unknown }).showDirectoryPicker === 'function';
+
+const loadPendingGroupInvite = async () => {
+  try {
+    const raw = localStorage.getItem('maiaGroupInvite');
+    if (!raw) return;
+    const invite = JSON.parse(raw);
+    if (!invite?.token || !invite?.groupId) {
+      localStorage.removeItem('maiaGroupInvite');
+      return;
+    }
+    pendingGroupInvite.value = invite;
+    // Fetch group name for the banner; this also marks the invite as
+    // "opened" at the registry so the admin sees link-click progress.
+    try {
+      const base = String(invite.registry || window.location.origin).replace(/\/$/, '');
+      const res = await fetch(
+        `${base}/api/groups/${encodeURIComponent(invite.groupId)}/invite-info?token=${encodeURIComponent(invite.token)}`
+      );
+      const data = await res.json();
+      if (res.ok && data.success) {
+        pendingInviteGroupName.value = data.group?.name || '';
+        if (data.invite && data.invite.valid === false) {
+          // Dead token (used or expired) — drop the banner.
+          localStorage.removeItem('maiaGroupInvite');
+          pendingGroupInvite.value = null;
+        }
+      }
+    } catch { /* banner shows generic text */ }
+  } catch {
+    localStorage.removeItem('maiaGroupInvite');
+  }
+};
+
+const pendingInviteLink = () => {
+  const i = pendingGroupInvite.value;
+  if (!i) return '';
+  const base = String(i.registry || window.location.origin).replace(/\/$/, '');
+  return `${base}/?groupInvite=${i.token}&groupId=${encodeURIComponent(i.groupId)}&registry=${encodeURIComponent(base)}`;
+};
+
+const copyPendingInviteLink = async () => {
+  try {
+    await navigator.clipboard.writeText(pendingInviteLink());
+  } catch { /* manual copy fallback — link visible in banner */ }
+};
 const chatInterfaceRef = ref<InstanceType<typeof ChatInterface> | null>(null);
 const isDeepLinkUser = ref(false);
 const deepLinkInfo = ref<DeepLinkInfo | null>(null);
@@ -3242,6 +3326,9 @@ onMounted(async () => {
       : `${window.location.pathname}${window.location.hash}`;
     window.history.replaceState({}, '', cleanedUrl);
   }
+  // Surface any pending invite (just captured OR left over from an earlier
+  // visit) on the welcome page, and mark it opened at the registry.
+  void loadPendingGroupInvite();
 
   let share: string | null = null;
   const queryShare = params.get('share');

@@ -191,7 +191,9 @@
                 </q-item-label>
                 <q-item-label caption>
                   <template v-if="m.status === 'invited'">
-                    Invited {{ formatDate(m.invitedAt) }} · expires {{ formatDate(m.inviteExpiresAt) }}
+                    Invited {{ formatDate(m.invitedAt) }}
+                    · {{ m.inviteOpenedAt ? `link opened ${formatDate(m.inviteOpenedAt)}` : 'link not opened yet' }}
+                    · expires {{ formatDate(m.inviteExpiresAt) }}
                   </template>
                   <template v-else-if="m.status === 'active'">
                     Joined {{ formatDate(m.joinedAt) }}
@@ -399,6 +401,7 @@ interface MemberSummary {
   revokedAt: string | null;
   inviteEmail: string | null;
   inviteExpiresAt: string | null;
+  inviteOpenedAt: string | null;
   mentor: boolean;
 }
 
