@@ -63,22 +63,73 @@
       the invite link brings you back here to join.
     </div>
     <q-list v-else separator>
-      <q-item v-for="m in memberships" :key="m.groupId">
-        <q-item-section avatar>
-          <q-icon name="groups" color="primary" />
-        </q-item-section>
-        <q-item-section>
-          <q-item-label class="text-weight-bold">{{ m.groupName }}</q-item-label>
-          <q-item-label caption>
-            You appear as <strong>{{ m.alias }}</strong> · Joined {{ formatDate(m.joinedAt) }}
-            <q-badge v-if="m.mentor" color="teal" label="Mentor" class="q-ml-sm" />
-          </q-item-label>
-        </q-item-section>
-        <q-item-section side>
-          <q-btn flat dense color="negative" label="Leave" :loading="leaving === m.groupId" @click="confirmLeave(m)" />
-        </q-item-section>
-      </q-item>
+      <template v-for="m in memberships" :key="m.groupId">
+        <q-item>
+          <q-item-section avatar>
+            <q-icon name="groups" color="primary" />
+          </q-item-section>
+          <q-item-section>
+            <q-item-label class="text-weight-bold">{{ m.groupName }}</q-item-label>
+            <q-item-label caption>
+              You appear as <strong>{{ m.alias }}</strong> · Joined {{ formatDate(m.joinedAt) }}
+              <q-badge v-if="m.mentor" color="teal" label="Mentor" class="q-ml-sm" />
+            </q-item-label>
+          </q-item-section>
+          <q-item-section side>
+            <div class="row items-center no-wrap q-gutter-xs">
+              <q-btn
+                flat dense
+                :icon="expandedGroup === m.groupId ? 'expand_less' : 'expand_more'"
+                :label="`Messages${(messagesByGroup[m.groupId] || []).length ? ' (' + messagesByGroup[m.groupId].length + ')' : ''}`"
+                @click="toggleMessages(m)"
+              />
+              <q-btn flat dense round icon="refresh" :loading="refreshing === m.groupId" @click="refreshMessages(m)">
+                <q-tooltip>Check for new messages</q-tooltip>
+              </q-btn>
+              <q-btn flat dense color="negative" label="Leave" :loading="leaving === m.groupId" @click="confirmLeave(m)" />
+            </div>
+          </q-item-section>
+        </q-item>
+
+        <!-- Inbox for this membership -->
+        <q-item v-if="expandedGroup === m.groupId">
+          <q-item-section>
+            <div v-if="!(messagesByGroup[m.groupId] || []).length" class="text-caption text-grey-6 q-pl-md">
+              No messages yet.
+            </div>
+            <div
+              v-for="msg in (messagesByGroup[m.groupId] || [])"
+              :key="msg.id"
+              class="q-pl-md q-py-xs"
+              style="border-bottom: 1px solid #f0f0f0"
+            >
+              <div class="text-caption text-grey-7">
+                From a group member · {{ formatDate(msg.receivedAt) }}
+              </div>
+              <div class="text-body2" style="white-space: pre-wrap; word-break: break-word">{{ msg.text }}</div>
+              <q-btn flat dense size="sm" color="primary" label="Reply" @click="openReply(m, msg)" />
+            </div>
+          </q-item-section>
+        </q-item>
+      </template>
     </q-list>
+
+    <!-- Reply dialog -->
+    <q-dialog v-model="showReplyDialog">
+      <q-card style="min-width: 420px; max-width: 560px">
+        <q-card-section>
+          <div class="text-h6">Reply</div>
+          <div class="text-caption text-grey-7">Your message is end-to-end encrypted to the recipient.</div>
+        </q-card-section>
+        <q-card-section class="q-pt-none">
+          <q-input v-model="replyText" type="textarea" outlined autogrow autofocus :disable="sendingReply" label="Message" />
+        </q-card-section>
+        <q-card-actions align="right">
+          <q-btn flat label="Cancel" v-close-popup :disable="sendingReply" />
+          <q-btn unelevated color="primary" label="Send" :loading="sendingReply" :disable="!replyText.trim()" @click="sendReply" />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
   </div>
 </template>
 
@@ -120,6 +171,20 @@ const inviteGroupDescription = ref('');
 const aliasInput = ref('');
 const joining = ref(false);
 const leaving = ref<string | null>(null);
+
+interface GroupMessage {
+  id: string;
+  fromPairwiseId: string;
+  text: string;
+  receivedAt: string;
+}
+const expandedGroup = ref<string | null>(null);
+const messagesByGroup = ref<Record<string, GroupMessage[]>>({});
+const refreshing = ref<string | null>(null);
+const showReplyDialog = ref(false);
+const replyText = ref('');
+const replyTo = ref<{ groupId: string; toPairwiseId: string } | null>(null);
+const sendingReply = ref(false);
 
 const formatDate = (iso: string): string => {
   if (!iso) return '';
@@ -282,6 +347,87 @@ const leaveGroup = async (m: Membership) => {
     $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to leave group' });
   } finally {
     leaving.value = null;
+  }
+};
+
+const loadMessages = async (groupId: string) => {
+  try {
+    const res = await fetch(
+      `/api/user-groups/messages?userId=${encodeURIComponent(props.userId)}&groupId=${encodeURIComponent(groupId)}`,
+      { credentials: 'include' }
+    );
+    const data = await res.json();
+    if (res.ok && data.success) {
+      messagesByGroup.value = { ...messagesByGroup.value, [groupId]: data.messages || [] };
+    }
+  } catch {
+    /* keep prior list */
+  }
+};
+
+const toggleMessages = async (m: Membership) => {
+  if (expandedGroup.value === m.groupId) {
+    expandedGroup.value = null;
+    return;
+  }
+  expandedGroup.value = m.groupId;
+  await loadMessages(m.groupId);
+};
+
+const refreshMessages = async (m: Membership) => {
+  refreshing.value = m.groupId;
+  try {
+    const res = await fetch('/api/user-groups/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ userId: props.userId })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    await loadMessages(m.groupId);
+    await loadMemberships(); // a revoked membership would drop off here
+    if (expandedGroup.value !== m.groupId) expandedGroup.value = m.groupId;
+    $q.notify({
+      type: data.newMessages ? 'positive' : 'info',
+      message: data.newMessages ? `${data.newMessages} new message(s).` : 'No new messages.'
+    });
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to check messages' });
+  } finally {
+    refreshing.value = null;
+  }
+};
+
+const openReply = (m: Membership, msg: GroupMessage) => {
+  replyTo.value = { groupId: m.groupId, toPairwiseId: msg.fromPairwiseId };
+  replyText.value = '';
+  showReplyDialog.value = true;
+};
+
+const sendReply = async () => {
+  if (!replyTo.value || !replyText.value.trim()) return;
+  sendingReply.value = true;
+  try {
+    const res = await fetch('/api/user-groups/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        userId: props.userId,
+        groupId: replyTo.value.groupId,
+        toPairwiseId: replyTo.value.toPairwiseId,
+        text: replyText.value.trim()
+      })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    showReplyDialog.value = false;
+    $q.notify({ type: 'positive', message: 'Message sent.' });
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to send message' });
+  } finally {
+    sendingReply.value = false;
   }
 };
 

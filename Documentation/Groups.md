@@ -540,3 +540,26 @@ and any design decisions resolved.
   instead of vanishing. Tested locally: join → leave (signature verified,
   registry entry removed) → membership gone; forged-signature leave
   rejected with 403 and the member stays active.
+- **2026-07-09** — **PR-3: relay + heartbeat + daily cron** (§6.1/§6.3/§7.3).
+  New `maia_relay` db (transient sealed messages). **E2E encryption**:
+  X25519 ECDH → HKDF-SHA256 → AES-256-GCM sealed box; the relay stores only
+  the opaque box + routing envelope and never holds a key (verified: no
+  plaintext in `maia_relay`). Registry endpoints (all pairwise-Ed25519
+  signed): `refresh` (renew 24h credential, stamp `lastRefreshAt` liveness,
+  return pending messages, delete acked ones, report `revoked` for
+  revoked/removed members), `relay` (store sealed msg; sender+recipient must
+  both be active → instant revocation for relayed traffic), `member-key`
+  (signed lookup of a member's X25519 key for sealing), `stats` (aggregate
+  active + recently-active counts only). Member side: `/api/user-groups/`
+  `refresh` (renews all memberships, **drops any the registry reports
+  revoked** — reconciles registry-side revocation, closing the earlier
+  staleness caveat), `send` (looks up recipient key, seals, relays —
+  reply-to-sender needs no directory), `messages` (decrypted inbox stored on
+  the userDoc). Daily cron (`setInterval`, 5 min after boot then every 24h):
+  runs the member refresh across all users + sweeps expired relay messages
+  (30-day TTL) and expired invites. GroupsPanel: per-membership inbox
+  (expand, refresh, reply) with E2E send. Tested locally end-to-end: send →
+  relay ciphertext-only → refresh pull+decrypt → ack-delete → admin revoke →
+  member refresh drops membership → relay to revoked member blocked;
+  forged-signature relay/refresh rejected. Deferred to PR-5 (directory):
+  first-contact compose to arbitrary members (PR-3 supports reply-to-sender).

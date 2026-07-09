@@ -839,7 +839,7 @@ ensureBucketExists();
     return;
   }
 
-  const databases = ['maia_sessions', 'maia_users', 'maia_audit_log', 'maia_chats', 'maia_groups'];
+  const databases = ['maia_sessions', 'maia_users', 'maia_audit_log', 'maia_chats', 'maia_groups', 'maia_relay'];
 
   for (const dbName of databases) {
     try {
@@ -1551,7 +1551,7 @@ setupFileRoutes(app, cloudant, doClient);
 // sendEmail is injected lazily: initResend is a hoisted function declaration
 // defined further down; it resolves the Resend client (or null when
 // RESEND_API_KEY is unset — invites then rely on the copyable link).
-setupGroupRoutes(app, cloudant, auditLog, {
+const { runDailyGroupMaintenance } = setupGroupRoutes(app, cloudant, auditLog, {
   sendEmail: async (to, subject, text) => {
     const resend = await initResend();
     if (!resend) return false;
@@ -1560,6 +1560,19 @@ setupGroupRoutes(app, cloudant, auditLog, {
     return true;
   }
 });
+
+// Groups daily maintenance (Groups.md §6.1/§6.3/§7.3): renew 24h membership
+// credentials, reconcile registry-side revocation, pull relay mail, and
+// sweep expired messages + invites. Runs ~5 min after boot (let startup
+// settle) and every 24h thereafter. A single-deployment interval is fine
+// for Phase 1; a durable scheduler can replace it later.
+const GROUP_MAINTENANCE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+setTimeout(() => {
+  runDailyGroupMaintenance().catch((e) => console.warn('[groups-cron] initial run failed:', e?.message || e));
+  setInterval(() => {
+    runDailyGroupMaintenance().catch((e) => console.warn('[groups-cron] run failed:', e?.message || e));
+  }, GROUP_MAINTENANCE_INTERVAL_MS);
+}, 5 * 60 * 1000);
 
 const DEEP_LINK_COOKIE = 'maia_deep_link_user';
 const DEEP_LINK_COOKIE_MAX_AGE = 30 * 24 * 60 * 60 * 1000;

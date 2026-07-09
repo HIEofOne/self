@@ -13,18 +13,82 @@
  *       and the patient-side /api/user-groups endpoints.
  * PR-3 (relay/heartbeat), PR-4 (requests inbox), PR-5 (directory) follow.
  */
-import { generateKeyPairSync, createHash, createPrivateKey, createPublicKey, randomBytes, sign as edSign, verify as edVerify } from 'crypto';
+import {
+  generateKeyPairSync, createHash, createPrivateKey, createPublicKey,
+  randomBytes, sign as edSign, verify as edVerify,
+  diffieHellman, hkdfSync, createCipheriv, createDecipheriv
+} from 'crypto';
 
 const GROUPS_DB = 'maia_groups';
 const USERS_DB = 'maia_users';
+const RELAY_DB = 'maia_relay';
 
 /** Invite tokens are single-use and expire after 14 days. */
 const INVITE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 /** Membership credentials live 24 hours (Groups.md §6.1). */
 const CREDENTIAL_TTL_MS = 24 * 60 * 60 * 1000;
+/** Undelivered relay messages are swept after 30 days (Groups.md §6.3). */
+const RELAY_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+/** A membership is "recently active" (liquidity signal) if refreshed within
+ *  48 h — twice the daily refresh cadence, tolerant of a missed beat. */
+const LIVENESS_WINDOW_MS = 48 * 60 * 60 * 1000;
+/** Cap the decrypted inbox stored per membership on the userDoc. */
+const INBOX_MAX = 200;
 
 const sha256hex = (s) => createHash('sha256').update(s).digest('hex');
 const b64u = (buf) => Buffer.from(buf).toString('base64url');
+
+// ── E2E sealed box (Groups.md §6.3) ────────────────────────────────
+// X25519 ECDH → HKDF-SHA256 → AES-256-GCM. The sender seals to the
+// recipient's per-group X25519 public key using an ephemeral keypair; the
+// relay stores only the resulting opaque box + routing envelope and never
+// holds a key. The recipient's MAIA opens it with its private key.
+const RELAY_HKDF_INFO = Buffer.from('maia-group-relay-v1');
+
+const sealTo = (recipientEncPubJwk, plaintext) => {
+  const eph = generateKeyPairSync('x25519');
+  const recipientPub = createPublicKey({ key: recipientEncPubJwk, format: 'jwk' });
+  const secret = diffieHellman({ privateKey: eph.privateKey, publicKey: recipientPub });
+  const key = Buffer.from(hkdfSync('sha256', secret, Buffer.alloc(0), RELAY_HKDF_INFO, 32));
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  const ct = Buffer.concat([cipher.update(Buffer.from(plaintext, 'utf8')), cipher.final()]);
+  return {
+    v: 1,
+    epk: eph.publicKey.export({ format: 'jwk' }),
+    iv: iv.toString('base64url'),
+    ct: ct.toString('base64url'),
+    tag: cipher.getAuthTag().toString('base64url')
+  };
+};
+
+const openFrom = (recipientEncPrivJwk, box) => {
+  const priv = createPrivateKey({ key: recipientEncPrivJwk, format: 'jwk' });
+  const epk = createPublicKey({ key: box.epk, format: 'jwk' });
+  const secret = diffieHellman({ privateKey: priv, publicKey: epk });
+  const key = Buffer.from(hkdfSync('sha256', secret, Buffer.alloc(0), RELAY_HKDF_INFO, 32));
+  const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(box.iv, 'base64url'));
+  decipher.setAuthTag(Buffer.from(box.tag, 'base64url'));
+  return Buffer.concat([decipher.update(Buffer.from(box.ct, 'base64url')), decipher.final()]).toString('utf8');
+};
+
+/** Verify a detached Ed25519 signature (base64url) over `payload` (string)
+ *  against a JWK public key. Returns the parsed claim on success, else null. */
+const verifySignedClaim = (payload, signature, publicKeyJwk, expect = {}) => {
+  try {
+    const pub = createPublicKey({ key: publicKeyJwk, format: 'jwk' });
+    if (!edVerify(null, Buffer.from(String(payload)), pub, Buffer.from(String(signature), 'base64url'))) {
+      return null;
+    }
+    const claim = JSON.parse(String(payload));
+    for (const [k, v] of Object.entries(expect)) {
+      if (claim[k] !== v) return null;
+    }
+    return claim;
+  } catch {
+    return null;
+  }
+};
 
 /**
  * Membership credential (Groups.md §3.1, interim format per §7.2):
@@ -614,6 +678,220 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     }
   });
 
+  // ── PR-3: relay + heartbeat (registry side) ────────────────────────
+  // All member-facing endpoints here are authenticated by the member's
+  // pairwise Ed25519 signing key (no session), so they work agent-to-agent
+  // and cross-deployment. The signed claim binds action + groupId +
+  // pairwiseId; an active-membership check gives instant revocation.
+
+  const findActiveMember = (doc, pairwiseId) =>
+    (doc.members || []).find((m) => m.pairwiseId === pairwiseId && m.status === 'active');
+
+  // POST /api/groups/:groupId/refresh — the daily heartbeat (Groups.md
+  // §6.1/§6.3). Verifies the member, renews the 24 h credential, stamps
+  // lastRefreshAt (liveness), deletes any messages the member acks as
+  // delivered, and returns still-pending sealed messages for this member.
+  // A revoked/removed member gets { revoked: true } so their MAIA drops the
+  // membership — this reconciles registry-side revocation.
+  app.post('/api/groups/:groupId/refresh', async (req, res) => {
+    try {
+      const doc = await cloudant.getDocument(GROUPS_DB, req.params.groupId);
+      if (!doc || doc.type !== 'group') {
+        return res.status(404).json({ success: false, error: 'Group not found' });
+      }
+      const { pairwiseId, payload, signature, ackMessageIds } = req.body || {};
+      const member = (doc.members || []).find((m) => m.pairwiseId === pairwiseId);
+      // No live public key or not active → treat as revoked (fail-safe:
+      // the member's MAIA will drop the membership).
+      if (!member || member.status !== 'active' || !member.signingPublicKeyJwk) {
+        // Still require a well-formed request so this can't enumerate.
+        if (!pairwiseId || !payload || !signature) {
+          return res.status(400).json({ success: false, error: 'pairwiseId, payload and signature are required' });
+        }
+        return res.json({ success: true, revoked: true });
+      }
+      const claim = verifySignedClaim(payload, signature, member.signingPublicKeyJwk, {
+        action: 'refresh', groupId: doc._id, pairwiseId
+      });
+      if (!claim) {
+        return res.status(403).json({ success: false, error: 'Invalid signature' });
+      }
+
+      member.lastRefreshAt = new Date().toISOString();
+      await cloudant.saveDocument(GROUPS_DB, doc);
+
+      // Delete acknowledged (delivered) messages.
+      if (Array.isArray(ackMessageIds) && ackMessageIds.length) {
+        await Promise.all(ackMessageIds.map(async (id) => {
+          try {
+            const m = await cloudant.getDocument(RELAY_DB, String(id));
+            if (m && m.toPairwiseId === pairwiseId) await cloudant.deleteDocument(RELAY_DB, m._id);
+          } catch { /* already gone */ }
+        }));
+      }
+
+      // Return pending messages addressed to this member in this group.
+      let messages = [];
+      try {
+        const all = await cloudant.getAllDocuments(RELAY_DB);
+        messages = (all || [])
+          .filter((m) => m && m.type === 'relay_message' && m.groupId === doc._id && m.toPairwiseId === pairwiseId)
+          .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
+          .map((m) => ({ id: m._id, fromPairwiseId: m.fromPairwiseId, box: m.box, createdAt: m.createdAt }));
+      } catch { /* empty on error */ }
+
+      const credential = signMembershipCredential(doc, member);
+      res.json({ success: true, revoked: false, credential, messages });
+    } catch (error) {
+      console.error('[groups] refresh failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to refresh' });
+    }
+  });
+
+  // POST /api/groups/:groupId/relay — store a sealed message for another
+  // member. Both sender and recipient must be ACTIVE (instant revocation
+  // for relayed traffic, Groups.md §6.1). The relay stores only the opaque
+  // box + routing envelope; it never holds a key.
+  app.post('/api/groups/:groupId/relay', async (req, res) => {
+    try {
+      const doc = await cloudant.getDocument(GROUPS_DB, req.params.groupId);
+      if (!doc || doc.type !== 'group') {
+        return res.status(404).json({ success: false, error: 'Group not found' });
+      }
+      const { fromPairwiseId, toPairwiseId, box, payload, signature } = req.body || {};
+      if (!fromPairwiseId || !toPairwiseId || !box || !payload || !signature) {
+        return res.status(400).json({ success: false, error: 'fromPairwiseId, toPairwiseId, box, payload and signature are required' });
+      }
+      const sender = findActiveMember(doc, fromPairwiseId);
+      if (!sender || !sender.signingPublicKeyJwk) {
+        return res.status(403).json({ success: false, error: 'Sender is not an active member' });
+      }
+      const claim = verifySignedClaim(payload, signature, sender.signingPublicKeyJwk, {
+        action: 'relay', groupId: doc._id, fromPairwiseId, toPairwiseId
+      });
+      if (!claim) {
+        return res.status(403).json({ success: false, error: 'Invalid signature' });
+      }
+      if (!findActiveMember(doc, toPairwiseId)) {
+        return res.status(404).json({ success: false, error: 'Recipient is not an active member' });
+      }
+      const now = Date.now();
+      const msg = {
+        _id: `relay_${now}_${randomBytes(6).toString('hex')}`,
+        type: 'relay_message',
+        groupId: doc._id,
+        fromPairwiseId,
+        toPairwiseId,
+        box, // opaque sealed box — relay cannot read it
+        createdAt: new Date(now).toISOString(),
+        expiresAt: new Date(now + RELAY_TTL_MS).toISOString()
+      };
+      await cloudant.saveDocument(RELAY_DB, msg);
+      res.json({ success: true, messageId: msg._id });
+    } catch (error) {
+      console.error('[groups] relay failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to relay message' });
+    }
+  });
+
+  // GET /api/groups/:groupId/member-key/:pairwiseId — signed lookup of a
+  // member's X25519 public key so a sender can seal to them. Requires the
+  // CALLER to be an active member (signed query params). This is the
+  // minimal slice of the directory (PR-5) that relay send needs.
+  app.get('/api/groups/:groupId/member-key/:pairwiseId', async (req, res) => {
+    try {
+      const doc = await cloudant.getDocument(GROUPS_DB, req.params.groupId);
+      if (!doc || doc.type !== 'group') {
+        return res.status(404).json({ success: false, error: 'Group not found' });
+      }
+      const { caller, payload, signature } = req.query || {};
+      const callerMember = findActiveMember(doc, caller);
+      if (!callerMember || !callerMember.signingPublicKeyJwk) {
+        return res.status(403).json({ success: false, error: 'Caller is not an active member' });
+      }
+      const claim = verifySignedClaim(payload, signature, callerMember.signingPublicKeyJwk, {
+        action: 'member-key', groupId: doc._id, caller
+      });
+      if (!claim) {
+        return res.status(403).json({ success: false, error: 'Invalid signature' });
+      }
+      const target = findActiveMember(doc, req.params.pairwiseId);
+      if (!target || !target.encryptionPublicKeyJwk) {
+        return res.status(404).json({ success: false, error: 'Member not found' });
+      }
+      res.json({
+        success: true,
+        pairwiseId: target.pairwiseId,
+        alias: target.alias || null,
+        encryptionPublicKeyJwk: target.encryptionPublicKeyJwk
+      });
+    } catch (error) {
+      console.error('[groups] member-key lookup failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to look up member key' });
+    }
+  });
+
+  // GET /api/groups/:groupId/stats — aggregate liquidity only (Groups.md
+  // §6.4/§6.6). Signed by an active member. Returns counts, never a roster.
+  app.get('/api/groups/:groupId/stats', async (req, res) => {
+    try {
+      const doc = await cloudant.getDocument(GROUPS_DB, req.params.groupId);
+      if (!doc || doc.type !== 'group') {
+        return res.status(404).json({ success: false, error: 'Group not found' });
+      }
+      const { caller, payload, signature } = req.query || {};
+      const callerMember = findActiveMember(doc, caller);
+      if (!callerMember || !callerMember.signingPublicKeyJwk) {
+        return res.status(403).json({ success: false, error: 'Caller is not an active member' });
+      }
+      if (!verifySignedClaim(payload, signature, callerMember.signingPublicKeyJwk, {
+        action: 'stats', groupId: doc._id, caller
+      })) {
+        return res.status(403).json({ success: false, error: 'Invalid signature' });
+      }
+      const cutoff = Date.now() - LIVENESS_WINDOW_MS;
+      const active = (doc.members || []).filter((m) => m.status === 'active');
+      const recentlyActive = active.filter((m) => m.lastRefreshAt && new Date(m.lastRefreshAt).getTime() >= cutoff);
+      res.json({
+        success: true,
+        stats: { activeMembers: active.length, recentlyActiveMembers: recentlyActive.length }
+      });
+    } catch (error) {
+      console.error('[groups] stats failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to fetch stats' });
+    }
+  });
+
+  // Sweep expired relay messages + expired invites (called by the daily
+  // cron in server/index.js). Returns counts for logging.
+  const sweepExpired = async () => {
+    const nowIso = new Date().toISOString();
+    let relayDeleted = 0;
+    let invitesExpired = 0;
+    try {
+      const all = await cloudant.getAllDocuments(RELAY_DB);
+      for (const m of all || []) {
+        if (m && m.type === 'relay_message' && m.expiresAt && m.expiresAt < nowIso) {
+          try { await cloudant.deleteDocument(RELAY_DB, m._id); relayDeleted++; } catch { /* ignore */ }
+        }
+      }
+    } catch { /* relay db may not exist yet */ }
+    try {
+      const groups = await cloudant.getAllDocuments(GROUPS_DB);
+      for (const g of groups || []) {
+        if (!g || g.type !== 'group' || !Array.isArray(g.members)) continue;
+        const before = g.members.length;
+        g.members = g.members.filter((m) => !(m.status === 'invited' && m.inviteExpiresAt && m.inviteExpiresAt < nowIso));
+        if (g.members.length !== before) {
+          invitesExpired += before - g.members.length;
+          g.updatedAt = nowIso;
+          try { await cloudant.saveDocument(GROUPS_DB, g); } catch { /* ignore */ }
+        }
+      }
+    } catch { /* ignore */ }
+    return { relayDeleted, invitesExpired };
+  };
+
   // ── PR-2: patient-side membership endpoints ────────────────────────
   // Session pattern matches existing user endpoints: userId comes from the
   // request; when a session exists it must match (403 on mismatch).
@@ -802,4 +1080,224 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       res.status(500).json({ success: false, error: 'Failed to leave group' });
     }
   });
+
+  // ── PR-3: relay + heartbeat (member side) ──────────────────────────
+
+  const signWithMembership = (membership, claimObj) => {
+    const payload = JSON.stringify(claimObj);
+    const priv = createPrivateKey({ key: membership.signingKeyPair.privateKeyJwk, format: 'jwk' });
+    const signature = edSign(null, Buffer.from(payload), priv).toString('base64url');
+    return { payload, signature };
+  };
+
+  const registryBase = (membership) =>
+    String(membership.registryUrl || `http://localhost:${process.env.PORT || 3001}`).replace(/\/$/, '');
+
+  /**
+   * Refresh one membership against its registry: renew the credential,
+   * pull + decrypt any pending messages into the membership inbox, ack
+   * them, and report whether the membership was revoked. Mutates the
+   * passed membership object; caller persists the userDoc. Returns
+   * { revoked, newMessages }.
+   */
+  const refreshMembership = async (membership) => {
+    const { payload, signature } = signWithMembership(membership, {
+      action: 'refresh',
+      groupId: membership.groupId,
+      pairwiseId: membership.pairwiseId,
+      ts: new Date().toISOString()
+    });
+    // Ack messages we already stored last time (delivered).
+    const ackMessageIds = (membership.inbox || []).map((msg) => msg.id).filter(Boolean);
+    const res = await fetch(`${registryBase(membership)}/api/groups/${encodeURIComponent(membership.groupId)}/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pairwiseId: membership.pairwiseId, payload, signature, ackMessageIds })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || `Registry refresh failed (HTTP ${res.status})`);
+    }
+    if (data.revoked) return { revoked: true, newMessages: 0 };
+
+    if (data.credential) membership.credential = data.credential;
+    membership.lastRefreshAt = new Date().toISOString();
+
+    // Decrypt newly-pulled messages and append to the stored inbox.
+    const existingIds = new Set((membership.inbox || []).map((m) => m.id));
+    let added = 0;
+    for (const m of data.messages || []) {
+      if (existingIds.has(m.id)) continue;
+      let text = null;
+      try {
+        text = openFrom(membership.encryptionKeyPair.privateKeyJwk, m.box);
+      } catch {
+        text = null; // undecryptable — skip rather than store garbage
+      }
+      if (text == null) continue;
+      membership.inbox = membership.inbox || [];
+      membership.inbox.push({ id: m.id, fromPairwiseId: m.fromPairwiseId, text, receivedAt: m.createdAt });
+      added++;
+    }
+    // Cap inbox size (oldest dropped).
+    if (membership.inbox && membership.inbox.length > INBOX_MAX) {
+      membership.inbox = membership.inbox.slice(-INBOX_MAX);
+    }
+    return { revoked: false, newMessages: added };
+  };
+
+  // POST /api/user-groups/refresh — refresh all of a user's memberships
+  // (also invoked by the daily cron). Drops any membership the registry
+  // reports revoked.
+  app.post('/api/user-groups/refresh', async (req, res) => {
+    const userId = requireMatchingUser(req, res);
+    if (!userId) return;
+    try {
+      const userDoc = await cloudant.getDocument(USERS_DB, userId);
+      if (!userDoc) return res.status(404).json({ success: false, error: 'User not found' });
+      const result = await refreshUserMemberships(userDoc);
+      if (result.changed) await cloudant.saveDocument(USERS_DB, userDoc);
+      res.json({ success: true, ...result.summary });
+    } catch (error) {
+      console.error('[user-groups] refresh failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to refresh memberships' });
+    }
+  });
+
+  // POST /api/user-groups/send — seal a message to another member and relay
+  // it. Reply-to-sender needs no directory: the recipient's key is looked
+  // up from the registry (signed) at send time.
+  app.post('/api/user-groups/send', async (req, res) => {
+    const userId = requireMatchingUser(req, res);
+    if (!userId) return;
+    try {
+      const { groupId, toPairwiseId, text } = req.body || {};
+      if (!groupId || !toPairwiseId || !text || !String(text).trim()) {
+        return res.status(400).json({ success: false, error: 'groupId, toPairwiseId and text are required' });
+      }
+      const userDoc = await cloudant.getDocument(USERS_DB, userId);
+      const membership = (userDoc?.groupMemberships || []).find((m) => m.groupId === groupId);
+      if (!membership) return res.status(404).json({ success: false, error: 'Not a member of this group' });
+      const base = registryBase(membership);
+
+      // Look up the recipient's encryption key (signed).
+      const kq = signWithMembership(membership, {
+        action: 'member-key', groupId, caller: membership.pairwiseId, ts: new Date().toISOString()
+      });
+      const keyRes = await fetch(
+        `${base}/api/groups/${encodeURIComponent(groupId)}/member-key/${encodeURIComponent(toPairwiseId)}` +
+        `?caller=${encodeURIComponent(membership.pairwiseId)}&payload=${encodeURIComponent(kq.payload)}&signature=${encodeURIComponent(kq.signature)}`
+      );
+      const keyData = await keyRes.json().catch(() => ({}));
+      if (!keyRes.ok || !keyData.success) {
+        return res.status(keyRes.status === 404 ? 404 : 502).json({ success: false, error: keyData.error || 'Recipient not found' });
+      }
+
+      // Seal and relay.
+      const box = sealTo(keyData.encryptionPublicKeyJwk, String(text));
+      const rq = signWithMembership(membership, {
+        action: 'relay', groupId, fromPairwiseId: membership.pairwiseId, toPairwiseId, ts: new Date().toISOString()
+      });
+      const relayRes = await fetch(`${base}/api/groups/${encodeURIComponent(groupId)}/relay`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fromPairwiseId: membership.pairwiseId, toPairwiseId, box, payload: rq.payload, signature: rq.signature })
+      });
+      const relayData = await relayRes.json().catch(() => ({}));
+      if (!relayRes.ok || !relayData.success) {
+        return res.status(502).json({ success: false, error: relayData.error || 'Relay failed' });
+      }
+      auditLog.logEvent({
+        type: 'user_group_message_sent',
+        userId,
+        ip: req.ip,
+        details: { groupId, toPairwiseId }
+      });
+      res.json({ success: true });
+    } catch (error) {
+      console.error('[user-groups] send failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to send message' });
+    }
+  });
+
+  // GET /api/user-groups/messages?userId=&groupId= — decrypted inbox for a
+  // membership (stored on the userDoc; populated by refresh).
+  app.get('/api/user-groups/messages', async (req, res) => {
+    const userId = requireMatchingUser(req, res);
+    if (!userId) return;
+    try {
+      const userDoc = await cloudant.getDocument(USERS_DB, userId);
+      const membership = (userDoc?.groupMemberships || []).find((m) => m.groupId === req.query.groupId);
+      if (!membership) return res.status(404).json({ success: false, error: 'Not a member of this group' });
+      res.json({ success: true, messages: membership.inbox || [] });
+    } catch (error) {
+      console.error('[user-groups] messages failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to load messages' });
+    }
+  });
+
+  /** Refresh every membership on a userDoc; drop revoked ones. Mutates
+   *  userDoc.groupMemberships. Returns { changed, summary }. */
+  const refreshUserMemberships = async (userDoc) => {
+    const memberships = userDoc.groupMemberships || [];
+    if (memberships.length === 0) return { changed: false, summary: { refreshed: 0, revoked: 0, newMessages: 0 } };
+    let changed = false;
+    let refreshed = 0;
+    let revoked = 0;
+    let newMessages = 0;
+    const kept = [];
+    for (const membership of memberships) {
+      try {
+        const r = await refreshMembership(membership);
+        if (r.revoked) {
+          revoked++;
+          changed = true;
+          continue; // drop this membership
+        }
+        refreshed++;
+        newMessages += r.newMessages;
+        if (r.newMessages > 0 || membership.credential) changed = true;
+      } catch (e) {
+        console.warn(`[user-groups] refresh failed for ${membership.groupId}:`, e?.message || e);
+      }
+      kept.push(membership);
+    }
+    userDoc.groupMemberships = kept;
+    if (changed) userDoc.updatedAt = new Date().toISOString();
+    return { changed, summary: { refreshed, revoked, newMessages } };
+  };
+
+  /**
+   * Daily maintenance for the cron (server/index.js): sweep expired relay
+   * messages + invites at the registry, then refresh every user's
+   * memberships (renewing credentials, reconciling revocation, pulling
+   * mail). Best-effort; logs a summary.
+   */
+  const runDailyGroupMaintenance = async () => {
+    const swept = await sweepExpired();
+    let usersProcessed = 0;
+    let totalRevoked = 0;
+    let totalMessages = 0;
+    try {
+      const users = await cloudant.getAllDocuments(USERS_DB);
+      for (const userDoc of users || []) {
+        if (!userDoc || !Array.isArray(userDoc.groupMemberships) || userDoc.groupMemberships.length === 0) continue;
+        try {
+          const r = await refreshUserMemberships(userDoc);
+          if (r.changed) await cloudant.saveDocument(USERS_DB, userDoc);
+          usersProcessed++;
+          totalRevoked += r.summary.revoked;
+          totalMessages += r.summary.newMessages;
+        } catch (e) {
+          console.warn(`[groups-cron] user ${userDoc.userId} refresh failed:`, e?.message || e);
+        }
+      }
+    } catch (e) {
+      console.warn('[groups-cron] user iteration failed:', e?.message || e);
+    }
+    console.log(`[groups-cron] maintenance: swept ${swept.relayDeleted} msgs / ${swept.invitesExpired} invites; ` +
+      `refreshed ${usersProcessed} users, ${totalRevoked} revoked, ${totalMessages} new messages`);
+  };
+
+  return { runDailyGroupMaintenance };
 }
