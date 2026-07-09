@@ -3505,6 +3505,24 @@ const handlePickLocalFolder = async () => {
   if (!props.user?.userId) return;
   const result = await pickLocalFolder(props.user.userId);
   if (!result) return; // user cancelled
+  // Guard against nesting/commingling this account into another's folder.
+  if (result.conflict) {
+    if (result.conflict.severity === 'block') {
+      $q.notify({ type: 'negative', message: result.conflict.message, timeout: 9000 });
+      return; // handle was not stored; user must pick a different folder
+    }
+    // 'warn' — let the user confirm before reusing a MAIA-looking folder.
+    const proceed = await new Promise<boolean>((resolve) => {
+      $q.dialog({
+        title: 'Folder already in use?',
+        message: result.conflict!.message,
+        ok: { label: 'Use anyway', color: 'warning' },
+        cancel: { label: 'Pick another', flat: true },
+        persistent: true
+      }).onOk(() => resolve(true)).onCancel(() => resolve(false));
+    });
+    if (!proceed) return;
+  }
   localFolderHandle.value = result.handle;
   localFolderName.value = result.folderName;
   emit('local-folder-connected', { handle: result.handle, folderName: result.folderName });

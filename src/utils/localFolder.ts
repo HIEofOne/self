@@ -168,16 +168,87 @@ async function getStoredHandle(
 // ── Handle lifecycle ───────────────────────────────────────────────
 
 /**
+ * Result of scanning a just-picked folder for signs it already belongs to
+ * (or sits inside) another MAIA account. Guards against accidentally
+ * nesting/commingling two accounts in one folder tree — e.g. selecting
+ * another account's root, or a "chats" subfolder inside one.
+ */
+export interface FolderConflict {
+  severity: 'block' | 'warn';
+  kind: 'other-account' | 'maia-workspace';
+  otherUserId?: string;
+  message: string;
+}
+
+/**
+ * Inspect a just-picked directory for a foreign MAIA account.
+ * - Hard BLOCK if it contains a maia-state.json owned by a DIFFERENT userId
+ *   (two accounts must never share a root).
+ * - WARN if it has no state file but does contain MAIA artifacts
+ *   (maia-log.pdf, maia*.webloc, or "MAIA chat *.pdf") — a strong sign it
+ *   is inside another account's folder (e.g. its "chats" subfolder).
+ * Best-effort: any scan error returns null (never blocks on a read failure).
+ * The picker's own folder (same userId's maia-state.json) returns null.
+ */
+export async function inspectFolderForForeignAccount(
+  handle: FileSystemDirectoryHandle,
+  userId: string
+): Promise<FolderConflict | null> {
+  try {
+    let hasStateFile = false;
+    let hasArtifacts = false;
+    for await (const entry of handle.values()) {
+      if (entry.kind !== 'file') continue;
+      if (entry.name === STATE_FILE_NAME) hasStateFile = true;
+      else if (entry.name === 'maia-log.pdf') hasArtifacts = true;
+      else if (entry.name.endsWith('.webloc') && entry.name.startsWith('maia')) hasArtifacts = true;
+      else if (/^MAIA chat .*\.pdf$/i.test(entry.name)) hasArtifacts = true;
+    }
+    if (hasStateFile) {
+      const state = await readStateFile(handle);
+      const owner = state?.userDoc?.userId;
+      if (owner && owner !== userId) {
+        return {
+          severity: 'block',
+          kind: 'other-account',
+          otherUserId: owner,
+          message: `This folder is already the MAIA home of a different account ("${owner}"). Choose an empty folder so the two accounts don't share storage.`
+        };
+      }
+      return null; // this user's own folder — fine to (re)pick
+    }
+    if (hasArtifacts) {
+      return {
+        severity: 'warn',
+        kind: 'maia-workspace',
+        message: 'This folder already contains MAIA files, so it may be inside another account’s folder (for example a "chats" subfolder). Using it could mix accounts. Choose a new, empty folder unless you are sure.'
+      };
+    }
+    return null;
+  } catch {
+    return null; // never block on a scan failure
+  }
+}
+
+/**
  * Open a directory picker and store the handle. Must be called from a user gesture.
+ * Runs a foreign-account inspection on the chosen folder (see
+ * inspectFolderForForeignAccount). On a hard `block` conflict the handle is
+ * NOT stored — the caller must reject the selection and re-prompt.
  */
 export async function pickLocalFolder(
   userId: string
-): Promise<{ handle: FileSystemDirectoryHandle; folderName: string } | null> {
+): Promise<{ handle: FileSystemDirectoryHandle; folderName: string; conflict: FolderConflict | null } | null> {
   if (!isFileSystemAccessSupported()) return null;
   try {
     const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
+    const conflict = await inspectFolderForForeignAccount(handle, userId);
+    if (conflict && conflict.severity === 'block') {
+      // Do NOT remember a folder that belongs to another account.
+      return { handle, folderName: handle.name, conflict };
+    }
     await storeDirectoryHandle(userId, handle);
-    return { handle, folderName: handle.name };
+    return { handle, folderName: handle.name, conflict: conflict || null };
   } catch (e: any) {
     // User cancelled the picker
     if (e?.name === 'AbortError') return null;
