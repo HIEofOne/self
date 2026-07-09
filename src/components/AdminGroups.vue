@@ -83,7 +83,16 @@
                 revoked {{ formatDate(m.revokedAt) }}
               </template>
             </div>
-            <div class="member-cell" style="flex: 0 0 44px; text-align: right">
+            <div class="member-cell" style="flex: 0 0 88px; text-align: right">
+              <q-btn
+                v-if="m.status === 'active'"
+                flat dense round size="sm"
+                :icon="m.mentor ? 'star' : 'star_border'"
+                :color="m.mentor ? 'teal' : 'grey-6'"
+                @click="toggleMentor(g, m)"
+              >
+                <q-tooltip>{{ m.mentor ? 'Remove mentor (hide from directory)' : 'Make mentor (list in directory)' }}</q-tooltip>
+              </q-btn>
               <q-btn flat dense round size="sm" icon="delete" color="negative" @click="confirmRemoveMember(g, m)">
                 <q-tooltip>
                   {{ m.status === 'invited' ? 'Cancel invite' : m.status === 'active' ? 'Revoke membership' : 'Remove entry' }}
@@ -408,6 +417,26 @@ const copyInviteLink = async () => {
     $q.notify({ type: 'positive', message: 'Invite link copied.' });
   } catch {
     $q.notify({ type: 'negative', message: 'Could not copy — select the link text manually.' });
+  }
+};
+
+const toggleMentor = async (g: GroupSummary, m: MemberSummary) => {
+  try {
+    const res = await fetch(
+      `/api/groups/${encodeURIComponent(g.groupId)}/members/${encodeURIComponent(m.pairwiseId)}/mentor`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ mentor: !m.mentor })
+      }
+    );
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    await loadMembers(g.groupId);
+    $q.notify({ type: 'positive', message: data.mentor ? 'Marked as mentor (now in the directory).' : 'Removed from mentors.' });
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to update mentor' });
   }
 };
 

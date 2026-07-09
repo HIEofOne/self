@@ -591,3 +591,23 @@ and any design decisions resolved.
   1.5.8. Re-landed here as a clean PR-4-only diff off main. Lesson: don't
   stack a PR on another PR's branch — wait for the base PR to merge, then
   branch off main.
+- **2026-07-09** — **PR-5: directory & liquidity + mentor role** (§6.6, §7.5;
+  completes Phase-1 peer reachability). Registry: `GET /api/groups/:groupId/
+  directory` (signed, member-only) returns aggregate liquidity
+  (`activeMembers`, `recentlyActiveMembers`) PLUS the opt-in-discoverable
+  members (mentors) by alias + pairwiseId — **regular members are never
+  individually listed** ("aggregate liquidity, individual silence"); the
+  caller is excluded from the mentor list. `PUT /api/groups/:groupId/
+  members/:pairwiseId/mentor` (admin) toggles a member's mentor flag —
+  admin-curated mentor supply for launch (member self-opt-in is a noted
+  follow-up). Member side: `GET /api/user-groups/directory` signs and
+  proxies to the registry. **First-contact compose**: the Groups tab's
+  "Find peers" panel shows liquidity + mentors, each with a Message button
+  that composes to that mentor via the existing E2E `/send` — closing the
+  deferral from PR-3/PR-4 (previously reply-to-sender only). AdminGroups:
+  a star toggle per active member sets mentor. Tested locally: directory
+  lists only mentors while the aggregate count reflects all active members;
+  admin mentor toggle; caller excluded from own directory; first-contact
+  message to a mentor delivered; forged/non-member directory requests
+  rejected 403. Deferred: member self-opt-in as mentor; reaching a specific
+  non-mentor member (via match-probe in Phase 3 or an introduction).
