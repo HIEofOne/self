@@ -863,6 +863,78 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     }
   });
 
+  // GET /api/groups/:groupId/directory — the member-facing directory
+  // (Groups.md §6.6, §7.3). Signed by an active member. Returns aggregate
+  // liquidity PLUS the opt-in-discoverable members only (mentors) by alias
+  // + pairwiseId. Regular members are NOT individually listed — "aggregate
+  // liquidity, individual silence." You reach a non-mentor via reply, a
+  // match-probe (Phase 3), or a mentor introduction, never a browsable
+  // roster. The caller is excluded from the mentor list.
+  app.get('/api/groups/:groupId/directory', async (req, res) => {
+    try {
+      const doc = await cloudant.getDocument(GROUPS_DB, req.params.groupId);
+      if (!doc || doc.type !== 'group') {
+        return res.status(404).json({ success: false, error: 'Group not found' });
+      }
+      const { caller, payload, signature } = req.query || {};
+      const callerMember = findActiveMember(doc, caller);
+      if (!callerMember || !callerMember.signingPublicKeyJwk) {
+        return res.status(403).json({ success: false, error: 'Caller is not an active member' });
+      }
+      if (!verifySignedClaim(payload, signature, callerMember.signingPublicKeyJwk, {
+        action: 'directory', groupId: doc._id, caller
+      })) {
+        return res.status(403).json({ success: false, error: 'Invalid signature' });
+      }
+      const cutoff = Date.now() - LIVENESS_WINDOW_MS;
+      const active = (doc.members || []).filter((m) => m.status === 'active');
+      const recentlyActive = active.filter((m) => m.lastRefreshAt && new Date(m.lastRefreshAt).getTime() >= cutoff);
+      const mentors = active
+        .filter((m) => m.mentor && m.pairwiseId !== caller)
+        .map((m) => ({ pairwiseId: m.pairwiseId, alias: m.alias || '(member)' }));
+      res.json({
+        success: true,
+        stats: { activeMembers: active.length, recentlyActiveMembers: recentlyActive.length },
+        mentors
+      });
+    } catch (error) {
+      console.error('[groups] directory failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to fetch directory' });
+    }
+  });
+
+  // PUT /api/groups/:groupId/members/:pairwiseId/mentor — admin toggles a
+  // member's mentor (discoverable) flag. Mentors are the supply side of the
+  // matching market (Groups.md §6.6, Refinement 1): the only members listed
+  // individually in the directory. Admin-curated for launch; member
+  // self-opt-in is a noted follow-up.
+  app.put('/api/groups/:groupId/members/:pairwiseId/mentor', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const doc = await cloudant.getDocument(GROUPS_DB, req.params.groupId);
+      if (!doc || doc.type !== 'group') {
+        return res.status(404).json({ success: false, error: 'Group not found' });
+      }
+      const member = (doc.members || []).find((m) => m.pairwiseId === req.params.pairwiseId);
+      if (!member || member.status !== 'active') {
+        return res.status(404).json({ success: false, error: 'Active member not found' });
+      }
+      member.mentor = !!(req.body && req.body.mentor);
+      doc.updatedAt = new Date().toISOString();
+      await cloudant.saveDocument(GROUPS_DB, doc);
+      auditLog.logEvent({
+        type: 'group_member_mentor_set',
+        userId: req.session?.userId || 'admin-local',
+        ip: req.ip,
+        details: { groupId: doc._id, pairwiseId: member.pairwiseId, mentor: member.mentor }
+      });
+      res.json({ success: true, mentor: member.mentor });
+    } catch (error) {
+      console.error('[groups] mentor toggle failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to update mentor flag' });
+    }
+  });
+
   // Sweep expired relay messages + expired invites (called by the daily
   // cron in server/index.js). Returns counts for logging.
   const sweepExpired = async () => {
@@ -1364,6 +1436,35 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     } catch (error) {
       console.error('[user-groups] messages failed:', error);
       res.status(500).json({ success: false, error: 'Failed to load messages' });
+    }
+  });
+
+  // GET /api/user-groups/directory?userId=&groupId= — the member's view of
+  // their group: aggregate liquidity + the discoverable mentors they can
+  // reach for first contact. Signs a directory claim and calls the registry.
+  app.get('/api/user-groups/directory', async (req, res) => {
+    const userId = requireMatchingUser(req, res);
+    if (!userId) return;
+    try {
+      const userDoc = await cloudant.getDocument(USERS_DB, userId);
+      const membership = (userDoc?.groupMemberships || []).find((m) => m.groupId === req.query.groupId);
+      if (!membership) return res.status(404).json({ success: false, error: 'Not a member of this group' });
+      const { payload, signature } = signWithMembership(membership, {
+        action: 'directory', groupId: membership.groupId, caller: membership.pairwiseId, ts: new Date().toISOString()
+      });
+      const base = registryBase(membership);
+      const r = await fetch(
+        `${base}/api/groups/${encodeURIComponent(membership.groupId)}/directory` +
+        `?caller=${encodeURIComponent(membership.pairwiseId)}&payload=${encodeURIComponent(payload)}&signature=${encodeURIComponent(signature)}`
+      );
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || !data.success) {
+        return res.status(502).json({ success: false, error: data.error || 'Directory unavailable' });
+      }
+      res.json({ success: true, stats: data.stats, mentors: data.mentors || [] });
+    } catch (error) {
+      console.error('[user-groups] directory failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to fetch directory' });
     }
   });
 

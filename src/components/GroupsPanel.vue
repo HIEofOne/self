@@ -117,11 +117,45 @@
                 :label="`Messages${(messagesByGroup[m.groupId] || []).length ? ' (' + messagesByGroup[m.groupId].length + ')' : ''}`"
                 @click="toggleMessages(m)"
               />
+              <q-btn flat dense icon="people" label="Find peers" @click="toggleDirectory(m)" />
               <q-btn flat dense round icon="refresh" :loading="refreshing === m.groupId" @click="refreshMessages(m)">
                 <q-tooltip>Check for new messages</q-tooltip>
               </q-btn>
               <q-btn flat dense color="negative" label="Leave" :loading="leaving === m.groupId" @click="confirmLeave(m)" />
             </div>
+          </q-item-section>
+        </q-item>
+
+        <!-- Directory / find peers for this membership -->
+        <q-item v-if="expandedDirectory === m.groupId">
+          <q-item-section>
+            <div v-if="loadingDirectory === m.groupId" class="text-caption text-grey-6 q-pl-md">Loading…</div>
+            <template v-else>
+              <div class="text-caption text-grey-7 q-pl-md q-mb-xs">
+                <template v-if="directoryByGroup[m.groupId]">
+                  {{ directoryByGroup[m.groupId].stats.activeMembers }} member(s) ·
+                  {{ directoryByGroup[m.groupId].stats.recentlyActiveMembers }} active recently
+                </template>
+              </div>
+              <div
+                v-if="directoryByGroup[m.groupId] && !directoryByGroup[m.groupId].mentors.length"
+                class="text-caption text-grey-6 q-pl-md"
+              >
+                No mentors are listed yet. You can still reply to anyone who messages you.
+              </div>
+              <div
+                v-for="mentor in (directoryByGroup[m.groupId] ? directoryByGroup[m.groupId].mentors : [])"
+                :key="mentor.pairwiseId"
+                class="row items-center no-wrap q-pl-md q-py-xs"
+                style="border-bottom: 1px solid #f0f0f0"
+              >
+                <div class="col">
+                  <span class="text-body2">{{ mentor.alias }}</span>
+                  <q-badge color="teal" label="mentor" class="q-ml-sm" />
+                </div>
+                <q-btn flat dense size="sm" color="primary" label="Message" @click="openCompose(m, mentor)" />
+              </div>
+            </template>
           </q-item-section>
         </q-item>
 
@@ -148,11 +182,11 @@
       </template>
     </q-list>
 
-    <!-- Reply dialog -->
+    <!-- Compose / reply dialog -->
     <q-dialog v-model="showReplyDialog">
       <q-card style="min-width: 420px; max-width: 560px">
         <q-card-section>
-          <div class="text-h6">Reply</div>
+          <div class="text-h6">{{ replyTo && replyTo.alias ? `Message ${replyTo.alias}` : 'Reply' }}</div>
           <div class="text-caption text-grey-7">Your message is end-to-end encrypted to the recipient.</div>
         </q-card-section>
         <q-card-section class="q-pt-none">
@@ -217,8 +251,16 @@ const messagesByGroup = ref<Record<string, GroupMessage[]>>({});
 const refreshing = ref<string | null>(null);
 const showReplyDialog = ref(false);
 const replyText = ref('');
-const replyTo = ref<{ groupId: string; toPairwiseId: string } | null>(null);
+const replyTo = ref<{ groupId: string; toPairwiseId: string; alias?: string } | null>(null);
 const sendingReply = ref(false);
+
+interface Directory {
+  stats: { activeMembers: number; recentlyActiveMembers: number };
+  mentors: { pairwiseId: string; alias: string }[];
+}
+const expandedDirectory = ref<string | null>(null);
+const directoryByGroup = ref<Record<string, Directory>>({});
+const loadingDirectory = ref<string | null>(null);
 
 interface AsRequest {
   id: string;
@@ -455,6 +497,42 @@ const refreshMessages = async (m: Membership) => {
 
 const openReply = (m: Membership, msg: GroupMessage) => {
   replyTo.value = { groupId: m.groupId, toPairwiseId: msg.fromPairwiseId };
+  replyText.value = '';
+  showReplyDialog.value = true;
+};
+
+const loadDirectory = async (groupId: string) => {
+  loadingDirectory.value = groupId;
+  try {
+    const res = await fetch(
+      `/api/user-groups/directory?userId=${encodeURIComponent(props.userId)}&groupId=${encodeURIComponent(groupId)}`,
+      { credentials: 'include' }
+    );
+    const data = await res.json();
+    if (res.ok && data.success) {
+      directoryByGroup.value = {
+        ...directoryByGroup.value,
+        [groupId]: { stats: data.stats, mentors: data.mentors || [] }
+      };
+    }
+  } catch {
+    /* panel shows nothing */
+  } finally {
+    loadingDirectory.value = null;
+  }
+};
+
+const toggleDirectory = async (m: Membership) => {
+  if (expandedDirectory.value === m.groupId) {
+    expandedDirectory.value = null;
+    return;
+  }
+  expandedDirectory.value = m.groupId;
+  await loadDirectory(m.groupId);
+};
+
+const openCompose = (m: Membership, mentor: { pairwiseId: string; alias: string }) => {
+  replyTo.value = { groupId: m.groupId, toPairwiseId: mentor.pairwiseId, alias: mentor.alias };
   replyText.value = '';
   showReplyDialog.value = true;
 };
