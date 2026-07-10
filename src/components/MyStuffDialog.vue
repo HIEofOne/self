@@ -1077,8 +1077,8 @@
           </q-tab-panel>
 
           <!-- Groups Tab (Groups & AS feature — Documentation/Groups.md §7.4) -->
-          <q-tab-panel name="groups" class="q-pa-none">
-            <GroupsPanel :userId="userId" />
+          <q-tab-panel name="groups" class="q-pa-none" style="display: flex; flex-direction: column; height: 100%;">
+            <GroupsPanel :userId="userId" style="flex: 1; min-height: 0;" />
           </q-tab-panel>
 
           <!-- Privacy Filter Tab -->

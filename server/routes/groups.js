@@ -35,6 +35,10 @@ const RELAY_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const LIVENESS_WINDOW_MS = 48 * 60 * 60 * 1000;
 /** Cap the decrypted inbox stored per membership on the userDoc. */
 const INBOX_MAX = 200;
+/** Cap the sent-message log stored per membership on the userDoc. Sent
+ *  messages are recorded locally (never at the registry) so the Groups
+ *  tab can render both sides of a conversation thread. */
+const OUTBOX_MAX = 200;
 
 const sha256hex = (s) => createHash('sha256').update(s).digest('hex');
 const b64u = (buf) => Buffer.from(buf).toString('base64url');
@@ -1173,6 +1177,30 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
    * passed membership object; caller persists the userDoc. Returns
    * { revoked, newMessages }.
    */
+  /** Best-effort alias lookup for a fellow member via the registry's
+   *  signed member-key endpoint (which already returns alias alongside
+   *  the encryption key). Used to label inbound messages/requests with
+   *  the sender's display name. Returns null on any failure — a missing
+   *  alias never blocks message ingest. `cache` deduplicates lookups
+   *  within one refresh pass. */
+  const lookupMemberAlias = async (membership, pairwiseId, cache) => {
+    if (cache && cache.has(pairwiseId)) return cache.get(pairwiseId);
+    let alias = null;
+    try {
+      const kq = signWithMembership(membership, {
+        action: 'member-key', groupId: membership.groupId, caller: membership.pairwiseId, ts: new Date().toISOString()
+      });
+      const r = await fetch(
+        `${registryBase(membership)}/api/groups/${encodeURIComponent(membership.groupId)}/member-key/${encodeURIComponent(pairwiseId)}` +
+        `?caller=${encodeURIComponent(membership.pairwiseId)}&payload=${encodeURIComponent(kq.payload)}&signature=${encodeURIComponent(kq.signature)}`
+      );
+      const d = await r.json().catch(() => ({}));
+      if (r.ok && d.success) alias = d.alias || null;
+    } catch { /* offline registry / departed member — no alias */ }
+    if (cache) cache.set(pairwiseId, alias);
+    return alias;
+  };
+
   const refreshMembership = async (membership) => {
     const { payload, signature } = signWithMembership(membership, {
       action: 'refresh',
@@ -1203,6 +1231,8 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     const existingIds = new Set((membership.inbox || []).map((m) => m.id));
     let added = 0;
     const asRequests = [];
+    // One alias lookup per unique sender per refresh (best-effort).
+    const aliasCache = new Map();
     for (const m of data.messages || []) {
       if (existingIds.has(m.id)) continue;
       let text = null;
@@ -1220,10 +1250,13 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         if (parsed && parsed.maiaType === 'as-request') envelope = parsed;
       } catch { /* plain text message */ }
 
+      const fromAlias = await lookupMemberAlias(membership, m.fromPairwiseId, aliasCache);
+
       if (envelope) {
         asRequests.push({
           relayId: m.id,
           fromPairwiseId: m.fromPairwiseId,
+          fromAlias,
           receivedAt: m.createdAt,
           action: String(envelope.action || 'message'),
           resource: String(envelope.resource || ''),
@@ -1238,7 +1271,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       }
 
       membership.inbox = membership.inbox || [];
-      membership.inbox.push({ id: m.id, fromPairwiseId: m.fromPairwiseId, text, receivedAt: m.createdAt });
+      membership.inbox.push({ id: m.id, fromPairwiseId: m.fromPairwiseId, fromAlias, text, receivedAt: m.createdAt });
       added++;
     }
     // Cap inbox size (oldest dropped).
@@ -1295,7 +1328,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     if (!relayRes.ok || !relayData.success) {
       return { ok: false, status: 502, error: relayData.error || 'Relay failed' };
     }
-    return { ok: true };
+    return { ok: true, toAlias: keyData.alias || null };
   };
 
   // POST /api/user-groups/send — seal a plain message to another member and
@@ -1313,8 +1346,20 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       if (!membership) return res.status(404).json({ success: false, error: 'Not a member of this group' });
       const result = await deliverSealed(membership, toPairwiseId, String(text));
       if (!result.ok) return res.status(result.status).json({ success: false, error: result.error });
+      // Record the sent message locally (userDoc only — never the registry)
+      // so the Groups conversation view can show both sides of a thread.
+      const sent = {
+        id: `out_${Date.now()}_${randomBytes(4).toString('hex')}`,
+        toPairwiseId,
+        toAlias: result.toAlias || null,
+        text: String(text),
+        sentAt: new Date().toISOString()
+      };
+      membership.outbox = [...(membership.outbox || []), sent].slice(-OUTBOX_MAX);
+      userDoc.updatedAt = new Date().toISOString();
+      await cloudant.saveDocument(USERS_DB, userDoc);
       auditLog.logEvent({ type: 'user_group_message_sent', userId, ip: req.ip, details: { groupId, toPairwiseId } });
-      res.json({ success: true });
+      res.json({ success: true, sent });
     } catch (error) {
       console.error('[user-groups] send failed:', error);
       res.status(500).json({ success: false, error: 'Failed to send message' });
@@ -1371,6 +1416,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
           groupId: r.groupId,
           groupName: r.groupName,
           fromPairwiseId: r.fromPairwiseId,
+          fromAlias: r.fromAlias || null,
           action: r.action,
           resource: r.resource,
           payload: r.payload,
@@ -1458,7 +1504,9 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       const userDoc = await cloudant.getDocument(USERS_DB, userId);
       const membership = (userDoc?.groupMemberships || []).find((m) => m.groupId === req.query.groupId);
       if (!membership) return res.status(404).json({ success: false, error: 'Not a member of this group' });
-      res.json({ success: true, messages: membership.inbox || [] });
+      // `messages` = received (inbox); `sent` = locally-recorded outbox so
+      // the client can render a two-sided conversation thread.
+      res.json({ success: true, messages: membership.inbox || [], sent: membership.outbox || [] });
     } catch (error) {
       console.error('[user-groups] messages failed:', error);
       res.status(500).json({ success: false, error: 'Failed to load messages' });
@@ -1515,6 +1563,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         groupName: membership.groupName,
         toPairwiseId: membership.pairwiseId,
         fromPairwiseId: r.fromPairwiseId,
+        fromAlias: r.fromAlias || null,
         action: r.action,
         resource: r.resource,
         computationClass: r.computationClass,

@@ -1,208 +1,270 @@
 <template>
-  <div class="q-pa-md">
-    <div class="text-h6 q-mb-xs">Groups</div>
-    <div class="text-body2 text-grey-7 q-mb-md">
-      Connect with patients who share your situation. Your records never leave
-      your MAIA — groups only mediate introductions and messages you approve.
-    </div>
-
-    <!-- Pending invite banner -->
-    <q-banner v-if="pendingInvite" class="bg-blue-1 q-mb-md" rounded>
-      <template v-slot:avatar>
-        <q-icon name="mail" color="primary" />
-      </template>
-      <div class="text-body2">
-        <template v-if="inviteGroupName">
-          You've been invited to join <strong>{{ inviteGroupName }}</strong>
-          <span v-if="inviteGroupDescription" class="text-grey-7"> — {{ inviteGroupDescription }}</span>
-        </template>
-        <template v-else>
-          You have a pending group invitation.
-        </template>
-      </div>
-      <div class="row items-center q-mt-sm q-gutter-sm">
-        <q-input
-          v-model="aliasInput"
-          dense
-          outlined
-          label="Your display name in this group"
-          hint="Members will know you by this name"
-          style="min-width: 260px"
-          :disable="joining"
-        />
+  <div class="groups-shell">
+    <!-- ── Left rail: groups + peer conversations (Signal-style) ────── -->
+    <div class="groups-rail">
+      <div class="groups-rail__header">
+        <div class="text-subtitle1 text-weight-bold">Groups</div>
         <q-btn
-          unelevated
-          color="primary"
-          label="Join group"
-          :loading="joining"
-          :disable="!aliasInput.trim()"
-          @click="joinPendingGroup"
-        />
-        <q-btn flat color="grey-7" label="Dismiss" :disable="joining" @click="dismissInvite" />
-      </div>
-    </q-banner>
-
-    <!-- Dead invite token: persistent explanation, dismissible -->
-    <q-banner v-if="invalidInviteMessage" class="bg-red-1 q-mb-md" rounded>
-      <template v-slot:avatar>
-        <q-icon name="link_off" color="negative" />
-      </template>
-      <div class="text-body2">{{ invalidInviteMessage }}</div>
-      <template v-slot:action>
-        <q-btn flat dense color="negative" label="Dismiss" @click="invalidInviteMessage = ''" />
-      </template>
-    </q-banner>
-
-    <!-- Requests inbox (AS, Phase 1 — every request escalates to you) -->
-    <div v-if="requests.length" class="q-mb-md">
-      <div class="row items-center q-mb-xs">
-        <div class="text-subtitle2">Requests</div>
-        <q-btn flat dense round size="sm" icon="refresh" :loading="loadingRequests" class="q-ml-xs" @click="loadRequests">
-          <q-tooltip>Refresh requests</q-tooltip>
+          flat dense round size="sm" icon="refresh"
+          :loading="refreshingAll"
+          @click="refreshAll"
+        >
+          <q-tooltip>Check for new messages</q-tooltip>
         </q-btn>
       </div>
+
+      <!-- Pending invite (compact card) -->
+      <div v-if="pendingInvite" class="groups-invite-card">
+        <div class="row items-center no-wrap q-gutter-xs">
+          <q-icon name="mail" color="primary" size="18px" />
+          <div class="text-caption">
+            <template v-if="inviteGroupName">
+              Invited to <strong>{{ inviteGroupName }}</strong>
+            </template>
+            <template v-else>Group invitation</template>
+          </div>
+        </div>
+        <div v-if="inviteGroupDescription" class="text-caption text-grey-7 q-mt-xs">
+          {{ inviteGroupDescription }}
+        </div>
+        <q-input
+          v-model="aliasInput"
+          dense outlined
+          class="q-mt-sm"
+          label="Your display name in this group"
+          :disable="joining"
+        />
+        <div class="row q-gutter-xs q-mt-sm">
+          <q-btn
+            dense unelevated size="sm" color="primary" label="Join"
+            :loading="joining" :disable="!aliasInput.trim()"
+            @click="joinPendingGroup"
+          />
+          <q-btn dense flat size="sm" color="grey-7" label="Dismiss" :disable="joining" @click="dismissInvite" />
+        </div>
+      </div>
+
+      <!-- Dead invite token: persistent explanation, dismissible -->
+      <div v-if="invalidInviteMessage" class="groups-invite-card groups-invite-card--invalid">
+        <div class="row items-start no-wrap q-gutter-xs">
+          <q-icon name="link_off" color="negative" size="18px" class="q-mt-xs" />
+          <div class="text-caption">{{ invalidInviteMessage }}</div>
+        </div>
+        <q-btn dense flat size="sm" color="negative" label="Dismiss" class="q-mt-xs" @click="invalidInviteMessage = ''" />
+      </div>
+
+      <div v-if="loading" class="text-center q-pa-md">
+        <q-spinner size="1.5em" />
+      </div>
       <div
-        v-for="r in requests"
-        :key="r.id"
-        class="q-pa-sm q-mb-xs"
-        style="border: 1px solid #e0e0e0; border-radius: 8px"
+        v-else-if="memberships.length === 0 && !pendingInvite"
+        class="text-caption text-grey-7 q-pa-md"
       >
-        <div class="text-body2">
-          A member of <strong>{{ r.groupName }}</strong> sent a request
-          <span class="text-grey-7">({{ r.action }})</span>
-        </div>
-        <div v-if="r.aiSummary" class="text-caption text-grey-8 q-mt-xs">{{ r.aiSummary }}</div>
-        <div v-else-if="r.payload" class="text-caption text-grey-8 q-mt-xs" style="white-space: pre-wrap; word-break: break-word">
-          {{ typeof r.payload === 'string' ? r.payload : JSON.stringify(r.payload) }}
-        </div>
-        <div class="text-caption text-grey-6 q-mt-xs">{{ formatDate(r.receivedAt) }}</div>
-        <div v-if="r.status === 'pending'" class="q-mt-xs q-gutter-sm">
-          <q-btn dense unelevated size="sm" color="primary" label="Accept" :loading="deciding === r.id" @click="decide(r, 'accept')" />
-          <q-btn dense flat size="sm" color="grey-8" label="Decline" :loading="deciding === r.id" @click="decide(r, 'decline')" />
-          <q-btn dense flat size="sm" color="negative" label="Block sender" :loading="deciding === r.id" @click="decide(r, 'block')" />
-        </div>
-        <div v-else class="q-mt-xs">
-          <q-badge :color="r.status === 'accepted' ? 'green' : r.status === 'blocked' ? 'negative' : 'grey'" :label="r.status" />
+        You're not in any groups yet. Group admins send invitations by email —
+        the invite link brings you back here to join.
+      </div>
+
+      <!-- Group sections -->
+      <div v-for="m in memberships" :key="m.groupId" class="groups-rail__section">
+        <button
+          type="button"
+          class="groups-rail__group"
+          :class="{ 'is-selected': isSelected(m.groupId, null) }"
+          @click="selectGroup(m)"
+        >
+          <q-icon name="groups" size="18px" color="primary" />
+          <span class="groups-rail__group-name">{{ m.groupName }}</span>
+          <q-icon name="info_outline" size="14px" class="text-grey-6">
+            <q-tooltip>Group info, peers &amp; membership</q-tooltip>
+          </q-icon>
+        </button>
+
+        <!-- Conversations (peers) inside this group -->
+        <div
+          v-for="c in conversationsFor(m.groupId)"
+          :key="c.peerId"
+          class="groups-rail__convo"
+          :class="{ 'is-selected': isSelected(m.groupId, c.peerId) }"
+          role="button"
+          tabindex="0"
+          @click="selectPeer(m, c.peerId)"
+          @keydown.enter="selectPeer(m, c.peerId)"
+        >
+          <div class="groups-rail__avatar" :style="{ background: avatarColor(c.peerId) }">
+            {{ (c.alias || '?').slice(0, 1).toUpperCase() }}
+          </div>
+          <div class="groups-rail__convo-body">
+            <div class="row items-center no-wrap">
+              <span class="groups-rail__convo-name" :class="{ 'text-weight-bold': c.unread > 0 }">
+                {{ c.alias || 'Group member' }}
+              </span>
+              <span class="groups-rail__convo-time">{{ shortTime(c.lastAt) }}</span>
+            </div>
+            <div class="row items-center no-wrap">
+              <span class="groups-rail__convo-snippet" :class="{ 'text-weight-medium': c.unread > 0 }">
+                <template v-if="c.hasPendingRequest">Wants to connect</template>
+                <template v-else>{{ c.snippet }}</template>
+              </span>
+              <q-badge v-if="c.unread > 0" rounded color="primary" :label="c.unread" class="q-ml-xs" />
+              <q-icon v-else-if="c.hasPendingRequest" name="person_add" size="14px" color="primary" class="q-ml-xs" />
+            </div>
+          </div>
         </div>
       </div>
     </div>
 
-    <!-- Memberships -->
-    <div v-if="loading" class="text-center q-pa-md">
-      <q-spinner size="2em" />
-      <div class="q-mt-sm text-grey-7">Loading your groups…</div>
-    </div>
-    <div v-else-if="memberships.length === 0 && !pendingInvite" class="text-body2 text-grey-7">
-      You're not in any groups yet. Group admins send invitations by email —
-      the invite link brings you back here to join.
-    </div>
-    <q-list v-else separator>
-      <template v-for="m in memberships" :key="m.groupId">
-        <q-item>
-          <q-item-section avatar>
-            <q-icon name="groups" color="primary" />
-          </q-item-section>
-          <q-item-section>
-            <q-item-label class="text-weight-bold">{{ m.groupName }}</q-item-label>
-            <q-item-label caption>
-              You appear as <strong>{{ m.alias }}</strong> · Joined {{ formatDate(m.joinedAt) }}
-              <q-badge v-if="m.mentor" color="teal" label="Mentor" class="q-ml-sm" />
-            </q-item-label>
-          </q-item-section>
-          <q-item-section side>
-            <div class="row items-center no-wrap q-gutter-xs">
-              <q-btn
-                flat dense
-                :icon="expandedGroup === m.groupId ? 'expand_less' : 'expand_more'"
-                :label="`Messages${(messagesByGroup[m.groupId] || []).length ? ' (' + messagesByGroup[m.groupId].length + ')' : ''}`"
-                @click="toggleMessages(m)"
-              />
-              <q-btn flat dense icon="people" label="Find peers" @click="toggleDirectory(m)" />
-              <q-btn flat dense round icon="refresh" :loading="refreshing === m.groupId" @click="refreshMessages(m)">
-                <q-tooltip>Check for new messages</q-tooltip>
-              </q-btn>
-              <q-btn flat dense color="negative" label="Leave" :loading="leaving === m.groupId" @click="confirmLeave(m)" />
+    <!-- ── Right pane: thread / group info / empty state ─────────────── -->
+    <div class="groups-main">
+      <!-- Empty state -->
+      <div v-if="!selected" class="groups-main__empty">
+        <q-icon name="forum" size="52px" class="text-grey-4" />
+        <div class="text-body2 text-grey-6 q-mt-sm" style="max-width: 380px; text-align: center">
+          Connect with patients who share your situation. Your records never
+          leave your MAIA — groups only mediate introductions and messages you
+          approve.
+        </div>
+        <div v-if="memberships.length" class="text-caption text-grey-5 q-mt-sm">
+          Select a conversation, or open a group to find peers.
+        </div>
+      </div>
+
+      <!-- Group info / find peers -->
+      <template v-else-if="selected && !selected.peerId && selectedMembership">
+        <div class="groups-main__header">
+          <q-icon name="groups" color="primary" size="22px" />
+          <div class="groups-main__header-text">
+            <div class="text-subtitle2">{{ selectedMembership.groupName }}</div>
+            <div class="text-caption text-grey-7">
+              You appear as <strong>{{ selectedMembership.alias }}</strong>
+              · Joined {{ formatDate(selectedMembership.joinedAt) }}
+              <q-badge v-if="selectedMembership.mentor" color="teal" label="Mentor" class="q-ml-xs" />
             </div>
-          </q-item-section>
-        </q-item>
+          </div>
+          <q-space />
+          <q-btn
+            flat dense color="negative" size="sm" label="Leave"
+            :loading="leaving === selectedMembership.groupId"
+            @click="confirmLeave(selectedMembership)"
+          />
+        </div>
 
-        <!-- Directory / find peers for this membership -->
-        <q-item v-if="expandedDirectory === m.groupId">
-          <q-item-section>
-            <div v-if="loadingDirectory === m.groupId" class="text-caption text-grey-6 q-pl-md">Loading…</div>
-            <template v-else>
-              <div class="text-caption text-grey-7 q-pl-md q-mb-xs">
-                <template v-if="directoryByGroup[m.groupId]">
-                  {{ directoryByGroup[m.groupId].stats.activeMembers }} member(s) ·
-                  {{ directoryByGroup[m.groupId].stats.recentlyActiveMembers }} active recently
-                </template>
-              </div>
-              <div
-                v-if="directoryByGroup[m.groupId] && !directoryByGroup[m.groupId].mentors.length"
-                class="text-caption text-grey-6 q-pl-md"
-              >
-                No mentors are listed yet. You can still reply to anyone who messages you.
-              </div>
-              <div
-                v-for="mentor in (directoryByGroup[m.groupId] ? directoryByGroup[m.groupId].mentors : [])"
-                :key="mentor.pairwiseId"
-                class="row items-center no-wrap q-pl-md q-py-xs"
-                style="border-bottom: 1px solid #f0f0f0"
-              >
-                <div class="col">
-                  <span class="text-body2">{{ mentor.alias }}</span>
-                  <q-badge color="teal" label="mentor" class="q-ml-sm" />
-                </div>
-                <q-btn flat dense size="sm" color="primary" label="Message" @click="openCompose(m, mentor)" />
-              </div>
-            </template>
-          </q-item-section>
-        </q-item>
-
-        <!-- Inbox for this membership -->
-        <q-item v-if="expandedGroup === m.groupId">
-          <q-item-section>
-            <div v-if="!(messagesByGroup[m.groupId] || []).length" class="text-caption text-grey-6 q-pl-md">
-              No messages yet.
+        <div class="groups-main__scroll q-pa-md">
+          <div class="text-caption text-grey-7 q-mb-sm" v-if="directoryByGroup[selectedMembership.groupId]">
+            {{ directoryByGroup[selectedMembership.groupId].stats.activeMembers }} member(s) ·
+            {{ directoryByGroup[selectedMembership.groupId].stats.recentlyActiveMembers }} active recently
+          </div>
+          <div v-if="loadingDirectory === selectedMembership.groupId" class="text-caption text-grey-6">
+            Loading peers…
+          </div>
+          <template v-else>
+            <div class="text-subtitle2 q-mb-xs">Peers you can reach</div>
+            <div
+              v-if="directoryByGroup[selectedMembership.groupId] && !directoryByGroup[selectedMembership.groupId].mentors.length"
+              class="text-caption text-grey-6"
+            >
+              No mentors are listed yet. You can still reply to anyone who
+              messages you — and anyone in the group can message you.
             </div>
             <div
-              v-for="msg in (messagesByGroup[m.groupId] || [])"
-              :key="msg.id"
-              class="q-pl-md q-py-xs"
-              style="border-bottom: 1px solid #f0f0f0"
+              v-for="mentor in (directoryByGroup[selectedMembership.groupId]?.mentors || [])"
+              :key="mentor.pairwiseId"
+              class="groups-peer-row"
             >
-              <div class="text-caption text-grey-7">
-                From a group member · {{ formatDate(msg.receivedAt) }}
+              <div class="groups-rail__avatar" :style="{ background: avatarColor(mentor.pairwiseId) }">
+                {{ mentor.alias.slice(0, 1).toUpperCase() }}
               </div>
-              <div class="text-body2" style="white-space: pre-wrap; word-break: break-word">{{ msg.text }}</div>
-              <q-btn flat dense size="sm" color="primary" label="Reply" @click="openReply(m, msg)" />
+              <span class="text-body2">{{ mentor.alias }}</span>
+              <q-badge color="teal" label="mentor" />
+              <q-space />
+              <q-btn
+                dense flat size="sm" color="primary" label="Message"
+                @click="selectPeer(selectedMembership, mentor.pairwiseId)"
+              />
             </div>
-          </q-item-section>
-        </q-item>
+          </template>
+        </div>
       </template>
-    </q-list>
 
-    <!-- Compose / reply dialog -->
-    <q-dialog v-model="showReplyDialog">
-      <q-card style="min-width: 420px; max-width: 560px">
-        <q-card-section>
-          <div class="text-h6">{{ replyTo && replyTo.alias ? `Message ${replyTo.alias}` : 'Reply' }}</div>
-          <div class="text-caption text-grey-7">Your message is end-to-end encrypted to the recipient.</div>
-        </q-card-section>
-        <q-card-section class="q-pt-none">
-          <q-input v-model="replyText" type="textarea" outlined autogrow autofocus :disable="sendingReply" label="Message" />
-        </q-card-section>
-        <q-card-actions align="right">
-          <q-btn flat label="Cancel" v-close-popup :disable="sendingReply" />
-          <q-btn unelevated color="primary" label="Send" :loading="sendingReply" :disable="!replyText.trim()" @click="sendReply" />
-        </q-card-actions>
-      </q-card>
-    </q-dialog>
+      <!-- Peer conversation thread -->
+      <template v-else-if="selected && selected.peerId && selectedMembership">
+        <div class="groups-main__header">
+          <div class="groups-rail__avatar" :style="{ background: avatarColor(selected.peerId) }">
+            {{ (selectedPeerAlias || '?').slice(0, 1).toUpperCase() }}
+          </div>
+          <div class="groups-main__header-text">
+            <div class="text-subtitle2">{{ selectedPeerAlias || 'Group member' }}</div>
+            <div class="text-caption text-grey-7">{{ selectedMembership.groupName }} · end-to-end encrypted</div>
+          </div>
+        </div>
+
+        <div ref="threadScrollEl" class="groups-main__scroll groups-thread">
+          <div v-if="!threadItems.length && !pendingRequestFromPeer" class="text-caption text-grey-6 text-center q-mt-lg">
+            No messages yet. Say hello — your message is end-to-end encrypted
+            to {{ selectedPeerAlias || 'this member' }}.
+          </div>
+
+          <div
+            v-for="item in threadItems"
+            :key="item.id"
+            class="groups-bubble-row"
+            :class="item.direction === 'out' ? 'is-out' : 'is-in'"
+          >
+            <div class="groups-bubble" :class="item.direction === 'out' ? 'groups-bubble--out' : 'groups-bubble--in'">
+              <div class="groups-bubble__text">{{ item.text }}</div>
+              <div class="groups-bubble__time">{{ bubbleTime(item.at) }}</div>
+            </div>
+          </div>
+
+          <!-- Pending first-contact request from this peer (Signal's
+               "message request" pattern) -->
+          <div v-if="pendingRequestFromPeer" class="groups-request-card">
+            <div class="text-body2">
+              <strong>{{ selectedPeerAlias || 'A group member' }}</strong> wants to connect
+              <span class="text-grey-7">({{ pendingRequestFromPeer.action }})</span>
+            </div>
+            <div v-if="pendingRequestFromPeer.aiSummary" class="text-caption text-grey-8 q-mt-xs">
+              {{ pendingRequestFromPeer.aiSummary }}
+            </div>
+            <div
+              v-else-if="pendingRequestFromPeer.payload"
+              class="text-caption text-grey-8 q-mt-xs"
+              style="white-space: pre-wrap; word-break: break-word"
+            >
+              {{ typeof pendingRequestFromPeer.payload === 'string' ? pendingRequestFromPeer.payload : JSON.stringify(pendingRequestFromPeer.payload) }}
+            </div>
+            <div class="text-caption text-grey-6 q-mt-xs">{{ formatDate(pendingRequestFromPeer.receivedAt) }}</div>
+            <div class="q-mt-sm q-gutter-sm">
+              <q-btn dense unelevated size="sm" color="primary" label="Accept" :loading="deciding === pendingRequestFromPeer.id" @click="decide(pendingRequestFromPeer, 'accept')" />
+              <q-btn dense flat size="sm" color="grey-8" label="Decline" :loading="deciding === pendingRequestFromPeer.id" @click="decide(pendingRequestFromPeer, 'decline')" />
+              <q-btn dense flat size="sm" color="negative" label="Block" :loading="deciding === pendingRequestFromPeer.id" @click="decide(pendingRequestFromPeer, 'block')" />
+            </div>
+          </div>
+        </div>
+
+        <!-- Composer -->
+        <div class="groups-composer">
+          <q-input
+            v-model="composerText"
+            dense outlined autogrow
+            :max-height="120"
+            placeholder="Message"
+            :disable="sending"
+            class="groups-composer__input"
+            @keydown.enter.exact.prevent="sendMessage"
+          />
+          <q-btn
+            round unelevated color="primary" icon="send" size="sm"
+            :loading="sending" :disable="!composerText.trim()"
+            @click="sendMessage"
+          />
+        </div>
+      </template>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, computed, onMounted, nextTick } from 'vue';
 import { useQuasar } from 'quasar';
 
 const $q = useQuasar();
@@ -228,6 +290,8 @@ interface PendingInvite {
 }
 
 const INVITE_LS_KEY = 'maiaGroupInvite';
+/** Per-thread "last seen" timestamps (client-side unread tracking). */
+const THREAD_SEEN_LS_KEY = 'maia.groupThreadSeen';
 
 const memberships = ref<Membership[]>([]);
 const loading = ref(false);
@@ -243,22 +307,25 @@ const leaving = ref<string | null>(null);
 interface GroupMessage {
   id: string;
   fromPairwiseId: string;
+  fromAlias?: string | null;
   text: string;
   receivedAt: string;
 }
-const expandedGroup = ref<string | null>(null);
+interface SentMessage {
+  id: string;
+  toPairwiseId: string;
+  toAlias?: string | null;
+  text: string;
+  sentAt: string;
+}
 const messagesByGroup = ref<Record<string, GroupMessage[]>>({});
-const refreshing = ref<string | null>(null);
-const showReplyDialog = ref(false);
-const replyText = ref('');
-const replyTo = ref<{ groupId: string; toPairwiseId: string; alias?: string } | null>(null);
-const sendingReply = ref(false);
+const sentByGroup = ref<Record<string, SentMessage[]>>({});
+const refreshingAll = ref(false);
 
 interface Directory {
   stats: { activeMembers: number; recentlyActiveMembers: number };
   mentors: { pairwiseId: string; alias: string }[];
 }
-const expandedDirectory = ref<string | null>(null);
 const directoryByGroup = ref<Record<string, Directory>>({});
 const loadingDirectory = ref<string | null>(null);
 
@@ -267,6 +334,7 @@ interface AsRequest {
   groupId: string;
   groupName: string;
   fromPairwiseId: string;
+  fromAlias?: string | null;
   action: string;
   resource: string;
   payload: unknown;
@@ -275,18 +343,177 @@ interface AsRequest {
   aiSummary: string | null;
 }
 const requests = ref<AsRequest[]>([]);
-const loadingRequests = ref(false);
 const deciding = ref<string | null>(null);
 
-const formatDate = (iso: string): string => {
-  if (!iso) return '';
+// ── Selection (Signal-style): a group (info pane) or a peer (thread) ──
+const selected = ref<{ groupId: string; peerId: string | null } | null>(null);
+const composerText = ref('');
+const sending = ref(false);
+const threadScrollEl = ref<HTMLElement | null>(null);
+
+const selectedMembership = computed(() =>
+  selected.value ? memberships.value.find((m) => m.groupId === selected.value?.groupId) || null : null
+);
+
+const isSelected = (groupId: string, peerId: string | null) =>
+  !!selected.value && selected.value.groupId === groupId && selected.value.peerId === peerId;
+
+// ── Per-thread unread tracking (localStorage) ──────────────────────
+const threadSeen = ref<Record<string, string>>({});
+const seenKey = (groupId: string, peerId: string) => `${groupId}|${peerId}`;
+const loadThreadSeen = () => {
   try {
-    return new Date(iso).toLocaleDateString();
-  } catch {
-    return iso;
-  }
+    threadSeen.value = JSON.parse(window.localStorage.getItem(`${THREAD_SEEN_LS_KEY}.${props.userId}`) || '{}');
+  } catch { threadSeen.value = {}; }
+};
+const markThreadSeen = (groupId: string, peerId: string) => {
+  threadSeen.value = { ...threadSeen.value, [seenKey(groupId, peerId)]: new Date().toISOString() };
+  try {
+    window.localStorage.setItem(`${THREAD_SEEN_LS_KEY}.${props.userId}`, JSON.stringify(threadSeen.value));
+  } catch { /* ignore */ }
 };
 
+// ── Alias resolution: message tags → requests → directory → fallback ──
+const aliasFor = (groupId: string, peerId: string): string | null => {
+  for (const msg of messagesByGroup.value[groupId] || []) {
+    if (msg.fromPairwiseId === peerId && msg.fromAlias) return msg.fromAlias;
+  }
+  for (const s of sentByGroup.value[groupId] || []) {
+    if (s.toPairwiseId === peerId && s.toAlias) return s.toAlias;
+  }
+  const req = requests.value.find((r) => r.groupId === groupId && r.fromPairwiseId === peerId && r.fromAlias);
+  if (req) return req.fromAlias || null;
+  const mentor = (directoryByGroup.value[groupId]?.mentors || []).find((x) => x.pairwiseId === peerId);
+  return mentor ? mentor.alias : null;
+};
+
+const selectedPeerAlias = computed(() =>
+  selected.value?.peerId ? aliasFor(selected.value.groupId, selected.value.peerId) : null
+);
+
+// ── Rail conversations: one item per peer with any history/request ──
+interface Convo {
+  peerId: string;
+  alias: string | null;
+  snippet: string;
+  lastAt: string;
+  unread: number;
+  hasPendingRequest: boolean;
+}
+const conversationsFor = (groupId: string): Convo[] => {
+  const peers = new Map<string, { lastAt: string; snippet: string; unread: number; hasPendingRequest: boolean }>();
+  const bump = (peerId: string, at: string, snippet: string, unreadInc: number) => {
+    const cur = peers.get(peerId) || { lastAt: '', snippet: '', unread: 0, hasPendingRequest: false };
+    if (!cur.lastAt || at > cur.lastAt) { cur.lastAt = at; cur.snippet = snippet; }
+    cur.unread += unreadInc;
+    peers.set(peerId, cur);
+  };
+  for (const msg of messagesByGroup.value[groupId] || []) {
+    const seen = threadSeen.value[seenKey(groupId, msg.fromPairwiseId)] || '';
+    bump(msg.fromPairwiseId, msg.receivedAt, msg.text, msg.receivedAt > seen ? 1 : 0);
+  }
+  for (const s of sentByGroup.value[groupId] || []) {
+    bump(s.toPairwiseId, s.sentAt, `You: ${s.text}`, 0);
+  }
+  for (const r of requests.value) {
+    if (r.groupId !== groupId) continue;
+    const cur = peers.get(r.fromPairwiseId) || { lastAt: '', snippet: '', unread: 0, hasPendingRequest: false };
+    if (!cur.lastAt || r.receivedAt > cur.lastAt) cur.lastAt = r.receivedAt;
+    if (r.status === 'pending') cur.hasPendingRequest = true;
+    peers.set(r.fromPairwiseId, cur);
+  }
+  return Array.from(peers.entries())
+    .map(([peerId, p]) => ({
+      peerId,
+      alias: aliasFor(groupId, peerId),
+      snippet: p.snippet,
+      lastAt: p.lastAt,
+      unread: p.unread,
+      hasPendingRequest: p.hasPendingRequest
+    }))
+    .sort((a, b) => (b.lastAt || '').localeCompare(a.lastAt || ''));
+};
+
+// ── Thread for the selected peer: merge in + out, oldest first ──────
+interface ThreadItem { id: string; direction: 'in' | 'out'; text: string; at: string }
+const threadItems = computed<ThreadItem[]>(() => {
+  if (!selected.value?.peerId) return [];
+  const { groupId, peerId } = selected.value;
+  const items: ThreadItem[] = [];
+  for (const msg of messagesByGroup.value[groupId] || []) {
+    if (msg.fromPairwiseId === peerId) items.push({ id: msg.id, direction: 'in', text: msg.text, at: msg.receivedAt });
+  }
+  for (const s of sentByGroup.value[groupId] || []) {
+    if (s.toPairwiseId === peerId) items.push({ id: s.id, direction: 'out', text: s.text, at: s.sentAt });
+  }
+  return items.sort((a, b) => (a.at || '').localeCompare(b.at || ''));
+});
+
+const pendingRequestFromPeer = computed(() => {
+  if (!selected.value?.peerId) return null;
+  const { groupId, peerId } = selected.value;
+  return requests.value.find(
+    (r) => r.groupId === groupId && r.fromPairwiseId === peerId && r.status === 'pending'
+  ) || null;
+});
+
+// ── Selection actions ───────────────────────────────────────────────
+const selectGroup = async (m: Membership) => {
+  selected.value = { groupId: m.groupId, peerId: null };
+  await loadDirectory(m.groupId);
+};
+
+const selectPeer = async (m: Membership, peerId: string) => {
+  selected.value = { groupId: m.groupId, peerId };
+  markThreadSeen(m.groupId, peerId);
+  composerText.value = '';
+  await nextTick();
+  scrollThreadToBottom();
+};
+
+const scrollThreadToBottom = () => {
+  const el = threadScrollEl.value;
+  if (el) el.scrollTop = el.scrollHeight;
+};
+
+// ── Presentation helpers ────────────────────────────────────────────
+const formatDate = (iso: string): string => {
+  if (!iso) return '';
+  try { return new Date(iso).toLocaleDateString(); } catch { return iso; }
+};
+
+/** Signal-style compact time: today → clock; this year → "Jul 3"; else date. */
+const shortTime = (iso: string): string => {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso);
+    const now = new Date();
+    if (d.toDateString() === now.toDateString()) {
+      return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    }
+    if (d.getFullYear() === now.getFullYear()) {
+      return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+    }
+    return d.toLocaleDateString();
+  } catch { return ''; }
+};
+
+const bubbleTime = (iso: string): string => {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso);
+    return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
+  } catch { return ''; }
+};
+
+/** Stable pastel avatar color from the peer id. */
+const avatarColor = (peerId: string): string => {
+  let h = 0;
+  for (let i = 0; i < peerId.length; i++) h = (h * 31 + peerId.charCodeAt(i)) % 360;
+  return `hsl(${h}, 45%, 55%)`;
+};
+
+// ── Data loading ────────────────────────────────────────────────────
 const loadMemberships = async () => {
   if (!props.userId) return;
   loading.value = true;
@@ -305,6 +532,88 @@ const loadMemberships = async () => {
   }
 };
 
+const loadMessages = async (groupId: string) => {
+  try {
+    const res = await fetch(
+      `/api/user-groups/messages?userId=${encodeURIComponent(props.userId)}&groupId=${encodeURIComponent(groupId)}`,
+      { credentials: 'include' }
+    );
+    const data = await res.json();
+    if (res.ok && data.success) {
+      messagesByGroup.value = { ...messagesByGroup.value, [groupId]: data.messages || [] };
+      sentByGroup.value = { ...sentByGroup.value, [groupId]: data.sent || [] };
+    }
+  } catch {
+    /* keep prior list */
+  }
+};
+
+const loadAllMessages = async () => {
+  await Promise.all(memberships.value.map((m) => loadMessages(m.groupId)));
+};
+
+const loadDirectory = async (groupId: string) => {
+  loadingDirectory.value = groupId;
+  try {
+    const res = await fetch(
+      `/api/user-groups/directory?userId=${encodeURIComponent(props.userId)}&groupId=${encodeURIComponent(groupId)}`,
+      { credentials: 'include' }
+    );
+    const data = await res.json();
+    if (res.ok && data.success) {
+      directoryByGroup.value = {
+        ...directoryByGroup.value,
+        [groupId]: { stats: data.stats, mentors: data.mentors || [] }
+      };
+    }
+  } catch {
+    /* panel shows nothing */
+  } finally {
+    loadingDirectory.value = null;
+  }
+};
+
+const loadRequests = async () => {
+  try {
+    const res = await fetch(`/api/user-groups/requests?userId=${encodeURIComponent(props.userId)}`, {
+      credentials: 'include'
+    });
+    const data = await res.json();
+    if (res.ok && data.success) requests.value = data.requests || [];
+  } catch {
+    /* keep prior list */
+  }
+};
+
+/** Pull relay mail for all memberships, then reload everything. */
+const refreshAll = async () => {
+  refreshingAll.value = true;
+  try {
+    const res = await fetch('/api/user-groups/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ userId: props.userId })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    await loadMemberships(); // a revoked membership would drop off here
+    await Promise.all([loadAllMessages(), loadRequests()]);
+    const bits = [];
+    if (data.newMessages) bits.push(`${data.newMessages} message(s)`);
+    if (data.newRequests) bits.push(`${data.newRequests} request(s)`);
+    $q.notify({
+      type: bits.length ? 'positive' : 'info',
+      message: bits.length ? `New: ${bits.join(', ')}.` : 'Nothing new.'
+    });
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to check messages' });
+  } finally {
+    refreshingAll.value = false;
+  }
+};
+
+// ── Invite join flow ────────────────────────────────────────────────
 const loadPendingInvite = async () => {
   try {
     const raw = localStorage.getItem(INVITE_LS_KEY);
@@ -324,7 +633,7 @@ const loadPendingInvite = async () => {
       localStorage.removeItem(INVITE_LS_KEY);
       invalidInviteMessage.value =
         `You're already a member of this group as "${existing.alias}". ` +
-        `A new invitation isn't needed. To join under a different name, use Leave on the group below, then open the new invitation.`;
+        `A new invitation isn't needed. To join under a different name, open the group and use Leave, then open the new invitation.`;
       return;
     }
     pendingInvite.value = invite;
@@ -383,6 +692,10 @@ const joinPendingGroup = async () => {
     pendingInvite.value = null;
     await loadMemberships();
     $q.notify({ type: 'positive', message: `Welcome to ${data.membership?.groupName || 'the group'}!` });
+    // Land the new member on their group's info pane so "Find peers" is
+    // the natural next step.
+    const joined = memberships.value.find((m) => m.groupId === data.membership?.groupId);
+    if (joined) await selectGroup(joined);
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Failed to join group';
     // A dead token can't succeed on retry — swap the join banner for a
@@ -404,6 +717,7 @@ const dismissInvite = () => {
   pendingInvite.value = null;
 };
 
+// ── Leave group ─────────────────────────────────────────────────────
 const confirmLeave = (m: Membership) => {
   $q.dialog({
     title: `Leave ${m.groupName}?`,
@@ -428,6 +742,7 @@ const leaveGroup = async (m: Membership) => {
     });
     const data = await res.json();
     if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    if (selected.value?.groupId === m.groupId) selected.value = null;
     await loadMemberships();
     $q.notify({
       type: 'positive',
@@ -442,104 +757,11 @@ const leaveGroup = async (m: Membership) => {
   }
 };
 
-const loadMessages = async (groupId: string) => {
-  try {
-    const res = await fetch(
-      `/api/user-groups/messages?userId=${encodeURIComponent(props.userId)}&groupId=${encodeURIComponent(groupId)}`,
-      { credentials: 'include' }
-    );
-    const data = await res.json();
-    if (res.ok && data.success) {
-      messagesByGroup.value = { ...messagesByGroup.value, [groupId]: data.messages || [] };
-    }
-  } catch {
-    /* keep prior list */
-  }
-};
-
-const toggleMessages = async (m: Membership) => {
-  if (expandedGroup.value === m.groupId) {
-    expandedGroup.value = null;
-    return;
-  }
-  expandedGroup.value = m.groupId;
-  await loadMessages(m.groupId);
-};
-
-const refreshMessages = async (m: Membership) => {
-  refreshing.value = m.groupId;
-  try {
-    const res = await fetch('/api/user-groups/refresh', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({ userId: props.userId })
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
-    await loadMessages(m.groupId);
-    await loadMemberships(); // a revoked membership would drop off here
-    await loadRequests(); // AS requests arrive via the same pull
-    if (expandedGroup.value !== m.groupId) expandedGroup.value = m.groupId;
-    const bits = [];
-    if (data.newMessages) bits.push(`${data.newMessages} message(s)`);
-    if (data.newRequests) bits.push(`${data.newRequests} request(s)`);
-    $q.notify({
-      type: bits.length ? 'positive' : 'info',
-      message: bits.length ? `New: ${bits.join(', ')}.` : 'Nothing new.'
-    });
-  } catch (err) {
-    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to check messages' });
-  } finally {
-    refreshing.value = null;
-  }
-};
-
-const openReply = (m: Membership, msg: GroupMessage) => {
-  replyTo.value = { groupId: m.groupId, toPairwiseId: msg.fromPairwiseId };
-  replyText.value = '';
-  showReplyDialog.value = true;
-};
-
-const loadDirectory = async (groupId: string) => {
-  loadingDirectory.value = groupId;
-  try {
-    const res = await fetch(
-      `/api/user-groups/directory?userId=${encodeURIComponent(props.userId)}&groupId=${encodeURIComponent(groupId)}`,
-      { credentials: 'include' }
-    );
-    const data = await res.json();
-    if (res.ok && data.success) {
-      directoryByGroup.value = {
-        ...directoryByGroup.value,
-        [groupId]: { stats: data.stats, mentors: data.mentors || [] }
-      };
-    }
-  } catch {
-    /* panel shows nothing */
-  } finally {
-    loadingDirectory.value = null;
-  }
-};
-
-const toggleDirectory = async (m: Membership) => {
-  if (expandedDirectory.value === m.groupId) {
-    expandedDirectory.value = null;
-    return;
-  }
-  expandedDirectory.value = m.groupId;
-  await loadDirectory(m.groupId);
-};
-
-const openCompose = (m: Membership, mentor: { pairwiseId: string; alias: string }) => {
-  replyTo.value = { groupId: m.groupId, toPairwiseId: mentor.pairwiseId, alias: mentor.alias };
-  replyText.value = '';
-  showReplyDialog.value = true;
-};
-
-const sendReply = async () => {
-  if (!replyTo.value || !replyText.value.trim()) return;
-  sendingReply.value = true;
+// ── Send from the composer ──────────────────────────────────────────
+const sendMessage = async () => {
+  if (!selected.value?.peerId || !composerText.value.trim() || sending.value) return;
+  const { groupId, peerId } = selected.value;
+  sending.value = true;
   try {
     const res = await fetch('/api/user-groups/send', {
       method: 'POST',
@@ -547,37 +769,32 @@ const sendReply = async () => {
       credentials: 'include',
       body: JSON.stringify({
         userId: props.userId,
-        groupId: replyTo.value.groupId,
-        toPairwiseId: replyTo.value.toPairwiseId,
-        text: replyText.value.trim()
+        groupId,
+        toPairwiseId: peerId,
+        text: composerText.value.trim()
       })
     });
     const data = await res.json();
     if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
-    showReplyDialog.value = false;
-    $q.notify({ type: 'positive', message: 'Message sent.' });
+    // Append the server-recorded sent message so the thread updates
+    // immediately (no full reload needed).
+    if (data.sent) {
+      sentByGroup.value = {
+        ...sentByGroup.value,
+        [groupId]: [...(sentByGroup.value[groupId] || []), data.sent]
+      };
+    }
+    composerText.value = '';
+    await nextTick();
+    scrollThreadToBottom();
   } catch (err) {
     $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to send message' });
   } finally {
-    sendingReply.value = false;
+    sending.value = false;
   }
 };
 
-const loadRequests = async () => {
-  loadingRequests.value = true;
-  try {
-    const res = await fetch(`/api/user-groups/requests?userId=${encodeURIComponent(props.userId)}`, {
-      credentials: 'include'
-    });
-    const data = await res.json();
-    if (res.ok && data.success) requests.value = data.requests || [];
-  } catch {
-    /* keep prior list */
-  } finally {
-    loadingRequests.value = false;
-  }
-};
-
+// ── Requests (AS, Phase 1 — every request escalates to you) ─────────
 const decide = async (r: AsRequest, decision: 'accept' | 'decline' | 'block') => {
   deciding.value = r.id;
   try {
@@ -591,6 +808,10 @@ const decide = async (r: AsRequest, decision: 'accept' | 'decline' | 'block') =>
     if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
     await loadRequests();
     $q.notify({ type: 'positive', message: `Request ${data.status}.` });
+    // Blocking someone removes the conversation with them.
+    if (decision === 'block' && selected.value?.peerId === r.fromPairwiseId) {
+      selected.value = { groupId: r.groupId, peerId: null };
+    }
   } catch (err) {
     $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to record decision' });
   } finally {
@@ -599,8 +820,232 @@ const decide = async (r: AsRequest, decision: 'accept' | 'decline' | 'block') =>
 };
 
 onMounted(async () => {
+  loadThreadSeen();
   await loadMemberships();
-  await loadRequests();
+  await Promise.all([loadAllMessages(), loadRequests()]);
   await loadPendingInvite();
 });
 </script>
+
+<style scoped lang="scss">
+// ── Signal-style two-pane layout ────────────────────────────────────
+.groups-shell {
+  display: flex;
+  height: 100%;
+  min-height: 420px;
+  overflow: hidden;
+}
+
+// Left rail: conversation list
+.groups-rail {
+  width: 280px;
+  flex: 0 0 280px;
+  border-right: 1px solid #e0e0e0;
+  overflow-y: auto;
+  background: #fafafa;
+}
+.groups-rail__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 12px 8px;
+  position: sticky;
+  top: 0;
+  background: #fafafa;
+  z-index: 1;
+}
+.groups-invite-card {
+  margin: 0 8px 8px;
+  padding: 10px;
+  border: 1px solid #bbdefb;
+  border-radius: 10px;
+  background: #e3f2fd;
+
+  &--invalid {
+    border-color: #ffcdd2;
+    background: #ffebee;
+  }
+}
+.groups-rail__section {
+  padding-bottom: 4px;
+}
+.groups-rail__group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  padding: 8px 12px;
+  text-align: left;
+  font-size: 13px;
+  font-weight: 600;
+  color: #444;
+  border-radius: 8px;
+
+  &:hover { background: rgba(0, 0, 0, 0.05); }
+  &.is-selected { background: rgba(25, 118, 210, 0.1); color: #1976d2; }
+}
+.groups-rail__group-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.groups-rail__convo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px 8px 16px;
+  cursor: pointer;
+  border-radius: 8px;
+
+  &:hover { background: rgba(0, 0, 0, 0.05); }
+  &.is-selected { background: rgba(25, 118, 210, 0.12); }
+}
+.groups-rail__avatar {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  border-radius: 50%;
+  color: white;
+  font-weight: 600;
+  font-size: 15px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.groups-rail__convo-body {
+  flex: 1;
+  min-width: 0;
+}
+.groups-rail__convo-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13.5px;
+  color: #222;
+}
+.groups-rail__convo-time {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: #999;
+  margin-left: 6px;
+}
+.groups-rail__convo-snippet {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: #777;
+}
+
+// Right pane
+.groups-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+}
+.groups-main__empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.groups-main__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-bottom: 1px solid #e0e0e0;
+  flex: 0 0 auto;
+}
+.groups-main__header-text {
+  min-width: 0;
+}
+.groups-main__scroll {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+.groups-peer-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 4px;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+// Thread bubbles
+.groups-thread {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.groups-bubble-row {
+  display: flex;
+
+  &.is-in { justify-content: flex-start; }
+  &.is-out { justify-content: flex-end; }
+}
+.groups-bubble {
+  max-width: 72%;
+  padding: 8px 12px;
+  border-radius: 16px;
+  font-size: 14px;
+
+  &--in {
+    background: #f0f0f0;
+    color: #222;
+    border-bottom-left-radius: 4px;
+  }
+  &--out {
+    background: #1976d2;
+    color: #fff;
+    border-bottom-right-radius: 4px;
+  }
+}
+.groups-bubble__text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.groups-bubble__time {
+  font-size: 10.5px;
+  opacity: 0.65;
+  margin-top: 2px;
+  text-align: right;
+}
+.groups-request-card {
+  align-self: center;
+  max-width: 420px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid #bbdefb;
+  border-radius: 12px;
+  background: #e3f2fd;
+}
+
+// Composer
+.groups-composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid #e0e0e0;
+  flex: 0 0 auto;
+}
+.groups-composer__input {
+  flex: 1;
+}
+</style>
