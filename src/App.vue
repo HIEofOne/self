@@ -224,6 +224,29 @@
 
         <!-- Authenticated - show main interface or admin page -->
         <div v-else class="full-width full-height">
+          <!-- Admin opened a group-invite link. Because a single browser
+               session (notably Chrome incognito, shared across all its
+               tabs/windows) can only be one account, the invite is
+               captured but the app lands here on the admin page instead
+               of the join flow. Explain rather than silently swallow it. -->
+          <q-banner
+            v-if="showAdminPage && pendingGroupInvite && !adminInviteNoticeDismissed"
+            dense
+            class="bg-blue-1 text-blue-10"
+          >
+            <template #avatar>
+              <q-icon name="mail" color="blue-8" />
+            </template>
+            A group invitation to
+            <strong>{{ pendingInviteGroupName || pendingGroupInvite.groupId }}</strong>
+            was detected, but you're signed in as <strong>admin</strong>.
+            Group invitations are for patient MAIAs — open the invite link in a
+            separate, non-admin browser session (a regular window or a different
+            Chrome profile) to join.
+            <template #action>
+              <q-btn flat dense color="blue-10" label="Dismiss" @click="adminInviteNoticeDismissed = true" />
+            </template>
+          </q-banner>
           <AdminUsers v-if="showAdminPage" />
           <ChatInterface
             v-else
@@ -874,6 +897,11 @@ const pendingInviteGroupName = ref('');
  *  newer invite, or expired). Drives a PERSISTENT explanatory banner —
  *  silently clearing produced an unreadable sub-second flash. */
 const invalidInviteMessage = ref('');
+/** Dismisses the admin-page invite notice (below). Shown when a group
+ *  invite link is opened in an admin session — common in incognito,
+ *  where a single shared session means the invite is captured but the
+ *  app redirects to /admin instead of the welcome/join flow. */
+const adminInviteNoticeDismissed = ref(false);
 // File System Access API is MAIA's storage requirement (Chrome 122+).
 const isChromeCapable = typeof (window as unknown as { showDirectoryPicker?: unknown }).showDirectoryPicker === 'function';
 
