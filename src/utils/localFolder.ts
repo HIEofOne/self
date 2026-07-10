@@ -212,7 +212,7 @@ export async function inspectFolderForForeignAccount(
           severity: 'block',
           kind: 'other-account',
           otherUserId: owner,
-          message: `This folder is already the MAIA home of a different account ("${owner}"). Choose an empty folder so the two accounts don't share storage.`
+          message: `This folder is already the MAIA home of a different account ("${owner}"). Choose a different folder so the two accounts don't share storage.`
         };
       }
       return null; // this user's own folder — fine to (re)pick
@@ -221,7 +221,7 @@ export async function inspectFolderForForeignAccount(
       return {
         severity: 'warn',
         kind: 'maia-workspace',
-        message: 'This folder already contains MAIA files, so it may be inside another account’s folder (for example a "chats" subfolder). Using it could mix accounts. Choose a new, empty folder unless you are sure.'
+        message: 'This folder already contains MAIA files, so it may be inside another account’s folder (for example a "chats" subfolder). Using it could mix accounts. Choose a different folder unless you are sure.'
       };
     }
     return null;

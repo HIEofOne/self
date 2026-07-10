@@ -82,8 +82,8 @@
             'is-active': isOpen && currentTab === t.name,
             'has-attention': t.alertOutline
           }"
-          :title="t.alertOutline ? `${t.label} — needs your attention` : t.label"
-          :aria-label="t.label"
+          :title="t.infoAlert ? t.infoTitle : (t.alertOutline ? `${t.label} — needs your attention` : t.label)"
+          :aria-label="t.infoAlert ? t.infoTitle : t.label"
           @click="railClick(t.name)"
         >
           <q-icon :name="t.icon" size="22px" class="my-stuff-rail__icon" />
@@ -99,6 +99,17 @@
             :label="t.alertCount > 9 ? '9+' : String(t.alertCount)"
             floating
           />
+          <!-- Blue triangle: informational "something is waiting for you"
+               (e.g. Groups has an invitation, request, or new message).
+               Distinct from the orange `has-attention` outline. -->
+          <span
+            v-if="t.infoAlert"
+            class="my-stuff-rail__info-triangle"
+            aria-hidden="true"
+          ></span>
+          <q-tooltip v-if="t.infoAlert" anchor="center right" self="center left">
+            {{ t.infoTitle }}
+          </q-tooltip>
         </button>
 
         <!-- Spacer pushes the user / sign-out group to the bottom of
@@ -1841,7 +1852,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onUnmounted, nextTick } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import VueMarkdown from 'vue-markdown-render';
 import MarkdownIt from 'markdown-it';
 import PdfViewerModal from './PdfViewerModal.vue';
@@ -2054,16 +2065,82 @@ watch(currentTab, (v) => {
 //   - My Lists: Current Medications not verified or edited
 // Yellow OUTLINE is distinct from the rotating yellow RING on the
 // Setup Wizard icon (that one signals "wizard work in progress").
+// --- Groups rail-icon alert (blue triangle) ---------------------------
+// A small blue triangle on the Groups icon flags "something is waiting
+// for you in Groups" without the user having to open the tab:
+//   - a pending group invitation (localStorage, set by the invite URL)
+//   - pending AS requests (first-contact from another member)
+//   - new peer messages since you last opened the tab
+// Distinct from the orange `alertOutline` ("needs verification"): this is
+// informational/blue. Cheap to poll: one GET /api/user-groups/alerts.
+const INVITE_LS_KEY = 'maiaGroupInvite';
+const GROUPS_SEEN_LS_KEY = 'maia.groupsMessagesSeen';
+const groupsHasInvite = ref(false);
+const groupsPendingRequests = ref(0);
+const groupsMessageCount = ref(0);
+const readGroupsSeen = (): number => {
+  try { return parseInt(window.localStorage.getItem(GROUPS_SEEN_LS_KEY) || '0', 10) || 0; }
+  catch { return 0; }
+};
+const groupsSeenMessages = ref<number>(readGroupsSeen());
+const groupsNewMessages = computed(() =>
+  Math.max(0, groupsMessageCount.value - groupsSeenMessages.value)
+);
+const groupsAlert = computed(() =>
+  groupsHasInvite.value || groupsPendingRequests.value > 0 || groupsNewMessages.value > 0
+);
+const groupsAlertTitle = computed(() => {
+  const parts: string[] = [];
+  if (groupsHasInvite.value) parts.push('You have a group invitation');
+  if (groupsPendingRequests.value > 0) {
+    parts.push(`${groupsPendingRequests.value} group request${groupsPendingRequests.value > 1 ? 's' : ''} awaiting your response`);
+  }
+  if (groupsNewMessages.value > 0) {
+    parts.push(`${groupsNewMessages.value} new group message${groupsNewMessages.value > 1 ? 's' : ''}`);
+  }
+  return parts.length ? `Groups — ${parts.join('; ')}` : 'Groups';
+});
+const refreshGroupsAlert = async () => {
+  try { groupsHasInvite.value = !!window.localStorage.getItem(INVITE_LS_KEY); }
+  catch { groupsHasInvite.value = false; }
+  if (!props.userId) { groupsPendingRequests.value = 0; groupsMessageCount.value = 0; return; }
+  try {
+    const res = await fetch(`/api/user-groups/alerts?userId=${encodeURIComponent(props.userId)}`, {
+      credentials: 'include'
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.success) {
+        groupsPendingRequests.value = data.pendingRequests || 0;
+        groupsMessageCount.value = data.messageCount || 0;
+      }
+    }
+  } catch { /* network hiccup — leave last-known counts */ }
+};
+// Called when the user opens the Groups tab: mark current messages as
+// seen (invite/requests clear on their own once acted on).
+const markGroupsSeen = () => {
+  groupsSeenMessages.value = groupsMessageCount.value;
+  try { window.localStorage.setItem(GROUPS_SEEN_LS_KEY, String(groupsMessageCount.value)); } catch { /* ignore */ }
+};
+let groupsAlertTimer: ReturnType<typeof setInterval> | null = null;
+onMounted(() => {
+  refreshGroupsAlert();
+  groupsAlertTimer = setInterval(refreshGroupsAlert, 90000);
+});
+onUnmounted(() => { if (groupsAlertTimer) clearInterval(groupsAlertTimer); });
+watch(() => props.userId, () => refreshGroupsAlert());
+
 const railTabs = computed(() => [
-  { name: 'files',      icon: 'description',  label: 'Saved Files',     alertCount: 0, alertOutline: false },
-  { name: 'agent',      icon: 'smart_toy',    label: 'AI Agents',       alertCount: 0, alertOutline: false },
-  { name: 'chats',      icon: 'chat',         label: 'Saved Chats',     alertCount: props.savedChatCount || 0, alertOutline: false },
-  { name: 'summary',    icon: 'description',  label: 'Patient Summary', alertCount: 0, alertOutline: summaryNeedsVerify.value },
-  { name: 'lists',      icon: 'list',         label: 'Lists',           alertCount: 0, alertOutline: !!props.medsNeedsVerify },
-  { name: 'groups',     icon: 'groups',       label: 'Groups',          alertCount: 0, alertOutline: false },
-  { name: 'privacy',    icon: 'privacy_tip',  label: 'Privacy Filter',  alertCount: 0, alertOutline: false },
-  { name: 'diary',      icon: 'book',         label: 'Patient Diary',   alertCount: 0, alertOutline: false },
-  { name: 'references', icon: 'link',         label: 'References',      alertCount: 0, alertOutline: false }
+  { name: 'files',      icon: 'description',  label: 'Saved Files',     alertCount: 0, alertOutline: false, infoAlert: false,             infoTitle: '' },
+  { name: 'agent',      icon: 'smart_toy',    label: 'AI Agents',       alertCount: 0, alertOutline: false, infoAlert: false,             infoTitle: '' },
+  { name: 'chats',      icon: 'chat',         label: 'Saved Chats',     alertCount: props.savedChatCount || 0, alertOutline: false, infoAlert: false, infoTitle: '' },
+  { name: 'summary',    icon: 'description',  label: 'Patient Summary', alertCount: 0, alertOutline: summaryNeedsVerify.value, infoAlert: false, infoTitle: '' },
+  { name: 'lists',      icon: 'list',         label: 'Lists',           alertCount: 0, alertOutline: !!props.medsNeedsVerify, infoAlert: false, infoTitle: '' },
+  { name: 'groups',     icon: 'groups',       label: 'Groups',          alertCount: 0, alertOutline: false, infoAlert: groupsAlert.value, infoTitle: groupsAlertTitle.value },
+  { name: 'privacy',    icon: 'privacy_tip',  label: 'Privacy Filter',  alertCount: 0, alertOutline: false, infoAlert: false,             infoTitle: '' },
+  { name: 'diary',      icon: 'book',         label: 'Patient Diary',   alertCount: 0, alertOutline: false, infoAlert: false,             infoTitle: '' },
+  { name: 'references', icon: 'link',         label: 'References',      alertCount: 0, alertOutline: false, infoAlert: false,             infoTitle: '' }
 ]);
 
 // Click a rail icon: open the content panel AND jump to that section.
@@ -2080,6 +2157,16 @@ const railClick = (name: string) => {
     return;
   }
   currentTab.value = name;
+  // Consume any pending parent `initialTab` so the modelValue-open
+  // watcher (which honors a *newly-supplied* initialTab) doesn't
+  // clobber this explicit rail choice with a stale value. Without
+  // this, opening the Workbook via the rail right after the wizard/
+  // SEND flow (which leaves myStuffInitialTab='summary') would land
+  // on Patient Summary on the first click and only reach the picked
+  // tab on a second click. Programmatic opens set a NEW initialTab and
+  // open directly (not via railClick), so they still take effect.
+  lastAppliedInitialTab = props.initialTab || '';
+  if (name === 'groups') markGroupsSeen();
   if (!isOpen.value) {
     isOpen.value = true;
     emit('update:modelValue', true);
@@ -7158,6 +7245,10 @@ watch(() => props.modelValue, async (newValue) => {
     // Reset per-open state
     medsMismatchAcknowledged.value = false;
 
+    // Refresh the Groups rail-icon alert on every open so the blue
+    // triangle reflects current invites/requests/messages.
+    refreshGroupsAlert();
+
     // Eagerly load files so processFileNCitations can resolve citations
     // on any tab (Patient Summary, Lists) without waiting for the files tab.
     if (userFiles.value.length === 0) {
@@ -7597,6 +7688,23 @@ $my-stuff-z: 6000; // above q-dialog default; sub-dialogs from within
 
 .my-stuff-rail__badge {
   transform: translate(20%, -20%);
+}
+
+// Blue "something is waiting" triangle, floated on the top-right of a
+// rail icon (currently Groups: invitation / request / new message).
+// A small upward triangle drawn with borders; blue to distinguish it
+// from the orange verification outline.
+.my-stuff-rail__info-triangle {
+  position: absolute;
+  top: 5px;
+  right: 7px;
+  width: 0;
+  height: 0;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-bottom: 9px solid #1976d2;
+  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.35));
+  pointer-events: none;
 }
 
 // Setup Wizard rail button: lives at the top of the rail's section
