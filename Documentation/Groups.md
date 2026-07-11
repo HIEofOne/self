@@ -645,3 +645,21 @@ and any design decisions resolved.
   Quick-start selection survives reloads mid-deploy. Groups membership
   and the agent persist across the upgrade. Deferred to PR-7: transient
   context documents + privacy-filter wiring for chat+AI.
+- **2026-07-10** — **PR-6.5: frictionless invitee onboarding** (quick-start
+  polish from first local testing). (1) **Folder deferred**: quick start no
+  longer picks a local folder at all — agents were already requested at
+  account creation and mount-time polling detects readiness, so the run is
+  literally zero-decision; the folder is asked for when first needed (the
+  "Add records" upgrade opens the standard folder pick). (2) **Invite-aware
+  welcome**: with a pending group invite, GET STARTED becomes
+  "JOIN <group>" and the wizard auto-selects quick start (sessionStorage
+  handoff; never affects restores/existing accounts) — the invitee goes
+  from one button click to a deploying private AI with no fork, no folder,
+  no jargon (subtitle: "Setting up your private AI — about a minute").
+  (3) **Alias = MAIA pseudonym**: the join card prefills the display name
+  with the userId (editable) — no second naming ceremony; join is one
+  click. (4) **Groups landing fixed**: quick-start completion previously
+  raced the wizard-resume machinery (status refresh against a stale
+  workflowStage could reopen My Lists); completion now lands on
+  Workbook → Groups synchronously, marks resume as attempted, and
+  refreshes status afterwards.

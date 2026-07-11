@@ -32,6 +32,7 @@
           dense outlined
           class="q-mt-sm"
           label="Your display name in this group"
+          hint="Members will know you by this name — change it if you like"
           :disable="joining"
         />
         <div class="row q-gutter-xs q-mt-sm">
@@ -637,6 +638,12 @@ const loadPendingInvite = async () => {
       return;
     }
     pendingInvite.value = invite;
+    // Prefill the group display name with the MAIA pseudonym (userId) so
+    // joining is one click — no second naming ceremony. Editable: members
+    // who prefer a different name in this group just type over it.
+    if (!aliasInput.value.trim() && props.userId) {
+      aliasInput.value = props.userId;
+    }
     // Group metadata for the banner + invite validity. invite-info also
     // marks the invite "opened" at the registry (admin-visible progress).
     try {
