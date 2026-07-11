@@ -9515,6 +9515,40 @@ app.get('/api/cloud-health', async (req, res) => {
   }
 });
 
+// POST /api/wizard/quick-start-complete — mark a quick-start account
+// (chat + private AI, no health records yet) as setup-complete. Sets
+// workflowStage 'chat_ready', a legitimate wizard-done state: the agent
+// is deployed, there is no KB/patient summary, and the Groups tab is the
+// primary surface. Adding records later runs the full wizard, whose
+// patient-summary verification advances the stage past 'chat_ready'.
+// Never downgrades an account that already completed the full wizard.
+app.post('/api/wizard/quick-start-complete', async (req, res) => {
+  try {
+    const { userId } = req.body || {};
+    if (!userId) {
+      return res.status(400).json({ success: false, error: 'User ID is required' });
+    }
+    const isLocalhost = req.hostname === 'localhost' || req.hostname === '127.0.0.1';
+    if (!isLocalhost && req.session?.userId !== userId) {
+      return res.status(403).json({ success: false, error: 'Not authorized for this user' });
+    }
+    const userDoc = await cloudant.getDocument('maia_users', userId);
+    if (!userDoc) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+    const COMPLETED_STAGES = new Set(['patient_summary', 'link_stored']);
+    if (!COMPLETED_STAGES.has(userDoc.workflowStage)) {
+      userDoc.workflowStage = 'chat_ready';
+      userDoc.updatedAt = new Date().toISOString();
+      await cloudant.saveDocument('maia_users', userDoc);
+    }
+    res.json({ success: true, workflowStage: userDoc.workflowStage });
+  } catch (error) {
+    console.error('[Wizard] quick-start-complete failed:', error);
+    res.status(500).json({ success: false, error: 'Failed to record quick start' });
+  }
+});
+
 // Get user status (for contextual tip)
 app.get('/api/user-status', async (req, res) => {
   try {

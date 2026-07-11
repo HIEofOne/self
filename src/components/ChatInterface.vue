@@ -228,6 +228,27 @@
             </div>
           </div>
           
+          <!-- Quick-start upgrade CTA: shown for 'chat_ready' accounts
+               (agent deployed, records skipped). Dismissible per session;
+               disappears for good once the full wizard completes and the
+               stage advances past 'chat_ready'. -->
+          <q-banner
+            v-if="userResourceStatus?.workflowStage === 'chat_ready' && !upgradeBannerDismissed"
+            dense
+            rounded
+            class="bg-blue-1 text-blue-10 q-mb-sm"
+          >
+            <template #avatar>
+              <q-icon name="upgrade" color="blue-8" />
+            </template>
+            Your private AI is ready. Add your health records to unlock a
+            patient summary and answers grounded in your own history.
+            <template #action>
+              <q-btn flat dense color="blue-10" label="Add records" @click="startRecordsUpgrade" />
+              <q-btn flat dense color="grey-7" label="Later" @click="upgradeBannerDismissed = true" />
+            </template>
+          </q-banner>
+
           <div class="row q-gutter-sm" style="align-items: center;">
             <!-- v1.4.35: paperclip (attach_file) replaced by a
                  plain "+" and moved to the LEFT of the AI provider
@@ -345,7 +366,7 @@
                 label="Choose the patient folder"
                 icon="folder_open"
                 :disable="localFolderAutoRunActive"
-                @click="handlePickLocalFolder"
+                @click="handleFullSetupClick"
               />
               <q-btn
                 v-if="isLocalhost"
@@ -357,6 +378,25 @@
                 :disable="localFolderAutoRunActive || testMode"
                 @click="handleTestButton"
               />
+              <!-- Quick-start tier: deploy the private AI without records
+                   (Groups adoption floor). Still picks a MAIA folder — a
+                   new, empty one — for app state and saved chats. -->
+              <div v-if="!props.restoreActive" class="q-mt-sm">
+                <q-btn
+                  flat
+                  dense
+                  color="primary"
+                  label="Quick start — no records yet"
+                  icon="bolt"
+                  :disable="localFolderAutoRunActive"
+                  @click="handleQuickStartClick"
+                />
+                <div class="text-caption text-grey-7 q-mt-xs" style="max-width: 480px">
+                  Sets up your private AI in about a minute so you can join
+                  patient groups and chat now. Pick a new, empty MAIA folder.
+                  You can add health records anytime later.
+                </div>
+              </div>
             </template>
             <!-- Safari: one-time folder read -->
             <q-btn
@@ -463,8 +503,20 @@
               </q-item-section>
             </q-item>
 
-            <!-- Draft Patient Summary (always visible) -->
-            <q-item dense class="q-py-xs">
+            <!-- Quick-start: records/KB/summary intentionally skipped -->
+            <q-item v-if="wizardQuickStart" dense class="q-py-xs">
+              <q-item-section avatar style="min-width: 28px">
+                <q-icon name="bolt" color="primary" size="sm" />
+              </q-item-section>
+              <q-item-section>
+                <q-item-label class="text-grey-7">
+                  Health records skipped — add them anytime from the Setup Wizard
+                </q-item-label>
+              </q-item-section>
+            </q-item>
+
+            <!-- Draft Patient Summary (hidden for quick start) -->
+            <q-item v-if="!wizardQuickStart" dense class="q-py-xs">
               <q-item-section avatar style="min-width: 28px">
                 <q-icon v-if="wizardDraftPsStatus === 'done' || preGeneratedSummary" name="check_circle" color="green" size="sm" />
                 <q-spinner v-else-if="wizardDraftPsStatus === 'running'" size="sm" color="primary" />
@@ -487,8 +539,8 @@
               </q-item-section>
             </q-item>
 
-            <!-- Medication Worksheets (always visible) -->
-            <q-item dense class="q-py-xs">
+            <!-- Medication Worksheets (hidden for quick start) -->
+            <q-item v-if="!wizardQuickStart" dense class="q-py-xs">
               <q-item-section avatar style="min-width: 28px">
                 <q-icon v-if="wizardCurrentMedications" name="check_circle" color="green" size="sm" />
                 <q-spinner v-else-if="wizardPreparingRecords && wizardDraftPsStatus !== 'running'" size="sm" color="primary" />
@@ -503,8 +555,8 @@
               </q-item-section>
             </q-item>
 
-            <!-- Verify Patient Summary (always visible, after medications) -->
-            <q-item dense class="q-py-xs">
+            <!-- Verify Patient Summary (hidden for quick start) -->
+            <q-item v-if="!wizardQuickStart" dense class="q-py-xs">
               <q-item-section avatar style="min-width: 28px">
                 <q-icon v-if="wizardPatientSummary" name="check_circle" color="green" size="sm" />
                 <q-spinner v-else-if="wizardFlowPhase === 'summary'" size="sm" color="primary" />
@@ -1114,6 +1166,33 @@ const wizardUserStorageKey = computed(() => props.user?.userId ? `wizard-complet
 const wizardStage2NoDeviceKey = computed(() => props.user?.userId ? `wizardStage2NoDevice-${props.user.userId}` : null);
 const wizardAgentSetupStartedKey = (userId: string | undefined) => userId ? `wizard_agent_setup_started_${userId}` : null;
 const wizardStage3IndexingStartedKey = (userId: string | undefined) => userId ? `wizard_stage3_indexing_started_${userId}` : null;
+
+// ── Quick-start tier (Groups adoption floor — Groups.md §7) ────────
+// "Chat + Private AI, no records yet": the user picks a (typically
+// empty) MAIA folder, the agents deploy, and setup completes WITHOUT
+// records upload / KB indexing / patient-summary drafting. The account
+// lands on workflowStage 'chat_ready' and the Workbook opens on Groups.
+// Adding records later runs the standard full wizard on the same
+// folder (agents already deployed complete instantly).
+/** True while the current wizard run is the quick-start (no-records) path. */
+const wizardQuickStart = ref(false);
+/** Survives reloads mid-quick-start (e.g. agent still deploying). */
+const wizardQuickStartKey = (userId: string | undefined) => userId ? `wizard_quickstart_${userId}` : null;
+/** Dismissed state for the "add your records" upgrade banner (per session). */
+const upgradeBannerDismissed = ref(false);
+// Restore an interrupted quick-start on reload (flag cleared on
+// completion) so the resumed wizard stays in agents-only mode and the
+// completion watcher still fires when the agent turns Ready.
+watch(
+  () => props.user?.userId,
+  (uid) => {
+    try {
+      const k = wizardQuickStartKey(uid);
+      if (k && localStorage.getItem(k) === 'true') wizardQuickStart.value = true;
+    } catch { /* ignore */ }
+  },
+  { immediate: true }
+);
 const wizardRestoreActive = computed(() => !!props.rehydrationActive && (Array.isArray(props.rehydrationFiles) ? props.rehydrationFiles.length > 0 : false));
 const showRestoreCompleteDialog = ref(false);
 const restoreIndexingActive = ref(false);
@@ -1755,7 +1834,11 @@ const userResourceStatus = ref<{
 //   Summary. This is the last user-facing setup gate.
 // - 'link_stored':    user has additionally saved/shared a chat
 //   link. Bonus stage, not required for "wizard done."
-const WIZARD_DONE_STAGES = new Set(['patient_summary', 'link_stored']);
+// - 'chat_ready':     quick-start tier — agent deployed, NO health
+//   records/KB/summary by explicit choice (Groups adoption floor).
+//   Setup is legitimately complete; adding records later re-runs the
+//   full wizard and advances the stage to 'patient_summary'.
+const WIZARD_DONE_STAGES = new Set(['patient_summary', 'link_stored', 'chat_ready']);
 
 const wizardActive = computed<boolean>(() => {
   if (wizardPatientSummary.value) return false;
@@ -1765,7 +1848,9 @@ const wizardActive = computed<boolean>(() => {
   if (!status) return false;
   if (status.kbIndexingActive === true) return true;
   if (status.workflowStage && !WIZARD_DONE_STAGES.has(status.workflowStage)) return true;
-  if (status.hasAgent && status.hasPatientSummary === false) return true;
+  // Agent-without-summary means outstanding setup EXCEPT for the
+  // quick-start tier, where "no summary" is the chosen end state.
+  if (status.hasAgent && status.hasPatientSummary === false && status.workflowStage !== 'chat_ready') return true;
   return false;
 });
 
@@ -1782,6 +1867,9 @@ const medsNeedsVerify = computed<boolean>(() => {
   const status = userResourceStatus.value;
   if (!status) return false;
   if (!status.hasAgent) return false;
+  // Quick-start tier has no records — there are no medications to
+  // verify, so don't paint the Lists attention outline.
+  if (status.workflowStage === 'chat_ready') return false;
   return status.hasCurrentMedications === false;
 });
 const isRequestSent = computed(() => userResourceStatus.value?.workflowStage === 'request_sent');
@@ -3536,12 +3624,18 @@ const handlePickLocalFolder = async () => {
     // ignore shortcut write errors
   }
 
-  // Scan folder for PDF files
-  try {
-    const files = await listFolderFiles(result.handle, { extensions: ['pdf'] });
-    localFolderFiles.value = files;
-  } catch (e) {
+  // Scan folder for PDF files. Quick-start skips records entirely — an
+  // empty file list keeps the checklist and auto-run in agents-only mode
+  // even if the picked folder happens to contain PDFs.
+  if (wizardQuickStart.value) {
     localFolderFiles.value = [];
+  } else {
+    try {
+      const files = await listFolderFiles(result.handle, { extensions: ['pdf'] });
+      localFolderFiles.value = files;
+    } catch (e) {
+      localFolderFiles.value = [];
+    }
   }
 
   // Start 60-minute timeout
@@ -3555,6 +3649,65 @@ const handlePickLocalFolder = async () => {
   // Start auto-run wizard — set guided flow phase to 'running'
   wizardFlowPhase.value = 'running';
   await runAutoWizard();
+};
+
+/** Quick-start tier: mark this run as no-records, then reuse the normal
+ *  folder pick. Everything downstream keys off `wizardQuickStart`. */
+const handleQuickStartClick = async () => {
+  wizardQuickStart.value = true;
+  try {
+    const k = wizardQuickStartKey(props.user?.userId);
+    if (k) localStorage.setItem(k, 'true');
+  } catch { /* ignore */ }
+  logProvisioningEvent({ event: 'quick-start-selected' });
+  await handlePickLocalFolder();
+};
+
+/** Full-setup folder pick: clears any dangling quick-start selection
+ *  (e.g. user clicked Quick start, cancelled the picker, then chose the
+ *  full path) so the run uploads records normally. */
+const handleFullSetupClick = async () => {
+  wizardQuickStart.value = false;
+  try {
+    const k = wizardQuickStartKey(props.user?.userId);
+    if (k) localStorage.removeItem(k);
+  } catch { /* ignore */ }
+  await handlePickLocalFolder();
+};
+
+/** Upgrade a quick-start ('chat_ready') account to the full tier: re-run
+ *  the standard wizard over the connected folder. Agents are already
+ *  deployed (instant green); any records the user has since copied into
+ *  the folder upload + index, and the draft-summary → medications →
+ *  summary verification flow proceeds exactly as first-time setup. */
+const startRecordsUpgrade = async () => {
+  wizardQuickStart.value = false;
+  try {
+    const k = wizardQuickStartKey(props.user?.userId);
+    if (k) localStorage.removeItem(k);
+  } catch { /* ignore */ }
+  upgradeBannerDismissed.value = true;
+  wizardDismissed.value = false;
+  showAgentSetupDialog.value = true;
+  logProvisioningEvent({ event: 'quick-start-upgrade-started' });
+  if (localFolderHandle.value) {
+    // Re-scan the folder — the user may have just copied records in.
+    try {
+      localFolderFiles.value = await listFolderFiles(localFolderHandle.value, { extensions: ['pdf'] });
+    } catch { localFolderFiles.value = []; }
+    if (localFolderFiles.value.length === 0) {
+      $q.notify({
+        type: 'info',
+        message: 'No health records found in your MAIA folder yet. Copy your record PDFs into the folder, then click ADD RECORDS again.',
+        timeout: 8000
+      });
+      return;
+    }
+    wizardFlowPhase.value = 'running';
+    await runAutoWizard();
+  }
+  // No folder handle (fresh reload): the wizard shows "Choose the patient
+  // folder" — re-picking the same folder runs the full flow.
 };
 
 /** Safari: user clicks "Select your MAIA folder" — opens webkitdirectory input, scans files, starts auto-run. */
@@ -7429,6 +7582,61 @@ watch(
     if (verified && !was && (localFolderHandle.value || safariFolderName.value)) {
       void generateSetupLogPdf();
     }
+  }
+);
+
+// Quick-start completion: agent readiness is the ONLY gate (no records,
+// no KB indexing, no draft summary, no verification steps). Marks the
+// account 'chat_ready' server-side, closes the wizard, and lands the
+// user on Workbook → Groups — the tier's primary surface. Gated on the
+// persistent flag (not wizardFlowPhase, which resets to 'done' on
+// reload) so a quick-start interrupted mid-deploy still completes when
+// the resumed agent polling turns Ready.
+const quickStartCompleting = ref(false);
+watch(
+  [() => wizardStage1Complete.value, () => wizardQuickStart.value],
+  async ([agentReady, quickStart]) => {
+    if (!quickStart || !agentReady || quickStartCompleting.value) return;
+    let flagPresent = false;
+    try {
+      const k = wizardQuickStartKey(props.user?.userId);
+      flagPresent = !!(k && localStorage.getItem(k) === 'true');
+    } catch { /* ignore */ }
+    if (!flagPresent) return; // already completed (or upgrade started)
+    quickStartCompleting.value = true;
+    wizardFlowPhase.value = 'done';
+    if (wizardTimeoutTimer) {
+      clearTimeout(wizardTimeoutTimer);
+      wizardTimeoutTimer = null;
+    }
+    try {
+      const res = await fetch('/api/wizard/quick-start-complete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ userId: props.user?.userId })
+      });
+      if (!res.ok) console.warn('[Wizard] quick-start-complete HTTP', res.status);
+    } catch (e) {
+      console.warn('[Wizard] quick-start-complete failed:', e);
+    }
+    try {
+      const k = wizardQuickStartKey(props.user?.userId);
+      if (k) localStorage.removeItem(k);
+    } catch { /* ignore */ }
+    logProvisioningEvent({ event: 'quick-start-complete' });
+    // Regenerate the setup log + state now that the agent is Ready.
+    void generateSetupLogPdf();
+    void saveStateToLocalFolder();
+    await refreshWizardState(); // pick up workflowStage 'chat_ready'
+    showAgentSetupDialog.value = false;
+    myStuffInitialTab.value = 'groups';
+    showMyStuffDialog.value = true;
+    $q.notify({
+      type: 'positive',
+      message: 'Your private AI is ready. You can join groups and chat now — add health records anytime later.',
+      timeout: 8000
+    });
   }
 );
 

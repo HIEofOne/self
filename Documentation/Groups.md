@@ -611,3 +611,37 @@ and any design decisions resolved.
   message to a mentor delivered; forged/non-member directory requests
   rejected 403. Deferred: member self-opt-in as mentor; reaching a specific
   non-mentor member (via match-probe in Phase 3 or an introduction).
+- **2026-07-10** — **Groups UX + Signal-style redesign** (post-PR-5 polish,
+  PRs #153–#156). Local-folder nesting guard: picking a folder that holds
+  another account's `maia-state.json` is blocked; a folder with MAIA
+  artifacts but no state file (e.g. a `chats` subfolder) warns before use.
+  Groups rail icon gained a blue-triangle alert (pending invitation /
+  request / new messages; `GET /api/user-groups/alerts`) with informative
+  hover text. Admin sessions that open a group-invite link now get an
+  explanatory banner instead of a silent bounce to /admin. The Groups tab
+  was rebuilt as a two-pane Signal-style layout: left rail of groups with
+  per-peer conversations (avatar, snippet, unread, "wants to connect"),
+  right pane with a bubble thread + composer; first-contact requests
+  render inline as message-request cards (Accept/Decline/Block). Sent
+  messages are now recorded per membership (`outbox`, capped, userDoc
+  only — never the registry) so threads show both sides; sender/recipient
+  aliases resolve best-effort via the signed member-key lookup. Full
+  two-member E2E test passed on the test deployment.
+- **2026-07-10** — **PR-6: quick-start onboarding tier** (§7 adoption
+  floor; "chat + Private AI, no records yet"). The Setup Wizard offers
+  "Quick start — no records yet" beside the standard folder pick: the
+  user picks a new (typically empty) MAIA folder, the private AI agents
+  deploy (≈1 min), and setup completes WITHOUT records upload, KB
+  indexing, or patient-summary drafting. The account lands on a new
+  `workflowStage: 'chat_ready'` (set via `POST /api/wizard/quick-start-
+  complete`; never downgrades a completed account), which counts as
+  wizard-done (no perpetual setup spinner, no meds-verify nag), and the
+  Workbook opens on the Groups tab — join a group and chat immediately.
+  A dismissible "Add records" banner above the chat composer upgrades
+  the account: it re-runs the standard wizard over the same folder
+  (already-deployed agents complete instantly; new records upload, index,
+  and the draft-summary → medications → summary verification flow runs
+  exactly as first-time setup, advancing the stage past `chat_ready`).
+  Quick-start selection survives reloads mid-deploy. Groups membership
+  and the agent persist across the upgrade. Deferred to PR-7: transient
+  context documents + privacy-filter wiring for chat+AI.
