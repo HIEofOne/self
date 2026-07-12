@@ -663,3 +663,21 @@ and any design decisions resolved.
   workflowStage could reopen My Lists); completion now lands on
   Workbook → Groups synchronously, marks resume as attempted, and
   refreshes status afterwards.
+- **2026-07-12** — **PR-8: member-initiated invites + seeded first thread +
+  passkey nudge** (adoption sequence per design review). Registry:
+  `POST /api/groups/:groupId/member-invites` — an ACTIVE member (signed
+  member-invite claim) invites by email, subject to the group's new
+  `memberInvitesAllowed` admin policy (default ON; toggle in the admin
+  create/edit dialog; enforced at the registry). The invite entry records
+  `invitedByPairwiseId`; the invite email names the inviter by group alias.
+  Shared `mintInvite` helper now backs both admin and member invites.
+  Join returns `inviter { pairwiseId, alias }` (if still active); the
+  joiner's membership stores `invitedBy` and pre-accepts the inviter
+  (mutual consent). Member side: `POST /api/user-groups/invite` proxy;
+  Groups tab's group-info pane gains an "Invite someone" email box (link
+  shown for copy/paste when email isn't configured). The invitee's rail
+  always shows the inviter as a conversation ("Invited you — say hi") and
+  joining lands directly in that thread — the empty-room problem is gone.
+  Passkey nudge: temporary quick-start accounts see a dismissible banner
+  ("your account only exists in this browser — add a passkey") wired to
+  the existing add-passkey dialog.

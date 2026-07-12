@@ -228,6 +228,28 @@
             </div>
           </div>
           
+          <!-- Passkey nudge (quick-start tier): a temporary account's only
+               credential is this browser's local storage — a group member
+               who wants to return from another device (or survive a
+               cleared browser) needs a passkey. Dismissible per session;
+               gone for good once a passkey exists (isTemporary false). -->
+          <q-banner
+            v-if="props.user?.isTemporary && userResourceStatus?.workflowStage === 'chat_ready' && !passkeyNudgeDismissed"
+            dense
+            rounded
+            class="bg-amber-1 text-brown-9 q-mb-sm"
+          >
+            <template #avatar>
+              <q-icon name="key" color="amber-9" />
+            </template>
+            Right now your account only exists in this browser. Add a passkey
+            so you can sign in from your phone or another computer.
+            <template #action>
+              <q-btn flat dense color="brown-9" label="Add passkey" @click="emit('add-passkey')" />
+              <q-btn flat dense color="grey-7" label="Later" @click="passkeyNudgeDismissed = true" />
+            </template>
+          </q-banner>
+
           <!-- Quick-start upgrade CTA: shown for 'chat_ready' accounts
                (agent deployed, records skipped). Dismissible per session;
                disappears for good once the full wizard completes and the
@@ -1020,6 +1042,9 @@ const emit = defineEmits<{
   'session-dirty': [];
   'wizard-complete': [];
   'test-setup-complete': [payload: { verification: any; folderHandle: FileSystemDirectoryHandle }];
+  // Passkey nudge (quick-start tier): opens App.vue's existing
+  // add-a-passkey dialog for the signed-in temporary user.
+  'add-passkey': [];
 }>();
 
 const $q = useQuasar();
@@ -1185,6 +1210,8 @@ const wizardQuickStart = ref(false);
 const wizardQuickStartKey = (userId: string | undefined) => userId ? `wizard_quickstart_${userId}` : null;
 /** Dismissed state for the "add your records" upgrade banner (per session). */
 const upgradeBannerDismissed = ref(false);
+/** Dismissed state for the add-a-passkey nudge (per session). */
+const passkeyNudgeDismissed = ref(false);
 // Restore an interrupted quick-start on reload (flag cleared on
 // completion) so the resumed wizard stays in agents-only mode and the
 // completion watcher still fires when the agent turns Ready.
