@@ -99,6 +99,9 @@
               <span class="groups-rail__convo-name" :class="{ 'text-weight-bold': c.unread > 0 }">
                 {{ c.alias || 'Group member' }}
               </span>
+              <q-icon v-if="c.mentor" name="star" size="12px" color="teal" class="q-ml-xs" style="flex: 0 0 auto">
+                <q-tooltip>Mentor</q-tooltip>
+              </q-icon>
               <span class="groups-rail__convo-time">{{ shortTime(c.lastAt) }}</span>
             </div>
             <div class="row items-center no-wrap">
@@ -265,7 +268,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, nextTick } from 'vue';
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue';
 import { useQuasar } from 'quasar';
 
 const $q = useQuasar();
@@ -392,7 +395,9 @@ const selectedPeerAlias = computed(() =>
   selected.value?.peerId ? aliasFor(selected.value.groupId, selected.value.peerId) : null
 );
 
-// ── Rail conversations: one item per peer with any history/request ──
+// ── Rail conversations: one item per peer with any history/request,
+//    PLUS the group's mentors (directories auto-load on mount) so a
+//    fresh member immediately sees someone to talk to — no clicks. ──
 interface Convo {
   peerId: string;
   alias: string | null;
@@ -400,11 +405,12 @@ interface Convo {
   lastAt: string;
   unread: number;
   hasPendingRequest: boolean;
+  mentor: boolean;
 }
 const conversationsFor = (groupId: string): Convo[] => {
-  const peers = new Map<string, { lastAt: string; snippet: string; unread: number; hasPendingRequest: boolean }>();
+  const peers = new Map<string, { lastAt: string; snippet: string; unread: number; hasPendingRequest: boolean; mentor: boolean }>();
   const bump = (peerId: string, at: string, snippet: string, unreadInc: number) => {
-    const cur = peers.get(peerId) || { lastAt: '', snippet: '', unread: 0, hasPendingRequest: false };
+    const cur = peers.get(peerId) || { lastAt: '', snippet: '', unread: 0, hasPendingRequest: false, mentor: false };
     if (!cur.lastAt || at > cur.lastAt) { cur.lastAt = at; cur.snippet = snippet; }
     cur.unread += unreadInc;
     peers.set(peerId, cur);
@@ -418,10 +424,22 @@ const conversationsFor = (groupId: string): Convo[] => {
   }
   for (const r of requests.value) {
     if (r.groupId !== groupId) continue;
-    const cur = peers.get(r.fromPairwiseId) || { lastAt: '', snippet: '', unread: 0, hasPendingRequest: false };
+    const cur = peers.get(r.fromPairwiseId) || { lastAt: '', snippet: '', unread: 0, hasPendingRequest: false, mentor: false };
     if (!cur.lastAt || r.receivedAt > cur.lastAt) cur.lastAt = r.receivedAt;
     if (r.status === 'pending') cur.hasPendingRequest = true;
     peers.set(r.fromPairwiseId, cur);
+  }
+  // Mentors appear even with no history — the "say hello" affordance a
+  // brand-new member needs. Never removes anyone; only adds/flags.
+  for (const mentor of directoryByGroup.value[groupId]?.mentors || []) {
+    const cur = peers.get(mentor.pairwiseId);
+    if (cur) {
+      cur.mentor = true;
+    } else {
+      peers.set(mentor.pairwiseId, {
+        lastAt: '', snippet: 'Mentor — say hello', unread: 0, hasPendingRequest: false, mentor: true
+      });
+    }
   }
   return Array.from(peers.entries())
     .map(([peerId, p]) => ({
@@ -430,8 +448,10 @@ const conversationsFor = (groupId: string): Convo[] => {
       snippet: p.snippet,
       lastAt: p.lastAt,
       unread: p.unread,
-      hasPendingRequest: p.hasPendingRequest
+      hasPendingRequest: p.hasPendingRequest,
+      mentor: p.mentor
     }))
+    // Real conversations first (newest on top); history-less mentors last.
     .sort((a, b) => (b.lastAt || '').localeCompare(a.lastAt || ''));
 };
 
@@ -586,20 +606,26 @@ const loadRequests = async () => {
   }
 };
 
-/** Pull relay mail for all memberships, then reload everything. */
-const refreshAll = async () => {
-  refreshingAll.value = true;
-  try {
-    const res = await fetch('/api/user-groups/refresh', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({ userId: props.userId })
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
-    await loadMemberships(); // a revoked membership would drop off here
-    await Promise.all([loadAllMessages(), loadRequests()]);
+/** Load directories for every membership so mentors appear in the rail
+ *  without any clicks (a fresh member must SEE someone to talk to). */
+const loadAllDirectories = async () => {
+  await Promise.all(memberships.value.map((m) => loadDirectory(m.groupId)));
+};
+
+/** Pull relay mail for all memberships, then reload local state.
+ *  Silent unless `notify` — the auto-poll uses the silent form. */
+const pullMail = async (notify: boolean) => {
+  const res = await fetch('/api/user-groups/refresh', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ userId: props.userId })
+  });
+  const data = await res.json();
+  if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+  await loadMemberships(); // a revoked membership would drop off here
+  await Promise.all([loadAllMessages(), loadRequests()]);
+  if (notify) {
     const bits = [];
     if (data.newMessages) bits.push(`${data.newMessages} message(s)`);
     if (data.newRequests) bits.push(`${data.newRequests} request(s)`);
@@ -607,11 +633,33 @@ const refreshAll = async () => {
       type: bits.length ? 'positive' : 'info',
       message: bits.length ? `New: ${bits.join(', ')}.` : 'Nothing new.'
     });
+  }
+};
+
+const refreshAll = async () => {
+  refreshingAll.value = true;
+  try {
+    await pullMail(true);
   } catch (err) {
     $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to check messages' });
   } finally {
     refreshingAll.value = false;
   }
+};
+
+// Auto-poll: pull relay mail while the Groups tab is open so messages
+// and requests appear without a manual refresh.
+// TESTING CADENCE — 5 s is for convenient local/two-tab testing; raise
+// substantially (e.g. 60 s+) before production scale-out.
+const AUTO_PULL_MS = 5000;
+let autoPullTimer: ReturnType<typeof setInterval> | null = null;
+let autoPullBusy = false;
+const autoPull = async () => {
+  if (autoPullBusy || refreshingAll.value || !props.userId) return;
+  if (memberships.value.length === 0) return; // nothing to poll
+  autoPullBusy = true;
+  try { await pullMail(false); } catch { /* silent — next tick retries */ }
+  finally { autoPullBusy = false; }
 };
 
 // ── Invite join flow ────────────────────────────────────────────────
@@ -829,8 +877,13 @@ const decide = async (r: AsRequest, decision: 'accept' | 'decline' | 'block') =>
 onMounted(async () => {
   loadThreadSeen();
   await loadMemberships();
-  await Promise.all([loadAllMessages(), loadRequests()]);
+  await Promise.all([loadAllMessages(), loadRequests(), loadAllDirectories()]);
   await loadPendingInvite();
+  autoPullTimer = setInterval(autoPull, AUTO_PULL_MS);
+});
+
+onUnmounted(() => {
+  if (autoPullTimer) clearInterval(autoPullTimer);
 });
 </script>
 

@@ -741,7 +741,7 @@
       @file-added-to-kb="handleFileAddedToKb"
       @tab-opened="handleMyStuffTabOpened"
       @sign-out-requested="handleSignOut"
-      @wizard-requested="() => { wizardDismissed = false; showAgentSetupDialog = true; }"
+      @wizard-requested="handleWizardRequested"
       @provisioning-event="(data: Record<string, any>) => logProvisioningEvent(data)"
       v-if="canAccessMyStuff"
     />
@@ -3698,6 +3698,29 @@ const handleFullSetupClick = async () => {
     if (k) localStorage.removeItem(k);
   } catch { /* ignore */ }
   await handlePickLocalFolder();
+};
+
+/** Wizard rail icon clicked. Routes to the right continuation for a
+ *  resume that was ARMED on reload (flowPhase medications/summary) —
+ *  those steps live in My Lists / Patient Summary, not the setup
+ *  dialog. Everything else opens the setup dialog as before. */
+const handleWizardRequested = () => {
+  wizardDismissed.value = false;
+  if (wizardFlowPhase.value === 'medications') {
+    try {
+      sessionStorage.setItem('autoProcessInitialFile', 'true');
+      sessionStorage.setItem('wizardMyListsAuto', 'true');
+    } catch { /* ignore */ }
+    myStuffInitialTab.value = 'lists';
+    showMyStuffDialog.value = true;
+    return;
+  }
+  if (wizardFlowPhase.value === 'summary') {
+    myStuffInitialTab.value = 'summary';
+    showMyStuffDialog.value = true;
+    return;
+  }
+  showAgentSetupDialog.value = true;
 };
 
 /** Upgrade a quick-start ('chat_ready') account to the full tier: re-run
@@ -7302,29 +7325,35 @@ const startSetupWizardPolling = () => {
         wizardStage1Complete.value &&
         !wizardPatientSummary.value
       ) {
+        // Mid-guided-flow reload: ARM the resume (flowPhase drives the
+        // wizard rail icon's attention triangle) but do NOT hijack the
+        // user's tab — clicking the wizard icon continues at the right
+        // step via handleWizardRequested. Previously this force-opened
+        // My Lists / Patient Summary over whatever tab the user was on.
         if (!wizardCurrentMedications.value) {
-          // Meds not yet verified → resume at medications phase.
           wizardFlowPhase.value = 'medications';
-          try {
-            sessionStorage.setItem('autoProcessInitialFile', 'true');
-            sessionStorage.setItem('wizardMyListsAuto', 'true');
-          } catch { /* ignore */ }
-          myStuffInitialTab.value = 'lists';
-          showMyStuffDialog.value = true;
-          logProvisioningEvent({ event: 'setup-resumed', reason: 'current-medications-not-verified' });
+          logProvisioningEvent({ event: 'setup-resume-armed', reason: 'current-medications-not-verified' });
         } else {
-          // Meds verified, summary still a draft → resume at summary phase.
-          // (Common after Restore: restored Patient Summary is a draft until
-          // the user verifies it. Logged once: the phase flip to 'summary'
-          // keeps this block from re-entering.)
           wizardFlowPhase.value = 'summary';
-          myStuffInitialTab.value = 'summary';
-          showMyStuffDialog.value = true;
-          logProvisioningEvent({ event: 'setup-resumed', reason: 'patient-summary-not-verified' });
+          logProvisioningEvent({ event: 'setup-resume-armed', reason: 'patient-summary-not-verified' });
         }
       }
 
-      if (!shouldHideSetupWizard.value && !showAgentSetupDialog.value && !wizardDismissed.value && !showMyStuffDialog.value) {
+      // Auto-open the setup dialog ONLY for a brand-new account that has
+      // never engaged the wizard (no folder, no uploads, no verified meds,
+      // not a completed stage) — that first open IS the onboarding. Any
+      // other incomplete state (reload mid-flow, dismissed, quick-start
+      // deploying) is signaled passively by the wizard rail icon's blue
+      // attention triangle instead of a dialog stealing the screen.
+      const stageNow = userResourceStatus.value?.workflowStage || null;
+      const neverEngagedWizard =
+        !wizardQuickStart.value &&
+        wizardStage3Files.value.length === 0 &&
+        !localFolderHandle.value && !localFolderName.value && !safariFolderName.value &&
+        !wizardCurrentMedications.value &&
+        wizardFlowPhase.value === 'done' &&
+        (!stageNow || !WIZARD_DONE_STAGES.has(stageNow));
+      if (neverEngagedWizard && !shouldHideSetupWizard.value && !showAgentSetupDialog.value && !wizardDismissed.value && !showMyStuffDialog.value) {
         showAgentSetupDialog.value = true;
         stopAgentSetupTimer();
         agentSetupTimer = setInterval(() => {
@@ -7385,13 +7414,8 @@ const startSetupWizardPolling = () => {
         return;
       }
 
-      if (!shouldHideSetupWizard.value && !showAgentSetupDialog.value && !wizardDismissed.value && !showMyStuffDialog.value) {
-        showAgentSetupDialog.value = true;
-        stopAgentSetupTimer();
-        agentSetupTimer = setInterval(() => {
-          agentSetupElapsed.value += 1;
-        }, 1000);
-      }
+      // (No auto-reopen while the agent deploys: a closed/reloaded wizard
+      // stays closed; the rail icon's attention triangle signals instead.)
     } catch (error) {
       console.warn('Agent setup status check failed:', error);
     }
