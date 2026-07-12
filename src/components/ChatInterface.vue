@@ -335,6 +335,9 @@
                 <template v-if="wizardPreparingRecords">
                   {{ wizardPreparingMessage || `Preparing health records for ${props.user?.userId || 'Guest'}. Almost done...` }}
                 </template>
+                <template v-else-if="wizardQuickStart">
+                  Setting up your private AI for <strong>{{ props.user?.userId || 'Guest' }}</strong> — about a minute...
+                </template>
                 <template v-else>
                   Creating account for <strong>{{ props.user?.userId || 'Guest' }}</strong>. This can take 5 to 60 minutes.
                 </template>
@@ -356,8 +359,10 @@
             @change="handleSafariFolderSelected"
           />
 
-          <!-- Action button: Choose the patient folder -->
-          <div v-if="!setupFolderConnected" class="q-mb-md">
+          <!-- Action button: Choose the patient folder. Hidden while a
+               quick-start run is underway (agents-only: no folder, no
+               choices — the folder is deferred until first needed). -->
+          <div v-if="!setupFolderConnected && !wizardQuickStart" class="q-mb-md">
             <!-- Chrome: persistent folder access (+ TEST on localhost) -->
             <template v-if="localFolderSupported">
               <q-btn
@@ -379,8 +384,8 @@
                 @click="handleTestButton"
               />
               <!-- Quick-start tier: deploy the private AI without records
-                   (Groups adoption floor). Still picks a MAIA folder — a
-                   new, empty one — for app state and saved chats. -->
+                   (Groups adoption floor). No folder pick either — the
+                   local folder is deferred until first needed. -->
               <div v-if="!props.restoreActive" class="q-mt-sm">
                 <q-btn
                   flat
@@ -393,8 +398,8 @@
                 />
                 <div class="text-caption text-grey-7 q-mt-xs" style="max-width: 480px">
                   Sets up your private AI in about a minute so you can join
-                  patient groups and chat now. Pick a new, empty MAIA folder.
-                  You can add health records anytime later.
+                  patient groups and chat now. Nothing to choose — you can
+                  add health records anytime later.
                 </div>
               </div>
             </template>
@@ -614,7 +619,7 @@
 
         <q-card-actions align="right">
           <q-btn
-            v-if="wizardStage1Complete && (indexingStatus?.phase === 'complete' || !stage3HasFiles) && !wizardPreparingRecords"
+            v-if="wizardStage1Complete && (indexingStatus?.phase === 'complete' || !stage3HasFiles) && !wizardPreparingRecords && !wizardQuickStart"
             unelevated label="Continue" color="primary"
             @click="dismissWizard"
           />
@@ -736,7 +741,7 @@
       @file-added-to-kb="handleFileAddedToKb"
       @tab-opened="handleMyStuffTabOpened"
       @sign-out-requested="handleSignOut"
-      @wizard-requested="() => { wizardDismissed = false; showAgentSetupDialog = true; }"
+      @wizard-requested="handleWizardRequested"
       @provisioning-event="(data: Record<string, any>) => logProvisioningEvent(data)"
       v-if="canAccessMyStuff"
     />
@@ -1192,6 +1197,21 @@ watch(
     } catch { /* ignore */ }
   },
   { immediate: true }
+);
+// Invitee arrival (welcome page set maiaQuickStartOnOpen at JOIN-click):
+// when the setup wizard opens for the brand-new account, preselect the
+// quick-start tier automatically — no fork, no folder, no decisions.
+watch(
+  () => showAgentSetupDialog.value,
+  (open) => {
+    if (!open || setupFolderConnected.value || props.restoreActive) return;
+    try {
+      if (sessionStorage.getItem('maiaQuickStartOnOpen') === '1') {
+        sessionStorage.removeItem('maiaQuickStartOnOpen');
+        handleQuickStartClick();
+      }
+    } catch { /* ignore */ }
+  }
 );
 const wizardRestoreActive = computed(() => !!props.rehydrationActive && (Array.isArray(props.rehydrationFiles) ? props.rehydrationFiles.length > 0 : false));
 const showRestoreCompleteDialog = ref(false);
@@ -3651,16 +3671,21 @@ const handlePickLocalFolder = async () => {
   await runAutoWizard();
 };
 
-/** Quick-start tier: mark this run as no-records, then reuse the normal
- *  folder pick. Everything downstream keys off `wizardQuickStart`. */
-const handleQuickStartClick = async () => {
+/** Quick-start tier: agents-only setup, NO folder pick. The local folder
+ *  is deferred until first needed (adding records, saving chats) — the
+ *  agents were already requested at account creation and the mount-time
+ *  polling detects readiness, so there is genuinely nothing for the user
+ *  to do here but wait ~1 minute. Everything downstream keys off
+ *  `wizardQuickStart`; the completion watcher closes the wizard and
+ *  lands on Workbook → Groups. */
+const handleQuickStartClick = () => {
   wizardQuickStart.value = true;
   try {
     const k = wizardQuickStartKey(props.user?.userId);
     if (k) localStorage.setItem(k, 'true');
   } catch { /* ignore */ }
   logProvisioningEvent({ event: 'quick-start-selected' });
-  await handlePickLocalFolder();
+  wizardFlowPhase.value = 'running';
 };
 
 /** Full-setup folder pick: clears any dangling quick-start selection
@@ -3673,6 +3698,29 @@ const handleFullSetupClick = async () => {
     if (k) localStorage.removeItem(k);
   } catch { /* ignore */ }
   await handlePickLocalFolder();
+};
+
+/** Wizard rail icon clicked. Routes to the right continuation for a
+ *  resume that was ARMED on reload (flowPhase medications/summary) —
+ *  those steps live in My Lists / Patient Summary, not the setup
+ *  dialog. Everything else opens the setup dialog as before. */
+const handleWizardRequested = () => {
+  wizardDismissed.value = false;
+  if (wizardFlowPhase.value === 'medications') {
+    try {
+      sessionStorage.setItem('autoProcessInitialFile', 'true');
+      sessionStorage.setItem('wizardMyListsAuto', 'true');
+    } catch { /* ignore */ }
+    myStuffInitialTab.value = 'lists';
+    showMyStuffDialog.value = true;
+    return;
+  }
+  if (wizardFlowPhase.value === 'summary') {
+    myStuffInitialTab.value = 'summary';
+    showMyStuffDialog.value = true;
+    return;
+  }
+  showAgentSetupDialog.value = true;
 };
 
 /** Upgrade a quick-start ('chat_ready') account to the full tier: re-run
@@ -7277,29 +7325,35 @@ const startSetupWizardPolling = () => {
         wizardStage1Complete.value &&
         !wizardPatientSummary.value
       ) {
+        // Mid-guided-flow reload: ARM the resume (flowPhase drives the
+        // wizard rail icon's attention triangle) but do NOT hijack the
+        // user's tab — clicking the wizard icon continues at the right
+        // step via handleWizardRequested. Previously this force-opened
+        // My Lists / Patient Summary over whatever tab the user was on.
         if (!wizardCurrentMedications.value) {
-          // Meds not yet verified → resume at medications phase.
           wizardFlowPhase.value = 'medications';
-          try {
-            sessionStorage.setItem('autoProcessInitialFile', 'true');
-            sessionStorage.setItem('wizardMyListsAuto', 'true');
-          } catch { /* ignore */ }
-          myStuffInitialTab.value = 'lists';
-          showMyStuffDialog.value = true;
-          logProvisioningEvent({ event: 'setup-resumed', reason: 'current-medications-not-verified' });
+          logProvisioningEvent({ event: 'setup-resume-armed', reason: 'current-medications-not-verified' });
         } else {
-          // Meds verified, summary still a draft → resume at summary phase.
-          // (Common after Restore: restored Patient Summary is a draft until
-          // the user verifies it. Logged once: the phase flip to 'summary'
-          // keeps this block from re-entering.)
           wizardFlowPhase.value = 'summary';
-          myStuffInitialTab.value = 'summary';
-          showMyStuffDialog.value = true;
-          logProvisioningEvent({ event: 'setup-resumed', reason: 'patient-summary-not-verified' });
+          logProvisioningEvent({ event: 'setup-resume-armed', reason: 'patient-summary-not-verified' });
         }
       }
 
-      if (!shouldHideSetupWizard.value && !showAgentSetupDialog.value && !wizardDismissed.value && !showMyStuffDialog.value) {
+      // Auto-open the setup dialog ONLY for a brand-new account that has
+      // never engaged the wizard (no folder, no uploads, no verified meds,
+      // not a completed stage) — that first open IS the onboarding. Any
+      // other incomplete state (reload mid-flow, dismissed, quick-start
+      // deploying) is signaled passively by the wizard rail icon's blue
+      // attention triangle instead of a dialog stealing the screen.
+      const stageNow = userResourceStatus.value?.workflowStage || null;
+      const neverEngagedWizard =
+        !wizardQuickStart.value &&
+        wizardStage3Files.value.length === 0 &&
+        !localFolderHandle.value && !localFolderName.value && !safariFolderName.value &&
+        !wizardCurrentMedications.value &&
+        wizardFlowPhase.value === 'done' &&
+        (!stageNow || !WIZARD_DONE_STAGES.has(stageNow));
+      if (neverEngagedWizard && !shouldHideSetupWizard.value && !showAgentSetupDialog.value && !wizardDismissed.value && !showMyStuffDialog.value) {
         showAgentSetupDialog.value = true;
         stopAgentSetupTimer();
         agentSetupTimer = setInterval(() => {
@@ -7360,13 +7414,8 @@ const startSetupWizardPolling = () => {
         return;
       }
 
-      if (!shouldHideSetupWizard.value && !showAgentSetupDialog.value && !wizardDismissed.value && !showMyStuffDialog.value) {
-        showAgentSetupDialog.value = true;
-        stopAgentSetupTimer();
-        agentSetupTimer = setInterval(() => {
-          agentSetupElapsed.value += 1;
-        }, 1000);
-      }
+      // (No auto-reopen while the agent deploys: a closed/reloaded wizard
+      // stays closed; the rail icon's attention triangle signals instead.)
     } catch (error) {
       console.warn('Agent setup status check failed:', error);
     }
@@ -7625,11 +7674,19 @@ watch(
       if (k) localStorage.removeItem(k);
     } catch { /* ignore */ }
     logProvisioningEvent({ event: 'quick-start-complete' });
-    // Regenerate the setup log + state now that the agent is Ready.
+    // Setup log + state are folder-backed; both are safe no-ops for the
+    // (usual) folder-less quick start and correct if a folder exists.
     void generateSetupLogPdf();
     void saveStateToLocalFolder();
-    await refreshWizardState(); // pick up workflowStage 'chat_ready'
+    // Land on Workbook → Groups FIRST, synchronously. The status refresh
+    // below can trigger the wizard-resume machinery against a stale
+    // workflowStage (CouchDB read-after-write lag on the POST above),
+    // which opens My Lists and would stomp the Groups landing — so mark
+    // the resume as already attempted and refresh only after the UI is
+    // where we want it.
     showAgentSetupDialog.value = false;
+    wizardQuickStart.value = false; // reopening the wizard shows the normal fork
+    wizardResumeAttempted.value = true;
     myStuffInitialTab.value = 'groups';
     showMyStuffDialog.value = true;
     $q.notify({
@@ -7637,6 +7694,7 @@ watch(
       message: 'Your private AI is ready. You can join groups and chat now — add health records anytime later.',
       timeout: 8000
     });
+    void refreshWizardState(); // pick up workflowStage 'chat_ready'
   }
 );
 

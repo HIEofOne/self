@@ -1001,13 +1001,17 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       // Agent linked to KB: agent exists AND kbId is set AND agent has an endpoint
       const agentLinkedToKb = agentExists && kbExists && !!userDoc?.agentEndpoint;
 
-      // Wizard complete: the account's restorable state is in place.
-      // Patient Summary and Current Medications content can legitimately be empty
-      // (e.g. the patient has no medications), so we do NOT require them to be non-empty.
-      // What matters is that the agent + KB + endpoint are provisioned.
-      const wizardComplete = agentExists
-        && kbExists
-        && !!userDoc?.agentEndpoint;
+      // "Wizard complete" here answers ONE question for the welcome card:
+      // does this account need RESTORING? That is true only when the core
+      // cloud resource — the agent + endpoint — is gone (the sign-out
+      // "delete everything in the cloud" case). Anything else the account
+      // might lack (KB for the quick-start tier, records not yet uploaded,
+      // meds/summary not yet verified) is wizard CONTINUATION, reachable by
+      // simply re-entering the account — the wizard rail icon's attention
+      // triangle takes it from there. Requiring a KB here mislabeled every
+      // quick-start account (no KB by explicit choice) and every mid-wizard
+      // account as "needs restoring" after sign-out.
+      const wizardComplete = agentExists && !!userDoc?.agentEndpoint;
 
       console.log(`[WELCOME] agent-exists for ${userId}: agent=${agentExists}, savedFiles=${savedFileCount}/${allFiles.length}, kb=${kbExists}, linked=${agentLinkedToKb}, wizardDone=${wizardComplete}, stage=${userDoc?.workflowStage || 'none'}`);
 

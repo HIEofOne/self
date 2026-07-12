@@ -163,9 +163,13 @@
                 </div>
 
                 <div v-if="!showAuth">
-                  <!-- GET STARTED is always the main action -->
+                  <!-- GET STARTED is always the main action. An invitee
+                       (pending group invite) gets a join-framed label and
+                       the quick-start tier preselected: the wizard shows no
+                       fork, no folder pick — private AI deploys, then the
+                       Workbook opens on Groups with the invite ready. -->
                   <q-btn
-                    label="GET STARTED"
+                    :label="pendingGroupInvite ? `JOIN ${(pendingInviteGroupName || 'THE GROUP').toUpperCase()}` : 'GET STARTED'"
                     color="primary"
                     size="lg"
                     class="full-width q-mb-sm"
@@ -2315,6 +2319,14 @@ const handleSharedWarningOk = () => {
 };
 
 const handleGetStartedNoPassword = () => {
+  // Invitee arrival: preselect the quick-start wizard tier so the new
+  // account goes straight from "JOIN <group>" to a deploying private AI
+  // with no fork and no folder pick. Consumed by ChatInterface when the
+  // setup wizard opens. Session-scoped: never affects restores or
+  // existing accounts.
+  if (pendingGroupInvite.value) {
+    try { sessionStorage.setItem('maiaQuickStartOnOpen', '1'); } catch { /* ignore */ }
+  }
   // Cloud user (has passkey) → challenge passkey directly
   if (welcomeUserType.value === 'cloud') {
     const userId = welcomeDisplayUserId.value;

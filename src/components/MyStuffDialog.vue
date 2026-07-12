@@ -62,7 +62,7 @@
           type="button"
           class="my-stuff-rail__btn my-stuff-rail__btn--wizard"
           :class="{ 'is-wizard-active': props.wizardActive }"
-          :title="'Setup Wizard' + (props.wizardActive ? ' (running)' : '')"
+          :title="props.wizardActive ? 'Setup Wizard — setup incomplete, click to continue' : 'Setup Wizard'"
           aria-label="Setup Wizard"
           @click="handleWizardClick"
         >
@@ -71,6 +71,17 @@
             <span v-if="props.wizardActive" class="my-stuff-rail__wizard-ring" aria-hidden="true"></span>
           </span>
           <span class="my-stuff-rail__label">Setup Wizard</span>
+          <!-- Blue "setup incomplete" triangle: the wizard never auto-opens
+               on reload; this is the passive signal that there is wizard
+               work to finish. Same visual language as the Groups alert. -->
+          <span
+            v-if="props.wizardActive"
+            class="my-stuff-rail__info-triangle"
+            aria-hidden="true"
+          ></span>
+          <q-tooltip v-if="props.wizardActive" anchor="center right" self="center left">
+            Setup incomplete — click to continue the Setup Wizard
+          </q-tooltip>
         </button>
 
         <button
