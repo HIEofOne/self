@@ -185,6 +185,40 @@
                 @click="selectPeer(selectedMembership, mentor.pairwiseId)"
               />
             </div>
+
+            <!-- Member-initiated invite (PR-8): any member can grow the
+                 group unless the admin disabled it (registry enforces). -->
+            <div class="text-subtitle2 q-mt-md q-mb-xs">Invite someone</div>
+            <div class="text-caption text-grey-7 q-mb-sm">
+              Know someone who belongs here? They'll get an email invitation,
+              and you'll be their first conversation when they join.
+            </div>
+            <div class="row items-center q-gutter-sm">
+              <q-input
+                v-model="inviteEmailInput"
+                dense outlined type="email"
+                label="Their email"
+                style="min-width: 240px"
+                :disable="sendingInvite"
+                @keydown.enter.prevent="sendMemberInvite"
+              />
+              <q-btn
+                dense unelevated color="primary" label="Invite"
+                :loading="sendingInvite"
+                :disable="!inviteEmailInput.trim()"
+                @click="sendMemberInvite"
+              />
+            </div>
+            <div v-if="lastInviteLink" class="text-caption q-mt-sm" style="word-break: break-all">
+              <template v-if="lastInviteEmailSent">Invitation emailed.</template>
+              <template v-else>Email isn't configured on this server — share this link yourself:</template>
+              <div class="q-mt-xs">
+                <a :href="lastInviteLink" @click.prevent>{{ lastInviteLink }}</a>
+                <q-btn dense flat size="sm" icon="content_copy" @click="copyInviteLink">
+                  <q-tooltip>Copy link</q-tooltip>
+                </q-btn>
+              </div>
+            </div>
           </template>
         </div>
       </template>
@@ -284,6 +318,9 @@ interface Membership {
   joinedAt: string;
   credentialExpiresAt: string | null;
   mentor: boolean;
+  /** Set when this membership came from a member's invitation — seeds
+   *  the first conversation with the inviter. */
+  invitedBy?: { pairwiseId: string; alias: string | null } | null;
 }
 
 interface PendingInvite {
@@ -388,7 +425,10 @@ const aliasFor = (groupId: string, peerId: string): string | null => {
   const req = requests.value.find((r) => r.groupId === groupId && r.fromPairwiseId === peerId && r.fromAlias);
   if (req) return req.fromAlias || null;
   const mentor = (directoryByGroup.value[groupId]?.mentors || []).find((x) => x.pairwiseId === peerId);
-  return mentor ? mentor.alias : null;
+  if (mentor) return mentor.alias;
+  const inviter = memberships.value.find((m) => m.groupId === groupId)?.invitedBy;
+  if (inviter && inviter.pairwiseId === peerId) return inviter.alias || null;
+  return null;
 };
 
 const selectedPeerAlias = computed(() =>
@@ -441,6 +481,14 @@ const conversationsFor = (groupId: string): Convo[] => {
       });
     }
   }
+  // The member who invited you is always a conversation — even before
+  // any messages. This is the invitee's obvious first move.
+  const inviter = memberships.value.find((m) => m.groupId === groupId)?.invitedBy;
+  if (inviter && !peers.has(inviter.pairwiseId)) {
+    peers.set(inviter.pairwiseId, {
+      lastAt: '', snippet: 'Invited you — say hi', unread: 0, hasPendingRequest: false, mentor: false
+    });
+  }
   return Array.from(peers.entries())
     .map(([peerId, p]) => ({
       peerId,
@@ -481,6 +529,10 @@ const pendingRequestFromPeer = computed(() => {
 // ── Selection actions ───────────────────────────────────────────────
 const selectGroup = async (m: Membership) => {
   selected.value = { groupId: m.groupId, peerId: null };
+  // Per-group invite widget state — don't leak group A's link into B.
+  inviteEmailInput.value = '';
+  lastInviteLink.value = '';
+  lastInviteEmailSent.value = false;
   await loadDirectory(m.groupId);
 };
 
@@ -747,10 +799,16 @@ const joinPendingGroup = async () => {
     pendingInvite.value = null;
     await loadMemberships();
     $q.notify({ type: 'positive', message: `Welcome to ${data.membership?.groupName || 'the group'}!` });
-    // Land the new member on their group's info pane so "Find peers" is
-    // the natural next step.
+    // Land the new member somewhere with an obvious next move: the
+    // conversation with whoever invited them (member invite), else the
+    // group's info pane where mentors/"Find peers" live.
     const joined = memberships.value.find((m) => m.groupId === data.membership?.groupId);
-    if (joined) await selectGroup(joined);
+    if (joined?.invitedBy) {
+      await loadDirectory(joined.groupId); // aliases for the rail
+      await selectPeer(joined, joined.invitedBy.pairwiseId);
+    } else if (joined) {
+      await selectGroup(joined);
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Failed to join group';
     // A dead token can't succeed on retry — swap the join banner for a
@@ -846,6 +904,51 @@ const sendMessage = async () => {
     $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to send message' });
   } finally {
     sending.value = false;
+  }
+};
+
+// ── Member-initiated invites (PR-8) ─────────────────────────────────
+const inviteEmailInput = ref('');
+const sendingInvite = ref(false);
+const lastInviteLink = ref('');
+const lastInviteEmailSent = ref(false);
+
+const sendMemberInvite = async () => {
+  const groupId = selected.value?.groupId;
+  const email = inviteEmailInput.value.trim();
+  if (!groupId || !email || sendingInvite.value) return;
+  sendingInvite.value = true;
+  try {
+    const res = await fetch('/api/user-groups/invite', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ userId: props.userId, groupId, email })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    lastInviteLink.value = data.invite?.inviteLink || '';
+    lastInviteEmailSent.value = !!data.invite?.emailSent;
+    inviteEmailInput.value = '';
+    $q.notify({
+      type: 'positive',
+      message: lastInviteEmailSent.value
+        ? `Invitation sent to ${email}.`
+        : 'Invitation created — email is not configured, so share the link yourself.'
+    });
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to send invitation' });
+  } finally {
+    sendingInvite.value = false;
+  }
+};
+
+const copyInviteLink = async () => {
+  try {
+    await navigator.clipboard.writeText(lastInviteLink.value);
+    $q.notify({ type: 'positive', message: 'Link copied.' });
+  } catch {
+    $q.notify({ type: 'warning', message: 'Copy failed — select and copy the link manually.' });
   }
 };
 

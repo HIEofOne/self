@@ -127,6 +127,17 @@
             outlined
             hint="Small, condition-appropriate vocabulary, e.g. mentorship, newly-diagnosed, biologics"
           />
+          <q-toggle
+            v-model="form.memberInvitesAllowed"
+            label="Members may invite new people"
+            dense
+          >
+            <q-tooltip>
+              When on (recommended), any active member can send email
+              invitations; the invitee's first conversation is their inviter.
+              When off, only you can invite.
+            </q-tooltip>
+          </q-toggle>
         </q-card-section>
         <q-card-actions align="right">
           <q-btn flat label="Cancel" v-close-popup :disable="saving" />
@@ -204,6 +215,7 @@ interface GroupSummary {
   groupId: string;
   name: string;
   description: string;
+  memberInvitesAllowed?: boolean;
   tagVocabulary: string[];
   publicKeyJwk: Record<string, string> | null;
   policyPackVersion: number;
@@ -236,7 +248,7 @@ const loadingMembers = ref<Record<string, boolean>>({});
 const showDialog = ref(false);
 const saving = ref(false);
 const editingGroupId = ref<string | null>(null);
-const form = ref({ name: '', description: '', tags: '' });
+const form = ref({ name: '', description: '', tags: '', memberInvitesAllowed: true });
 
 const showInviteDialog = ref(false);
 const inviteGroup = ref<GroupSummary | null>(null);
@@ -288,13 +300,18 @@ const loadGroups = async () => {
 
 const openCreateDialog = () => {
   editingGroupId.value = null;
-  form.value = { name: '', description: '', tags: '' };
+  form.value = { name: '', description: '', tags: '', memberInvitesAllowed: true };
   showDialog.value = true;
 };
 
 const openEditDialog = (g: GroupSummary) => {
   editingGroupId.value = g.groupId;
-  form.value = { name: g.name, description: g.description, tags: g.tagVocabulary.join(', ') };
+  form.value = {
+    name: g.name,
+    description: g.description,
+    tags: g.tagVocabulary.join(', '),
+    memberInvitesAllowed: g.memberInvitesAllowed !== false
+  };
   showDialog.value = true;
 };
 
@@ -305,7 +322,8 @@ const saveGroup = async () => {
     const body = {
       name: form.value.name.trim(),
       description: form.value.description.trim(),
-      tagVocabulary: form.value.tags
+      tagVocabulary: form.value.tags,
+      memberInvitesAllowed: form.value.memberInvitesAllowed
     };
     const url = editingGroupId.value
       ? `/api/groups/${encodeURIComponent(editingGroupId.value)}`

@@ -266,6 +266,7 @@
             :folder-access-tier="folderAccessTier"
             :passkey-without-folder="passkeyWithoutFolder"
             @sign-out="handleSignOut"
+            @add-passkey="startPasskeyRegistration"
             @restore-applied="restoredChatState = null"
             @rehydration-complete="handleRehydrationComplete"
             @rehydration-file-removed="handleRehydrationFileRemoved"

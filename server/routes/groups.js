@@ -163,6 +163,10 @@ const adminGroupView = (doc) => ({
   groupId: doc._id,
   name: doc.name,
   description: doc.description || '',
+  // Admin policy: may active members invite new people themselves?
+  // Default true (member virality is the adoption engine); the admin
+  // can turn it off per group.
+  memberInvitesAllowed: doc.memberInvitesAllowed !== false,
   tagVocabulary: doc.tagVocabulary || [],
   publicKeyJwk: doc.signingKey?.publicKeyJwk || null,
   policyPackVersion: doc.policyPackVersion ?? 0,
@@ -283,6 +287,9 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       }
       if (description !== undefined) doc.description = String(description || '').trim();
       if (tagVocabulary !== undefined) doc.tagVocabulary = normalizeTags(tagVocabulary);
+      if (req.body?.memberInvitesAllowed !== undefined) {
+        doc.memberInvitesAllowed = !!req.body.memberInvitesAllowed;
+      }
       doc.updatedAt = new Date().toISOString();
       await cloudant.saveDocument(GROUPS_DB, doc);
       auditLog.logEvent({
@@ -425,6 +432,62 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     mentor: !!m.mentor
   });
 
+  /** Mint an invite on `doc` (replacing any pending invite for the same
+   *  email), save, and best-effort email the join link. Shared by the
+   *  admin invite endpoint and member-initiated invites (PR-8). When
+   *  `invitedBy` is set (a member's pairwiseId), it is recorded on the
+   *  entry so the join can seed the inviter⇄invitee conversation, and the
+   *  email names the inviter by group alias. */
+  const mintInvite = async (doc, email, req, { invitedBy = null, inviterAlias = null } = {}) => {
+    const activeWithEmail = (doc.members || []).find(
+      (m) => m.status === 'invited' && m.inviteEmail === email
+    );
+    const token = randomBytes(32).toString('hex');
+    const now = new Date();
+    const entry = {
+      pairwiseId: randomBytes(12).toString('hex'),
+      status: 'invited',
+      inviteEmail: email,
+      inviteTokenHash: sha256hex(token),
+      invitedAt: now.toISOString(),
+      inviteExpiresAt: new Date(now.getTime() + INVITE_TTL_MS).toISOString(),
+      ...(invitedBy ? { invitedByPairwiseId: invitedBy } : {})
+    };
+    doc.members = (doc.members || []).filter((m) => m !== activeWithEmail);
+    doc.members.push(entry);
+    doc.updatedAt = now.toISOString();
+    await cloudant.saveDocument(GROUPS_DB, doc);
+
+    const appUrl = (process.env.PUBLIC_APP_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+    const inviteLink = `${appUrl}/?groupInvite=${token}&groupId=${encodeURIComponent(doc._id)}&registry=${encodeURIComponent(appUrl)}`;
+
+    let emailSent = false;
+    if (typeof sendEmail === 'function') {
+      try {
+        emailSent = await sendEmail(
+          email,
+          `You're invited to join "${doc.name}" on MAIA`,
+          [
+            inviterAlias
+              ? `${inviterAlias} invited you to join the patient group "${doc.name}".`
+              : `You've been invited to join the patient group "${doc.name}".`,
+            '',
+            'MAIA is a private medical AI assistant: your health records stay under your control,',
+            'and the group can never see them — it only helps you connect with peers.',
+            '',
+            `Accept the invitation (valid 14 days):`,
+            inviteLink,
+            '',
+            `If you don't want to join, simply ignore this email.`
+          ].join('\n')
+        );
+      } catch (mailErr) {
+        console.warn('[groups] invite email failed:', mailErr?.message || mailErr);
+      }
+    }
+    return { entry, inviteLink, emailSent };
+  };
+
   // POST /api/groups/:groupId/invites — invite a member by email (admin).
   // Generates a single-use token (only its hash is stored) and emails a
   // join link. The link is ALSO returned to the admin for copy/paste —
@@ -442,49 +505,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
         return res.status(400).json({ success: false, error: 'A valid email is required' });
       }
-      const activeWithEmail = (doc.members || []).find(
-        (m) => m.status === 'invited' && m.inviteEmail === email
-      );
-      const token = randomBytes(32).toString('hex');
-      const now = new Date();
-      const entry = {
-        pairwiseId: randomBytes(12).toString('hex'),
-        status: 'invited',
-        inviteEmail: email,
-        inviteTokenHash: sha256hex(token),
-        invitedAt: now.toISOString(),
-        inviteExpiresAt: new Date(now.getTime() + INVITE_TTL_MS).toISOString()
-      };
-      doc.members = (doc.members || []).filter((m) => m !== activeWithEmail);
-      doc.members.push(entry);
-      doc.updatedAt = now.toISOString();
-      await cloudant.saveDocument(GROUPS_DB, doc);
-
-      const appUrl = (process.env.PUBLIC_APP_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
-      const inviteLink = `${appUrl}/?groupInvite=${token}&groupId=${encodeURIComponent(doc._id)}&registry=${encodeURIComponent(appUrl)}`;
-
-      let emailSent = false;
-      if (typeof sendEmail === 'function') {
-        try {
-          emailSent = await sendEmail(
-            email,
-            `You're invited to join "${doc.name}" on MAIA`,
-            [
-              `You've been invited to join the patient group "${doc.name}".`,
-              '',
-              'MAIA is a private medical AI assistant: your health records stay under your control,',
-              'and the group can never see them — it only helps you connect with peers.',
-              '',
-              `Accept the invitation (valid 14 days):`,
-              inviteLink,
-              '',
-              `If you don't want to join, simply ignore this email.`
-            ].join('\n')
-          );
-        } catch (mailErr) {
-          console.warn('[groups] invite email failed:', mailErr?.message || mailErr);
-        }
-      }
+      const { entry, inviteLink, emailSent } = await mintInvite(doc, email, req);
       auditLog.logEvent({
         type: 'group_member_invited',
         userId: req.session?.userId || 'admin-local',
@@ -502,6 +523,55 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       });
     } catch (error) {
       console.error('[groups] invite failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to create invite' });
+    }
+  });
+
+  // POST /api/groups/:groupId/member-invites — an ACTIVE MEMBER invites
+  // someone by email (PR-8, member virality). Signed like every member→
+  // registry call; allowed unless the admin turned memberInvitesAllowed
+  // off for the group. The invite records the inviter's pairwiseId so the
+  // invitee's join seeds their first conversation with the inviter.
+  app.post('/api/groups/:groupId/member-invites', async (req, res) => {
+    try {
+      const doc = await cloudant.getDocument(GROUPS_DB, req.params.groupId);
+      if (!doc || doc.type !== 'group') {
+        return res.status(404).json({ success: false, error: 'Group not found' });
+      }
+      if (doc.memberInvitesAllowed === false) {
+        return res.status(403).json({ success: false, error: 'This group only accepts invitations from its administrator' });
+      }
+      const { caller, payload, signature } = req.body || {};
+      const callerMember = findActiveMember(doc, caller);
+      if (!callerMember || !callerMember.signingPublicKeyJwk) {
+        return res.status(403).json({ success: false, error: 'Caller is not an active member' });
+      }
+      const claim = verifySignedClaim(payload, signature, callerMember.signingPublicKeyJwk, {
+        action: 'member-invite', groupId: doc._id, caller
+      });
+      if (!claim) {
+        return res.status(403).json({ success: false, error: 'Invalid signature' });
+      }
+      const email = String(req.body?.email || '').trim().toLowerCase();
+      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return res.status(400).json({ success: false, error: 'A valid email is required' });
+      }
+      const { entry, inviteLink, emailSent } = await mintInvite(doc, email, req, {
+        invitedBy: callerMember.pairwiseId,
+        inviterAlias: callerMember.alias || null
+      });
+      auditLog.logEvent({
+        type: 'group_member_invited_by_member',
+        userId: null, // registry does not learn the inviter's userId
+        ip: req.ip,
+        details: { groupId: doc._id, pairwiseId: entry.pairwiseId, invitedBy: callerMember.pairwiseId, emailSent }
+      });
+      res.json({
+        success: true,
+        invite: { inviteLink, expiresAt: entry.inviteExpiresAt, emailSent }
+      });
+    } catch (error) {
+      console.error('[groups] member invite failed:', error);
       res.status(500).json({ success: false, error: 'Failed to create invite' });
     }
   });
@@ -564,6 +634,17 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       await cloudant.saveDocument(GROUPS_DB, doc);
 
       const credential = signMembershipCredential(doc, member);
+      // Member-initiated invite (PR-8): hand the joiner their inviter's
+      // pairwise identity + alias so their MAIA can seed the first
+      // conversation ("Alice invited you — say hi"). Only returned if the
+      // inviter is still an active member.
+      let inviter = null;
+      if (member.invitedByPairwiseId) {
+        const inviterMember = findActiveMember(doc, member.invitedByPairwiseId);
+        if (inviterMember) {
+          inviter = { pairwiseId: inviterMember.pairwiseId, alias: inviterMember.alias || null };
+        }
+      }
       auditLog.logEvent({
         type: 'group_member_joined',
         userId: null, // the registry does not learn the member's userId
@@ -578,7 +659,8 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
           pairwiseId: member.pairwiseId,
           alias: member.alias,
           credential,
-          groupPublicKeyJwk: doc.signingKey?.publicKeyJwk || null
+          groupPublicKeyJwk: doc.signingKey?.publicKeyJwk || null,
+          inviter
         }
       });
     } catch (error) {
@@ -997,7 +1079,8 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     alias: m.alias,
     joinedAt: m.joinedAt,
     credentialExpiresAt: m.credential?.expiresAt || null,
-    mentor: !!m.mentor
+    mentor: !!m.mentor,
+    invitedBy: m.invitedBy || null
   });
 
   // POST /api/user-groups/join — the patient accepts an invite. Their MAIA
@@ -1060,7 +1143,12 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         },
         credential: m.credential,
         groupPublicKeyJwk: m.groupPublicKeyJwk,
-        joinedAt: new Date().toISOString()
+        joinedAt: new Date().toISOString(),
+        // Member-invite provenance: seeds the first conversation and
+        // pre-accepts the inviter (mutual consent — they invited, we
+        // accepted the invitation).
+        invitedBy: m.inviter || null,
+        acceptedSenders: m.inviter ? [m.inviter.pairwiseId] : []
       };
       if (!userDoc.asId) userDoc.asId = randomBytes(16).toString('hex');
       userDoc.groupMemberships = [...(userDoc.groupMemberships || []), membership];
@@ -1077,6 +1165,54 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     } catch (error) {
       console.error('[user-groups] join failed:', error);
       res.status(500).json({ success: false, error: 'Failed to join group' });
+    }
+  });
+
+  // POST /api/user-groups/invite — a member invites someone to their group
+  // by email (PR-8). Signs a member-invite claim with the membership's
+  // pairwise key and calls the group registry, which minted-and-emails the
+  // invite (subject to the group's memberInvitesAllowed policy).
+  app.post('/api/user-groups/invite', async (req, res) => {
+    const userId = requireMatchingUser(req, res);
+    if (!userId) return;
+    try {
+      const { groupId, email } = req.body || {};
+      if (!groupId || !email || !String(email).trim()) {
+        return res.status(400).json({ success: false, error: 'groupId and email are required' });
+      }
+      const userDoc = await cloudant.getDocument(USERS_DB, userId);
+      const membership = (userDoc?.groupMemberships || []).find((m) => m.groupId === groupId);
+      if (!membership) return res.status(404).json({ success: false, error: 'Not a member of this group' });
+      const { payload, signature } = signWithMembership(membership, {
+        action: 'member-invite', groupId: membership.groupId, caller: membership.pairwiseId, ts: new Date().toISOString()
+      });
+      const r = await fetch(`${registryBase(membership)}/api/groups/${encodeURIComponent(membership.groupId)}/member-invites`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          caller: membership.pairwiseId,
+          payload,
+          signature,
+          email: String(email).trim().toLowerCase()
+        })
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || !data.success) {
+        return res.status(r.status === 403 ? 403 : 502).json({
+          success: false,
+          error: data.error || 'Registry rejected the invite'
+        });
+      }
+      auditLog.logEvent({
+        type: 'user_group_invite_sent',
+        userId,
+        ip: req.ip,
+        details: { groupId: membership.groupId, emailSent: !!data.invite?.emailSent }
+      });
+      res.json({ success: true, invite: data.invite });
+    } catch (error) {
+      console.error('[user-groups] invite failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to send invitation' });
     }
   });
 
