@@ -65,7 +65,7 @@
             </div>
             <div class="member-cell" style="flex: 0 0 130px">
               <q-badge
-                :color="m.status === 'active' ? 'green' : m.status === 'invited' ? 'orange' : 'grey'"
+                :color="m.status === 'active' ? 'green' : m.status === 'invited' ? 'orange' : m.status === 'requested' ? 'purple' : 'grey'"
                 :label="m.status"
               />
               <q-badge v-if="m.mentor" color="teal" label="mentor" class="q-ml-xs" />
@@ -79,11 +79,21 @@
                 · {{ m.inviteOpenedAt ? 'link opened ' + formatDate(m.inviteOpenedAt) : 'link not opened' }}
                 · expires {{ formatDate(m.inviteExpiresAt) }}
               </template>
+              <template v-else-if="m.status === 'requested'">
+                requested {{ formatDate(m.requestedAt) }} · approve to admit
+              </template>
               <template v-else>
                 revoked {{ formatDate(m.revokedAt) }}
               </template>
             </div>
-            <div class="member-cell" style="flex: 0 0 88px; text-align: right">
+            <div class="member-cell" style="flex: 0 0 120px; text-align: right">
+              <q-btn
+                v-if="m.status === 'requested'"
+                flat dense round size="sm" icon="how_to_reg" color="primary"
+                @click="approveRequest(g, m)"
+              >
+                <q-tooltip>Approve join request</q-tooltip>
+              </q-btn>
               <q-btn
                 v-if="m.status === 'active'"
                 flat dense round size="sm"
@@ -95,7 +105,7 @@
               </q-btn>
               <q-btn flat dense round size="sm" icon="delete" color="negative" @click="confirmRemoveMember(g, m)">
                 <q-tooltip>
-                  {{ m.status === 'invited' ? 'Cancel invite' : m.status === 'active' ? 'Revoke membership' : 'Remove entry' }}
+                  {{ m.status === 'invited' ? 'Cancel invite' : m.status === 'requested' ? 'Reject request' : m.status === 'active' ? 'Revoke membership' : 'Remove entry' }}
                 </q-tooltip>
               </q-btn>
             </div>
@@ -138,6 +148,38 @@
               When off, only you can invite.
             </q-tooltip>
           </q-toggle>
+          <q-toggle
+            v-model="form.joinByLink"
+            label="Anyone with the link may request to join"
+            dense
+          >
+            <q-tooltip>
+              Creates a shareable link (and QR code) anyone can use to
+              REQUEST membership. You approve each request — the link alone
+              never admits anyone. Rotate it any time to void old copies.
+            </q-tooltip>
+          </q-toggle>
+          <div v-if="form.joinByLink && editingJoinLink" class="q-mt-sm">
+            <div class="text-caption text-grey-7">Share this link or QR code:</div>
+            <div class="text-caption q-mt-xs" style="word-break: break-all">
+              {{ editingJoinLink }}
+              <q-btn dense flat size="sm" icon="content_copy" @click="copyJoinLink">
+                <q-tooltip>Copy link</q-tooltip>
+              </q-btn>
+            </div>
+            <img v-if="joinLinkQr" :src="joinLinkQr" alt="Join QR code" style="width: 160px; height: 160px" class="q-mt-xs" />
+            <div>
+              <q-btn dense flat size="sm" color="negative" icon="autorenew" label="Rotate link" :loading="rotatingLink" @click="rotateJoinLink">
+                <q-tooltip>Old links and printed QR codes stop working</q-tooltip>
+              </q-btn>
+            </div>
+          </div>
+          <div v-else-if="form.joinByLink && editingGroupId" class="text-caption text-grey-7">
+            Save to generate the link and QR code.
+          </div>
+          <div v-else-if="form.joinByLink" class="text-caption text-grey-7">
+            The link and QR code appear after the group is created (edit the group to see them).
+          </div>
         </q-card-section>
         <q-card-actions align="right">
           <q-btn flat label="Cancel" v-close-popup :disable="saving" />
@@ -206,8 +248,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, computed, watch, onMounted } from 'vue';
 import { useQuasar } from 'quasar';
+import QRCode from 'qrcode';
 
 const $q = useQuasar();
 
@@ -216,6 +259,8 @@ interface GroupSummary {
   name: string;
   description: string;
   memberInvitesAllowed?: boolean;
+  joinMode?: string;
+  joinLink?: string | null;
   tagVocabulary: string[];
   publicKeyJwk: Record<string, string> | null;
   policyPackVersion: number;
@@ -229,13 +274,14 @@ interface GroupSummary {
 interface MemberSummary {
   pairwiseId: string;
   alias: string | null;
-  status: 'invited' | 'active' | 'revoked';
+  status: 'invited' | 'active' | 'revoked' | 'requested';
   invitedAt: string | null;
   joinedAt: string | null;
   revokedAt: string | null;
   inviteEmail: string | null;
   inviteExpiresAt: string | null;
   inviteOpenedAt: string | null;
+  requestedAt?: string | null;
   mentor: boolean;
 }
 
@@ -248,7 +294,63 @@ const loadingMembers = ref<Record<string, boolean>>({});
 const showDialog = ref(false);
 const saving = ref(false);
 const editingGroupId = ref<string | null>(null);
-const form = ref({ name: '', description: '', tags: '', memberInvitesAllowed: true });
+const form = ref({ name: '', description: '', tags: '', memberInvitesAllowed: true, joinByLink: false });
+
+/** Join link of the group being edited (server-computed once saved). */
+const editingJoinLink = computed(() => {
+  const g = groups.value.find((x) => x.groupId === editingGroupId.value);
+  return g?.joinLink || null;
+});
+const joinLinkQr = ref('');
+watch(editingJoinLink, async (link) => {
+  joinLinkQr.value = link ? await QRCode.toDataURL(link, { width: 320, margin: 1 }).catch(() => '') : '';
+}, { immediate: true });
+const rotatingLink = ref(false);
+
+const copyJoinLink = async () => {
+  if (!editingJoinLink.value) return;
+  try {
+    await navigator.clipboard.writeText(editingJoinLink.value);
+    $q.notify({ type: 'positive', message: 'Link copied.' });
+  } catch {
+    $q.notify({ type: 'warning', message: 'Copy failed — select and copy the link manually.' });
+  }
+};
+
+const rotateJoinLink = async () => {
+  if (!editingGroupId.value) return;
+  rotatingLink.value = true;
+  try {
+    const res = await fetch(`/api/groups/${encodeURIComponent(editingGroupId.value)}/rotate-join-link`, {
+      method: 'POST',
+      credentials: 'include'
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    await loadGroups();
+    $q.notify({ type: 'positive', message: 'Join link rotated — old links and QR codes are dead.' });
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to rotate link' });
+  } finally {
+    rotatingLink.value = false;
+  }
+};
+
+const approveRequest = async (g: GroupSummary, m: MemberSummary) => {
+  try {
+    const res = await fetch(`/api/groups/${encodeURIComponent(g.groupId)}/members/${encodeURIComponent(m.pairwiseId)}/approve`, {
+      method: 'PUT',
+      credentials: 'include'
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    await loadMembers(g.groupId);
+    await loadGroups();
+    $q.notify({ type: 'positive', message: `${m.alias || 'Member'} approved — they'll be connected within seconds.` });
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to approve request' });
+  }
+};
 
 const showInviteDialog = ref(false);
 const inviteGroup = ref<GroupSummary | null>(null);
@@ -300,7 +402,7 @@ const loadGroups = async () => {
 
 const openCreateDialog = () => {
   editingGroupId.value = null;
-  form.value = { name: '', description: '', tags: '', memberInvitesAllowed: true };
+  form.value = { name: '', description: '', tags: '', memberInvitesAllowed: true, joinByLink: false };
   showDialog.value = true;
 };
 
@@ -310,7 +412,8 @@ const openEditDialog = (g: GroupSummary) => {
     name: g.name,
     description: g.description,
     tags: g.tagVocabulary.join(', '),
-    memberInvitesAllowed: g.memberInvitesAllowed !== false
+    memberInvitesAllowed: g.memberInvitesAllowed !== false,
+    joinByLink: g.joinMode === 'link-approval'
   };
   showDialog.value = true;
 };
@@ -323,7 +426,8 @@ const saveGroup = async () => {
       name: form.value.name.trim(),
       description: form.value.description.trim(),
       tagVocabulary: form.value.tags,
-      memberInvitesAllowed: form.value.memberInvitesAllowed
+      memberInvitesAllowed: form.value.memberInvitesAllowed,
+      joinMode: form.value.joinByLink ? 'link-approval' : 'invite-only'
     };
     const url = editingGroupId.value
       ? `/api/groups/${encodeURIComponent(editingGroupId.value)}`

@@ -1,6 +1,6 @@
 {
   "name": "maia-cloud-user-app",
-  "version": "1.5.20",
+  "version": "1.5.21",
   "description": "Authenticated User app for MAIA (Medical AI Assistant) - user.agropper.xyz",
   "type": "module",
   "engines": {
@@ -26,6 +26,7 @@
     "@simplewebauthn/browser": "^13.1.2",
     "@simplewebauthn/server": "^13.1.2",
     "@tato30/vue-pdf": "^1.11.5",
+    "@types/qrcode": "1.5.6",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
@@ -45,6 +46,7 @@
     "pouchdb-core": "^9.0.0",
     "pouchdb-find": "^9.0.0",
     "punycode": "^2.3.1",
+    "qrcode": "1.5.4",
     "quasar": "^2.15.3",
     "resend": "^6.12.2",
     "vue": "^3.5.13",

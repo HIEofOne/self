@@ -54,6 +54,34 @@
         <q-btn dense flat size="sm" color="negative" label="Dismiss" class="q-mt-xs" @click="invalidInviteMessage = ''" />
       </div>
 
+      <!-- Shareable join link (PR-9): request to join, admin approves -->
+      <div v-if="pendingJoinLink" class="groups-invite-card">
+        <div class="row items-center no-wrap q-gutter-xs">
+          <q-icon name="how_to_reg" color="primary" size="18px" />
+          <div class="text-caption">
+            Request to join
+            <strong>{{ pendingJoinLinkGroupName || 'this group' }}</strong>
+            — the group's administrator approves each request.
+          </div>
+        </div>
+        <q-input
+          v-model="joinAliasInput"
+          dense outlined
+          class="q-mt-sm"
+          label="Your display name in this group"
+          hint="Members will know you by this name — change it if you like"
+          :disable="requestingJoin"
+        />
+        <div class="row q-gutter-xs q-mt-sm">
+          <q-btn
+            dense unelevated size="sm" color="primary" label="Request to join"
+            :loading="requestingJoin" :disable="!joinAliasInput.trim()"
+            @click="submitJoinRequest"
+          />
+          <q-btn dense flat size="sm" color="grey-7" label="Dismiss" :disable="requestingJoin" @click="dismissJoinLink" />
+        </div>
+      </div>
+
       <div v-if="loading" class="text-center q-pa-md">
         <q-spinner size="1.5em" />
       </div>
@@ -76,7 +104,7 @@
           <q-icon name="groups" size="18px" color="primary" />
           <span class="groups-rail__group-name">{{ m.groupName }}</span>
           <q-icon name="info_outline" size="14px" class="text-grey-6">
-            <q-tooltip>Group info, peers &amp; membership</q-tooltip>
+            <q-tooltip>Group info: find peers, invite someone, leave</q-tooltip>
           </q-icon>
         </button>
 
@@ -113,6 +141,19 @@
               <q-icon v-else-if="c.hasPendingRequest" name="person_add" size="14px" color="primary" class="q-ml-xs" />
             </div>
           </div>
+        </div>
+      </div>
+      <!-- Join requests awaiting admin approval (PR-9) -->
+      <div
+        v-for="p in pendingJoins"
+        :key="`pending:${p.groupId}`"
+        class="groups-rail__convo"
+        style="cursor: default; opacity: 0.75"
+      >
+        <q-icon name="hourglass_top" size="20px" color="grey-6" style="flex: 0 0 auto" />
+        <div class="groups-rail__convo-body">
+          <div class="groups-rail__convo-name">{{ p.groupName }}</div>
+          <div class="groups-rail__convo-snippet">Waiting for approval as {{ p.alias }}</div>
         </div>
       </div>
     </div>
@@ -331,6 +372,7 @@ interface PendingInvite {
 }
 
 const INVITE_LS_KEY = 'maiaGroupInvite';
+const JOIN_LINK_LS_KEY = 'maiaGroupJoin';
 /** Per-thread "last seen" timestamps (client-side unread tracking). */
 const THREAD_SEEN_LS_KEY = 'maia.groupThreadSeen';
 
@@ -597,6 +639,7 @@ const loadMemberships = async () => {
     const data = await res.json();
     if (res.ok && data.success) {
       memberships.value = data.memberships || [];
+      pendingJoins.value = data.pendingJoins || [];
     }
   } catch {
     /* non-fatal — empty list shown */
@@ -708,9 +751,12 @@ let autoPullTimer: ReturnType<typeof setInterval> | null = null;
 let autoPullBusy = false;
 const autoPull = async () => {
   if (autoPullBusy || refreshingAll.value || !props.userId) return;
-  if (memberships.value.length === 0) return; // nothing to poll
+  if (memberships.value.length === 0 && pendingJoins.value.length === 0) return; // nothing to poll
   autoPullBusy = true;
-  try { await pullMail(false); } catch { /* silent — next tick retries */ }
+  try {
+    if (pendingJoins.value.length > 0) await pollJoins();
+    if (memberships.value.length > 0) await pullMail(false);
+  } catch { /* silent — next tick retries */ }
   finally { autoPullBusy = false; }
 };
 
@@ -907,6 +953,118 @@ const sendMessage = async () => {
   }
 };
 
+// ── Shareable join link (PR-9): request → admin approval ───────────
+interface PendingJoin { groupId: string; groupName: string; alias: string; requestedAt: string }
+const pendingJoins = ref<PendingJoin[]>([]);
+const pendingJoinLink = ref<{ token: string; groupId: string; registry: string } | null>(null);
+const pendingJoinLinkGroupName = ref('');
+const joinAliasInput = ref('');
+const requestingJoin = ref(false);
+
+const loadPendingJoinLink = async () => {
+  try {
+    const raw = localStorage.getItem(JOIN_LINK_LS_KEY);
+    if (!raw) return;
+    const link = JSON.parse(raw);
+    if (!link?.token || !link?.groupId) {
+      localStorage.removeItem(JOIN_LINK_LS_KEY);
+      return;
+    }
+    if (memberships.value.some((m) => m.groupId === link.groupId) ||
+        pendingJoins.value.some((p) => p.groupId === link.groupId)) {
+      localStorage.removeItem(JOIN_LINK_LS_KEY); // already joined/requested
+      return;
+    }
+    pendingJoinLink.value = link;
+    if (!joinAliasInput.value.trim() && props.userId) joinAliasInput.value = props.userId;
+    try {
+      const base = String(link.registry || window.location.origin).replace(/\/$/, '');
+      const res = await fetch(
+        `${base}/api/groups/${encodeURIComponent(link.groupId)}/join-info?token=${encodeURIComponent(link.token)}`
+      );
+      const data = await res.json();
+      if (res.ok && data.success) {
+        if (!data.valid) {
+          localStorage.removeItem(JOIN_LINK_LS_KEY);
+          pendingJoinLink.value = null;
+          invalidInviteMessage.value =
+            'This join link is no longer active — it may have been rotated or turned off. Ask the group for a fresh link or QR code.';
+          return;
+        }
+        pendingJoinLinkGroupName.value = data.group?.name || '';
+      }
+    } catch { /* generic card text */ }
+  } catch {
+    localStorage.removeItem(JOIN_LINK_LS_KEY);
+  }
+};
+
+const submitJoinRequest = async () => {
+  if (!pendingJoinLink.value || !joinAliasInput.value.trim()) return;
+  requestingJoin.value = true;
+  try {
+    const res = await fetch('/api/user-groups/request-join', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        userId: props.userId,
+        groupId: pendingJoinLink.value.groupId,
+        token: pendingJoinLink.value.token,
+        alias: joinAliasInput.value.trim(),
+        registryUrl: pendingJoinLink.value.registry || window.location.origin
+      })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    localStorage.removeItem(JOIN_LINK_LS_KEY);
+    pendingJoinLink.value = null;
+    await loadMemberships(); // pendingJoins now includes it
+    $q.notify({
+      type: 'positive',
+      message: `Request sent. You'll be connected as soon as ${data.pending?.groupName || 'the group'}'s administrator approves.`
+    });
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to send join request' });
+  } finally {
+    requestingJoin.value = false;
+  }
+};
+
+const dismissJoinLink = () => {
+  localStorage.removeItem(JOIN_LINK_LS_KEY);
+  pendingJoinLink.value = null;
+};
+
+/** Poll pending join requests; an approval becomes a membership. */
+const pollJoins = async () => {
+  try {
+    const res = await fetch('/api/user-groups/poll-joins', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ userId: props.userId })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) return;
+    if (data.activated?.length) {
+      await loadMemberships();
+      await Promise.all([loadAllMessages(), loadAllDirectories()]);
+      for (const a of data.activated) {
+        $q.notify({ type: 'positive', message: `You're in — welcome to ${a.groupName}!` });
+      }
+      const first = memberships.value.find((m) => m.groupId === data.activated[0].groupId);
+      if (first) await selectGroup(first);
+    }
+    if (data.rejected?.length) {
+      await loadMemberships();
+      for (const rj of data.rejected) {
+        $q.notify({ type: 'warning', message: `Your request to join ${rj.groupName} was not approved.` });
+      }
+    }
+  } catch { /* next tick retries */ }
+};
+
 // ── Member-initiated invites (PR-8) ─────────────────────────────────
 const inviteEmailInput = ref('');
 const sendingInvite = ref(false);
@@ -982,6 +1140,7 @@ onMounted(async () => {
   await loadMemberships();
   await Promise.all([loadAllMessages(), loadRequests(), loadAllDirectories()]);
   await loadPendingInvite();
+  await loadPendingJoinLink();
   autoPullTimer = setInterval(autoPull, AUTO_PULL_MS);
 });
 

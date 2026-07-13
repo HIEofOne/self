@@ -169,7 +169,9 @@
                        fork, no folder pick — private AI deploys, then the
                        Workbook opens on Groups with the invite ready. -->
                   <q-btn
-                    :label="pendingGroupInvite ? `JOIN ${(pendingInviteGroupName || 'THE GROUP').toUpperCase()}` : 'GET STARTED'"
+                    :label="pendingGroupInvite ? `JOIN ${(pendingInviteGroupName || 'THE GROUP').toUpperCase()}`
+                      : pendingGroupJoinLink ? `REQUEST TO JOIN ${(pendingJoinLinkGroupName || 'THE GROUP').toUpperCase()}`
+                      : 'GET STARTED'"
                     color="primary"
                     size="lg"
                     class="full-width q-mb-sm"
@@ -897,6 +899,40 @@ const user = ref<User | null>(null);
 // capture below). Drives the welcome-page banner so an invitee landing
 // here knows what to do — including "continue in Chrome" guidance.
 const pendingGroupInvite = ref<{ token: string; groupId: string; registry: string } | null>(null);
+/** Shareable join-request link (PR-9), captured from ?groupJoin=. */
+const pendingGroupJoinLink = ref<{ token: string; groupId: string; registry: string } | null>(null);
+const pendingJoinLinkGroupName = ref('');
+const loadPendingGroupJoinLink = async () => {
+  try {
+    const raw = localStorage.getItem('maiaGroupJoin');
+    if (!raw) return;
+    const link = JSON.parse(raw);
+    if (!link?.token || !link?.groupId) {
+      localStorage.removeItem('maiaGroupJoin');
+      return;
+    }
+    pendingGroupJoinLink.value = link;
+    try {
+      const base = String(link.registry || window.location.origin).replace(/\/$/, '');
+      const res = await fetch(
+        `${base}/api/groups/${encodeURIComponent(link.groupId)}/join-info?token=${encodeURIComponent(link.token)}`
+      );
+      const data = await res.json();
+      if (res.ok && data.success) {
+        if (!data.valid) {
+          // Rotated/disabled link — drop it silently (there is no invite
+          // to preserve; the person can ask for a fresh link/QR).
+          localStorage.removeItem('maiaGroupJoin');
+          pendingGroupJoinLink.value = null;
+          return;
+        }
+        pendingJoinLinkGroupName.value = data.group?.name || '';
+      }
+    } catch { /* name stays generic */ }
+  } catch {
+    localStorage.removeItem('maiaGroupJoin');
+  }
+};
 const pendingInviteGroupName = ref('');
 /** Set when the invite token turns out to be dead (used, replaced by a
  *  newer invite, or expired). Drives a PERSISTENT explanatory banner —
@@ -2325,7 +2361,7 @@ const handleGetStartedNoPassword = () => {
   // with no fork and no folder pick. Consumed by ChatInterface when the
   // setup wizard opens. Session-scoped: never affects restores or
   // existing accounts.
-  if (pendingGroupInvite.value) {
+  if (pendingGroupInvite.value || pendingGroupJoinLink.value) {
     try { sessionStorage.setItem('maiaQuickStartOnOpen', '1'); } catch { /* ignore */ }
   }
   // Cloud user (has passkey) → challenge passkey directly
@@ -3415,9 +3451,32 @@ onMounted(async () => {
       : `${window.location.pathname}${window.location.hash}`;
     window.history.replaceState({}, '', cleanedUrl);
   }
+  // Shareable join-request link (PR-9): ?groupJoin=<linkToken>. Same
+  // localStorage capture pattern as invites; the Groups tab turns it into
+  // a "request to join" card, and the admin approves each request.
+  const groupJoinToken = params.get('groupJoin');
+  const groupJoinGroupId = params.get('groupId');
+  if (groupJoinToken && groupJoinGroupId) {
+    try {
+      localStorage.setItem('maiaGroupJoin', JSON.stringify({
+        token: groupJoinToken,
+        groupId: groupJoinGroupId,
+        registry: params.get('registry') || window.location.origin,
+        capturedAt: new Date().toISOString()
+      }));
+    } catch { /* storage unavailable — link can be re-clicked */ }
+    params.delete('groupJoin');
+    params.delete('groupId');
+    params.delete('registry');
+    const cleanedJoinSearch = params.toString();
+    window.history.replaceState({}, '', cleanedJoinSearch
+      ? `${window.location.pathname}?${cleanedJoinSearch}${window.location.hash}`
+      : `${window.location.pathname}${window.location.hash}`);
+  }
   // Surface any pending invite (just captured OR left over from an earlier
   // visit) on the welcome page, and mark it opened at the registry.
   void loadPendingGroupInvite();
+  void loadPendingGroupJoinLink();
 
   let share: string | null = null;
   const queryShare = params.get('share');

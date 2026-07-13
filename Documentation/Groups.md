@@ -681,3 +681,24 @@ and any design decisions resolved.
   Passkey nudge: temporary quick-start accounts see a dismissible banner
   ("your account only exists in this browser — add a passkey") wired to
   the existing add-passkey dialog.
+- **2026-07-13** — **PR-9: shareable join-request link + QR + approval
+  queue** (adoption sequence step 2; the join-mode enum IS the Layer-2
+  admin policy). Group gains `joinMode` ('invite-only' default |
+  'link-approval') and an admin-rotatable `joinLinkToken`. Registry:
+  public `GET join-info` (validates a link for the request card),
+  `POST join-requests` (creates a 'requested' member entry carrying the
+  requester's pairwise public keys — no email ever stored), signed
+  `GET join-requests/:pairwiseId/status` (approval hands over credential +
+  group key), admin `PUT members/:pairwiseId/approve`, `POST
+  rotate-join-link` (voids old links/QR instantly; DELETE now rejects
+  'requested' entries outright). Member side: `POST /api/user-groups/
+  request-join` (keys + request + pendingGroupJoins on the userDoc) and
+  `POST poll-joins` (approval → full membership; the Groups panel's 5s
+  auto-poll calls it, so admission lands within seconds). UI: welcome
+  page captures ?groupJoin= (button becomes "REQUEST TO JOIN <group>",
+  quick start preselected); Groups tab shows the request card (prefilled
+  pseudonym) and hourglass "waiting for approval" rail rows; AdminGroups
+  edit dialog gains the join-by-link toggle with the link, a QR code
+  (qrcode dep), and Rotate; requested members show purple with
+  Approve/Reject. Also: group-row tooltip now mentions invites (PR-8
+  feedback).

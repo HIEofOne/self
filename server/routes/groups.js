@@ -149,11 +149,21 @@ const normalizeTags = (input) => {
 };
 
 const memberCounts = (doc) => {
-  const counts = { active: 0, invited: 0, revoked: 0 };
+  const counts = { active: 0, invited: 0, revoked: 0, requested: 0 };
   for (const m of doc.members || []) {
     if (m?.status && counts[m.status] !== undefined) counts[m.status]++;
   }
   return counts;
+};
+
+/** Public join-request link for a link-approval group (PR-9). One stable,
+ *  admin-rotatable URL — printable as a QR code. Anyone who opens it can
+ *  REQUEST to join; the admin approves each request, so a leaked link
+ *  never grants membership by itself. */
+const joinLinkFor = (doc) => {
+  if (doc.joinMode !== 'link-approval' || !doc.joinLinkToken) return null;
+  const appUrl = (process.env.PUBLIC_APP_URL || 'http://localhost:5173').replace(/\/$/, '');
+  return `${appUrl}/?groupJoin=${doc.joinLinkToken}&groupId=${encodeURIComponent(doc._id)}&registry=${encodeURIComponent(appUrl)}`;
 };
 
 /** Admin-facing view: everything except the private signing key and any
@@ -167,6 +177,11 @@ const adminGroupView = (doc) => ({
   // Default true (member virality is the adoption engine); the admin
   // can turn it off per group.
   memberInvitesAllowed: doc.memberInvitesAllowed !== false,
+  // Admin policy: how people join. 'invite-only' (default) or
+  // 'link-approval' (anyone with the join link can REQUEST; admin
+  // approves each). The link itself never grants membership.
+  joinMode: doc.joinMode === 'link-approval' ? 'link-approval' : 'invite-only',
+  joinLink: joinLinkFor(doc),
   tagVocabulary: doc.tagVocabulary || [],
   publicKeyJwk: doc.signingKey?.publicKeyJwk || null,
   policyPackVersion: doc.policyPackVersion ?? 0,
@@ -289,6 +304,14 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       if (tagVocabulary !== undefined) doc.tagVocabulary = normalizeTags(tagVocabulary);
       if (req.body?.memberInvitesAllowed !== undefined) {
         doc.memberInvitesAllowed = !!req.body.memberInvitesAllowed;
+      }
+      if (req.body?.joinMode !== undefined) {
+        doc.joinMode = req.body.joinMode === 'link-approval' ? 'link-approval' : 'invite-only';
+        // Mint the shareable link token on first enable; rotation is a
+        // separate explicit action (POST rotate-join-link).
+        if (doc.joinMode === 'link-approval' && !doc.joinLinkToken) {
+          doc.joinLinkToken = randomBytes(16).toString('hex');
+        }
       }
       doc.updatedAt = new Date().toISOString();
       await cloudant.saveDocument(GROUPS_DB, doc);
@@ -429,6 +452,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     inviteEmail: m.status === 'invited' ? (m.inviteEmail || null) : null,
     inviteExpiresAt: m.status === 'invited' ? (m.inviteExpiresAt || null) : null,
     inviteOpenedAt: m.status === 'invited' ? (m.inviteOpenedAt || null) : null,
+    requestedAt: m.status === 'requested' ? (m.requestedAt || null) : null,
     mentor: !!m.mentor
   });
 
@@ -576,6 +600,175 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     }
   });
 
+  // POST /api/groups/:groupId/rotate-join-link — mint a new join-link
+  // token (admin). Old links/QR codes stop working immediately; pending
+  // requests are unaffected (they're already entries, not links).
+  app.post('/api/groups/:groupId/rotate-join-link', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const doc = await cloudant.getDocument(GROUPS_DB, req.params.groupId);
+      if (!doc || doc.type !== 'group') {
+        return res.status(404).json({ success: false, error: 'Group not found' });
+      }
+      doc.joinLinkToken = randomBytes(16).toString('hex');
+      doc.updatedAt = new Date().toISOString();
+      await cloudant.saveDocument(GROUPS_DB, doc);
+      auditLog.logEvent({
+        type: 'group_join_link_rotated',
+        userId: req.session?.userId || 'admin-local',
+        ip: req.ip,
+        details: { groupId: doc._id }
+      });
+      res.json({ success: true, group: adminGroupView(doc) });
+    } catch (error) {
+      console.error('[groups] rotate join link failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to rotate join link' });
+    }
+  });
+
+  // GET /api/groups/:groupId/join-info?token= — public: validates a join
+  // link and returns just enough for the "request to join" card.
+  app.get('/api/groups/:groupId/join-info', async (req, res) => {
+    try {
+      const doc = await cloudant.getDocument(GROUPS_DB, req.params.groupId);
+      if (!doc || doc.type !== 'group') {
+        return res.status(404).json({ success: false, error: 'Group not found' });
+      }
+      const valid = doc.joinMode === 'link-approval'
+        && !!doc.joinLinkToken
+        && String(req.query?.token || '') === doc.joinLinkToken;
+      res.json({
+        success: true,
+        valid,
+        group: valid ? { name: doc.name, description: doc.description || '' } : null
+      });
+    } catch (error) {
+      console.error('[groups] join-info failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to check join link' });
+    }
+  });
+
+  // POST /api/groups/:groupId/join-requests — someone with the join link
+  // asks to join (PR-9). Creates a 'requested' member entry carrying the
+  // requester's pairwise public keys, so admin approval alone completes
+  // the membership — the requester's MAIA then collects its credential by
+  // polling the signed status endpoint below. No email is ever stored.
+  app.post('/api/groups/:groupId/join-requests', async (req, res) => {
+    try {
+      const doc = await cloudant.getDocument(GROUPS_DB, req.params.groupId);
+      if (!doc || doc.type !== 'group') {
+        return res.status(404).json({ success: false, error: 'Group not found' });
+      }
+      const { token, alias, signingPublicKeyJwk, encryptionPublicKeyJwk } = req.body || {};
+      if (doc.joinMode !== 'link-approval' || !doc.joinLinkToken || String(token || '') !== doc.joinLinkToken) {
+        return res.status(403).json({ success: false, error: 'This group is not accepting join requests via link' });
+      }
+      if (!alias || !String(alias).trim() || !signingPublicKeyJwk || !encryptionPublicKeyJwk) {
+        return res.status(400).json({ success: false, error: 'alias, signingPublicKeyJwk and encryptionPublicKeyJwk are required' });
+      }
+      const entry = {
+        pairwiseId: randomBytes(12).toString('hex'),
+        status: 'requested',
+        alias: String(alias).trim().slice(0, 60),
+        signingPublicKeyJwk,
+        encryptionPublicKeyJwk,
+        requestedAt: new Date().toISOString()
+      };
+      doc.members = [...(doc.members || []), entry];
+      doc.updatedAt = entry.requestedAt;
+      await cloudant.saveDocument(GROUPS_DB, doc);
+      auditLog.logEvent({
+        type: 'group_join_requested',
+        userId: null, // registry never learns the requester's userId
+        ip: req.ip,
+        details: { groupId: doc._id, pairwiseId: entry.pairwiseId }
+      });
+      res.json({ success: true, pairwiseId: entry.pairwiseId, groupName: doc.name });
+    } catch (error) {
+      console.error('[groups] join request failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to submit join request' });
+    }
+  });
+
+  // GET /api/groups/:groupId/join-requests/:pairwiseId/status — the
+  // requester's MAIA polls (signed with the keys it submitted) until the
+  // admin decides. 'active' returns the full membership (credential +
+  // group key), completing the join. A removed entry reads as 'rejected'.
+  app.get('/api/groups/:groupId/join-requests/:pairwiseId/status', async (req, res) => {
+    try {
+      const doc = await cloudant.getDocument(GROUPS_DB, req.params.groupId);
+      if (!doc || doc.type !== 'group') {
+        return res.status(404).json({ success: false, error: 'Group not found' });
+      }
+      const member = (doc.members || []).find((m) => m.pairwiseId === req.params.pairwiseId);
+      const { payload, signature } = req.query || {};
+      if (!member || !member.signingPublicKeyJwk) {
+        return res.json({ success: true, status: 'rejected' });
+      }
+      const claim = verifySignedClaim(payload, signature, member.signingPublicKeyJwk, {
+        action: 'join-status', groupId: doc._id, caller: member.pairwiseId
+      });
+      if (!claim) {
+        return res.status(403).json({ success: false, error: 'Invalid signature' });
+      }
+      if (member.status === 'requested') {
+        return res.json({ success: true, status: 'requested' });
+      }
+      if (member.status !== 'active') {
+        return res.json({ success: true, status: 'rejected' });
+      }
+      const credential = signMembershipCredential(doc, member);
+      res.json({
+        success: true,
+        status: 'active',
+        membership: {
+          groupId: doc._id,
+          groupName: doc.name,
+          pairwiseId: member.pairwiseId,
+          alias: member.alias,
+          credential,
+          groupPublicKeyJwk: doc.signingKey?.publicKeyJwk || null
+        }
+      });
+    } catch (error) {
+      console.error('[groups] join status failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to check join status' });
+    }
+  });
+
+  // PUT /api/groups/:groupId/members/:pairwiseId/approve — admin approves
+  // a pending join request. The requester's next status poll collects the
+  // membership credential.
+  app.put('/api/groups/:groupId/members/:pairwiseId/approve', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const doc = await cloudant.getDocument(GROUPS_DB, req.params.groupId);
+      if (!doc || doc.type !== 'group') {
+        return res.status(404).json({ success: false, error: 'Group not found' });
+      }
+      const member = (doc.members || []).find((m) => m.pairwiseId === req.params.pairwiseId);
+      if (!member || member.status !== 'requested') {
+        return res.status(404).json({ success: false, error: 'No pending request for this member' });
+      }
+      member.status = 'active';
+      member.joinedAt = new Date().toISOString();
+      member.lastRefreshAt = member.joinedAt;
+      delete member.requestedAt;
+      doc.updatedAt = member.joinedAt;
+      await cloudant.saveDocument(GROUPS_DB, doc);
+      auditLog.logEvent({
+        type: 'group_join_approved',
+        userId: req.session?.userId || 'admin-local',
+        ip: req.ip,
+        details: { groupId: doc._id, pairwiseId: member.pairwiseId }
+      });
+      res.json({ success: true, member: memberAdminView(member) });
+    } catch (error) {
+      console.error('[groups] approve failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to approve request' });
+    }
+  });
+
   // GET /api/groups/:groupId/members — member list (admin).
   app.get('/api/groups/:groupId/members', async (req, res) => {
     if (!requireAdmin(req, res)) return;
@@ -688,6 +881,11 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       if (member.status === 'invited') {
         doc.members = doc.members.filter((m) => m !== member);
         action = 'invite_cancelled';
+      } else if (member.status === 'requested') {
+        // Rejecting a join request removes the entry; the requester's
+        // status poll then reads 'rejected'.
+        doc.members = doc.members.filter((m) => m !== member);
+        action = 'join_request_rejected';
       } else if (member.status === 'revoked') {
         // Already revoked — the trash can now hard-removes the entry for
         // list cleanup (its credential already died at revocation).
@@ -1216,7 +1414,8 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     }
   });
 
-  // GET /api/user-groups — the patient's memberships (no private keys).
+  // GET /api/user-groups — the patient's memberships (no private keys)
+  // plus any join requests still awaiting admin approval.
   app.get('/api/user-groups', async (req, res) => {
     const userId = requireMatchingUser(req, res);
     if (!userId) return;
@@ -1225,10 +1424,149 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       if (!userDoc) {
         return res.status(404).json({ success: false, error: 'User not found' });
       }
-      res.json({ success: true, memberships: (userDoc.groupMemberships || []).map(membershipView) });
+      res.json({
+        success: true,
+        memberships: (userDoc.groupMemberships || []).map(membershipView),
+        pendingJoins: (userDoc.pendingGroupJoins || []).map((p) => ({
+          groupId: p.groupId,
+          groupName: p.groupName,
+          alias: p.alias,
+          requestedAt: p.requestedAt
+        }))
+      });
     } catch (error) {
       console.error('[user-groups] list failed:', error);
       res.status(500).json({ success: false, error: 'Failed to list memberships' });
+    }
+  });
+
+  // POST /api/user-groups/request-join — redeem a shareable join LINK
+  // (PR-9): generate pairwise keys, submit a join request to the registry,
+  // and remember it on the userDoc until the admin decides.
+  app.post('/api/user-groups/request-join', async (req, res) => {
+    const userId = requireMatchingUser(req, res);
+    if (!userId) return;
+    try {
+      const { groupId, token, alias, registryUrl } = req.body || {};
+      if (!groupId || !token || !alias || !String(alias).trim()) {
+        return res.status(400).json({ success: false, error: 'groupId, token and alias are required' });
+      }
+      const userDoc = await cloudant.getDocument(USERS_DB, userId);
+      if (!userDoc) return res.status(404).json({ success: false, error: 'User not found' });
+      if ((userDoc.groupMemberships || []).some((m) => m.groupId === groupId)) {
+        return res.status(400).json({ success: false, error: 'Already a member of this group' });
+      }
+      if ((userDoc.pendingGroupJoins || []).some((p) => p.groupId === groupId)) {
+        return res.status(400).json({ success: false, error: 'A join request for this group is already pending' });
+      }
+      const signPair = generateKeyPairSync('ed25519');
+      const encPair = generateKeyPairSync('x25519');
+      const signingPublicKeyJwk = signPair.publicKey.export({ format: 'jwk' });
+      const encryptionPublicKeyJwk = encPair.publicKey.export({ format: 'jwk' });
+      const base = String(registryUrl || `http://localhost:${process.env.PORT || 3001}`).replace(/\/$/, '');
+      const r = await fetch(`${base}/api/groups/${encodeURIComponent(groupId)}/join-requests`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, alias: String(alias).trim(), signingPublicKeyJwk, encryptionPublicKeyJwk })
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || !data.success) {
+        return res.status(r.status === 403 ? 403 : 502).json({
+          success: false,
+          error: data.error || `Registry rejected the join request (HTTP ${r.status})`
+        });
+      }
+      const pending = {
+        groupId,
+        groupName: data.groupName || groupId,
+        registryUrl: base,
+        pairwiseId: data.pairwiseId,
+        alias: String(alias).trim().slice(0, 60),
+        signingKeyPair: {
+          publicKeyJwk: signingPublicKeyJwk,
+          privateKeyJwk: signPair.privateKey.export({ format: 'jwk' })
+        },
+        encryptionKeyPair: {
+          publicKeyJwk: encryptionPublicKeyJwk,
+          privateKeyJwk: encPair.privateKey.export({ format: 'jwk' })
+        },
+        requestedAt: new Date().toISOString()
+      };
+      userDoc.pendingGroupJoins = [...(userDoc.pendingGroupJoins || []), pending];
+      userDoc.updatedAt = pending.requestedAt;
+      await cloudant.saveDocument(USERS_DB, userDoc);
+      auditLog.logEvent({
+        type: 'user_group_join_requested',
+        userId,
+        ip: req.ip,
+        details: { groupId, pairwiseId: data.pairwiseId }
+      });
+      res.json({ success: true, pending: { groupId, groupName: pending.groupName, alias: pending.alias, requestedAt: pending.requestedAt } });
+    } catch (error) {
+      console.error('[user-groups] request-join failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to submit join request' });
+    }
+  });
+
+  // POST /api/user-groups/poll-joins — check every pending join request
+  // against its registry (signed). Approved → becomes a real membership
+  // (the panel's auto-poll calls this, so approval lands within seconds).
+  app.post('/api/user-groups/poll-joins', async (req, res) => {
+    const userId = requireMatchingUser(req, res);
+    if (!userId) return;
+    try {
+      const userDoc = await cloudant.getDocument(USERS_DB, userId);
+      if (!userDoc) return res.status(404).json({ success: false, error: 'User not found' });
+      const pendings = userDoc.pendingGroupJoins || [];
+      if (pendings.length === 0) return res.json({ success: true, activated: [], rejected: [], pending: 0 });
+      const activated = [];
+      const rejected = [];
+      const still = [];
+      for (const p of pendings) {
+        try {
+          const { payload, signature } = signWithMembership(p, {
+            action: 'join-status', groupId: p.groupId, caller: p.pairwiseId, ts: new Date().toISOString()
+          });
+          const r = await fetch(
+            `${p.registryUrl}/api/groups/${encodeURIComponent(p.groupId)}/join-requests/${encodeURIComponent(p.pairwiseId)}/status` +
+            `?payload=${encodeURIComponent(payload)}&signature=${encodeURIComponent(signature)}`
+          );
+          const data = await r.json().catch(() => ({}));
+          if (r.ok && data.success && data.status === 'active' && data.membership) {
+            const m = data.membership;
+            userDoc.groupMemberships = [...(userDoc.groupMemberships || []), {
+              groupId: m.groupId,
+              groupName: m.groupName,
+              registryUrl: p.registryUrl,
+              pairwiseId: m.pairwiseId,
+              alias: m.alias,
+              signingKeyPair: p.signingKeyPair,
+              encryptionKeyPair: p.encryptionKeyPair,
+              credential: m.credential,
+              groupPublicKeyJwk: m.groupPublicKeyJwk,
+              joinedAt: new Date().toISOString(),
+              invitedBy: null,
+              acceptedSenders: []
+            }];
+            activated.push({ groupId: m.groupId, groupName: m.groupName });
+          } else if (r.ok && data.success && data.status === 'rejected') {
+            rejected.push({ groupId: p.groupId, groupName: p.groupName });
+          } else {
+            still.push(p); // registry unreachable or still pending
+          }
+        } catch {
+          still.push(p);
+        }
+      }
+      if (activated.length || rejected.length) {
+        userDoc.pendingGroupJoins = still;
+        userDoc.updatedAt = new Date().toISOString();
+        await cloudant.saveDocument(USERS_DB, userDoc);
+      }
+      res.json({ success: true, activated, rejected, pending: still.length });
+    } catch (error) {
+      console.error('[user-groups] poll-joins failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to poll join requests' });
     }
   });
 
