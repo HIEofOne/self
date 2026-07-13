@@ -712,3 +712,17 @@ and any design decisions resolved.
   views (a posting policy is community guidelines, not a secret). No
   machine enforcement yet by design — the join-mode enum (PR-9) is the
   enforceable Layer 2; Cedar execution is Phase 2.
+- **2026-07-13** — **PR-11: existing-MAIA join** ("already have a MAIA? no
+  new one needed"). The Groups rail gains a link button → "Join a group by
+  link" dialog: paste any invite (?groupInvite=) or join (?groupJoin=)
+  URL and the same card/join machinery runs with the LINK's origin as the
+  registry — the member's account stays on their own deployment. The two
+  browser-side registry reads (invite-info / join-info) now go through
+  member-server proxies (GET /api/user-groups/invite-info|join-info,
+  session-gated, http(s)-only registry validation) so CORS stays closed;
+  every other federation call was already server-to-server (no Origin
+  header → passes the existing CORS gate). Signed claims carry no
+  timestamp-freshness check, so cross-host clock skew is a non-issue in
+  the interim format. Welcome-page invite banner now tells existing MAIA
+  owners about the paste path. Needs the two-deployment test (localhost
+  member ↔ test deployment registry) before relying on it.

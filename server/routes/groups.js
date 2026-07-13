@@ -1449,6 +1449,58 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     }
   });
 
+  /** Validate a registry base URL for the info proxies below: http(s)
+   *  only. The same trust seam as join/request-join, which already fetch
+   *  caller-supplied registry URLs server-side (Phase-1 federation). */
+  const safeRegistryBase = (raw) => {
+    try {
+      const u = new URL(String(raw || ''));
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+      return u.origin;
+    } catch { return null; }
+  };
+
+  // GET /api/user-groups/invite-info — proxy a (possibly foreign)
+  // registry's invite-info so the browser never needs cross-origin CORS
+  // (PR-11, existing-MAIA join). Also marks the invite opened, exactly
+  // like a same-origin open would.
+  app.get('/api/user-groups/invite-info', async (req, res) => {
+    const userId = requireMatchingUser(req, res);
+    if (!userId) return;
+    try {
+      const base = safeRegistryBase(req.query?.registry || `http://localhost:${process.env.PORT || 3001}`);
+      const { groupId, token } = req.query || {};
+      if (!base || !groupId || !token) {
+        return res.status(400).json({ success: false, error: 'registry, groupId and token are required' });
+      }
+      const r = await fetch(`${base}/api/groups/${encodeURIComponent(groupId)}/invite-info?token=${encodeURIComponent(token)}`);
+      const data = await r.json().catch(() => ({}));
+      res.status(r.ok ? 200 : 502).json(data);
+    } catch (error) {
+      console.error('[user-groups] invite-info proxy failed:', error);
+      res.status(502).json({ success: false, error: 'Registry unreachable' });
+    }
+  });
+
+  // GET /api/user-groups/join-info — same proxy for shareable join links.
+  app.get('/api/user-groups/join-info', async (req, res) => {
+    const userId = requireMatchingUser(req, res);
+    if (!userId) return;
+    try {
+      const base = safeRegistryBase(req.query?.registry || `http://localhost:${process.env.PORT || 3001}`);
+      const { groupId, token } = req.query || {};
+      if (!base || !groupId || !token) {
+        return res.status(400).json({ success: false, error: 'registry, groupId and token are required' });
+      }
+      const r = await fetch(`${base}/api/groups/${encodeURIComponent(groupId)}/join-info?token=${encodeURIComponent(token)}`);
+      const data = await r.json().catch(() => ({}));
+      res.status(r.ok ? 200 : 502).json(data);
+    } catch (error) {
+      console.error('[user-groups] join-info proxy failed:', error);
+      res.status(502).json({ success: false, error: 'Registry unreachable' });
+    }
+  });
+
   // POST /api/user-groups/request-join — redeem a shareable join LINK
   // (PR-9): generate pairwise keys, submit a join request to the registry,
   // and remember it on the userDoc until the admin decides.

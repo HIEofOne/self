@@ -63,6 +63,12 @@
                       <strong>Sign in below</strong> (or create your MAIA) to accept.
                       After signing in, open <strong>Workbook → Groups</strong> to join.
                     </div>
+                    <div v-if="isChromeCapable" class="text-caption text-grey-8 q-mt-xs">
+                      Already have a MAIA somewhere else? You don't need a new
+                      one — in your own MAIA, open <strong>Workbook → Groups</strong>,
+                      click the <q-icon name="add_link" size="14px" /> link button,
+                      and paste this page's address there.
+                    </div>
                     <template v-else>
                       <div class="text-body2 text-orange-9 q-mt-xs">
                         MAIA needs <strong>Google Chrome</strong> to store your records.

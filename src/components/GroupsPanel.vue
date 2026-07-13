@@ -4,13 +4,18 @@
     <div class="groups-rail">
       <div class="groups-rail__header">
         <div class="text-subtitle1 text-weight-bold">Groups</div>
-        <q-btn
-          flat dense round size="sm" icon="refresh"
-          :loading="refreshingAll"
-          @click="refreshAll"
-        >
-          <q-tooltip>Check for new messages</q-tooltip>
-        </q-btn>
+        <div class="row no-wrap items-center">
+          <q-btn flat dense round size="sm" icon="add_link" @click="showPasteLinkDialog = true">
+            <q-tooltip>Join a group with an invite or join link — including groups hosted on another MAIA</q-tooltip>
+          </q-btn>
+          <q-btn
+            flat dense round size="sm" icon="refresh"
+            :loading="refreshingAll"
+            @click="refreshAll"
+          >
+            <q-tooltip>Check for new messages</q-tooltip>
+          </q-btn>
+        </div>
       </div>
 
       <!-- Pending invite (compact card) -->
@@ -353,6 +358,34 @@
         </div>
       </template>
     </div>
+
+    <!-- Paste an invite / join link (PR-11: works for groups hosted on
+         ANY MAIA deployment — your account stays right here) -->
+    <q-dialog v-model="showPasteLinkDialog">
+      <q-card style="min-width: 420px; max-width: 560px">
+        <q-card-section>
+          <div class="text-h6">Join a group by link</div>
+          <div class="text-caption text-grey-7">
+            Paste the invitation or join link you received. The group can be
+            hosted on this MAIA or any other — you join with the account
+            you're signed into now.
+          </div>
+        </q-card-section>
+        <q-card-section class="q-pt-none">
+          <q-input
+            v-model="pasteLinkInput"
+            dense outlined autofocus
+            label="Invite or join link"
+            placeholder="https://…/?groupInvite=…&groupId=…"
+            @keydown.enter.prevent="applyPastedLink"
+          />
+        </q-card-section>
+        <q-card-actions align="right">
+          <q-btn flat label="Cancel" v-close-popup />
+          <q-btn unelevated color="primary" label="Continue" :disable="!pasteLinkInput.trim()" @click="applyPastedLink" />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
   </div>
 </template>
 
@@ -809,9 +842,13 @@ const loadPendingInvite = async () => {
     // Group metadata for the banner + invite validity. invite-info also
     // marks the invite "opened" at the registry (admin-visible progress).
     try {
+      // Proxied through OUR server (PR-11): works when the group's
+      // registry is a different deployment, with CORS staying closed.
       const base = (invite.registry || window.location.origin).replace(/\/$/, '');
       const res = await fetch(
-        `${base}/api/groups/${encodeURIComponent(invite.groupId)}/invite-info?token=${encodeURIComponent(invite.token)}`
+        `/api/user-groups/invite-info?userId=${encodeURIComponent(props.userId)}&registry=${encodeURIComponent(base)}` +
+        `&groupId=${encodeURIComponent(invite.groupId)}&token=${encodeURIComponent(invite.token)}`,
+        { credentials: 'include' }
       );
       const data = await res.json();
       if (res.ok && data.success) {
@@ -970,6 +1007,48 @@ const sendMessage = async () => {
   }
 };
 
+// ── Paste an invite/join link (PR-11: existing-MAIA join) ──────────
+const showPasteLinkDialog = ref(false);
+const pasteLinkInput = ref('');
+
+/** Parse a pasted invite/join URL and hand it to the same localStorage +
+ *  card machinery a clicked link uses. The registry defaults to the
+ *  link's own origin, so links from OTHER deployments work — that's the
+ *  whole point ("already have a MAIA? no new one needed"). */
+const applyPastedLink = async () => {
+  let url: URL;
+  try {
+    url = new URL(pasteLinkInput.value.trim());
+  } catch {
+    $q.notify({ type: 'negative', message: 'That does not look like a link — paste the full URL from the invitation.' });
+    return;
+  }
+  const params = url.searchParams;
+  const registry = params.get('registry') || url.origin;
+  const groupId = params.get('groupId');
+  const inviteToken = params.get('groupInvite');
+  const joinToken = params.get('groupJoin');
+  if (!groupId || (!inviteToken && !joinToken)) {
+    $q.notify({ type: 'negative', message: 'No invitation found in that link. It should contain groupInvite or groupJoin.' });
+    return;
+  }
+  try {
+    if (inviteToken) {
+      localStorage.setItem(INVITE_LS_KEY, JSON.stringify({
+        token: inviteToken, groupId, registry, capturedAt: new Date().toISOString()
+      }));
+    } else {
+      localStorage.setItem(JOIN_LINK_LS_KEY, JSON.stringify({
+        token: joinToken, groupId, registry, capturedAt: new Date().toISOString()
+      }));
+    }
+  } catch { /* storage unavailable */ }
+  showPasteLinkDialog.value = false;
+  pasteLinkInput.value = '';
+  if (inviteToken) await loadPendingInvite();
+  else await loadPendingJoinLink();
+};
+
 // ── Shareable join link (PR-9): request → admin approval ───────────
 interface PendingJoin { groupId: string; groupName: string; alias: string; requestedAt: string }
 const pendingJoins = ref<PendingJoin[]>([]);
@@ -998,7 +1077,9 @@ const loadPendingJoinLink = async () => {
     try {
       const base = String(link.registry || window.location.origin).replace(/\/$/, '');
       const res = await fetch(
-        `${base}/api/groups/${encodeURIComponent(link.groupId)}/join-info?token=${encodeURIComponent(link.token)}`
+        `/api/user-groups/join-info?userId=${encodeURIComponent(props.userId)}&registry=${encodeURIComponent(base)}` +
+        `&groupId=${encodeURIComponent(link.groupId)}&token=${encodeURIComponent(link.token)}`,
+        { credentials: 'include' }
       );
       const data = await res.json();
       if (res.ok && data.success) {
