@@ -726,3 +726,18 @@ and any design decisions resolved.
   the interim format. Welcome-page invite banner now tells existing MAIA
   owners about the paste path. Needs the two-deployment test (localhost
   member ↔ test deployment registry) before relying on it.
+- **2026-07-13** — **PR-7: transient context documents + privacy-filtered
+  sharing** (the chat+AI floor's differentiator; Groups.md §7 happy path
+  complete). In any peer thread: paperclip → PDF parsed to text in memory
+  (existing /api/files/parse-pdf) and held CLIENT-SIDE for that
+  conversation only — never indexed, never uploaded to the KB, never sent
+  to the peer. "Ask your private AI about this document" sends doc+question
+  to the user's own agent (/api/chat/digitalocean); the answer renders as a
+  dashed private card ("only you can see this"). Sharing is explicit and
+  filtered: "Use in reply (privacy-filtered)" runs the answer through
+  POST /api/user-groups/filter-text (the userDoc.privacyFilter name
+  mapping — same source as physician deep-link sharing) and places the
+  result in the composer for human review before Send; if no mapping is
+  configured the user is told to review carefully. AI assists, never
+  participates in the E2E channel. Doc state clears when switching
+  conversations.
