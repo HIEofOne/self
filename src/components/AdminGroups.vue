@@ -131,6 +131,12 @@
           />
           <q-input v-model="form.description" label="Description" dense outlined type="textarea" autogrow />
           <q-input
+            v-model="form.postingPolicy"
+            label="Group policy (shown when people join)"
+            dense outlined type="textarea" autogrow
+            hint="Plain language: what this group is for, what members should and shouldn't post. Joining means accepting it."
+          />
+          <q-input
             v-model="form.tags"
             label="Match-query tags (comma-separated)"
             dense
@@ -259,6 +265,7 @@ interface GroupSummary {
   name: string;
   description: string;
   memberInvitesAllowed?: boolean;
+  postingPolicy?: string;
   joinMode?: string;
   joinLink?: string | null;
   tagVocabulary: string[];
@@ -294,7 +301,7 @@ const loadingMembers = ref<Record<string, boolean>>({});
 const showDialog = ref(false);
 const saving = ref(false);
 const editingGroupId = ref<string | null>(null);
-const form = ref({ name: '', description: '', tags: '', memberInvitesAllowed: true, joinByLink: false });
+const form = ref({ name: '', description: '', tags: '', postingPolicy: '', memberInvitesAllowed: true, joinByLink: false });
 
 /** Join link of the group being edited (server-computed once saved). */
 const editingJoinLink = computed(() => {
@@ -402,7 +409,7 @@ const loadGroups = async () => {
 
 const openCreateDialog = () => {
   editingGroupId.value = null;
-  form.value = { name: '', description: '', tags: '', memberInvitesAllowed: true, joinByLink: false };
+  form.value = { name: '', description: '', tags: '', postingPolicy: '', memberInvitesAllowed: true, joinByLink: false };
   showDialog.value = true;
 };
 
@@ -412,6 +419,7 @@ const openEditDialog = (g: GroupSummary) => {
     name: g.name,
     description: g.description,
     tags: g.tagVocabulary.join(', '),
+    postingPolicy: g.postingPolicy || '',
     memberInvitesAllowed: g.memberInvitesAllowed !== false,
     joinByLink: g.joinMode === 'link-approval'
   };
@@ -426,6 +434,7 @@ const saveGroup = async () => {
       name: form.value.name.trim(),
       description: form.value.description.trim(),
       tagVocabulary: form.value.tags,
+      postingPolicy: form.value.postingPolicy.trim(),
       memberInvitesAllowed: form.value.memberInvitesAllowed,
       joinMode: form.value.joinByLink ? 'link-approval' : 'invite-only'
     };

@@ -702,3 +702,13 @@ and any design decisions resolved.
   (qrcode dep), and Rotate; requested members show purple with
   Approve/Reject. Also: group-row tooltip now mentions invites (PR-8
   feedback).
+- **2026-07-13** — **PR-10: posting-policy form v1** (adoption sequence
+  step 3; Layer-1 "displayed" policy — joining is accepting). Group gains
+  admin-authored free-text `postingPolicy` (create/edit dialog textarea,
+  4000-char cap). Shown wherever someone decides to join: the email-invite
+  card and the join-request card render it under "Group policy — joining
+  means you accept it"; members re-read it in the group-info pane (carried
+  on the signed directory response). Also on the public invite-info/info
+  views (a posting policy is community guidelines, not a secret). No
+  machine enforcement yet by design — the join-mode enum (PR-9) is the
+  enforceable Layer 2; Cedar execution is Phase 2.

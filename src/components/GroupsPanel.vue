@@ -27,6 +27,10 @@
         <div v-if="inviteGroupDescription" class="text-caption text-grey-7 q-mt-xs">
           {{ inviteGroupDescription }}
         </div>
+        <div v-if="inviteGroupPolicy" class="groups-policy-note q-mt-xs">
+          <div class="text-caption text-weight-medium">Group policy — joining means you accept it:</div>
+          <div class="text-caption" style="white-space: pre-wrap">{{ inviteGroupPolicy }}</div>
+        </div>
         <q-input
           v-model="aliasInput"
           dense outlined
@@ -63,6 +67,10 @@
             <strong>{{ pendingJoinLinkGroupName || 'this group' }}</strong>
             — the group's administrator approves each request.
           </div>
+        </div>
+        <div v-if="joinLinkGroupPolicy" class="groups-policy-note q-mt-xs">
+          <div class="text-caption text-weight-medium">Group policy — joining means you accept it:</div>
+          <div class="text-caption" style="white-space: pre-wrap">{{ joinLinkGroupPolicy }}</div>
         </div>
         <q-input
           v-model="joinAliasInput"
@@ -202,6 +210,12 @@
             Loading peers…
           </div>
           <template v-else>
+            <div v-if="directoryByGroup[selectedMembership.groupId]?.postingPolicy" class="q-mb-md">
+              <div class="text-subtitle2 q-mb-xs">Group policy</div>
+              <div class="text-caption text-grey-8" style="white-space: pre-wrap">
+                {{ directoryByGroup[selectedMembership.groupId]?.postingPolicy }}
+              </div>
+            </div>
             <div class="text-subtitle2 q-mb-xs">Peers you can reach</div>
             <div
               v-if="directoryByGroup[selectedMembership.groupId] && !directoryByGroup[selectedMembership.groupId].mentors.length"
@@ -383,6 +397,7 @@ const pendingInvite = ref<PendingInvite | null>(null);
 const invalidInviteMessage = ref('');
 const inviteGroupName = ref('');
 const inviteGroupDescription = ref('');
+const inviteGroupPolicy = ref('');
 const aliasInput = ref('');
 const joining = ref(false);
 const leaving = ref<string | null>(null);
@@ -407,6 +422,7 @@ const refreshingAll = ref(false);
 
 interface Directory {
   stats: { activeMembers: number; recentlyActiveMembers: number };
+  postingPolicy?: string;
   mentors: { pairwiseId: string; alias: string }[];
 }
 const directoryByGroup = ref<Record<string, Directory>>({});
@@ -679,7 +695,7 @@ const loadDirectory = async (groupId: string) => {
     if (res.ok && data.success) {
       directoryByGroup.value = {
         ...directoryByGroup.value,
-        [groupId]: { stats: data.stats, mentors: data.mentors || [] }
+        [groupId]: { stats: data.stats, postingPolicy: data.postingPolicy || '', mentors: data.mentors || [] }
       };
     }
   } catch {
@@ -801,6 +817,7 @@ const loadPendingInvite = async () => {
       if (res.ok && data.success) {
         inviteGroupName.value = data.group?.name || '';
         inviteGroupDescription.value = data.group?.description || '';
+        inviteGroupPolicy.value = data.group?.postingPolicy || '';
         if (data.invite && data.invite.valid === false) {
           // Dead token — persistent explanation, never a silent vanish.
           localStorage.removeItem(INVITE_LS_KEY);
@@ -958,6 +975,7 @@ interface PendingJoin { groupId: string; groupName: string; alias: string; reque
 const pendingJoins = ref<PendingJoin[]>([]);
 const pendingJoinLink = ref<{ token: string; groupId: string; registry: string } | null>(null);
 const pendingJoinLinkGroupName = ref('');
+const joinLinkGroupPolicy = ref('');
 const joinAliasInput = ref('');
 const requestingJoin = ref(false);
 
@@ -992,6 +1010,7 @@ const loadPendingJoinLink = async () => {
           return;
         }
         pendingJoinLinkGroupName.value = data.group?.name || '';
+        joinLinkGroupPolicy.value = data.group?.postingPolicy || '';
       }
     } catch { /* generic card text */ }
   } catch {
@@ -1176,6 +1195,11 @@ onUnmounted(() => {
   background: #fafafa;
   z-index: 1;
 }
+.groups-policy-note {
+  border-left: 3px solid #90caf9;
+  padding-left: 8px;
+}
+
 .groups-invite-card {
   margin: 0 8px 8px;
   padding: 10px;

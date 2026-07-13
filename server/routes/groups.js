@@ -177,6 +177,7 @@ const adminGroupView = (doc) => ({
   // Default true (member virality is the adoption engine); the admin
   // can turn it off per group.
   memberInvitesAllowed: doc.memberInvitesAllowed !== false,
+  postingPolicy: doc.postingPolicy || '',
   // Admin policy: how people join. 'invite-only' (default) or
   // 'link-approval' (anyone with the join link can REQUEST; admin
   // approves each). The link itself never grants membership.
@@ -199,6 +200,9 @@ const publicGroupView = (doc) => ({
   groupId: doc._id,
   name: doc.name,
   description: doc.description || '',
+  // Posting policy (PR-10, Layer-1 "displayed" policy): shown on the
+  // join/invite cards — joining is accepting. Free text, admin-authored.
+  postingPolicy: doc.postingPolicy || '',
   tagVocabulary: doc.tagVocabulary || [],
   publicKeyJwk: doc.signingKey?.publicKeyJwk || null,
   activeMemberCount: memberCounts(doc).active
@@ -227,7 +231,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
   app.post('/api/groups', async (req, res) => {
     if (!requireAdmin(req, res)) return;
     try {
-      const { name, description = '', tagVocabulary = [] } = req.body || {};
+      const { name, description = '', tagVocabulary = [], postingPolicy = '' } = req.body || {};
       if (!name || !String(name).trim()) {
         return res.status(400).json({ success: false, error: 'name is required' });
       }
@@ -245,6 +249,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         type: 'group',
         name: String(name).trim(),
         description: String(description || '').trim(),
+        postingPolicy: String(postingPolicy || '').trim().slice(0, 4000),
         tagVocabulary: normalizeTags(tagVocabulary),
         signingKey: {
           publicKeyJwk: publicKey.export({ format: 'jwk' }),
@@ -301,6 +306,9 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         doc.name = String(name).trim();
       }
       if (description !== undefined) doc.description = String(description || '').trim();
+      if (req.body?.postingPolicy !== undefined) {
+        doc.postingPolicy = String(req.body.postingPolicy || '').trim().slice(0, 4000);
+      }
       if (tagVocabulary !== undefined) doc.tagVocabulary = normalizeTags(tagVocabulary);
       if (req.body?.memberInvitesAllowed !== undefined) {
         doc.memberInvitesAllowed = !!req.body.memberInvitesAllowed;
@@ -640,7 +648,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       res.json({
         success: true,
         valid,
-        group: valid ? { name: doc.name, description: doc.description || '' } : null
+        group: valid ? { name: doc.name, description: doc.description || '', postingPolicy: doc.postingPolicy || '' } : null
       });
     } catch (error) {
       console.error('[groups] join-info failed:', error);
@@ -1179,6 +1187,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       res.json({
         success: true,
         stats: { activeMembers: active.length, recentlyActiveMembers: recentlyActive.length },
+        postingPolicy: doc.postingPolicy || '',
         mentors
       });
     } catch (error) {
@@ -2009,7 +2018,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       if (!r.ok || !data.success) {
         return res.status(502).json({ success: false, error: data.error || 'Directory unavailable' });
       }
-      res.json({ success: true, stats: data.stats, mentors: data.mentors || [] });
+      res.json({ success: true, stats: data.stats, postingPolicy: data.postingPolicy || '', mentors: data.mentors || [] });
     } catch (error) {
       console.error('[user-groups] directory failed:', error);
       res.status(500).json({ success: false, error: 'Failed to fetch directory' });
