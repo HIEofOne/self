@@ -339,8 +339,51 @@
           </div>
         </div>
 
+        <!-- Transient context document (PR-7): private AI assist for THIS
+             conversation. The document is parsed to text in memory — never
+             indexed, never uploaded to the KB, never sent to the peer.
+             Sharing is an explicit, privacy-filtered action. -->
+        <div v-if="transientDoc" class="groups-transient">
+          <div class="row items-center no-wrap q-gutter-xs">
+            <q-icon name="description" size="16px" color="primary" />
+            <span class="text-caption text-weight-medium ellipsis" style="min-width: 0">{{ transientDoc.name }}</span>
+            <q-btn dense flat round size="xs" icon="close" @click="clearTransientDoc">
+              <q-tooltip>Remove document</q-tooltip>
+            </q-btn>
+          </div>
+          <div class="text-caption text-grey-7">
+            Only you and your private AI can see this document — nothing is
+            sent to {{ selectedPeerAlias || 'the peer' }} unless you share it.
+          </div>
+          <div class="row items-center q-gutter-sm q-mt-xs">
+            <q-input
+              v-model="askAiInput"
+              dense outlined
+              class="col"
+              label="Ask your private AI about this document"
+              :disable="askingAi"
+              @keydown.enter.prevent="askMyAi"
+            />
+            <q-btn dense unelevated size="sm" color="primary" label="Ask" :loading="askingAi" :disable="!askAiInput.trim()" @click="askMyAi" />
+          </div>
+          <div v-if="aiAnswer" class="groups-transient__answer q-mt-sm">
+            <div class="text-caption text-grey-7 q-mb-xs">
+              <q-icon name="smart_toy" size="14px" /> Private AI — only you can see this
+            </div>
+            <div class="text-body2" style="white-space: pre-wrap; word-break: break-word">{{ aiAnswer }}</div>
+            <div class="q-mt-xs q-gutter-sm">
+              <q-btn dense flat size="sm" color="primary" label="Use in reply (privacy-filtered)" :loading="filteringShare" @click="useAnswerInReply" />
+              <q-btn dense flat size="sm" color="grey-7" label="Dismiss" @click="aiAnswer = ''" />
+            </div>
+          </div>
+        </div>
+
         <!-- Composer -->
         <div class="groups-composer">
+          <q-btn dense flat round size="sm" icon="attach_file" :loading="parsingDoc" @click="transientFileInput?.click()">
+            <q-tooltip>Add a document for your private AI to read — it is never sent to the peer or indexed</q-tooltip>
+          </q-btn>
+          <input ref="transientFileInput" type="file" accept="application/pdf" style="display: none" @change="handleTransientFile" />
           <q-input
             v-model="composerText"
             dense outlined autogrow
@@ -629,6 +672,7 @@ const selectGroup = async (m: Membership) => {
 
 const selectPeer = async (m: Membership, peerId: string) => {
   selected.value = { groupId: m.groupId, peerId };
+  clearTransientDoc();
   markThreadSeen(m.groupId, peerId);
   composerText.value = '';
   await nextTick();
@@ -1210,6 +1254,101 @@ const copyInviteLink = async () => {
   }
 };
 
+// ── Transient context document + private-AI assist (PR-7) ──────────
+const transientFileInput = ref<HTMLInputElement | null>(null);
+const transientDoc = ref<{ name: string; text: string } | null>(null);
+const parsingDoc = ref(false);
+const askAiInput = ref('');
+const askingAi = ref(false);
+const aiAnswer = ref('');
+const filteringShare = ref(false);
+
+const clearTransientDoc = () => {
+  transientDoc.value = null;
+  aiAnswer.value = '';
+  askAiInput.value = '';
+};
+
+const handleTransientFile = async (event: Event) => {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = '';
+  if (!file) return;
+  if (file.size > 50 * 1024 * 1024) {
+    $q.notify({ type: 'negative', message: 'File too large (max 50MB).' });
+    return;
+  }
+  parsingDoc.value = true;
+  try {
+    const formData = new FormData();
+    formData.append('pdfFile', file);
+    const res = await fetch('/api/files/parse-pdf', { method: 'POST', credentials: 'include', body: formData });
+    const data = await res.json();
+    if (!res.ok || !data.text) throw new Error(data.error || 'Could not extract text from that PDF');
+    transientDoc.value = { name: file.name, text: data.text };
+    aiAnswer.value = '';
+    $q.notify({ type: 'positive', message: `${file.name} is ready — ask your private AI about it.` });
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to read the document' });
+  } finally {
+    parsingDoc.value = false;
+  }
+};
+
+const askMyAi = async () => {
+  if (!transientDoc.value || !askAiInput.value.trim() || askingAi.value) return;
+  askingAi.value = true;
+  try {
+    const content =
+      `You are the user's private medical AI assistant. Use ONLY the context document below to answer their question in plain, patient-friendly language.\n\n` +
+      `Context document "${transientDoc.value.name}":\n\n${transientDoc.value.text.slice(0, 120000)}\n\n---\n\nQuestion: ${askAiInput.value.trim()}`;
+    const res = await fetch('/api/chat/digitalocean', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ userId: props.userId, messages: [{ role: 'user', content }] })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    const answer = data.message?.content || data.content || data.response || data.text || '';
+    if (!answer) throw new Error('The private AI returned no answer');
+    aiAnswer.value = typeof answer === 'string' ? answer : JSON.stringify(answer);
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Private AI request failed' });
+  } finally {
+    askingAi.value = false;
+  }
+};
+
+/** Sharing is explicit and privacy-filtered (mandatory): the answer is
+ *  pseudonymized server-side with the user's name mapping, then placed
+ *  in the composer for review — the human still presses Send. */
+const useAnswerInReply = async () => {
+  if (!aiAnswer.value || filteringShare.value) return;
+  filteringShare.value = true;
+  try {
+    const res = await fetch('/api/user-groups/filter-text', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ userId: props.userId, text: aiAnswer.value })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    composerText.value = data.filtered;
+    $q.notify({
+      type: 'info',
+      message: data.mappingCount
+        ? 'Privacy filter applied — review the text before sending.'
+        : 'No privacy-filter names are set up yet (Workbook → Privacy Filter) — review the text carefully before sending.'
+    });
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to apply the privacy filter' });
+  } finally {
+    filteringShare.value = false;
+  }
+};
+
 // ── Requests (AS, Phase 1 — every request escalates to you) ─────────
 const decide = async (r: AsRequest, decision: 'accept' | 'decline' | 'block') => {
   deciding.value = r.id;
@@ -1276,6 +1415,19 @@ onUnmounted(() => {
   background: #fafafa;
   z-index: 1;
 }
+.groups-transient {
+  border-top: 1px solid #e0e0e0;
+  padding: 8px 12px;
+  background: #fafafa;
+  flex: 0 0 auto;
+}
+.groups-transient__answer {
+  border: 1px dashed #90caf9;
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: #f5faff;
+}
+
 .groups-policy-note {
   border-left: 3px solid #90caf9;
   padding-left: 8px;
