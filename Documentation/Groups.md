@@ -726,3 +726,22 @@ and any design decisions resolved.
   the interim format. Welcome-page invite banner now tells existing MAIA
   owners about the paste path. Needs the two-deployment test (localhost
   member ↔ test deployment registry) before relying on it.
+- **2026-07-14** — **PR-12: Sharing Policies tab (policy cards v1)**
+  (Refinement 7 foundation; the §6.2 Phase-1 stand-ins get their real
+  successor). New Workbook tab "Sharing Policies". A policy CARD is the
+  canonical structured object — Requesting Party (anyone | group | peer),
+  Purpose, Scope, privacy-filter flag, minimum Signature level, Payment —
+  stored on the userDoc (`sharingPolicies`, CRUD at /api/user-policies,
+  server/routes/policies.js, enum-validated). The plain-language sentence
+  is a DETERMINISTIC projection (src/utils/policyCards.ts `sentenceFor`);
+  the editor shows it live as chips are changed. Evaluation is
+  Cedar-style and deterministic (`evaluate`: enabled deny wins → allow →
+  else ASK ME): the stated default stays "MAIA asks you about everything
+  unless you've told it otherwise". The tab includes the "Try it"
+  simulator (hypothetical requester → ALLOW / ASK ME / DENY + which card
+  decided) and provenance sections (group-suggested vs user cards; group
+  policy-pack delivery rides the reserved policyPackVersion in a later
+  PR). Deliberately deferred: born-from-decisions inbox hook (today's AS
+  requests are messaging-scoped, already remembered as accepted/blocked
+  senders — data-scoped requests arrive with Cedar/Phase 2), Cedar code
+  projection, AI assist roles (Refinement 7a), AS enforcement wiring.

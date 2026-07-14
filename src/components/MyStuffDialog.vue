@@ -1092,6 +1092,10 @@
             <GroupsPanel :userId="userId" style="flex: 1; min-height: 0;" />
           </q-tab-panel>
 
+          <q-tab-panel name="policies" class="q-pa-none" style="overflow-y: auto;">
+            <PoliciesPanel :userId="userId" />
+          </q-tab-panel>
+
           <!-- Privacy Filter Tab -->
           <q-tab-panel name="privacy">
             <!-- Filter Current Chat Button -->
@@ -1870,6 +1874,7 @@ import PdfViewerModal from './PdfViewerModal.vue';
 import TextViewerModal from './TextViewerModal.vue';
 import Lists from './Lists.vue';
 import GroupsPanel from './GroupsPanel.vue';
+import PoliciesPanel from './PoliciesPanel.vue';
 import { useQuasar } from 'quasar';
 import { deleteChatById } from '../utils/chatApi';
 import { processFileNCitations } from '../utils/fileNCitations';
@@ -2149,6 +2154,7 @@ const railTabs = computed(() => [
   { name: 'summary',    icon: 'description',  label: 'Patient Summary', alertCount: 0, alertOutline: summaryNeedsVerify.value, infoAlert: false, infoTitle: '' },
   { name: 'lists',      icon: 'list',         label: 'Lists',           alertCount: 0, alertOutline: !!props.medsNeedsVerify, infoAlert: false, infoTitle: '' },
   { name: 'groups',     icon: 'groups',       label: 'Groups',          alertCount: 0, alertOutline: false, infoAlert: groupsAlert.value, infoTitle: groupsAlertTitle.value },
+  { name: 'policies',   icon: 'policy',       label: 'Sharing Policies', alertCount: 0, alertOutline: false, infoAlert: false,            infoTitle: '' },
   { name: 'privacy',    icon: 'privacy_tip',  label: 'Privacy Filter',  alertCount: 0, alertOutline: false, infoAlert: false,             infoTitle: '' },
   { name: 'diary',      icon: 'book',         label: 'Patient Diary',   alertCount: 0, alertOutline: false, infoAlert: false,             infoTitle: '' },
   { name: 'references', icon: 'link',         label: 'References',      alertCount: 0, alertOutline: false, infoAlert: false,             infoTitle: '' }

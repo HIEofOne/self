@@ -34,6 +34,7 @@ import setupChatRoutes, { getOwnerIdForDeepLinkSession } from './routes/chat.js'
 import setupFileRoutes from './routes/files.js';
 import { getUserBucketSize } from './routes/files.js';
 import setupGroupRoutes from './routes/groups.js';
+import setupPolicyRoutes from './routes/policies.js';
 import {
   S3Client,
   HeadBucketCommand,
@@ -1551,6 +1552,10 @@ setupFileRoutes(app, cloudant, doClient);
 // sendEmail is injected lazily: initResend is a hoisted function declaration
 // defined further down; it resolves the Resend client (or null when
 // RESEND_API_KEY is unset — invites then rely on the copyable link).
+// Sharing Policies (Groups_Design.md Refinement 7): structured policy
+// cards on the userDoc; the AS consults them for incoming requests.
+setupPolicyRoutes(app, cloudant, auditLog);
+
 const { runDailyGroupMaintenance } = setupGroupRoutes(app, cloudant, auditLog, {
   sendEmail: async (to, subject, text) => {
     const resend = await initResend();
