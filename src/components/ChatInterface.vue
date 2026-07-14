@@ -100,6 +100,13 @@
                     @click="startEditing(idx)"
                     title="Edit message"
                   />
+                  <q-btn
+                    v-if="msg.role === 'assistant'"
+                    flat dense size="xs" icon="ios_share" color="primary" label="Share to peer"
+                    class="q-ml-xs"
+                    @click="openShareToPeer(msg.content)"
+                    title="Share this to a group member — privacy-filtered"
+                  />
                 </div>
               </div>
             </div>
@@ -747,6 +754,39 @@
     />
 
     <!-- My Stuff Dialog -->
+    <!-- Unified share action (Refinement 6): send an AI answer to a group
+         member. Mandatory privacy filter; the human reviews before Send.
+         The AI is the assistant, never a participant in the E2E channel. -->
+    <q-dialog v-model="showShareToPeer">
+      <q-card style="min-width: 480px; max-width: 640px">
+        <q-card-section>
+          <div class="text-h6">Share to a group member</div>
+          <div class="text-caption text-grey-7">
+            Your private AI is not part of the conversation — you are sharing
+            this text yourself, privacy-filtered, over the end-to-end channel.
+          </div>
+        </q-card-section>
+        <q-card-section class="q-pt-none q-gutter-y-sm">
+          <q-select
+            v-model="sharePeer"
+            :options="sharePeerOptions"
+            emit-value map-options dense outlined
+            label="Send to"
+            :loading="loadingSharePeers"
+            hint="Only people you already have a conversation with are listed."
+          />
+          <div class="text-caption text-grey-7">
+            {{ shareMappingCount > 0 ? `Privacy filter applied (${shareMappingCount} name(s)).` : 'No privacy-filter names configured (Workbook → Privacy Filter) — review carefully.' }}
+          </div>
+          <q-input v-model="shareText" type="textarea" outlined autogrow label="Message (edit before sending)" :disable="sendingShare" />
+        </q-card-section>
+        <q-card-actions align="right">
+          <q-btn flat label="Cancel" v-close-popup :disable="sendingShare" />
+          <q-btn unelevated color="primary" label="Send" :loading="sendingShare" :disable="!sharePeer || !shareText.trim()" @click="sendShareToPeer" />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
     <MyStuffDialog
       @open-peer-thread="handleOpenPeerThread"
       ref="myStuffDialogRef"
@@ -1099,6 +1139,76 @@ const peerThread = ref<{ groupId: string; peerId: string; alias: string | null; 
 const handleOpenPeerThread = (t: { groupId: string; peerId: string; alias: string | null; groupName: string }) => {
   peerThread.value = t;
   showMyStuffDialog.value = false; // reveal the chat area under the Workbook
+};
+
+// ── Unified share action (Refinement 6): AI answer → group peer ──────
+const showShareToPeer = ref(false);
+const shareText = ref('');
+const shareRaw = ref('');
+const shareMappingCount = ref(0);
+const sharePeer = ref<string | null>(null); // "groupId|peerId"
+const sharePeerOptions = ref<Array<{ label: string; value: string }>>([]);
+const loadingSharePeers = ref(false);
+const sendingShare = ref(false);
+
+const openShareToPeer = async (content: string) => {
+  shareRaw.value = content;
+  shareText.value = content;
+  shareMappingCount.value = 0;
+  sharePeer.value = null;
+  showShareToPeer.value = true;
+  // Build the peer list from memberships × their known conversations.
+  loadingSharePeers.value = true;
+  try {
+    const uid = props.user?.userId || '';
+    const gRes = await fetch(`/api/user-groups?userId=${encodeURIComponent(uid)}`, { credentials: 'include' });
+    const gData = await gRes.json();
+    const opts: Array<{ label: string; value: string }> = [];
+    for (const m of (gData.memberships || [])) {
+      const mRes = await fetch(`/api/user-groups/messages?userId=${encodeURIComponent(uid)}&groupId=${encodeURIComponent(m.groupId)}`, { credentials: 'include' });
+      const mData = await mRes.json();
+      const peers = new Map<string, string>();
+      for (const msg of (mData.messages || [])) if (msg.fromPairwiseId) peers.set(msg.fromPairwiseId, msg.fromAlias || 'Group member');
+      for (const sent of (mData.sent || [])) if (sent.toPairwiseId) peers.set(sent.toPairwiseId, sent.toAlias || peers.get(sent.toPairwiseId) || 'Group member');
+      for (const [pid, alias] of peers) opts.push({ label: `${alias} · ${m.groupName}`, value: `${m.groupId}|${pid}` });
+    }
+    sharePeerOptions.value = opts;
+    if (opts.length === 1) sharePeer.value = opts[0].value;
+  } catch { /* empty list */ } finally {
+    loadingSharePeers.value = false;
+  }
+  // Apply the mandatory privacy filter to the initial text.
+  try {
+    const fRes = await fetch('/api/user-groups/filter-text', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+      body: JSON.stringify({ userId: props.user?.userId, text: content })
+    });
+    const fData = await fRes.json();
+    if (fRes.ok && fData.success) {
+      shareText.value = fData.filtered;
+      shareMappingCount.value = fData.mappingCount || 0;
+    }
+  } catch { /* leave unfiltered text; count 0 warns the user */ }
+};
+
+const sendShareToPeer = async () => {
+  if (!sharePeer.value || !shareText.value.trim() || sendingShare.value) return;
+  const [groupId, peerId] = sharePeer.value.split('|');
+  sendingShare.value = true;
+  try {
+    const res = await fetch('/api/user-groups/send', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+      body: JSON.stringify({ userId: props.user?.userId, groupId, toPairwiseId: peerId, text: shareText.value.trim() })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    showShareToPeer.value = false;
+    $q.notify({ type: 'positive', message: 'Shared to your group member.' });
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to share' });
+  } finally {
+    sendingShare.value = false;
+  }
 };
 const showWorkbookClosePrompt = ref(false);
 const myStuffInitialTab = ref<string>('files');

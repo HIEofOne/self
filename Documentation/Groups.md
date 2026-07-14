@@ -777,3 +777,17 @@ and any design decisions resolved.
   code was removed. Two surfaces remain by design (AG choice: "thread
   opens in chat area"); the unified conversation rail and AI-chat
   identity chips are candidate next steps.
+- **2026-07-14** — **Refinement 6 step 3: unified share action (queue
+  complete).** Every AI answer in the chat area gains a "Share to peer"
+  button → dialog that lists the peers you already converse with (built
+  from memberships × message history), applies the MANDATORY privacy
+  filter (restored POST /api/user-groups/filter-text — the
+  userDoc.privacyFilter name mapping, same source as physician deep-link
+  sharing), shows the filtered text for human review, and sends over the
+  existing E2E /send. If no mapping is configured the user is warned to
+  review carefully. The AI is the assistant; the human performs the
+  share; the AI is never a participant in the E2E channel. This retires
+  the reverted PR-7's remaining durable plumbing back into service.
+  Refinement 6 ("one chat, three doors") is now complete: threads in the
+  chat area (step 1), grounded identity chips/probe (step 2), one share
+  action (step 3).
