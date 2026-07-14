@@ -293,6 +293,10 @@
             <div class="text-subtitle2">{{ selectedPeerAlias || 'Group member' }}</div>
             <div class="text-caption text-grey-7">{{ selectedMembership.groupName }} · end-to-end encrypted</div>
           </div>
+          <q-space />
+          <q-btn flat dense round size="sm" icon="rule" color="primary" @click="openRequestDialog">
+            <q-tooltip>Request records from {{ selectedPeerAlias || 'this member' }} — their sharing policies (or they themselves) decide</q-tooltip>
+          </q-btn>
         </div>
 
         <div ref="threadScrollEl" class="groups-main__scroll groups-thread">
@@ -366,6 +370,33 @@
       </template>
     </div>
 
+    <!-- Data request (PR-13): ask a peer for part of their record. Their
+         AS decides: a matching allow card answers autonomously, a deny
+         card drops it silently, otherwise they get asked. -->
+    <q-dialog v-model="showRequestDialog">
+      <q-card style="min-width: 460px; max-width: 600px">
+        <q-card-section>
+          <div class="text-h6">Request records from {{ selectedPeerAlias || 'this member' }}</div>
+          <div class="text-caption text-grey-7">
+            Delivered to their MAIA's authorization server — their sharing
+            policies decide automatically, or they're asked. You'll see a
+            reply if and when they (or their policies) allow it.
+          </div>
+        </q-card-section>
+        <q-card-section class="q-pt-none">
+          <div class="row q-col-gutter-sm">
+            <q-select v-model="reqScope" :options="SCOPE_OPTIONS" emit-value map-options dense outlined label="What you're asking for" class="col-12" />
+            <q-select v-model="reqPurpose" :options="PURPOSE_OPTIONS" emit-value map-options dense outlined label="Purpose" class="col-12" />
+            <q-input v-model="reqNote" dense outlined autogrow label="Note (optional)" class="col-12" />
+          </div>
+        </q-card-section>
+        <q-card-actions align="right">
+          <q-btn flat label="Cancel" v-close-popup :disable="sendingDataRequest" />
+          <q-btn unelevated color="primary" label="Send request" :loading="sendingDataRequest" @click="sendDataRequest" />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
     <!-- Paste an invite / join link (PR-11: works for groups hosted on
          ANY MAIA deployment — your account stays right here) -->
     <q-dialog v-model="showPasteLinkDialog">
@@ -399,6 +430,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue';
 import { useQuasar } from 'quasar';
+import { SCOPE_OPTIONS, PURPOSE_OPTIONS, type Scope, type Purpose } from '../utils/policyCards';
 
 const $q = useQuasar();
 
@@ -1226,6 +1258,47 @@ const copyInviteLink = async () => {
     $q.notify({ type: 'positive', message: 'Link copied.' });
   } catch {
     $q.notify({ type: 'warning', message: 'Copy failed — select and copy the link manually.' });
+  }
+};
+
+// ── Outgoing data requests (PR-13) ─────────────────────────────────
+const showRequestDialog = ref(false);
+const reqScope = ref<Scope>('patient-summary');
+const reqPurpose = ref<Purpose>('clinical');
+const reqNote = ref('');
+const sendingDataRequest = ref(false);
+
+const openRequestDialog = () => {
+  reqNote.value = '';
+  showRequestDialog.value = true;
+};
+
+const sendDataRequest = async () => {
+  if (!selected.value?.peerId || sendingDataRequest.value) return;
+  sendingDataRequest.value = true;
+  try {
+    const res = await fetch('/api/user-groups/request', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        userId: props.userId,
+        groupId: selected.value.groupId,
+        toPairwiseId: selected.value.peerId,
+        action: 'share-request',
+        resource: reqScope.value,
+        purpose: reqPurpose.value,
+        payload: reqNote.value.trim() || null
+      })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    showRequestDialog.value = false;
+    $q.notify({ type: 'positive', message: 'Request sent — their sharing policies (or they themselves) will decide.' });
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to send request' });
+  } finally {
+    sendingDataRequest.value = false;
   }
 };
 
