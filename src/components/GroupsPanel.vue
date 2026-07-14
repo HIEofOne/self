@@ -313,6 +313,13 @@
             </div>
           </div>
 
+          <!-- A request auto-accepted by a sharing policy: show WHICH card
+               decided (the audit trail teaches the policy system) -->
+          <div v-if="policyDecidedForPeer" class="text-caption text-grey-7 text-center q-my-sm">
+            <q-icon name="policy" size="14px" color="green" />
+            Auto-accepted by your policy: “{{ policyDecidedForPeer }}”
+          </div>
+
           <!-- Pending first-contact request from this peer (Signal's
                "message request" pattern) -->
           <div v-if="pendingRequestFromPeer" class="groups-request-card">
@@ -469,6 +476,7 @@ interface AsRequest {
   fromAlias?: string | null;
   action: string;
   resource: string;
+  decidedBySentence?: string | null;
   payload: unknown;
   receivedAt: string;
   status: string;
@@ -607,6 +615,17 @@ const threadItems = computed<ThreadItem[]>(() => {
     if (s.toPairwiseId === peerId) items.push({ id: s.id, direction: 'out', text: s.text, at: s.sentAt });
   }
   return items.sort((a, b) => (a.at || '').localeCompare(b.at || ''));
+});
+
+/** Sentence of the policy that auto-decided the most recent request
+ *  from the selected peer (empty when every decision was human). */
+const policyDecidedForPeer = computed(() => {
+  if (!selected.value?.peerId) return '';
+  const { groupId, peerId } = selected.value;
+  const r = requests.value.find(
+    (x) => x.groupId === groupId && x.fromPairwiseId === peerId && x.decidedBySentence
+  );
+  return r?.decidedBySentence || '';
 });
 
 const pendingRequestFromPeer = computed(() => {

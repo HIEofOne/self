@@ -71,6 +71,65 @@ const normalizeCard = (raw) => {
   return card;
 };
 
+// ── Server-side projections (PR-13) ────────────────────────────────
+// JS ports of src/utils/policyCards.ts `sentenceFor` and `evaluate`.
+// The server snapshots the deciding card's sentence onto the request doc
+// at decision time (cards can change later; the audit trail must show
+// the sentence as it read when it decided).
+
+export const POLICY_SCOPES = SCOPES;
+export const POLICY_PURPOSES = PURPOSES;
+
+const SIGNATURE_RANK = { unverified: 0, 'verified-email': 1, 'group-member': 2, npi: 3, doximity: 3 };
+const SCOPE_LABELS = {
+  everything: 'everything in my record',
+  'not-sensitive': 'my record except sensitive categories',
+  'meds-allergies': 'Current Medications and Allergies',
+  'patient-summary': 'my Patient Summary'
+};
+const PAYMENT_LABELS = {
+  'spam-deposit': 'a returnable spam deposit',
+  'notification-deposit': 'a notification deposit',
+  'ai-prepay': 'prepayment of AI costs',
+  'sharing-payment': 'a sharing payment'
+};
+
+export const policySentence = (card) => {
+  const e = card.elements;
+  const who = e.party.type === 'group' ? `Anyone in ${e.party.groupName || 'the group'}`
+    : e.party.type === 'peer' ? (e.party.alias || 'This member') : 'Anyone';
+  const sig = e.signature === 'unverified' ? '(no identity check)' : `with ${e.signature} identity or stronger`;
+  const verb = card.outcome === 'allow' ? 'may receive' : 'may NOT receive';
+  const what = e.scope === 'past-months' ? `records from the past ${e.scopeMonths || 12} months`
+    : e.scope === 'apple-health-category' ? `my "${e.scopeCategory || 'selected'}" Apple Health records`
+    : (SCOPE_LABELS[e.scope] || e.scope);
+  const why = e.purpose === 'any' ? 'for any purpose' : `for ${e.purpose} use`;
+  const filt = e.filtered !== false ? 'privacy-filtered' : 'unfiltered';
+  const pay = e.payment === 'none' ? '' : `, if they provide ${PAYMENT_LABELS[e.payment] || e.payment}`;
+  return `${who} ${sig} ${verb} ${what} ${why}, ${filt}${pay}.`;
+};
+
+const cardMatches = (card, req) => {
+  const e = card.elements;
+  if (e.party.type === 'group' && (req.party.type !== 'group' || req.party.groupId !== e.party.groupId)) return false;
+  if (e.party.type === 'peer' && req.party.pairwiseId !== e.party.pairwiseId) return false;
+  if (e.purpose !== 'any' && e.purpose !== req.purpose) return false;
+  if (e.scope !== req.scope) return false;
+  if ((SIGNATURE_RANK[req.signature] ?? 0) < (SIGNATURE_RANK[e.signature] ?? 0)) return false;
+  if (e.payment !== 'none' && req.payment !== e.payment) return false;
+  return true;
+};
+
+/** Deterministic, Cedar-style: enabled DENY wins, then ALLOW, else ASK. */
+export const evaluatePolicies = (cards, req) => {
+  const active = (cards || []).filter((c) => c && c.enabled !== false);
+  const deny = active.find((c) => c.outcome === 'deny' && cardMatches(c, req));
+  if (deny) return { outcome: 'deny', decidedBy: deny };
+  const allow = active.find((c) => c.outcome === 'allow' && cardMatches(c, req));
+  if (allow) return { outcome: 'allow', decidedBy: allow };
+  return { outcome: 'ask', decidedBy: null };
+};
+
 export default function setupPolicyRoutes(app, cloudant, auditLog) {
   const requireMatchingUser = (req, res) => {
     const userId = req.body?.userId || req.query?.userId;

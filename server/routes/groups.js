@@ -13,6 +13,7 @@
  *       and the patient-side /api/user-groups endpoints.
  * PR-3 (relay/heartbeat), PR-4 (requests inbox), PR-5 (directory) follow.
  */
+import { evaluatePolicies, policySentence, POLICY_SCOPES, POLICY_PURPOSES } from './policies.js';
 import {
   generateKeyPairSync, createHash, createPrivateKey, createPublicKey,
   randomBytes, sign as edSign, verify as edVerify,
@@ -1794,6 +1795,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
           fromAlias,
           receivedAt: m.createdAt,
           action: String(envelope.action || 'message'),
+          purpose: POLICY_PURPOSES.includes(envelope.purpose) ? envelope.purpose : 'any',
           resource: String(envelope.resource || ''),
           computationClass: envelope.computationClass || null,
           payment: envelope.payment || null, // reserved (§3.4); unused in Phase 1
@@ -1921,6 +1923,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         maiaType: 'as-request',
         action: String(action || 'relay-message'),
         resource: String(resource || 'inbox'),
+        purpose: POLICY_PURPOSES.includes(req.body?.purpose) ? req.body.purpose : 'any',
         computationClass: 'answer-from-record', // §3.4 action ladder (Phase 1 floor)
         payment: null, // §3.4 reserved payment slot; unused in Phase 1
         nonce: randomBytes(8).toString('hex'),
@@ -1953,6 +1956,8 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
           fromPairwiseId: r.fromPairwiseId,
           fromAlias: r.fromAlias || null,
           action: r.action,
+          purpose: r.purpose || 'any',
+          decidedBySentence: r.decidedBySentence || null,
           resource: r.resource,
           payload: r.payload,
           receivedAt: r.receivedAt,
@@ -2078,17 +2083,44 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
   });
 
   /**
-   * Persist AS requests pulled during a refresh (Phase-1 "escalate
-   * everything" dispatch — no Cedar yet): store each as a pending
-   * maia_as_requests doc and best-effort notify the patient. A blocked
-   * sender is silently dropped (spam), the Phase-1 stand-in for a Cedar
-   * forbid. Returns the number stored.
+   * Persist AS requests pulled during a refresh. Dispatch (PR-13): each
+   * request is evaluated against the user's sharing-policy cards when its
+   * resource maps to a policy scope — an enabled DENY match drops it
+   * silently (like a blocked sender), an ALLOW match stores it
+   * pre-accepted with the deciding card's sentence snapshotted for the
+   * audit trail, and anything else stays 'pending' (ASK ME — the
+   * escalate-everything default). Messaging requests (resource 'inbox')
+   * have no policy scope and always escalate. Blocked senders drop first.
    */
   const ingestAsRequests = async (userDoc, membership, requests) => {
     let stored = 0;
     const blocked = new Set(membership.blockedSenders || []);
     for (const r of requests) {
       if (blocked.has(r.fromPairwiseId)) continue; // spam-drop
+
+      // Policy evaluation (deterministic; the AI is never in this path).
+      // Signature: 'group-member' is what the relay PROVED (signed member
+      // claim); stronger levels (NPI/Doximity) arrive in a later phase.
+      // Payment: the envelope's §3.4 slot is unused in Phase 1 → 'none'.
+      let decision = { outcome: 'ask', decidedBy: null };
+      if (POLICY_SCOPES.includes(r.resource)) {
+        decision = evaluatePolicies(userDoc.sharingPolicies || [], {
+          party: { type: 'group', groupId: membership.groupId, pairwiseId: r.fromPairwiseId },
+          purpose: r.purpose || 'any',
+          scope: r.resource,
+          signature: 'group-member',
+          payment: 'none'
+        });
+      }
+      if (decision.outcome === 'deny') {
+        auditLog.logEvent({
+          type: 'as_request_policy_denied',
+          userId: userDoc.userId,
+          details: { groupId: membership.groupId, fromPairwiseId: r.fromPairwiseId, resource: r.resource, policyId: decision.decidedBy?.id || null }
+        });
+        continue; // silent drop — the Cedar-style forbid
+      }
+
       const now = Date.now();
       const doc = {
         _id: `asreq_${now}_${randomBytes(6).toString('hex')}`,
@@ -2101,14 +2133,25 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         fromAlias: r.fromAlias || null,
         action: r.action,
         resource: r.resource,
+        purpose: r.purpose || 'any',
         computationClass: r.computationClass,
         payment: r.payment, // reserved (§3.4)
         payload: r.payload,
         nonce: r.nonce,
         createdAt: r.created || new Date(now).toISOString(),
         receivedAt: new Date(now).toISOString(),
-        status: 'pending' // Phase 1: every request escalates to the patient
+        status: decision.outcome === 'allow' ? 'accepted' : 'pending',
+        ...(decision.decidedBy ? {
+          decidedByPolicyId: decision.decidedBy.id,
+          decidedBySentence: policySentence(decision.decidedBy),
+          decidedAt: new Date(now).toISOString()
+        } : {})
       };
+      // Autonomous accept also pre-accepts the sender (same fact the
+      // human Accept button writes).
+      if (decision.outcome === 'allow') {
+        membership.acceptedSenders = Array.from(new Set([...(membership.acceptedSenders || []), r.fromPairwiseId]));
+      }
       try {
         await cloudant.saveDocument(AS_REQUESTS_DB, doc);
         stored++;
