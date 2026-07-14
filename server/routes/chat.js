@@ -243,6 +243,24 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient, app
           }
 
           retryCtx = { endpoint: profileEndpoint, profileKey: profileKeyToUse };
+
+          // Ground the agent's self-identity (Refinement 6 amendment):
+          // "What model are you?" must travel the REAL inference path and
+          // come back true — a user-runnable end-to-end wiring probe. The
+          // UI chip (metadata) and this live answer must agree; if they
+          // ever disagree, that disagreement is itself the diagnostic
+          // that the wrong agent or model is wired up. Never let the
+          // model improvise its identity (it hallucinates "GPT-4").
+          const identityModel = profileModelName || 'an unknown model';
+          if (Array.isArray(messages)) messages.unshift({
+            role: 'system',
+            content:
+              `You are MAIA, this patient's private medical AI assistant, ` +
+              `running as their dedicated agent "${profileAgentName}" on model "${identityModel}" ` +
+              `on their own MAIA deployment. If asked what AI or model you are, state exactly that ` +
+              `(agent "${profileAgentName}", model "${identityModel}") and do not speculate about ` +
+              `your architecture beyond it.`
+          });
         } else {
           return res.status(404).json({
             error: 'Private AI agent not provisioned for this user',
