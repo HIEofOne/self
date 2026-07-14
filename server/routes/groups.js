@@ -1501,37 +1501,6 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     }
   });
 
-  // POST /api/user-groups/filter-text — apply the user's privacy-filter
-  // name mapping (userDoc.privacyFilter.pseudonymMapping, same source as
-  // physician deep-link sharing) to arbitrary text. PR-7: mandatory
-  // pseudonymization before AI-derived text is shared with a peer.
-  app.post('/api/user-groups/filter-text', async (req, res) => {
-    const userId = requireMatchingUser(req, res);
-    if (!userId) return;
-    try {
-      const text = String(req.body?.text || '');
-      if (!text.trim()) return res.status(400).json({ success: false, error: 'text is required' });
-      const userDoc = await cloudant.getDocument(USERS_DB, userId);
-      const mapping = userDoc?.privacyFilter?.pseudonymMapping || [];
-      let out = text;
-      for (const { original, pseudonym } of mapping) {
-        const parts = String(original || '').split(/\s+/).filter(Boolean);
-        if (parts.length < 2) continue;
-        const firstName = parts[0];
-        const lastName = parts[parts.length - 1];
-        const pseudoParts = String(pseudonym || '').split(/\s+/).filter(Boolean);
-        const pseudoFirst = pseudoParts[0] || pseudonym;
-        const pseudoLast = pseudoParts.length >= 2 ? pseudoParts[pseudoParts.length - 1] : pseudoFirst;
-        out = out.replace(new RegExp(`${lastName}[_\\s]${firstName}`, 'gi'), `${pseudoLast}_${pseudoFirst}`);
-        out = out.replace(new RegExp(`${firstName}[_\\s]${lastName}`, 'gi'), `${pseudoFirst}_${pseudoLast}`);
-      }
-      res.json({ success: true, filtered: out, mappingCount: mapping.length });
-    } catch (error) {
-      console.error('[user-groups] filter-text failed:', error);
-      res.status(500).json({ success: false, error: 'Failed to filter text' });
-    }
-  });
-
   // POST /api/user-groups/request-join — redeem a shareable join LINK
   // (PR-9): generate pairwise keys, submit a join request to the registry,
   // and remember it on the userDoc until the admin decides.
