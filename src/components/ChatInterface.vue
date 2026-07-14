@@ -8,6 +8,21 @@
           <div class="text-body2 text-grey-7 q-mt-md">Setting up...</div>
         </div>
         <template v-else>
+        <!-- Peer thread takes over the chat area (Refinement 6, "thread
+             opens in chat area"): picked in Workbook → Groups, rendered
+             here with the identity header, request cards, and composer. -->
+        <PeerThreadView
+          v-if="peerThread"
+          :key="`${peerThread.groupId}:${peerThread.peerId}`"
+          :userId="props.user?.userId || ''"
+          :groupId="peerThread.groupId"
+          :peerId="peerThread.peerId"
+          :peerAlias="peerThread.alias"
+          :groupName="peerThread.groupName"
+          style="flex: 1; min-height: 0;"
+          @close="peerThread = null"
+        />
+        <template v-else>
         <!-- Phase 5: Passkey-only session warning banner -->
         <q-banner v-if="props.passkeyWithoutFolder" dense class="bg-amber-1 text-caption q-mb-none" style="flex-shrink: 0;">
           <template v-slot:avatar>
@@ -343,6 +358,7 @@
             </div>
           </div>
         </div>
+        </template>
         </template>
       </q-card-section>
     </q-card>
@@ -732,6 +748,7 @@
 
     <!-- My Stuff Dialog -->
     <MyStuffDialog
+      @open-peer-thread="handleOpenPeerThread"
       ref="myStuffDialogRef"
       v-model="showMyStuffDialog"
       :userId="props.user?.userId || ''"
@@ -940,6 +957,7 @@ import PdfViewerModal from './PdfViewerModal.vue';
 import TextViewerModal from './TextViewerModal.vue';
 import SavedChatsModal from './SavedChatsModal.vue';
 import MyStuffDialog from './MyStuffDialog.vue';
+import PeerThreadView from './PeerThreadView.vue';
 import { jsPDF } from 'jspdf';
 import MarkdownIt from 'markdown-it';
 import { processFileNCitations } from '../utils/fileNCitations';
@@ -1075,6 +1093,13 @@ const pdfInitialPage = ref<number | undefined>(undefined);
 const showSavedChatsModal = ref(false);
 const savedChatCount = ref(0);
 const showMyStuffDialog = ref(false);
+/** Peer conversation currently occupying the chat area (Refinement 6).
+ *  Set from Workbook → Groups (open-peer-thread); null = normal AI chat. */
+const peerThread = ref<{ groupId: string; peerId: string; alias: string | null; groupName: string } | null>(null);
+const handleOpenPeerThread = (t: { groupId: string; peerId: string; alias: string | null; groupName: string }) => {
+  peerThread.value = t;
+  showMyStuffDialog.value = false; // reveal the chat area under the Workbook
+};
 const showWorkbookClosePrompt = ref(false);
 const myStuffInitialTab = ref<string>('files');
 const myStuffDialogRef = ref<InstanceType<typeof MyStuffDialog> | null>(null);
