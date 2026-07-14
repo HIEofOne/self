@@ -763,3 +763,17 @@ and any design decisions resolved.
   the policy system. Signature is 'group-member' (what the relay proves);
   NPI/Doximity levels and payment enforcement arrive with their
   respective infrastructure. The AI remains outside the enforcement path.
+- **2026-07-14** — **Refinement 6 step 1: peer threads open in the chat
+  area.** New src/components/PeerThreadView.vue — the E2E thread as a
+  self-contained component: identity header (peer alias + "member of
+  <group>" chip + "your AI is not part of this conversation"), bubbles
+  with per-message sender labels, pending-request card
+  (Accept/Decline/Block), "auto-accepted by your policy" note, composer,
+  "Request records" dialog, and its own 5s pull. Clicking a conversation
+  in Workbook → Groups now emits open-thread → the Workbook closes and
+  the MAIN chat area renders the thread (back-arrow returns to the AI
+  chat). GroupsPanel shrinks to discovery + group management (rail,
+  invites, join links, group info); its embedded thread/composer/request
+  code was removed. Two surfaces remain by design (AG choice: "thread
+  opens in chat area"); the unified conversation rail and AI-chat
+  identity chips are candidate next steps.

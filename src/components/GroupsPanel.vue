@@ -283,119 +283,11 @@
         </div>
       </template>
 
-      <!-- Peer conversation thread -->
-      <template v-else-if="selected && selected.peerId && selectedMembership">
-        <div class="groups-main__header">
-          <div class="groups-rail__avatar" :style="{ background: avatarColor(selected.peerId) }">
-            {{ (selectedPeerAlias || '?').slice(0, 1).toUpperCase() }}
-          </div>
-          <div class="groups-main__header-text">
-            <div class="text-subtitle2">{{ selectedPeerAlias || 'Group member' }}</div>
-            <div class="text-caption text-grey-7">{{ selectedMembership.groupName }} · end-to-end encrypted</div>
-          </div>
-          <q-space />
-          <q-btn flat dense round size="sm" icon="rule" color="primary" @click="openRequestDialog">
-            <q-tooltip>Request records from {{ selectedPeerAlias || 'this member' }} — their sharing policies (or they themselves) decide</q-tooltip>
-          </q-btn>
-        </div>
-
-        <div ref="threadScrollEl" class="groups-main__scroll groups-thread">
-          <div v-if="!threadItems.length && !pendingRequestFromPeer" class="text-caption text-grey-6 text-center q-mt-lg">
-            No messages yet. Say hello — your message is end-to-end encrypted
-            to {{ selectedPeerAlias || 'this member' }}.
-          </div>
-
-          <div
-            v-for="item in threadItems"
-            :key="item.id"
-            class="groups-bubble-row"
-            :class="item.direction === 'out' ? 'is-out' : 'is-in'"
-          >
-            <div class="groups-bubble" :class="item.direction === 'out' ? 'groups-bubble--out' : 'groups-bubble--in'">
-              <div class="groups-bubble__text">{{ item.text }}</div>
-              <div class="groups-bubble__time">{{ bubbleTime(item.at) }}</div>
-            </div>
-          </div>
-
-          <!-- A request auto-accepted by a sharing policy: show WHICH card
-               decided (the audit trail teaches the policy system) -->
-          <div v-if="policyDecidedForPeer" class="text-caption text-grey-7 text-center q-my-sm">
-            <q-icon name="policy" size="14px" color="green" />
-            Auto-accepted by your policy: “{{ policyDecidedForPeer }}”
-          </div>
-
-          <!-- Pending first-contact request from this peer (Signal's
-               "message request" pattern) -->
-          <div v-if="pendingRequestFromPeer" class="groups-request-card">
-            <div class="text-body2">
-              <strong>{{ selectedPeerAlias || 'A group member' }}</strong> wants to connect
-              <span class="text-grey-7">({{ pendingRequestFromPeer.action }})</span>
-            </div>
-            <div v-if="pendingRequestFromPeer.aiSummary" class="text-caption text-grey-8 q-mt-xs">
-              {{ pendingRequestFromPeer.aiSummary }}
-            </div>
-            <div
-              v-else-if="pendingRequestFromPeer.payload"
-              class="text-caption text-grey-8 q-mt-xs"
-              style="white-space: pre-wrap; word-break: break-word"
-            >
-              {{ typeof pendingRequestFromPeer.payload === 'string' ? pendingRequestFromPeer.payload : JSON.stringify(pendingRequestFromPeer.payload) }}
-            </div>
-            <div class="text-caption text-grey-6 q-mt-xs">{{ formatDate(pendingRequestFromPeer.receivedAt) }}</div>
-            <div class="q-mt-sm q-gutter-sm">
-              <q-btn dense unelevated size="sm" color="primary" label="Accept" :loading="deciding === pendingRequestFromPeer.id" @click="decide(pendingRequestFromPeer, 'accept')" />
-              <q-btn dense flat size="sm" color="grey-8" label="Decline" :loading="deciding === pendingRequestFromPeer.id" @click="decide(pendingRequestFromPeer, 'decline')" />
-              <q-btn dense flat size="sm" color="negative" label="Block" :loading="deciding === pendingRequestFromPeer.id" @click="decide(pendingRequestFromPeer, 'block')" />
-            </div>
-          </div>
-        </div>
-
-        <!-- Composer -->
-        <div class="groups-composer">
-          <q-input
-            v-model="composerText"
-            dense outlined autogrow
-            :max-height="120"
-            placeholder="Message"
-            :disable="sending"
-            class="groups-composer__input"
-            @keydown.enter.exact.prevent="sendMessage"
-          />
-          <q-btn
-            round unelevated color="primary" icon="send" size="sm"
-            :loading="sending" :disable="!composerText.trim()"
-            @click="sendMessage"
-          />
-        </div>
-      </template>
+      <!-- Peer threads open in the MAIN chat area (Refinement 6:
+           "thread opens in chat area"). Clicking a conversation emits
+           open-thread; this pane only ever shows group info / empty. -->
     </div>
 
-    <!-- Data request (PR-13): ask a peer for part of their record. Their
-         AS decides: a matching allow card answers autonomously, a deny
-         card drops it silently, otherwise they get asked. -->
-    <q-dialog v-model="showRequestDialog">
-      <q-card style="min-width: 460px; max-width: 600px">
-        <q-card-section>
-          <div class="text-h6">Request records from {{ selectedPeerAlias || 'this member' }}</div>
-          <div class="text-caption text-grey-7">
-            Delivered to their MAIA's authorization server — their sharing
-            policies decide automatically, or they're asked. You'll see a
-            reply if and when they (or their policies) allow it.
-          </div>
-        </q-card-section>
-        <q-card-section class="q-pt-none">
-          <div class="row q-col-gutter-sm">
-            <q-select v-model="reqScope" :options="SCOPE_OPTIONS" emit-value map-options dense outlined label="What you're asking for" class="col-12" />
-            <q-select v-model="reqPurpose" :options="PURPOSE_OPTIONS" emit-value map-options dense outlined label="Purpose" class="col-12" />
-            <q-input v-model="reqNote" dense outlined autogrow label="Note (optional)" class="col-12" />
-          </div>
-        </q-card-section>
-        <q-card-actions align="right">
-          <q-btn flat label="Cancel" v-close-popup :disable="sendingDataRequest" />
-          <q-btn unelevated color="primary" label="Send request" :loading="sendingDataRequest" @click="sendDataRequest" />
-        </q-card-actions>
-      </q-card>
-    </q-dialog>
 
     <!-- Paste an invite / join link (PR-11: works for groups hosted on
          ANY MAIA deployment — your account stays right here) -->
@@ -428,13 +320,17 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useQuasar } from 'quasar';
-import { SCOPE_OPTIONS, PURPOSE_OPTIONS, type Scope, type Purpose } from '../utils/policyCards';
 
 const $q = useQuasar();
 
 const props = defineProps<{ userId: string }>();
+// Refinement 6 ("thread opens in chat area"): picking a conversation
+// hands it to the main chat area; this panel is discovery + group info.
+const emit = defineEmits<{
+  'open-thread': [payload: { groupId: string; peerId: string; alias: string | null; groupName: string }];
+}>();
 
 interface Membership {
   groupId: string;
@@ -515,13 +411,9 @@ interface AsRequest {
   aiSummary: string | null;
 }
 const requests = ref<AsRequest[]>([]);
-const deciding = ref<string | null>(null);
 
 // ── Selection (Signal-style): a group (info pane) or a peer (thread) ──
 const selected = ref<{ groupId: string; peerId: string | null } | null>(null);
-const composerText = ref('');
-const sending = ref(false);
-const threadScrollEl = ref<HTMLElement | null>(null);
 
 const selectedMembership = computed(() =>
   selected.value ? memberships.value.find((m) => m.groupId === selected.value?.groupId) || null : null
@@ -562,9 +454,7 @@ const aliasFor = (groupId: string, peerId: string): string | null => {
   return null;
 };
 
-const selectedPeerAlias = computed(() =>
-  selected.value?.peerId ? aliasFor(selected.value.groupId, selected.value.peerId) : null
-);
+
 
 // ── Rail conversations: one item per peer with any history/request,
 //    PLUS the group's mentors (directories auto-load on mount) so a
@@ -634,39 +524,11 @@ const conversationsFor = (groupId: string): Convo[] => {
     .sort((a, b) => (b.lastAt || '').localeCompare(a.lastAt || ''));
 };
 
-// ── Thread for the selected peer: merge in + out, oldest first ──────
-interface ThreadItem { id: string; direction: 'in' | 'out'; text: string; at: string }
-const threadItems = computed<ThreadItem[]>(() => {
-  if (!selected.value?.peerId) return [];
-  const { groupId, peerId } = selected.value;
-  const items: ThreadItem[] = [];
-  for (const msg of messagesByGroup.value[groupId] || []) {
-    if (msg.fromPairwiseId === peerId) items.push({ id: msg.id, direction: 'in', text: msg.text, at: msg.receivedAt });
-  }
-  for (const s of sentByGroup.value[groupId] || []) {
-    if (s.toPairwiseId === peerId) items.push({ id: s.id, direction: 'out', text: s.text, at: s.sentAt });
-  }
-  return items.sort((a, b) => (a.at || '').localeCompare(b.at || ''));
-});
 
-/** Sentence of the policy that auto-decided the most recent request
- *  from the selected peer (empty when every decision was human). */
-const policyDecidedForPeer = computed(() => {
-  if (!selected.value?.peerId) return '';
-  const { groupId, peerId } = selected.value;
-  const r = requests.value.find(
-    (x) => x.groupId === groupId && x.fromPairwiseId === peerId && x.decidedBySentence
-  );
-  return r?.decidedBySentence || '';
-});
 
-const pendingRequestFromPeer = computed(() => {
-  if (!selected.value?.peerId) return null;
-  const { groupId, peerId } = selected.value;
-  return requests.value.find(
-    (r) => r.groupId === groupId && r.fromPairwiseId === peerId && r.status === 'pending'
-  ) || null;
-});
+
+
+
 
 // ── Selection actions ───────────────────────────────────────────────
 const selectGroup = async (m: Membership) => {
@@ -679,16 +541,13 @@ const selectGroup = async (m: Membership) => {
 };
 
 const selectPeer = async (m: Membership, peerId: string) => {
-  selected.value = { groupId: m.groupId, peerId };
   markThreadSeen(m.groupId, peerId);
-  composerText.value = '';
-  await nextTick();
-  scrollThreadToBottom();
-};
-
-const scrollThreadToBottom = () => {
-  const el = threadScrollEl.value;
-  if (el) el.scrollTop = el.scrollHeight;
+  emit('open-thread', {
+    groupId: m.groupId,
+    peerId,
+    alias: aliasFor(m.groupId, peerId),
+    groupName: m.groupName
+  });
 };
 
 // ── Presentation helpers ────────────────────────────────────────────
@@ -713,13 +572,7 @@ const shortTime = (iso: string): string => {
   } catch { return ''; }
 };
 
-const bubbleTime = (iso: string): string => {
-  if (!iso) return '';
-  try {
-    const d = new Date(iso);
-    return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
-  } catch { return ''; }
-};
+
 
 /** Stable pastel avatar color from the peer id. */
 const avatarColor = (peerId: string): string => {
@@ -1021,42 +874,7 @@ const leaveGroup = async (m: Membership) => {
   }
 };
 
-// ── Send from the composer ──────────────────────────────────────────
-const sendMessage = async () => {
-  if (!selected.value?.peerId || !composerText.value.trim() || sending.value) return;
-  const { groupId, peerId } = selected.value;
-  sending.value = true;
-  try {
-    const res = await fetch('/api/user-groups/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({
-        userId: props.userId,
-        groupId,
-        toPairwiseId: peerId,
-        text: composerText.value.trim()
-      })
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
-    // Append the server-recorded sent message so the thread updates
-    // immediately (no full reload needed).
-    if (data.sent) {
-      sentByGroup.value = {
-        ...sentByGroup.value,
-        [groupId]: [...(sentByGroup.value[groupId] || []), data.sent]
-      };
-    }
-    composerText.value = '';
-    await nextTick();
-    scrollThreadToBottom();
-  } catch (err) {
-    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to send message' });
-  } finally {
-    sending.value = false;
-  }
-};
+
 
 // ── Paste an invite/join link (PR-11: existing-MAIA join) ──────────
 const showPasteLinkDialog = ref(false);
@@ -1261,71 +1079,10 @@ const copyInviteLink = async () => {
   }
 };
 
-// ── Outgoing data requests (PR-13) ─────────────────────────────────
-const showRequestDialog = ref(false);
-const reqScope = ref<Scope>('patient-summary');
-const reqPurpose = ref<Purpose>('clinical');
-const reqNote = ref('');
-const sendingDataRequest = ref(false);
 
-const openRequestDialog = () => {
-  reqNote.value = '';
-  showRequestDialog.value = true;
-};
-
-const sendDataRequest = async () => {
-  if (!selected.value?.peerId || sendingDataRequest.value) return;
-  sendingDataRequest.value = true;
-  try {
-    const res = await fetch('/api/user-groups/request', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({
-        userId: props.userId,
-        groupId: selected.value.groupId,
-        toPairwiseId: selected.value.peerId,
-        action: 'share-request',
-        resource: reqScope.value,
-        purpose: reqPurpose.value,
-        payload: reqNote.value.trim() || null
-      })
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
-    showRequestDialog.value = false;
-    $q.notify({ type: 'positive', message: 'Request sent — their sharing policies (or they themselves) will decide.' });
-  } catch (err) {
-    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to send request' });
-  } finally {
-    sendingDataRequest.value = false;
-  }
-};
 
 // ── Requests (AS, Phase 1 — every request escalates to you) ─────────
-const decide = async (r: AsRequest, decision: 'accept' | 'decline' | 'block') => {
-  deciding.value = r.id;
-  try {
-    const res = await fetch(`/api/user-groups/requests/${encodeURIComponent(r.id)}/decision`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({ userId: props.userId, decision })
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
-    await loadRequests();
-    $q.notify({ type: 'positive', message: `Request ${data.status}.` });
-    // Blocking someone removes the conversation with them.
-    if (decision === 'block' && selected.value?.peerId === r.fromPairwiseId) {
-      selected.value = { groupId: r.groupId, peerId: null };
-    }
-  } catch (err) {
-    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to record decision' });
-  } finally {
-    deciding.value = null;
-  }
-};
+
 
 onMounted(async () => {
   loadThreadSeen();

@@ -1089,7 +1089,7 @@
 
           <!-- Groups Tab (Groups & AS feature — Documentation/Groups.md §7.4) -->
           <q-tab-panel name="groups" class="q-pa-none" style="display: flex; flex-direction: column; height: 100%;">
-            <GroupsPanel :userId="userId" style="flex: 1; min-height: 0;" />
+            <GroupsPanel :userId="userId" style="flex: 1; min-height: 0;" @open-thread="(t) => emit('open-peer-thread', t)" />
           </q-tab-panel>
 
           <q-tab-panel name="policies" class="q-pa-none" style="overflow-y: auto;">
@@ -1988,6 +1988,7 @@ const emit = defineEmits<{
   // (showAgentSetupDialog, wizardDismissed, wizardFlowPhase);
   // we just forward the user's click.
   'wizard-requested': [];
+  'open-peer-thread': [payload: { groupId: string; peerId: string; alias: string | null; groupName: string }];
   'provisioning-event': [data: Record<string, any>];
 }>();
 
