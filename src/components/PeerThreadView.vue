@@ -59,8 +59,14 @@
       </div>
     </div>
 
-    <!-- Composer -->
+    <!-- Composer. The addressee chip mirrors the AI chat's consultant
+         chip: here it names the human peer (teal) so it's unmistakable
+         that this message goes to a person over the E2E channel, not to
+         an AI. (The future "Ask my AI" toggle swaps this chip's target.) -->
     <div class="peer-thread__composer">
+      <q-chip dense color="teal" text-color="white" icon="person" :label="`To: ${peerAlias || 'member'}`" style="flex: 0 0 auto">
+        <q-tooltip>This message is sent to a group member, end-to-end encrypted</q-tooltip>
+      </q-chip>
       <q-input
         v-model="composerText"
         dense outlined autogrow

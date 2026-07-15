@@ -341,9 +341,44 @@
                 @change="handleFileSelect"
               />
             </div>
-            <!-- AI-provider dropdown removed: the conversation rail is now
-                 the single counterparty selector. selectedProvider is still
-                 the active AI, driven by the rail. -->
+            <!-- Consultant chip (Refinement 6 step 4): the rail highlights
+                 the THREAD (new AI chat / stored chat); this chip names the
+                 CONSULTANT who will answer the NEXT message — answering
+                 "which AI am I about to access" at the exact spot the doubt
+                 occurs. Click to switch consultant WITHOUT leaving the
+                 thread. Shading matches the rail (private = deep-purple,
+                 public = blue-grey). -->
+            <div class="col-auto">
+              <q-chip
+                clickable
+                dense
+                :color="isPrivateAiLabel(selectedProvider) ? 'deep-purple' : 'blue-grey'"
+                text-color="white"
+                icon="smart_toy"
+                :label="`To: ${selectedProvider}`"
+                style="max-width: 260px"
+              >
+                <q-tooltip>Your next message goes to this AI — click to switch</q-tooltip>
+                <q-menu auto-close>
+                  <q-list style="min-width: 220px">
+                    <q-item-label header class="q-py-xs">Ask a different AI</q-item-label>
+                    <q-item
+                      v-for="e in aiRailEntries"
+                      :key="e.label"
+                      clickable
+                      :active="e.label === selectedProvider"
+                      @click="handleConsultantPick(e.label)"
+                    >
+                      <q-item-section avatar style="min-width: 32px">
+                        <q-icon :name="e.kind === 'private' ? 'smart_toy' : 'public'"
+                                :color="e.kind === 'private' ? 'deep-purple' : 'blue-grey'" size="18px" />
+                      </q-item-section>
+                      <q-item-section>{{ e.label }}</q-item-section>
+                    </q-item>
+                  </q-list>
+                </q-menu>
+              </q-chip>
+            </div>
             <div class="col">
               <q-input
                 v-model="inputMessage"
@@ -1171,10 +1206,25 @@ const aiRailEntries = computed(() =>
 const activePeerKey = computed(() =>
   peerThread.value ? { groupId: peerThread.value.groupId, peerId: peerThread.value.peerId } : null
 );
+// Rail click on a consultant. A thread and a consultant are different
+// things: the rail highlights the THREAD, the composer chip names the
+// consultant. So clicking an AI while inside a STORED chat switches the
+// consultant but keeps you in that thread (kind stays 'stored'); from a
+// peer thread or a plain AI chat it selects/returns to a live AI chat.
 const handleRailSelectAi = (label: string) => {
+  if (railActiveKind.value === 'stored' && !peerThread.value) {
+    selectedProvider.value = label; // switch consultant, stay in the thread
+    return;
+  }
   peerThread.value = null;
   railActiveKind.value = 'ai';
   selectedProvider.value = label;
+};
+// Composer consultant chip: same "switch who answers, keep the thread"
+// semantics, from either an AI or a stored-chat thread.
+const handleConsultantPick = (label: string) => {
+  selectedProvider.value = label;
+  if (railActiveKind.value === 'peer') { peerThread.value = null; railActiveKind.value = 'ai'; }
 };
 const handleRailOpenStored = (chat: any) => {
   peerThread.value = null;
@@ -7335,6 +7385,14 @@ const handleChatSelected = async (chat: any) => {
     messages.value = normalizedHistory;
     originalMessages.value = JSON.parse(JSON.stringify(normalizedHistory)); // Keep original in sync
     trulyOriginalMessages.value = JSON.parse(JSON.stringify(normalizedHistory)); // Store truly original for filtering
+    // Default the consultant to whoever last answered in THIS thread, so
+    // the composer chip honestly continues the conversation (the user can
+    // still switch in one click). Falls back to the current selection.
+    const lastAssistant = [...normalizedHistory].reverse().find((m) => m.authorType === 'assistant' || m.role === 'assistant');
+    const resumedLabel = lastAssistant ? assistantLabelForKey(lastAssistant.providerKey) : '';
+    if (resumedLabel && providerOptions.value.some((o) => o.label === resumedLabel)) {
+      selectedProvider.value = resumedLabel;
+    }
   }
   
   // Load the uploaded files
