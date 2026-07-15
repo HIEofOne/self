@@ -1,32 +1,28 @@
 <template>
   <div class="conv-rail">
-    <!-- Private AI -->
-    <div class="conv-rail__header conv-rail__header--private-ai">Private AI</div>
+    <!-- Current conversation: the live AI chat, always present, labeled by
+         the last question. Which AI answers is chosen in the composer's
+         "To:" selector — the rail is the THREAD list, not the AI picker. -->
+    <div class="conv-rail__header conv-rail__header--current">Current conversation</div>
     <button
-      v-for="e in privateAiEntries" :key="`pai:${e.label}`"
       type="button"
-      class="conv-rail__item conv-rail__item--private-ai"
-      :class="{ 'is-active': props.activeKind === 'ai' && activeProviderLabel === e.label }"
-      @click="emit('select-ai', e.label)"
+      class="conv-rail__item conv-rail__item--current"
+      :class="{ 'is-active': props.activeKind === 'ai' }"
+      @click="emit('open-current')"
     >
       <q-icon name="smart_toy" size="16px" />
-      <span class="conv-rail__label">{{ e.label }}</span>
+      <span class="conv-rail__label">{{ currentConversationLabel }}</span>
     </button>
-    <div v-if="!privateAiEntries.length" class="conv-rail__empty">Not set up yet</div>
-
-    <!-- Public AI -->
-    <div class="conv-rail__header conv-rail__header--public-ai">Public AI</div>
-    <button
-      v-for="e in publicAiEntries" :key="`cai:${e.label}`"
-      type="button"
-      class="conv-rail__item conv-rail__item--public-ai"
-      :class="{ 'is-active': props.activeKind === 'ai' && activeProviderLabel === e.label }"
-      @click="emit('select-ai', e.label)"
-    >
-      <q-icon name="public" size="16px" />
-      <span class="conv-rail__label">{{ e.label }}</span>
-    </button>
-    <div v-if="!publicAiEntries.length" class="conv-rail__empty">None available</div>
+    <div class="conv-rail__save-row">
+      <q-btn flat dense size="sm" color="primary" icon="save" label="SAVE"
+             :disable="!canSaveToGroup || savingDisabled" @click.stop="emit('save-group')">
+        <q-tooltip>Save this conversation into your Stored Chats</q-tooltip>
+      </q-btn>
+      <q-btn flat dense size="sm" color="primary" icon="download" label="LOCAL"
+             :disable="!canSaveLocally || savingDisabled" @click.stop="emit('save-local')">
+        <q-tooltip>Save this conversation to your local folder</q-tooltip>
+      </q-btn>
+    </div>
 
     <!-- Stored Chats (including deep links) -->
     <div class="conv-rail__header conv-rail__header--stored">Stored Chats</div>
@@ -68,25 +64,26 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, onMounted, onUnmounted } from 'vue';
 
 const props = defineProps<{
   userId: string;
-  aiEntries: Array<{ label: string; kind: 'private' | 'public' }>;
   activeKind: 'ai' | 'stored' | 'peer';
-  activeProviderLabel: string;
   activePeer: { groupId: string; peerId: string } | null;
   activeStoredId: string | null;
+  currentConversationLabel: string;
+  canSaveLocally: boolean;
+  canSaveToGroup: boolean;
+  savingDisabled: boolean;
 }>();
 const emit = defineEmits<{
-  'select-ai': [label: string];
+  'open-current': [];
+  'save-local': [];
+  'save-group': [];
   'open-peer': [payload: { groupId: string; peerId: string; alias: string | null; groupName: string }];
   'open-stored': [chat: any];
   'open-groups': [];
 }>();
-
-const privateAiEntries = computed(() => props.aiEntries.filter((e) => e.kind === 'private'));
-const publicAiEntries = computed(() => props.aiEntries.filter((e) => e.kind === 'public'));
 
 const avatarColor = (peerId: string): string => {
   let h = 0;
@@ -188,10 +185,15 @@ onUnmounted(() => { if (timer) clearInterval(timer); });
   z-index: 1;
 
   // Category accents — MUST match the message-chip colors in ChatInterface.
-  &--private-ai { color: #5e35b1; }   // deep-purple
-  &--public-ai  { color: #546e7a; }   // blue-grey
+  &--current    { color: #5e35b1; }   // deep-purple (AI conversation)
   &--stored     { color: #6d4c41; }   // brown
   &--group      { color: #00796b; }   // teal
+}
+.conv-rail__save-row {
+  display: flex;
+  gap: 4px;
+  padding: 2px 8px 8px;
+  border-bottom: 1px solid #f0f0f0;
 }
 .conv-rail__item {
   display: flex;
@@ -211,8 +213,7 @@ onUnmounted(() => { if (timer) clearInterval(timer); });
   &.is-active { font-weight: 600; }
 
   // Shading per category (tint + active left-border), matching the chips.
-  &--private-ai { &.is-active { background: #ede7f6; border-left-color: #5e35b1; } }
-  &--public-ai  { &.is-active { background: #eceff1; border-left-color: #546e7a; } }
+  &--current    { &.is-active { background: #ede7f6; border-left-color: #5e35b1; } }
   &--stored     { &.is-active { background: #efebe9; border-left-color: #6d4c41; } }
   &--group      { &.is-active { background: #e0f2f1; border-left-color: #00796b; } }
 }

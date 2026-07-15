@@ -14,12 +14,16 @@
           v-if="!isDeepLink"
           ref="conversationRailRef"
           :userId="props.user?.userId || ''"
-          :aiEntries="aiRailEntries"
           :activeKind="railActiveKind"
-          :activeProviderLabel="selectedProvider"
           :activePeer="activePeerKey"
           :activeStoredId="currentSavedChatId"
-          @select-ai="handleRailSelectAi"
+          :currentConversationLabel="currentConversationLabel"
+          :canSaveLocally="canSaveLocally"
+          :canSaveToGroup="canSaveToGroup"
+          :savingDisabled="isStreaming"
+          @open-current="handleOpenCurrent"
+          @save-local="saveLocally"
+          @save-group="saveToGroup"
           @open-peer="handleOpenPeerThread"
           @open-stored="handleRailOpenStored"
           @open-groups="handleRailOpenGroups"
@@ -227,45 +231,13 @@
           </q-card>
         </q-dialog>
 
-        <!-- Input Area with Provider Selector -->
-        <div class="q-pa-md" style="flex-shrink: 0; border-top: 1px solid #eee;">
-          <!-- Save Buttons -->
-          <div class="row q-gutter-sm q-mb-sm" v-if="messages.length > 0">
-            <div class="col"></div>
-            <div class="col-auto">
-              <q-btn 
-                flat 
-                dense 
-                size="sm"
-                color="primary" 
-                label="SAVE LOCALLY"
-                icon="save"
-                @click="saveLocally"
-                :disable="isStreaming || !canSaveLocally"
-              />
-              <q-btn 
-                flat 
-                dense 
-                size="sm"
-                color="secondary" 
-                label="SAVE TO GROUP"
-                icon="group"
-                @click="saveToGroup"
-                :disable="isStreaming || !canSaveToGroup"
-              />
-              <q-btn 
-                flat 
-                dense 
-                size="sm"
-                color="primary" 
-                :label="`${savedChatCount} SAVED CHATS`"
-                icon="history"
-                @click="showSavedChats"
-                :disable="!props.user?.userId"
-              />
-            </div>
-          </div>
-          
+        </template>
+        </div><!-- /chat-content-col -->
+        </div><!-- /chat-with-rail -->
+        <!-- Full-width composer bar (Refinement 6): spans the whole
+             width beneath the rail + content; hidden while a peer
+             thread (which has its own composer) is active. -->
+        <div v-if="!peerThread" class="composer-bar q-pa-md" style="flex-shrink: 0; border-top: 1px solid #eee;">
           <!-- Passkey nudge (quick-start tier): a temporary account's only
                credential is this browser's local storage — a group member
                who wants to return from another device (or survive a
@@ -405,9 +377,6 @@
             </div>
           </div>
         </div>
-        </template>
-        </div><!-- /chat-content-col -->
-        </div><!-- /chat-with-rail -->
         </template>
       </q-card-section>
     </q-card>
@@ -1206,26 +1175,25 @@ const aiRailEntries = computed(() =>
 const activePeerKey = computed(() =>
   peerThread.value ? { groupId: peerThread.value.groupId, peerId: peerThread.value.peerId } : null
 );
-// Rail click on a consultant. A thread and a consultant are different
-// things: the rail highlights the THREAD, the composer chip names the
-// consultant. So clicking an AI while inside a STORED chat switches the
-// consultant but keeps you in that thread (kind stays 'stored'); from a
-// peer thread or a plain AI chat it selects/returns to a live AI chat.
-const handleRailSelectAi = (label: string) => {
-  if (railActiveKind.value === 'stored' && !peerThread.value) {
-    selectedProvider.value = label; // switch consultant, stay in the thread
-    return;
-  }
-  peerThread.value = null;
-  railActiveKind.value = 'ai';
-  selectedProvider.value = label;
-};
-// Composer consultant chip: same "switch who answers, keep the thread"
-// semantics, from either an AI or a stored-chat thread.
+// The rail lists THREADS; the composer "To:" selector picks the
+// consultant (which AI answers next). Picking a consultant keeps you in
+// the current thread (AI or stored — both continue with the chosen AI);
+// from a peer thread it returns to the live/current AI conversation.
 const handleConsultantPick = (label: string) => {
   selectedProvider.value = label;
   if (railActiveKind.value === 'peer') { peerThread.value = null; railActiveKind.value = 'ai'; }
 };
+// "Current conversation" rail entry: focus the live AI chat.
+const handleOpenCurrent = () => {
+  peerThread.value = null;
+  railActiveKind.value = 'ai';
+};
+// Label the current-conversation thread by the last question asked.
+const currentConversationLabel = computed(() => {
+  const lastUser = [...messages.value].reverse().find((m) => (m.authorType || m.role) === 'user');
+  const t = lastUser?.content?.replace(/\s+/g, ' ').trim();
+  return t ? (t.length > 40 ? t.slice(0, 40) + '…' : t) : 'New conversation';
+});
 const handleRailOpenStored = (chat: any) => {
   peerThread.value = null;
   railActiveKind.value = 'stored';
@@ -7273,10 +7241,14 @@ const saveToGroup = async () => {
   }
 };
 
+// Retained for the saved-chats modal (still opened elsewhere); the
+// composer's SAVED CHATS button was removed in favor of the rail list.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 const showSavedChats = () => {
   showSavedChatsModal.value = true;
   loadSavedChatCount();
 };
+void showSavedChats;
 
 const loadSavedChatCount = async () => {
   if (!props.user?.userId) return;
