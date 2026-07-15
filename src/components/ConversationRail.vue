@@ -100,8 +100,13 @@ const loadStoredChats = async () => {
     const data = await res.json();
     if (!res.ok) return;
     storedChats.value = (data.chats || []).map((c: any) => {
-      const first = (c.chatHistory || []).find((m: any) => m?.content);
-      const preview = first ? String(first.content).replace(/\s+/g, ' ').slice(0, 32) : '';
+      // Title by the LAST question asked (matches the live "Current
+      // conversation" label) — not the first message, which is usually
+      // the preset "Click SEND…" prompt.
+      const hist = c.chatHistory || [];
+      const lastUser = [...hist].reverse().find((m: any) => (m?.authorType || m?.role) === 'user' && m?.content);
+      const src = lastUser || hist.find((m: any) => m?.content);
+      const preview = src ? String(src.content).replace(/\s+/g, ' ').slice(0, 32) : '';
       const date = (c.updatedAt || c.createdAt || '').slice(0, 10);
       return { _id: c._id, isDeepLink: !!c.shareId, raw: c, title: preview || `Chat ${date}` };
     }).sort((a: StoredChat, b: StoredChat) =>

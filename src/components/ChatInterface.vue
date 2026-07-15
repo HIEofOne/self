@@ -39,6 +39,8 @@
           :peerId="peerThread.peerId"
           :peerAlias="peerThread.alias"
           :groupName="peerThread.groupName"
+          :aiEntries="aiRailEntries"
+          :consult="consultAiOnce"
           style="flex: 1; min-height: 0;"
           @close="handlePeerThreadClose"
         />
@@ -1187,6 +1189,31 @@ const handleConsultantPick = (label: string) => {
 const handleOpenCurrent = () => {
   peerThread.value = null;
   railActiveKind.value = 'ai';
+};
+// One-shot AI consultation used from inside a peer thread (Refinement 6:
+// consult any AI even in a group thread). Non-streaming; returns the
+// answer text. The AI is never a participant in the E2E channel — the
+// answer is private to the patient until they choose to share it.
+const consultAiOnce = async (label: string, question: string): Promise<string> => {
+  const key = getProviderKey(label);
+  const body: Record<string, unknown> = {
+    userId: props.user?.userId,
+    messages: [{ role: 'user', content: question }]
+  };
+  if (key === 'digitalocean') {
+    const prof = privateAiProfiles.value.find((p) => p.label === label);
+    body.agentProfileKey = prof?.key || 'default';
+  }
+  const res = await fetch(`/api/chat/${key}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(body)
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  const answer = data.message?.content ?? data.content ?? data.response ?? data.text ?? '';
+  return typeof answer === 'string' ? answer : JSON.stringify(answer);
 };
 // Label the current-conversation thread by the last question asked.
 const currentConversationLabel = computed(() => {
