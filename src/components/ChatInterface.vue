@@ -8,9 +8,24 @@
           <div class="text-body2 text-grey-7 q-mt-md">Setting up...</div>
         </div>
         <template v-else>
+        <!-- Unified counterparty rail + chat content. -->
+        <div class="chat-with-rail">
+        <ConversationRail
+          v-if="!isDeepLink"
+          ref="conversationRailRef"
+          :userId="props.user?.userId || ''"
+          :aiEntries="aiRailEntries"
+          :activeProviderLabel="selectedProvider"
+          :activePeer="activePeerKey"
+          :activeStoredId="currentSavedChatId"
+          @select-ai="handleRailSelectAi"
+          @open-peer="handleOpenPeerThread"
+          @open-stored="handleRailOpenStored"
+          @open-groups="handleRailOpenGroups"
+        />
+        <div class="chat-content-col">
         <!-- Peer thread takes over the chat area (Refinement 6, "thread
-             opens in chat area"): picked in Workbook → Groups, rendered
-             here with the identity header, request cards, and composer. -->
+             opens in chat area"): picked in the rail / Workbook → Groups. -->
         <PeerThreadView
           v-if="peerThread"
           :key="`${peerThread.groupId}:${peerThread.peerId}`"
@@ -72,7 +87,7 @@
               :class="msg.role === 'user' ? 'text-right' : 'text-left'"
             >
               <q-badge 
-                :color="msg.role === 'user' ? 'primary' : 'secondary'"
+                :color="msg.role === 'user' ? 'primary' : assistantChipColor(msg)"
                 :label="getMessageLabel(msg)"
               />
               <div 
@@ -118,7 +133,7 @@
               :class="msg.role === 'user' ? 'text-right' : 'text-left'"
             >
               <q-badge 
-                :color="msg.role === 'user' ? 'primary' : 'secondary'"
+                :color="msg.role === 'user' ? 'primary' : assistantChipColor(msg)"
                 :label="getMessageLabel(msg)"
               />
               <div 
@@ -325,20 +340,9 @@
                 @change="handleFileSelect"
               />
             </div>
-            <div class="col-auto">
-              <q-select
-                v-model="selectedProvider"
-                :options="providerOptions"
-                emit-value
-                map-options
-                dense
-                outlined
-                behavior="menu"
-                style="min-width: 150px"
-              >
-                <q-tooltip>Select AI provider: Private AI uses your knowledge base, Public AIs see only chat content</q-tooltip>
-              </q-select>
-            </div>
+            <!-- AI-provider dropdown removed: the conversation rail is now
+                 the single counterparty selector. selectedProvider is still
+                 the active AI, driven by the rail. -->
             <div class="col">
               <q-input
                 v-model="inputMessage"
@@ -366,6 +370,8 @@
           </div>
         </div>
         </template>
+        </div><!-- /chat-content-col -->
+        </div><!-- /chat-with-rail -->
         </template>
       </q-card-section>
     </q-card>
@@ -998,6 +1004,7 @@ import TextViewerModal from './TextViewerModal.vue';
 import SavedChatsModal from './SavedChatsModal.vue';
 import MyStuffDialog from './MyStuffDialog.vue';
 import PeerThreadView from './PeerThreadView.vue';
+import ConversationRail from './ConversationRail.vue';
 import { jsPDF } from 'jspdf';
 import MarkdownIt from 'markdown-it';
 import { processFileNCitations } from '../utils/fileNCitations';
@@ -1139,6 +1146,36 @@ const peerThread = ref<{ groupId: string; peerId: string; alias: string | null; 
 const handleOpenPeerThread = (t: { groupId: string; peerId: string; alias: string | null; groupName: string }) => {
   peerThread.value = t;
   showMyStuffDialog.value = false; // reveal the chat area under the Workbook
+};
+
+// ── Conversation rail (unified counterparty selector) ───────────────
+const conversationRailRef = ref<InstanceType<typeof ConversationRail> | null>(null);
+const aiRailEntries = computed(() =>
+  providerOptions.value.map((o) => ({
+    label: o.label,
+    kind: (isPrivateAiLabel(o.label) ? 'private' : 'public') as 'private' | 'public'
+  }))
+);
+const activePeerKey = computed(() =>
+  peerThread.value ? { groupId: peerThread.value.groupId, peerId: peerThread.value.peerId } : null
+);
+const handleRailSelectAi = (label: string) => {
+  peerThread.value = null;
+  selectedProvider.value = label;
+};
+const handleRailOpenStored = (chat: any) => {
+  peerThread.value = null;
+  void handleChatSelected(chat);
+};
+const handleRailOpenGroups = () => {
+  myStuffInitialTab.value = 'groups';
+  showMyStuffDialog.value = true;
+};
+/** Chip color for an assistant message — matches the rail category
+ *  shading (Private AI = deep-purple, Public AI = blue-grey). */
+const assistantChipColor = (msg: Message): string => {
+  const key = msg.providerKey || (isPrivateAiLabel(msg.authorLabel || msg.name || '') ? 'digitalocean' : '');
+  return key === 'digitalocean' ? 'deep-purple' : 'blue-grey';
 };
 
 // ── Unified share action (Refinement 6): AI answer → group peer ──────
@@ -8981,6 +9018,20 @@ defineExpose({
 .chat-interface {
   width: 100%;
   height: 100vh;
+}
+
+.chat-with-rail {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+}
+.chat-content-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .chat-interface .q-card {

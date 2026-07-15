@@ -791,3 +791,15 @@ and any design decisions resolved.
   Refinement 6 ("one chat, three doors") is now complete: threads in the
   chat area (step 1), grounded identity chips/probe (step 2), one share
   action (step 3).
+- **2026-07-14** — **Unified conversation rail (chat-area counterparty
+  selector).** New src/components/ConversationRail.vue: a left sidebar in
+  the chat area listing every counterparty under shaded category headers
+  — Private AI, Public AI, Stored Chats (incl. deep links), and one
+  section per Group with its peer conversations. Category accents MATCH
+  the message-chip color (Private AI deep-purple, Public AI blue-grey,
+  Stored brown, Group teal; user chips stay primary/blue). The bottom
+  AI-provider dropdown is REMOVED — the rail drives selectedProvider;
+  stored chats load via handleChatSelected; peers open PeerThreadView;
+  each group's ＋ opens the Groups tab. Self-fetches memberships +
+  messages + saved chats (15s); hidden for deep-link sessions; sits just
+  right of the Workbook rail.
