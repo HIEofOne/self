@@ -7292,6 +7292,11 @@ const handleChatDeleted = (chatId: string) => {
 const handleChatSelected = async (chat: any) => {
   currentSavedChatId.value = chat._id || null;
   currentSavedChatShareId.value = chat.shareId || null;
+  // A stored chat is a LIVE conversation the user (or a deep-link peer)
+  // can keep extending — highlight it as the active counterparty from
+  // whatever opened it (rail, Saved Chats tab, or deep-link load).
+  peerThread.value = null;
+  railActiveKind.value = 'stored';
   if (deepLinkShareId.value) {
     hasLoadedDeepLinkChat.value = true;
     deepLinkInfoLocal.value = {
