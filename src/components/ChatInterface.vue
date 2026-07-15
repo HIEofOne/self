@@ -15,6 +15,7 @@
           ref="conversationRailRef"
           :userId="props.user?.userId || ''"
           :aiEntries="aiRailEntries"
+          :activeKind="railActiveKind"
           :activeProviderLabel="selectedProvider"
           :activePeer="activePeerKey"
           :activeStoredId="currentSavedChatId"
@@ -35,7 +36,7 @@
           :peerAlias="peerThread.alias"
           :groupName="peerThread.groupName"
           style="flex: 1; min-height: 0;"
-          @close="peerThread = null"
+          @close="handlePeerThreadClose"
         />
         <template v-else>
         <!-- Phase 5: Passkey-only session warning banner -->
@@ -1145,11 +1146,22 @@ const showMyStuffDialog = ref(false);
 const peerThread = ref<{ groupId: string; peerId: string; alias: string | null; groupName: string } | null>(null);
 const handleOpenPeerThread = (t: { groupId: string; peerId: string; alias: string | null; groupName: string }) => {
   peerThread.value = t;
+  railActiveKind.value = 'peer';
   showMyStuffDialog.value = false; // reveal the chat area under the Workbook
+};
+// Back-arrow out of a peer thread returns to the live AI conversation.
+const handlePeerThreadClose = () => {
+  peerThread.value = null;
+  railActiveKind.value = 'ai';
 };
 
 // ── Conversation rail (unified counterparty selector) ───────────────
 const conversationRailRef = ref<InstanceType<typeof ConversationRail> | null>(null);
+// Single source of truth for which rail row is highlighted. Deriving it
+// from currentSavedChatId + peerThread + selectedProvider conflicted:
+// saving/loading a chat set currentSavedChatId, which stole the highlight
+// from the AI and made the rail look "stuck / no AI selected".
+const railActiveKind = ref<'ai' | 'stored' | 'peer'>('ai');
 const aiRailEntries = computed(() =>
   providerOptions.value.map((o) => ({
     label: o.label,
@@ -1161,10 +1173,12 @@ const activePeerKey = computed(() =>
 );
 const handleRailSelectAi = (label: string) => {
   peerThread.value = null;
+  railActiveKind.value = 'ai';
   selectedProvider.value = label;
 };
 const handleRailOpenStored = (chat: any) => {
   peerThread.value = null;
+  railActiveKind.value = 'stored';
   void handleChatSelected(chat);
 };
 const handleRailOpenGroups = () => {

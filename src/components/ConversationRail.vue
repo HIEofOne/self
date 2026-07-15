@@ -6,7 +6,7 @@
       v-for="e in privateAiEntries" :key="`pai:${e.label}`"
       type="button"
       class="conv-rail__item conv-rail__item--private-ai"
-      :class="{ 'is-active': !activePeer && !activeStoredId && activeProviderLabel === e.label }"
+      :class="{ 'is-active': props.activeKind === 'ai' && activeProviderLabel === e.label }"
       @click="emit('select-ai', e.label)"
     >
       <q-icon name="smart_toy" size="16px" />
@@ -20,7 +20,7 @@
       v-for="e in publicAiEntries" :key="`cai:${e.label}`"
       type="button"
       class="conv-rail__item conv-rail__item--public-ai"
-      :class="{ 'is-active': !activePeer && !activeStoredId && activeProviderLabel === e.label }"
+      :class="{ 'is-active': props.activeKind === 'ai' && activeProviderLabel === e.label }"
       @click="emit('select-ai', e.label)"
     >
       <q-icon name="public" size="16px" />
@@ -34,7 +34,7 @@
       v-for="c in storedChats" :key="`sc:${c._id}`"
       type="button"
       class="conv-rail__item conv-rail__item--stored"
-      :class="{ 'is-active': activeStoredId === c._id }"
+      :class="{ 'is-active': props.activeKind === 'stored' && activeStoredId === c._id }"
       @click="emit('open-stored', c.raw)"
     >
       <q-icon :name="c.isDeepLink ? 'link' : 'history'" size="16px" />
@@ -55,7 +55,7 @@
         v-for="p in g.peers" :key="`p:${g.groupId}:${p.peerId}`"
         type="button"
         class="conv-rail__item conv-rail__item--group"
-        :class="{ 'is-active': activePeer && activePeer.groupId === g.groupId && activePeer.peerId === p.peerId }"
+        :class="{ 'is-active': props.activeKind === 'peer' && activePeer && activePeer.groupId === g.groupId && activePeer.peerId === p.peerId }"
         @click="emit('open-peer', { groupId: g.groupId, peerId: p.peerId, alias: p.alias, groupName: g.groupName })"
       >
         <div class="conv-rail__avatar" :style="{ background: avatarColor(p.peerId) }">{{ (p.alias || '?').slice(0,1).toUpperCase() }}</div>
@@ -73,6 +73,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 const props = defineProps<{
   userId: string;
   aiEntries: Array<{ label: string; kind: 'private' | 'public' }>;
+  activeKind: 'ai' | 'stored' | 'peer';
   activeProviderLabel: string;
   activePeer: { groupId: string; peerId: string } | null;
   activeStoredId: string | null;
