@@ -33,6 +33,7 @@
              opens in chat area"): picked in the rail / Workbook → Groups. -->
         <PeerThreadView
           v-if="peerThread"
+          ref="peerThreadViewRef"
           :key="`${peerThread.groupId}:${peerThread.peerId}`"
           :userId="props.user?.userId || ''"
           :groupId="peerThread.groupId"
@@ -239,7 +240,7 @@
         <!-- Full-width composer bar (Refinement 6): spans the whole
              width beneath the rail + content; hidden while a peer
              thread (which has its own composer) is active. -->
-        <div v-if="!peerThread" class="composer-bar q-pa-md" style="flex-shrink: 0; border-top: 1px solid #eee;">
+        <div class="composer-bar q-pa-md" style="flex-shrink: 0; border-top: 1px solid #eee;">
           <!-- Passkey nudge (quick-start tier): a temporary account's only
                credential is this browser's local storage — a group member
                who wants to return from another device (or survive a
@@ -326,22 +327,30 @@
               <q-chip
                 clickable
                 dense
-                :color="isPrivateAiLabel(selectedProvider) ? 'deep-purple' : 'blue-grey'"
+                :color="composerTargetIsPeer ? 'teal' : (isPrivateAiLabel(composerTargetLabel) ? 'deep-purple' : 'blue-grey')"
                 text-color="white"
-                icon="smart_toy"
-                :label="`To: ${selectedProvider}`"
+                :icon="composerTargetIsPeer ? 'person' : 'smart_toy'"
+                :label="`To: ${composerTargetIsPeer ? (peerThread?.alias || 'member') : composerTargetLabel}`"
                 style="max-width: 260px"
               >
-                <q-tooltip>Your next message goes to this AI — click to switch</q-tooltip>
+                <q-tooltip>{{ composerTargetIsPeer ? 'Sent to the group member, end-to-end encrypted' : 'Your next message goes to this AI — click to switch' }}</q-tooltip>
                 <q-menu auto-close>
                   <q-list style="min-width: 220px">
-                    <q-item-label header class="q-py-xs">Ask a different AI</q-item-label>
+                    <template v-if="peerThread">
+                      <q-item clickable :active="composerTargetIsPeer" @click="peerTarget = 'peer'">
+                        <q-item-section avatar style="min-width: 32px"><q-icon name="person" color="teal" size="18px" /></q-item-section>
+                        <q-item-section>{{ peerThread.alias || 'Group member' }} <span class="text-caption text-grey-6">· E2E message</span></q-item-section>
+                      </q-item>
+                      <q-separator />
+                      <q-item-label header class="q-py-xs">Consult an AI (private — only you see the answer)</q-item-label>
+                    </template>
+                    <q-item-label v-else header class="q-py-xs">Ask a different AI</q-item-label>
                     <q-item
                       v-for="e in aiRailEntries"
                       :key="e.label"
                       clickable
-                      :active="e.label === selectedProvider"
-                      @click="handleConsultantPick(e.label)"
+                      :active="!composerTargetIsPeer && e.label === composerTargetLabel"
+                      @click="peerThread ? (peerTarget = e.label) : handleConsultantPick(e.label)"
                     >
                       <q-item-section avatar style="min-width: 32px">
                         <q-icon :name="e.kind === 'private' ? 'smart_toy' : 'public'"
@@ -360,7 +369,7 @@
                 outlined
                 dense
                 :disable="isRequestSent"
-                @keyup.enter="sendMessage"
+                @keyup.enter="submitGlobalComposer"
                 @focus="clearPresetPrompt"
               >
                 <q-tooltip v-if="isRequestSent">Chat is disabled until your account is approved</q-tooltip>
@@ -372,7 +381,7 @@
                 color="primary"
                 label="Send"
                 :disable="!inputMessage || isStreaming || isRequestSent"
-                @click="sendMessage"
+                @click="submitGlobalComposer"
               >
                 <q-tooltip v-if="isRequestSent">Chat is disabled until your account is approved</q-tooltip>
               </q-btn>
@@ -1185,6 +1194,32 @@ const handleConsultantPick = (label: string) => {
   selectedProvider.value = label;
   if (railActiveKind.value === 'peer') { peerThread.value = null; railActiveKind.value = 'ai'; }
 };
+// Global-composer target while a peer thread is open: 'peer' (E2E) or an
+// AI label (private consult rendered inline in the thread). Resets to
+// 'peer' whenever a (different) thread opens — messaging the human is the
+// expected default; consulting an AI is the explicit choice.
+const peerThreadViewRef = ref<InstanceType<typeof PeerThreadView> | null>(null);
+const peerTarget = ref<string>('peer');
+watch(peerThread, () => { peerTarget.value = 'peer'; });
+const composerTargetIsPeer = computed(() => !!peerThread.value && peerTarget.value === 'peer');
+const composerTargetLabel = computed(() => (peerThread.value ? peerTarget.value : selectedProvider.value));
+
+/** One composer, every conversation: route SEND by mode + target. */
+const submitGlobalComposer = () => {
+  const text = inputMessage.value?.trim();
+  if (!text) return;
+  if (peerThread.value) {
+    if (peerTarget.value === 'peer') {
+      void peerThreadViewRef.value?.sendToPeer(text);
+    } else {
+      void peerThreadViewRef.value?.startConsult(peerTarget.value, text);
+    }
+    inputMessage.value = '';
+    return;
+  }
+  void sendMessage();
+};
+
 // "Current conversation" rail entry: focus the live AI chat.
 const handleOpenCurrent = () => {
   peerThread.value = null;
