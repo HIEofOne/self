@@ -803,3 +803,19 @@ and any design decisions resolved.
   each group's ＋ opens the Groups tab. Self-fetches memberships +
   messages + saved chats (15s); hidden for deep-link sessions; sits just
   right of the Workbook rail.
+- **2026-07-16** — **Organizer-first welcome page** (adoption redesign;
+  design in the local doc as Refinement 8). The welcome page now recruits
+  GROUP ORGANIZERS: hero ("Health AI that answers to you" + volunteer/
+  open-source identity), two accent doors (See a live group / Start a
+  group), the explicit 4-step organizer journey, a demoted member row
+  (Get your own MAIA — quick start; Have an invitation? — pre-auth
+  paste-a-link capture; Learn more → trustee.substack.com + demo video
+  link), a generic "How MAIA is different" comparison, and a "Groups
+  hosted here" section. New public surface: groups gain an admin opt-in
+  `publiclyListed` flag (default OFF — invite-only groups stay
+  invisible); GET /api/groups/public returns name, description, posting
+  policy, aggregate member count, and the join link only when
+  link-approval is on — never a roster. The welcome video and the four
+  numbered steps are removed from the page (video demoted to Learn more;
+  the wizard teaches by doing). Next per Refinement 8: full public group
+  page (W2) and outsider requests v1 with email verification (W3).
