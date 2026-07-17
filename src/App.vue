@@ -261,10 +261,9 @@
 
                   <!-- How MAIA is different (generic; named comparisons live on Substack) -->
                   <div class="q-mb-md" style="border-top: 1px solid #eee; padding-top: 12px;">
-                    <div class="text-caption text-weight-medium text-grey-7 q-mb-xs">How MAIA is different</div>
                     <table class="welcome-compare-table">
                       <thead>
-                        <tr><th></th><th>MAIA</th><th>Typical health-AI apps</th></tr>
+                        <tr><th class="welcome-compare-title">How MAIA is different</th><th>MAIA</th><th>Typical health-AI apps</th></tr>
                       </thead>
                       <tbody>
                         <tr><td>Who holds your record</td><td>You, on your own computer</td><td>The company's cloud</td></tr>
@@ -3844,6 +3843,7 @@ onMounted(async () => {
     border-bottom: 1px solid #eee;
   }
   th { color: #666; font-weight: 600; border-bottom: 1px solid #ccc; }
+  th.welcome-compare-title { color: #222; font-size: 14px; font-weight: 700; }
   td:first-child { color: #666; width: 28%; }
   td:nth-child(2) { background: #e8f2fc; font-weight: 500; }
   th:nth-child(2) { background: #e8f2fc; }
