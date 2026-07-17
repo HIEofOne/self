@@ -200,7 +200,7 @@
                         <div class="text-subtitle1 q-mb-xs"><q-icon name="groups" size="20px" class="q-mr-xs" />Start a group</div>
                         <div class="text-body2 text-grey-8 q-mb-sm">
                           Host a group for people like you, on a server you control. Write the
-                          sharing policies. Invite whoever you trust. About $10–40 a month.
+                          sharing policies. Invite whoever you trust. About $10–40 a month for DigitalOcean hosting.
                         </div>
                         <q-btn unelevated color="primary" label="Set up a group" type="a" href="https://github.com/HIEofOne/self#readme" target="_blank" />
                       </div>
@@ -262,12 +262,16 @@
                   <!-- How MAIA is different (generic; named comparisons live on Substack) -->
                   <div class="q-mb-md" style="border-top: 1px solid #eee; padding-top: 12px;">
                     <div class="text-caption text-weight-medium text-grey-7 q-mb-xs">How MAIA is different</div>
-                    <div class="welcome-compare text-caption">
-                      <div></div><div class="text-weight-medium">MAIA</div><div class="text-weight-medium text-grey-7">Typical health-AI apps</div>
-                      <div class="text-grey-7">Who holds your record</div><div>You, on your own computer</div><div class="text-grey-7">The company's cloud</div>
-                      <div class="text-grey-7">Who sets sharing rules</div><div>You and your group, as written policies</div><div class="text-grey-7">Their terms of service</div>
-                      <div class="text-grey-7">Who the AI works for</div><div>You</div><div class="text-grey-7">The platform and its funders</div>
-                    </div>
+                    <table class="welcome-compare-table">
+                      <thead>
+                        <tr><th></th><th>MAIA</th><th>Typical health-AI apps</th></tr>
+                      </thead>
+                      <tbody>
+                        <tr><td>Who holds your record</td><td>You, on your own computer</td><td>The company's cloud</td></tr>
+                        <tr><td>Who sets sharing rules</td><td>You and your group, as written policies</td><td>Their terms of service</td></tr>
+                        <tr><td>Who the AI works for</td><td>You</td><td>The platform and its funders</td></tr>
+                      </tbody>
+                    </table>
                   </div>
 
                   <!-- Groups hosted on this deployment (publicly listed only) -->
@@ -285,12 +289,26 @@
                         </div>
                         <div class="col-auto">
                           <q-btn flat dense size="sm" color="primary" :label="expandedPublicGroup === g.groupId ? 'Hide details' : 'Look around'" @click="expandedPublicGroup = expandedPublicGroup === g.groupId ? null : g.groupId" />
-                          <q-btn v-if="g.joinLink" flat dense size="sm" color="primary" label="Ask to join" type="a" :href="g.joinLink" />
+                          <q-btn
+                            v-if="g.joinLink && pendingGroupJoinLink?.groupId !== g.groupId"
+                            flat dense size="sm" color="primary" label="Ask to join"
+                            @click="askToJoinPublic(g)"
+                          />
                         </div>
                       </div>
                       <div v-if="expandedPublicGroup === g.groupId && g.postingPolicy" class="q-mt-sm q-pa-sm" style="border-left: 3px solid #90caf9; background: #fafafa;">
                         <div class="text-caption text-weight-medium">Group policy — joining means you accept it:</div>
                         <div class="text-caption" style="white-space: pre-wrap;">{{ g.postingPolicy }}</div>
+                      </div>
+                      <div v-if="pendingGroupJoinLink?.groupId === g.groupId" class="q-mt-sm q-pa-sm" style="border-left: 3px solid #1976d2; background: #e3f2fd;">
+                        <div class="text-caption q-mb-xs">
+                          To send your request, create your MAIA (about a minute) — the group's
+                          administrator approves requests, not a company.
+                        </div>
+                        <q-btn unelevated dense color="primary" size="sm"
+                          :label="`CREATE MY MAIA & REQUEST TO JOIN ${g.name.toUpperCase()}`"
+                          :loading="tempStartLoading"
+                          @click="handleGetStartedNoPassword" />
                       </div>
                     </div>
                   </div>
@@ -1126,6 +1144,24 @@ const loadPublicGroups = async () => {
     if (res.ok && data.success) publicGroups.value = data.groups || [];
   } catch { /* section shows empty state */ }
 };
+/** "Ask to join" on a public group card: capture the join link in place
+ *  (no page reload) and surface the next step ON the card itself — the
+ *  far-away GET STARTED button changing was disorienting. */
+const askToJoinPublic = async (g: { groupId: string; joinLink: string | null }) => {
+  if (!g.joinLink) return;
+  try {
+    const url = new URL(g.joinLink);
+    const params = url.searchParams;
+    localStorage.setItem('maiaGroupJoin', JSON.stringify({
+      token: params.get('groupJoin'),
+      groupId: params.get('groupId') || g.groupId,
+      registry: params.get('registry') || url.origin,
+      capturedAt: new Date().toISOString()
+    }));
+  } catch { /* malformed link — nothing captured */ }
+  await loadPendingGroupJoinLink();
+};
+
 const scrollToHostedGroups = () => {
   document.getElementById('hosted-groups')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 };
@@ -3797,10 +3833,21 @@ onMounted(async () => {
 .welcome-door--accent {
   border: 2px solid #1976d2;
 }
-.welcome-compare {
-  display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1fr);
-  gap: 4px 12px;
+.welcome-compare-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+
+  th, td {
+    text-align: left;
+    padding: 5px 10px;
+    border-bottom: 1px solid #eee;
+  }
+  th { color: #666; font-weight: 600; border-bottom: 1px solid #ccc; }
+  td:first-child { color: #666; width: 28%; }
+  td:nth-child(2) { background: #e8f2fc; font-weight: 500; }
+  th:nth-child(2) { background: #e8f2fc; }
+  td:nth-child(3) { color: #777; }
 }
 
 .welcome-footer-link {
