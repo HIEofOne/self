@@ -1275,6 +1275,34 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     }
   });
 
+  // DELETE /api/groups/:groupId — delete the whole group (admin). Every
+  // member's access ends: credentials stop refreshing (dead within 24 h,
+  // §6.1) and each member's MAIA drops the membership on its next refresh
+  // (the registry 404 reads as revoked). Relay messages and AS requests
+  // for the group become undeliverable and are swept by the daily
+  // maintenance TTLs. Irreversible without the recovery kit (§6.7).
+  app.delete('/api/groups/:groupId', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const doc = await cloudant.getDocument(GROUPS_DB, req.params.groupId);
+      if (!doc || doc.type !== 'group') {
+        return res.status(404).json({ success: false, error: 'Group not found' });
+      }
+      const counts = memberCounts(doc);
+      await cloudant.deleteDocument(GROUPS_DB, doc._id);
+      auditLog.logEvent({
+        type: 'group_deleted',
+        userId: req.session?.userId || 'admin-local',
+        ip: req.ip,
+        details: { groupId: doc._id, name: doc.name, activeMembers: counts.active }
+      });
+      res.json({ success: true, deleted: doc._id });
+    } catch (error) {
+      console.error('[groups] delete failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to delete group' });
+    }
+  });
+
   // PUT /api/groups/:groupId/members/:pairwiseId/mentor — admin toggles a
   // member's mentor (discoverable) flag. Mentors are the supply side of the
   // matching market (Groups.md §6.6, Refinement 1): the only members listed
@@ -1907,6 +1935,10 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       body: JSON.stringify({ pairwiseId: membership.pairwiseId, payload, signature, ackMessageIds })
     });
     const data = await res.json().catch(() => ({}));
+    // Group deleted at the registry (404): treat exactly like a revoked
+    // membership so the member's userDoc cleans itself up on the next
+    // refresh instead of erroring forever against a missing group.
+    if (res.status === 404) return { revoked: true, newMessages: 0, asRequests: [] };
     if (!res.ok || !data.success) {
       throw new Error(data.error || `Registry refresh failed (HTTP ${res.status})`);
     }

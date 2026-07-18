@@ -45,6 +45,9 @@
               <q-btn flat dense round icon="edit" color="grey-7" @click="openEditDialog(g)">
                 <q-tooltip>Edit group</q-tooltip>
               </q-btn>
+              <q-btn flat dense round icon="delete" color="negative" @click="confirmDeleteGroup(g)">
+                <q-tooltip>Delete group</q-tooltip>
+              </q-btn>
             </div>
           </div>
 
@@ -423,6 +426,39 @@ const openCreateDialog = () => {
   editingGroupId.value = null;
   form.value = { name: '', description: '', tags: '', postingPolicy: '', memberInvitesAllowed: true, joinMode: 'invite-only', publiclyListed: false };
   showDialog.value = true;
+};
+
+const confirmDeleteGroup = (g: GroupSummary) => {
+  const n = g.memberCounts?.active ?? 0;
+  $q.dialog({
+    title: `Delete ${g.name}?`,
+    message:
+      `This immediately ends access for ${n} active member${n === 1 ? '' : 's'}: their credentials stop refreshing ` +
+      `and die within 24 hours, and each member's MAIA drops the membership on its next refresh. ` +
+      `Undelivered messages are discarded. This cannot be undone — the recovery kit is the only way back.`,
+    prompt: {
+      model: '',
+      type: 'text',
+      label: `Type the group name to confirm`,
+      isValid: (v: string) => v.trim() === g.name
+    },
+    ok: { label: 'Delete group', color: 'negative' },
+    cancel: { label: 'Keep', flat: true },
+    persistent: true
+  }).onOk(async () => {
+    try {
+      const res = await fetch(`/api/groups/${encodeURIComponent(g.groupId)}`, {
+        method: 'DELETE',
+        credentials: 'include'
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+      await loadGroups();
+      $q.notify({ type: 'positive', message: `${g.name} deleted. Members' MAIAs will clean up on their next refresh.` });
+    } catch (err) {
+      $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to delete group' });
+    }
+  });
 };
 
 const openEditDialog = (g: GroupSummary) => {

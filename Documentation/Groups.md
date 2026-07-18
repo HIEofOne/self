@@ -851,3 +851,12 @@ and any design decisions resolved.
   joined:true with complete membership in one request (test member
   revoked, demo group's mode restored). Intended use: the Trustee
   bootstrap group runs open; cautious groups keep approval.
+- **2026-07-18** — **Group deletion** (needed before the Trustee rollout
+  replaces the IBD demo). Admin: DELETE /api/groups/:groupId + a trash
+  button per group with a type-the-name confirm stating the blast radius
+  (N members lose access; credentials die within 24 h; undelivered
+  messages discarded; recovery kit is the only way back; audited as
+  group_deleted). Member side: a registry 404 on refresh now reads
+  exactly like a revoked membership, so every member's MAIA drops the
+  membership cleanly on its next refresh instead of erroring forever
+  against a missing group. Verified live: create → delete → /info 404.
