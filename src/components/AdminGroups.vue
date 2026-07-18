@@ -155,6 +155,17 @@
             </q-tooltip>
           </q-toggle>
           <q-toggle
+            v-model="form.publiclyListed"
+            label="List this group publicly on the welcome page"
+            dense
+          >
+            <q-tooltip>
+              Shows the group's name, description, posting policy, and member
+              count on this server's welcome page. Never a member roster.
+              Off = invisible to visitors.
+            </q-tooltip>
+          </q-toggle>
+          <q-toggle
             v-model="form.joinByLink"
             label="Anyone with the link may request to join"
             dense
@@ -266,6 +277,7 @@ interface GroupSummary {
   description: string;
   memberInvitesAllowed?: boolean;
   postingPolicy?: string;
+  publiclyListed?: boolean;
   joinMode?: string;
   joinLink?: string | null;
   tagVocabulary: string[];
@@ -301,7 +313,7 @@ const loadingMembers = ref<Record<string, boolean>>({});
 const showDialog = ref(false);
 const saving = ref(false);
 const editingGroupId = ref<string | null>(null);
-const form = ref({ name: '', description: '', tags: '', postingPolicy: '', memberInvitesAllowed: true, joinByLink: false });
+const form = ref({ name: '', description: '', tags: '', postingPolicy: '', memberInvitesAllowed: true, joinByLink: false, publiclyListed: false });
 
 /** Join link of the group being edited (server-computed once saved). */
 const editingJoinLink = computed(() => {
@@ -409,7 +421,7 @@ const loadGroups = async () => {
 
 const openCreateDialog = () => {
   editingGroupId.value = null;
-  form.value = { name: '', description: '', tags: '', postingPolicy: '', memberInvitesAllowed: true, joinByLink: false };
+  form.value = { name: '', description: '', tags: '', postingPolicy: '', memberInvitesAllowed: true, joinByLink: false, publiclyListed: false };
   showDialog.value = true;
 };
 
@@ -421,7 +433,8 @@ const openEditDialog = (g: GroupSummary) => {
     tags: g.tagVocabulary.join(', '),
     postingPolicy: g.postingPolicy || '',
     memberInvitesAllowed: g.memberInvitesAllowed !== false,
-    joinByLink: g.joinMode === 'link-approval'
+    joinByLink: g.joinMode === 'link-approval',
+    publiclyListed: g.publiclyListed === true
   };
   showDialog.value = true;
 };
@@ -436,7 +449,8 @@ const saveGroup = async () => {
       tagVocabulary: form.value.tags,
       postingPolicy: form.value.postingPolicy.trim(),
       memberInvitesAllowed: form.value.memberInvitesAllowed,
-      joinMode: form.value.joinByLink ? 'link-approval' : 'invite-only'
+      joinMode: form.value.joinByLink ? 'link-approval' : 'invite-only',
+      publiclyListed: form.value.publiclyListed
     };
     const url = editingGroupId.value
       ? `/api/groups/${encodeURIComponent(editingGroupId.value)}`

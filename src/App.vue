@@ -169,42 +169,165 @@
                 </div>
 
                 <div v-if="!showAuth">
-                  <!-- GET STARTED is always the main action. An invitee
-                       (pending group invite) gets a join-framed label and
-                       the quick-start tier preselected: the wizard shows no
-                       fork, no folder pick — private AI deploys, then the
-                       Workbook opens on Groups with the invite ready. -->
-                  <q-btn
-                    :label="pendingGroupInvite ? `JOIN ${(pendingInviteGroupName || 'THE GROUP').toUpperCase()}`
-                      : pendingGroupJoinLink ? `REQUEST TO JOIN ${(pendingJoinLinkGroupName || 'THE GROUP').toUpperCase()}`
-                      : 'GET STARTED'"
-                    color="primary"
-                    size="lg"
-                    class="full-width q-mb-sm"
-                    :loading="tempStartLoading"
-                    @click="handleGetStartedNoPassword"
-                  />
+                  <!-- Organizer-first welcome (Refinement 8). The page
+                       recruits GROUP ORGANIZERS: invitations arrive three
+                       steps downstream via the groups themselves. Video and
+                       numbered steps removed (wizard teaches by doing). -->
+                  <div class="text-center q-mb-lg">
+                    <div class="text-h4 q-mb-sm" style="font-weight: 600;">Health AI that answers to you</div>
+                    <div class="text-body2 text-grey-8" style="max-width: 640px; margin: 0 auto; line-height: 1.6;">
+                      Patient groups that help each other with each patient having a private AI —
+                      records stay with each patient, sharing rules are written by the group and can
+                      be modified by each patient. Free and open source, built by volunteer patient
+                      advocates. No company behind it.
+                    </div>
+                  </div>
+
+                  <!-- Two organizer doors -->
+                  <div class="row q-col-gutter-md q-mb-md">
+                    <div class="col-12 col-md-6">
+                      <div class="welcome-door welcome-door--accent">
+                        <div class="text-subtitle1 q-mb-xs"><q-icon name="visibility" size="20px" class="q-mr-xs" />See a live group</div>
+                        <div class="text-body2 text-grey-8 q-mb-sm">
+                          Walk into our demo group right now — read its sharing policies and see
+                          that it's alive. You can't browse members' conversations. That's the point.
+                        </div>
+                        <q-btn unelevated color="primary" label="Explore the groups hosted here" @click="scrollToHostedGroups" />
+                      </div>
+                    </div>
+                    <div class="col-12 col-md-6">
+                      <div class="welcome-door welcome-door--accent">
+                        <div class="text-subtitle1 q-mb-xs"><q-icon name="groups" size="20px" class="q-mr-xs" />Start a group</div>
+                        <div class="text-body2 text-grey-8 q-mb-sm">
+                          Host a group for people like you, on a server you control. Write the
+                          sharing policies. Invite whoever you trust. About $10–40 a month for DigitalOcean hosting.
+                        </div>
+                        <q-btn unelevated color="primary" label="Set up a group" type="a" href="https://github.com/HIEofOne/self#readme" target="_blank" />
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- The organizer journey, stated up front -->
+                  <div class="text-center text-caption text-grey-7 q-mb-md">
+                    <strong>1</strong> See it working &nbsp;→&nbsp;
+                    <strong>2</strong> Start your group and its policies &nbsp;→&nbsp;
+                    <strong>3</strong> Get your own MAIA &nbsp;→&nbsp;
+                    <strong>4</strong> Invite your members
+                  </div>
+
+                  <!-- Member-shaped doors (demoted row) -->
+                  <div class="row q-col-gutter-md q-mb-md">
+                    <div class="col-12 col-md-4">
+                      <div class="welcome-door">
+                        <div class="text-subtitle2 q-mb-xs"><q-icon name="favorite_border" size="18px" class="q-mr-xs" />Get your own MAIA</div>
+                        <div class="text-caption text-grey-8 q-mb-sm">
+                          A private AI and a health record that stays yours. Ready in about a
+                          minute. Add and index your records as you get them.
+                        </div>
+                        <q-btn
+                          unelevated color="primary" size="md" class="full-width"
+                          :label="pendingGroupInvite ? `JOIN ${(pendingInviteGroupName || 'THE GROUP').toUpperCase()}`
+                            : pendingGroupJoinLink ? `REQUEST TO JOIN ${(pendingJoinLinkGroupName || 'THE GROUP').toUpperCase()}`
+                            : 'GET STARTED'"
+                          :loading="tempStartLoading"
+                          @click="handleGetStartedNoPassword"
+                        />
+                      </div>
+                    </div>
+                    <div class="col-12 col-md-4">
+                      <div class="welcome-door">
+                        <div class="text-subtitle2 q-mb-xs"><q-icon name="mail_outline" size="18px" class="q-mr-xs" />Have an invitation?</div>
+                        <div class="text-caption text-grey-8 q-mb-sm">
+                          Paste your invite or join link — the group's own admin approves,
+                          not a company.
+                        </div>
+                        <q-btn outline color="primary" size="md" class="full-width" label="Use my invitation or link" @click="showWelcomePasteDialog = true" />
+                      </div>
+                    </div>
+                    <div class="col-12 col-md-4">
+                      <div class="welcome-door">
+                        <div class="text-subtitle2 q-mb-xs"><q-icon name="menu_book" size="18px" class="q-mr-xs" />Learn more</div>
+                        <div class="text-caption text-grey-8 q-mb-sm">
+                          Why patient-controlled matters, and the design behind MAIA.
+                          Or <a href="/welcome-video.mp4" target="_blank" class="welcome-footer-link">watch the demo video</a>.
+                        </div>
+                        <q-btn outline color="primary" size="md" class="full-width" label="Read on Substack" icon-right="open_in_new" type="a" href="https://trustee.substack.com" target="_blank" />
+                      </div>
+                    </div>
+                  </div>
                   <div v-if="tempStartError" class="text-negative text-center q-mb-md">
                     {{ tempStartError }}
                   </div>
 
-                  <!-- Welcome video + Steps from welcome.md -->
-                  <div class="row q-mt-lg q-col-gutter-md welcome-row">
-                    <div class="col-12 col-md-6">
-                      <video
-                        class="welcome-video"
-                        src="/welcome-video.mp4"
-                        controls
-                        preload="metadata"
-                        playsinline
-                      />
+                  <!-- How MAIA is different (generic; named comparisons live on Substack) -->
+                  <div class="q-mb-md" style="border-top: 1px solid #eee; padding-top: 12px;">
+                    <table class="welcome-compare-table">
+                      <thead>
+                        <tr><th class="welcome-compare-title">How MAIA is different</th><th>MAIA</th><th>Typical health-AI apps</th></tr>
+                      </thead>
+                      <tbody>
+                        <tr><td>Who holds your record</td><td>You, on your own computer</td><td>The company's cloud</td></tr>
+                        <tr><td>Who sets sharing rules</td><td>You and your group, as written policies</td><td>Their terms of service</td></tr>
+                        <tr><td>Who the AI works for</td><td>You</td><td>The platform and its funders</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <!-- Groups hosted on this deployment (publicly listed only) -->
+                  <div id="hosted-groups" class="q-mb-md" style="border-top: 1px solid #eee; padding-top: 12px;">
+                    <div class="text-caption text-weight-medium text-grey-7 q-mb-xs">Groups hosted here</div>
+                    <div v-if="!publicGroups.length" class="text-caption text-grey-6">
+                      No groups are publicly listed on this server yet.
                     </div>
-                    <div class="col-12 col-md-6">
-                      <div class="welcome-intro text-body2 text-grey-8 q-pa-md">
-                        <vue-markdown :source="welcomeIntro || 'Loading...'" />
+                    <div v-for="g in publicGroups" :key="g.groupId" class="welcome-door q-mb-sm">
+                      <div class="row items-center q-col-gutter-sm">
+                        <div class="col">
+                          <div class="text-subtitle2">{{ g.name }}</div>
+                          <div class="text-caption text-grey-8">{{ g.description }}</div>
+                          <div class="text-caption text-grey-6">{{ g.activeMemberCount }} member(s)</div>
+                        </div>
+                        <div class="col-auto">
+                          <q-btn flat dense size="sm" color="primary" :label="expandedPublicGroup === g.groupId ? 'Hide details' : 'Look around'" @click="expandedPublicGroup = expandedPublicGroup === g.groupId ? null : g.groupId" />
+                          <q-btn
+                            v-if="g.joinLink && pendingGroupJoinLink?.groupId !== g.groupId"
+                            flat dense size="sm" color="primary" label="Ask to join"
+                            @click="askToJoinPublic(g)"
+                          />
+                        </div>
+                      </div>
+                      <div v-if="expandedPublicGroup === g.groupId && g.postingPolicy" class="q-mt-sm q-pa-sm" style="border-left: 3px solid #90caf9; background: #fafafa;">
+                        <div class="text-caption text-weight-medium">Group policy — joining means you accept it:</div>
+                        <div class="text-caption" style="white-space: pre-wrap;">{{ g.postingPolicy }}</div>
+                      </div>
+                      <div v-if="pendingGroupJoinLink?.groupId === g.groupId" class="q-mt-sm q-pa-sm" style="border-left: 3px solid #1976d2; background: #e3f2fd;">
+                        <div class="text-caption q-mb-xs">
+                          To send your request, create your MAIA (about a minute) — the group's
+                          administrator approves requests, not a company.
+                        </div>
+                        <q-btn unelevated dense color="primary" size="sm"
+                          :label="`CREATE MY MAIA & REQUEST TO JOIN ${g.name.toUpperCase()}`"
+                          :loading="tempStartLoading"
+                          @click="handleGetStartedNoPassword" />
                       </div>
                     </div>
                   </div>
+
+                  <!-- Paste an invite / join link (pre-auth capture) -->
+                  <q-dialog v-model="showWelcomePasteDialog">
+                    <q-card style="min-width: 420px; max-width: 560px">
+                      <q-card-section>
+                        <div class="text-h6">Use an invitation or join link</div>
+                        <div class="text-caption text-grey-7">Paste the link you received by email, text, or QR code.</div>
+                      </q-card-section>
+                      <q-card-section class="q-pt-none">
+                        <q-input v-model="welcomePasteInput" dense outlined autofocus label="Invite or join link" @keydown.enter.prevent="applyWelcomePastedLink" />
+                      </q-card-section>
+                      <q-card-actions align="right">
+                        <q-btn flat label="Cancel" v-close-popup />
+                        <q-btn unelevated color="primary" label="Continue" :disable="!welcomePasteInput.trim()" @click="applyWelcomePastedLink" />
+                      </q-card-actions>
+                    </q-card>
+                  </q-dialog>
 
                   <!-- Footer: Privacy | User Guide | FAQ | About + copyright -->
                   <div class="text-center q-mt-lg q-mb-md">
@@ -830,7 +953,6 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
-import VueMarkdown from 'vue-markdown-render';
 
 // Store route check interval and event listener for cleanup (must be at top level)
 const routeCheckInterval = ref<ReturnType<typeof setInterval> | null>(null);
@@ -1009,7 +1131,70 @@ const showDeepLinkAccess = ref(false);
 const deepLinkLoading = ref(false);
 const deepLinkError = ref('');
 const showAdminPage = ref(false);
-const welcomeIntro = ref<string>('');
+
+// ── Organizer-first welcome (Refinement 8) ─────────────────────────
+/** Publicly-listed groups on this deployment (admin opt-in per group). */
+const publicGroups = ref<Array<{ groupId: string; name: string; description: string; postingPolicy: string; activeMemberCount: number; joinLink: string | null }>>([]);
+const expandedPublicGroup = ref<string | null>(null);
+const loadPublicGroups = async () => {
+  try {
+    const res = await fetch('/api/groups/public');
+    const data = await res.json();
+    if (res.ok && data.success) publicGroups.value = data.groups || [];
+  } catch { /* section shows empty state */ }
+};
+/** "Ask to join" on a public group card: capture the join link in place
+ *  (no page reload) and surface the next step ON the card itself — the
+ *  far-away GET STARTED button changing was disorienting. */
+const askToJoinPublic = async (g: { groupId: string; joinLink: string | null }) => {
+  if (!g.joinLink) return;
+  try {
+    const url = new URL(g.joinLink);
+    const params = url.searchParams;
+    localStorage.setItem('maiaGroupJoin', JSON.stringify({
+      token: params.get('groupJoin'),
+      groupId: params.get('groupId') || g.groupId,
+      registry: params.get('registry') || url.origin,
+      capturedAt: new Date().toISOString()
+    }));
+  } catch { /* malformed link — nothing captured */ }
+  await loadPendingGroupJoinLink();
+};
+
+const scrollToHostedGroups = () => {
+  document.getElementById('hosted-groups')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+};
+/** Pre-auth paste capture: same localStorage hand-off a clicked link uses,
+ *  so the GET STARTED button immediately becomes JOIN / REQUEST TO JOIN. */
+const showWelcomePasteDialog = ref(false);
+const welcomePasteInput = ref('');
+const applyWelcomePastedLink = async () => {
+  let url: URL;
+  try { url = new URL(welcomePasteInput.value.trim()); } catch {
+    $q.notify({ type: 'negative', message: 'That does not look like a link — paste the full URL.' });
+    return;
+  }
+  const params = url.searchParams;
+  const registry = params.get('registry') || url.origin;
+  const groupId = params.get('groupId');
+  const inviteToken = params.get('groupInvite');
+  const joinToken = params.get('groupJoin');
+  if (!groupId || (!inviteToken && !joinToken)) {
+    $q.notify({ type: 'negative', message: 'No invitation found in that link.' });
+    return;
+  }
+  try {
+    if (inviteToken) {
+      localStorage.setItem('maiaGroupInvite', JSON.stringify({ token: inviteToken, groupId, registry, capturedAt: new Date().toISOString() }));
+    } else {
+      localStorage.setItem('maiaGroupJoin', JSON.stringify({ token: joinToken, groupId, registry, capturedAt: new Date().toISOString() }));
+    }
+  } catch { /* storage unavailable */ }
+  showWelcomePasteDialog.value = false;
+  welcomePasteInput.value = '';
+  if (inviteToken) await loadPendingGroupInvite();
+  else await loadPendingGroupJoinLink();
+};
 const tempStartLoading = ref(false);
 const tempStartError = ref('');
 const showTempSignOutDialog = ref(false);
@@ -3313,16 +3498,6 @@ const handleDeepLinkInfoUpdate = (info: DeepLinkInfo | null) => {
   deepLinkInfo.value = info;
 };
 
-const loadWelcomeIntro = async () => {
-  try {
-    const response = await fetch('/welcome.md', { cache: 'no-cache' });
-    if (!response.ok) return;
-    const text = await response.text();
-    welcomeIntro.value = text.trim();
-  } catch (error) {
-    console.error('Error loading welcome intro:', error);
-  }
-};
 
 const hydrateDeepLinkSession = async (share: string) => {
   try {
@@ -3365,7 +3540,7 @@ onMounted(async () => {
   window.addEventListener('beforeunload', beforeUnloadHandler);
 
   // Load welcome introduction from welcome.md
-  loadWelcomeIntro();
+  void loadPublicGroups();
   
   // Check for admin page route
   const isAdminPage = window.location.pathname === '/admin';
@@ -3645,6 +3820,34 @@ onMounted(async () => {
   border-radius: 4px;
   background-color: #000;
   display: block;
+}
+
+.welcome-door {
+  border: 1px solid #e0e0e0;
+  border-radius: 12px;
+  padding: 14px 16px;
+  height: 100%;
+  background: #fff;
+}
+.welcome-door--accent {
+  border: 2px solid #1976d2;
+}
+.welcome-compare-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+
+  th, td {
+    text-align: left;
+    padding: 5px 10px;
+    border-bottom: 1px solid #eee;
+  }
+  th { color: #666; font-weight: 600; border-bottom: 1px solid #ccc; }
+  th.welcome-compare-title { color: #222; font-size: 14px; font-weight: 700; }
+  td:first-child { color: #666; width: 28%; }
+  td:nth-child(2) { background: #e8f2fc; font-weight: 500; }
+  th:nth-child(2) { background: #e8f2fc; }
+  td:nth-child(3) { color: #777; }
 }
 
 .welcome-footer-link {

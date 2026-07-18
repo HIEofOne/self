@@ -184,6 +184,9 @@ const adminGroupView = (doc) => ({
   // approves each). The link itself never grants membership.
   joinMode: doc.joinMode === 'link-approval' ? 'link-approval' : 'invite-only',
   joinLink: joinLinkFor(doc),
+  // Welcome-page listing (Refinement 8): admin opt-in, default OFF —
+  // invite-only groups stay invisible (no honeypot directory).
+  publiclyListed: doc.publiclyListed === true,
   tagVocabulary: doc.tagVocabulary || [],
   publicKeyJwk: doc.signingKey?.publicKeyJwk || null,
   policyPackVersion: doc.policyPackVersion ?? 0,
@@ -314,6 +317,9 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       if (req.body?.memberInvitesAllowed !== undefined) {
         doc.memberInvitesAllowed = !!req.body.memberInvitesAllowed;
       }
+      if (req.body?.publiclyListed !== undefined) {
+        doc.publiclyListed = !!req.body.publiclyListed;
+      }
       if (req.body?.joinMode !== undefined) {
         doc.joinMode = req.body.joinMode === 'link-approval' ? 'link-approval' : 'invite-only';
         // Mint the shareable link token on first enable; rotation is a
@@ -334,6 +340,32 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     } catch (error) {
       console.error('[groups] update failed:', error);
       res.status(500).json({ success: false, error: 'Failed to update group' });
+    }
+  });
+
+  // GET /api/groups/public — the deployment's publicly-listed groups for
+  // the welcome page (Refinement 8). Admin opt-in per group; returns only
+  // what the design allows ANYONE to see: name, description, posting
+  // policy, aggregate liquidity — never a roster. The join link is
+  // included only when the group accepts link-approval join requests.
+  app.get('/api/groups/public', async (req, res) => {
+    try {
+      const all = await cloudant.getAllDocuments(GROUPS_DB);
+      const groups = (all || [])
+        .filter((d) => d && d.type === 'group' && d.publiclyListed === true)
+        .map((d) => ({
+          groupId: d._id,
+          name: d.name,
+          description: d.description || '',
+          postingPolicy: d.postingPolicy || '',
+          activeMemberCount: memberCounts(d).active,
+          joinLink: joinLinkFor(d)
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+      res.json({ success: true, groups });
+    } catch (error) {
+      console.error('[groups] public list failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to list groups' });
     }
   });
 
