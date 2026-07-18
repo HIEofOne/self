@@ -961,3 +961,24 @@ and any design decisions resolved.
   Everyone + two outside requesters + mentor-starred justin33 (silent
   jack89 correctly absent); rename to "Aiden the Advocate" propagated
   to the public mentor list via the signed claim.
+- **2026-07-18** — **Wizard silenced for joined members + the
+  index-your-file nudge**. Root cause of the reopening wizard: the
+  agent-status poll clobbered workflowStage 'chat_ready' back to
+  'agent_deployed' (typically when the SECONDARY agent turned ready a
+  beat after quick-start completion), and 'agent_deployed' with no
+  artifacts looks brand-new to the auto-open heuristic — so the setup
+  dialog reopened on every reload. Fixed on both sides: the
+  agent-status writers never downgrade a wizard-done stage
+  ('chat_ready'/'patient_summary'/'link_stored'), and the client
+  self-heals stuck accounts (stage 'agent_deployed' + zero wizard
+  artifacts + a group membership ⇒ re-mark 'chat_ready', stay silent).
+  Files added via the chat "+" upload silently and are NOT indexed —
+  new modal after each attach for users without the records tier:
+  "File saved — make it part of your MAIA?" (index + user-verified
+  Current Medications + Patient Summary, "can take 5 minutes or
+  more") with [Run the Wizard] (opens the records-upgrade wizard,
+  which indexes root uploads like these) / [Not yet] (straight back
+  to chat; re-offered on the next attach). Verified live: stuck
+  member self-healed to chat_ready with no dialog on reload; attach →
+  modal → Not yet → chat; re-attach → modal again → Run the Wizard →
+  setup dialog.

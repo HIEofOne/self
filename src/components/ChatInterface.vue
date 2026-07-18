@@ -316,6 +316,33 @@
                 style="display: none"
                 @change="handleFileSelect"
               />
+              <!-- Post-attach nudge: the file saved silently; indexing and
+                   the verified lists/summary need the wizard. Re-offered on
+                   every attach until the records tier exists. -->
+              <q-dialog v-model="showIndexNudge">
+                <q-card style="max-width: 500px">
+                  <q-card-section>
+                    <div class="text-h6">File saved — make it part of your MAIA?</div>
+                    <div class="text-body2 q-mt-sm">
+                      Your file is in Saved Files, but it isn't indexed yet, so
+                      your private AI can't use it. Run the Setup Wizard to
+                      index it and create your user-verified
+                      <strong>Current Medications</strong> list and
+                      <strong>Patient Summary</strong>.
+                    </div>
+                    <div class="text-caption text-grey-7 q-mt-sm">
+                      This can take 5 minutes or more.
+                    </div>
+                  </q-card-section>
+                  <q-card-actions align="right">
+                    <q-btn flat color="grey-8" label="Not yet" v-close-popup />
+                    <q-btn
+                      unelevated color="primary" label="Run the Wizard"
+                      @click="showIndexNudge = false; startRecordsUpgrade()"
+                    />
+                  </q-card-actions>
+                </q-card>
+              </q-dialog>
             </div>
             <!-- Consultant chip (Refinement 6 step 4): the rail highlights
                  the THREAD (new AI chat / stored chat); this chip names the
@@ -1149,6 +1176,10 @@ const toggleReasoning = (idx: number) => {
 };
 const uploadedFiles = ref<UploadedFile[]>([]);
 const fileInput = ref<HTMLInputElement | null>(null);
+/** Post-attach nudge: a chat upload is saved but NOT indexed, and the
+ *  records tier (verified meds + patient summary) doesn't exist yet.
+ *  Re-offered on every new attach — "Not yet" is per-file, not forever. */
+const showIndexNudge = ref(false);
 const isUploadingFile = ref(false);
 const showPdfViewer = ref(false);
 const showTextViewer = ref(false);
@@ -5417,6 +5448,15 @@ const handleFileSelect = async (event: Event) => {
     } else {
       throw new Error('Unsupported file type');
     }
+    // A plain chat attach saved the file but did NOT index it — nothing
+    // else tells the user that. If they haven't built the records tier
+    // yet, offer the wizard (it indexes root uploads like this one).
+    if (!wizardUploadIntent.value &&
+        !wizardPatientSummary.value &&
+        userResourceStatus.value?.hasPatientSummary !== true &&
+        !showAgentSetupDialog.value) {
+      showIndexNudge.value = true;
+    }
   } catch (error) {
     console.error('Error uploading file:', error);
     alert(`Error uploading file: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -7618,7 +7658,7 @@ const startSetupWizardPolling = () => {
   }
 
   refreshWizardState()
-    .then(() => {
+    .then(async () => {
       // ── Safari/basic reload recovery: resume guided flow if indexing already done ──
       // On reload wizardFlowPhase resets to 'done'. If the server shows
       // indexing complete + agent ready but Medications or Patient Summary
@@ -7648,6 +7688,37 @@ const startSetupWizardPolling = () => {
           wizardFlowPhase.value = 'summary';
           logProvisioningEvent({ event: 'setup-resume-armed', reason: 'patient-summary-not-verified' });
         }
+      }
+
+      // Self-heal: a quick-start member whose 'chat_ready' stage was
+      // clobbered back to 'agent_deployed' by the agent-status poll
+      // (fixed server-side, but existing accounts are stuck). Zero
+      // wizard artifacts + a group membership means setup legitimately
+      // finished — repair the stage and stay silent instead of
+      // reopening the wizard on every reload.
+      if (
+        userResourceStatus.value?.workflowStage === 'agent_deployed' &&
+        userResourceStatus.value?.hasAgent &&
+        wizardStage3Files.value.length === 0 &&
+        !localFolderHandle.value && !localFolderName.value && !safariFolderName.value &&
+        !wizardCurrentMedications.value &&
+        !wizardPatientSummary.value &&
+        props.user?.userId
+      ) {
+        try {
+          const gRes = await fetch(`/api/user-groups?userId=${encodeURIComponent(props.user.userId)}`, { credentials: 'include' });
+          const gData = await gRes.json();
+          if (gRes.ok && gData.success && (gData.memberships || []).length > 0) {
+            void fetch('/api/wizard/quick-start-complete', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              credentials: 'include',
+              body: JSON.stringify({ userId: props.user.userId })
+            });
+            if (userResourceStatus.value) userResourceStatus.value.workflowStage = 'chat_ready';
+            logProvisioningEvent({ event: 'quick-start-stage-repaired' });
+          }
+        } catch { /* leave the stage as-is */ }
       }
 
       // Auto-open the setup dialog ONLY for a brand-new account that has
