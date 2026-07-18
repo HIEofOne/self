@@ -993,3 +993,20 @@ and any design decisions resolved.
   message settings are all changeable on this page after joining —
   everything above [JOIN GROUP]. Verified pre-join with a throwaway
   group carrying one allow + one deny suggestion.
+- **2026-07-18** — **Suggested policies preview in the REAL editor**
+  (follow-up to the join-card fix: one rendering, not two). The join
+  card no longer embeds its own differently-formatted policy list.
+  Instead, the moment a pending invite/join link loads, the group's
+  suggestions are imported into the user's OWN Sharing Policies list
+  (new member endpoint import-suggested-policies — server-fetches the
+  registry payload, never trusts client cards, reuses the idempotent
+  skip-if-present import), so they appear in the normal editor with
+  real toggles/edit/delete BEFORE the join decision, under "Suggested
+  by <group>". The card slims to: group name, posting policy, a
+  pointer ("...added to your Sharing Policies list below — review,
+  edit, or turn them off before or after you join"), display name,
+  [JOIN GROUP] [DISMISS]. Joining keeps every pre-join edit (the join
+  import skips when cards exist); DISMISS removes the previewed cards
+  (guarded: never removes cards for a group you belong to). Verified:
+  2 cards previewed into the live list under the correct group label,
+  DISMISS removed exactly those 2, membership cards untouched.

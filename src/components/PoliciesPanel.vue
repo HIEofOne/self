@@ -12,6 +12,7 @@
       :memberships="memberships"
       @joined="loadAll"
       @requested="loadAll"
+      @policies-changed="loadAll"
     />
 
     <!-- The default mental model, stated up front -->
@@ -302,7 +303,9 @@ const sections = computed(() => {
   const out: Array<{ key: string; label: string; cards: PolicyCard[] }> = [];
   for (const [k, cards] of groups) {
     const gid = k.slice(6);
-    const name = memberships.value.find((m) => m.groupId === gid)?.groupName || gid;
+    const name = memberships.value.find((m) => m.groupId === gid)?.groupName
+      || cards.find((c) => c.elements?.party?.groupName)?.elements.party.groupName
+      || gid;
     out.push({ key: k, label: `Suggested by ${name} — yours to keep, change, or turn off`, cards });
   }
   out.push({ key: 'user', label: 'Your policies', cards: own });

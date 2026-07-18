@@ -18,24 +18,11 @@
         <div class="text-caption text-weight-medium">Group policy — joining means you accept it:</div>
         <div class="text-caption" style="white-space: pre-wrap">{{ inviteGroupPolicy }}</div>
       </div>
-      <div v-if="inviteSuggested.length" class="q-mt-xs">
-        <div class="text-caption text-weight-medium">
-          Joining adds these suggested sharing policies to your list —
-          yours to edit or turn off:
-        </div>
-        <div
-          v-for="(c, i) in inviteSuggested"
-          :key="`is:${i}`"
-          class="join-policy-card"
-          :class="c.outcome === 'deny' ? 'join-policy-card--deny' : 'join-policy-card--allow'"
-        >
-          {{ c.sentence }}
-        </div>
-      </div>
-      <div class="text-caption text-grey-7 q-mt-xs">
-        Group-wide "Everyone" messages are on by default. Your name, these
-        policies, and message settings can all be changed on this page at
-        any time after you join.
+      <div v-if="inviteSuggested.length" class="text-caption text-weight-medium q-mt-xs">
+        The group's suggested sharing policies have been added to your
+        Sharing Policies list below — review, edit, or turn them off
+        before or after you join. Group-wide "Everyone" messages are on
+        by default.
       </div>
       <q-input
         v-model="aliasInput"
@@ -75,24 +62,11 @@
         <div class="text-caption text-weight-medium">Group policy — joining means you accept it:</div>
         <div class="text-caption" style="white-space: pre-wrap">{{ joinLinkGroupPolicy }}</div>
       </div>
-      <div v-if="joinLinkSuggested.length" class="q-mt-xs">
-        <div class="text-caption text-weight-medium">
-          Joining adds these suggested sharing policies to your list —
-          yours to edit or turn off:
-        </div>
-        <div
-          v-for="(c, i) in joinLinkSuggested"
-          :key="`js:${i}`"
-          class="join-policy-card"
-          :class="c.outcome === 'deny' ? 'join-policy-card--deny' : 'join-policy-card--allow'"
-        >
-          {{ c.sentence }}
-        </div>
-      </div>
-      <div class="text-caption text-grey-7 q-mt-xs">
-        Group-wide "Everyone" messages are on by default. Your name, these
-        policies, and message settings can all be changed on this page at
-        any time after you join.
+      <div v-if="joinLinkSuggested.length" class="text-caption text-weight-medium q-mt-xs">
+        The group's suggested sharing policies have been added to your
+        Sharing Policies list below — review, edit, or turn them off
+        before or after you join. Group-wide "Everyone" messages are on
+        by default.
       </div>
       <q-input
         v-model="joinAliasInput"
@@ -151,6 +125,8 @@ const emit = defineEmits<{
   (e: 'requested'): void;
   /** Whether the card is showing anything (parents gate empty-states). */
   (e: 'active', value: boolean): void;
+  /** Suggested policies were preview-imported or removed — reload lists. */
+  (e: 'policies-changed'): void;
 }>();
 
 const INVITE_LS_KEY = 'maiaGroupInvite';
@@ -215,6 +191,9 @@ const loadPendingInvite = async () => {
         inviteGroupDescription.value = data.group?.description || '';
         inviteGroupPolicy.value = data.group?.postingPolicy || '';
         inviteSuggested.value = data.group?.suggestedPolicies || [];
+        if (inviteSuggested.value.length && (!data.invite || data.invite.valid !== false)) {
+          void previewImportSuggested(invite, 'invite');
+        }
         if (data.invite && data.invite.valid === false) {
           // Dead token — persistent explanation, never a silent vanish.
           localStorage.removeItem(INVITE_LS_KEY);
@@ -267,6 +246,9 @@ const loadPendingJoinLink = async () => {
         joinLinkGroupName.value = data.group?.name || '';
         joinLinkGroupPolicy.value = data.group?.postingPolicy || '';
         joinLinkSuggested.value = data.group?.suggestedPolicies || [];
+        if (joinLinkSuggested.value.length) {
+          void previewImportSuggested(link, 'join');
+        }
         joinLinkMode.value = data.joinMode || 'link-approval';
       }
     } catch { /* generic card text */ }
@@ -355,14 +337,56 @@ const submitJoinRequest = async () => {
   }
 };
 
+/** Pre-join preview: import the group's suggestions as the user's own
+ *  cards NOW, so the normal Sharing Policies editor shows them in
+ *  canonical form before the join decision. Server-side import skips
+ *  when cards from this group already exist, so this is idempotent and
+ *  joining later never duplicates or clobbers edits. */
+const previewImportSuggested = async (link: { groupId: string; token: string; registry?: string }, kind: 'invite' | 'join') => {
+  try {
+    const res = await fetch('/api/user-groups/import-suggested-policies', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        userId: props.userId,
+        groupId: link.groupId,
+        token: link.token,
+        registryUrl: link.registry || window.location.origin,
+        kind
+      })
+    });
+    const data = await res.json();
+    if (res.ok && data.success && data.imported > 0) emit('policies-changed');
+  } catch { /* the card still explains; join imports as before */ }
+};
+
+/** Declining the join takes the previewed cards with it. */
+const removePreviewedSuggested = async (groupId: string) => {
+  try {
+    const res = await fetch('/api/user-groups/remove-suggested-policies', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ userId: props.userId, groupId })
+    });
+    const data = await res.json();
+    if (res.ok && data.success && data.removed > 0) emit('policies-changed');
+  } catch { /* non-fatal */ }
+};
+
 const dismissInvite = () => {
   localStorage.removeItem(INVITE_LS_KEY);
+  const gid = pendingInvite.value?.groupId;
   pendingInvite.value = null;
+  if (gid) void removePreviewedSuggested(gid);
 };
 
 const dismissJoinLink = () => {
   localStorage.removeItem(JOIN_LINK_LS_KEY);
+  const gid = pendingJoinLink.value?.groupId;
   pendingJoinLink.value = null;
+  if (gid) void removePreviewedSuggested(gid);
 };
 
 const reload = async () => {
@@ -411,16 +435,4 @@ onMounted(reload);
   padding-left: 8px;
 }
 
-.join-policy-card {
-  margin-top: 4px;
-  padding: 4px 8px;
-  font-size: 12px;
-  background: #fff;
-  border-radius: 4px;
-  border-left: 3px solid #66bb6a;
-
-  &--deny {
-    border-left-color: #ef5350;
-  }
-}
 </style>
