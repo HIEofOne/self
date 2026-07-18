@@ -819,3 +819,18 @@ and any design decisions resolved.
   numbered steps are removed from the page (video demoted to Learn more;
   the wizard teaches by doing). Next per Refinement 8: full public group
   page (W2) and outsider requests v1 with email verification (W3).
+- **2026-07-16** — **Deploy template + featured peer registries**
+  (Refinement 8 infrastructure). `.do/deploy.template.yaml` powers a
+  Deploy-to-DigitalOcean button (README gains a "Set up a group" section:
+  one-click app creation, the four env prompts, the CouchDB-droplet step
+  App Platform can't automate, and the email-safe CNAME custom-domain
+  recipe — never switch nameservers on a domain whose registrar handles
+  email forwarding). New `FEATURED_GROUP_REGISTRIES` env: comma-separated
+  peer MAIA deployments whose public groups this welcome page also
+  features — fetched server-to-server (60 s cache, 3 s timeout, no CORS),
+  labeled "hosted at <host>", listed before local groups. Join links are
+  absolute with their own registry= param, so cross-host Ask-to-join
+  rides the existing federation path. Verified with two local instances:
+  port 3002 featuring port 3001 lists the peer's group first with
+  originHost set. This is how maia.agropper.xyz will feature the
+  standalone Trustee group at trustee.ai.

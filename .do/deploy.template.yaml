@@ -1,0 +1,49 @@
+# Deploy-to-DigitalOcean template (Refinement 8: "Start a group").
+# Referenced by the Deploy button in README.md — one click creates the
+# App Platform app and prompts for the four required secrets/settings.
+#
+# What this DOES create: the MAIA app (SPA + server, which includes the
+# group registry and each member's authorization server).
+# What it CANNOT create: the CouchDB droplet (App Platform templates
+# can't provision droplets) — see "Set up a group" in README.md for the
+# one-command droplet step, and set CLOUDANT_URL afterwards.
+spec:
+  name: maia
+  region: nyc
+  services:
+    - name: web
+      github:
+        repo: HIEofOne/self
+        branch: main
+        deploy_on_push: true
+      build_command: npm run build
+      run_command: npm start
+      environment_slug: node-js
+      instance_count: 1
+      instance_size_slug: basic-xs
+      http_port: 3001
+      routes:
+        - path: /
+      envs:
+        - key: NODE_ENV
+          value: production
+        - key: PORT
+          value: "3001"
+        - key: DIGITALOCEAN_TOKEN
+          scope: RUN_TIME
+          type: SECRET
+        - key: SPACES_AWS_ACCESS_KEY_ID
+          scope: RUN_TIME
+          type: SECRET
+        - key: SPACES_AWS_SECRET_ACCESS_KEY
+          scope: RUN_TIME
+          type: SECRET
+        - key: PUBLIC_APP_URL
+          scope: RUN_TIME
+          value: ""
+        - key: CLOUDANT_URL
+          scope: RUN_TIME
+          value: ""
+        - key: FEATURED_GROUP_REGISTRIES
+          scope: RUN_TIME
+          value: ""

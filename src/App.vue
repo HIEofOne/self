@@ -282,7 +282,10 @@
                     <div v-for="g in publicGroups" :key="g.groupId" class="welcome-door q-mb-sm">
                       <div class="row items-center q-col-gutter-sm">
                         <div class="col">
-                          <div class="text-subtitle2">{{ g.name }}</div>
+                          <div class="text-subtitle2">
+                            {{ g.name }}
+                            <q-badge v-if="g.originHost" outline color="teal" :label="`hosted at ${g.originHost}`" class="q-ml-xs" />
+                          </div>
                           <div class="text-caption text-grey-8">{{ g.description }}</div>
                           <div class="text-caption text-grey-6">{{ g.activeMemberCount }} member(s)</div>
                         </div>
@@ -1134,7 +1137,7 @@ const showAdminPage = ref(false);
 
 // ── Organizer-first welcome (Refinement 8) ─────────────────────────
 /** Publicly-listed groups on this deployment (admin opt-in per group). */
-const publicGroups = ref<Array<{ groupId: string; name: string; description: string; postingPolicy: string; activeMemberCount: number; joinLink: string | null }>>([]);
+const publicGroups = ref<Array<{ groupId: string; name: string; description: string; postingPolicy: string; activeMemberCount: number; joinLink: string | null; origin?: string | null; originHost?: string | null }>>([]);
 const expandedPublicGroup = ref<string | null>(null);
 const loadPublicGroups = async () => {
   try {

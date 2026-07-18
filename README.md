@@ -14,6 +14,36 @@ When running MAIA, use your own credit card to pay for hosting. If someone else 
 
 ---
 
+## Set up a group (host your own MAIA)
+
+[![Deploy to DO](https://www.deploytodo.com/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/HIEofOne/self/tree/main)
+
+One click creates the MAIA app on your DigitalOcean account (about $10–40/month
+total for hosting). You will be prompted for:
+
+| Setting | What to enter |
+|---|---|
+| `DIGITALOCEAN_TOKEN` | A DO API token from your account (Settings → API). This is the master secret — everything else is derived from it. |
+| `SPACES_AWS_ACCESS_KEY_ID` / `SPACES_AWS_SECRET_ACCESS_KEY` | Spaces keys (Settings → API → Spaces Keys). |
+| `PUBLIC_APP_URL` | The public URL your app will live at, e.g. `https://maia.example.org`. |
+| `CLOUDANT_URL` | Leave blank at first — fill in after the droplet step below. |
+| `FEATURED_GROUP_REGISTRIES` | Optional: comma-separated URLs of other MAIA deployments whose public groups your welcome page should feature. |
+
+**The CouchDB droplet** (App Platform cannot create droplets): create the
+cheapest droplet, install CouchDB, and set its admin password to the value
+derived from your DO token (the app prints the expected value in its logs on
+first boot). Then set `CLOUDANT_URL=http://<droplet-ip>:5984` in the app's
+environment and redeploy. A guided in-app bootstrap for this step is planned.
+
+**Custom domain without breaking your email**: keep your registrar's
+nameservers and add a CNAME for a subdomain (e.g. `maia`) pointing at the
+app's `…ondigitalocean.app` hostname, then add that domain in the app's
+Settings → Domains. Do not switch nameservers if your registrar handles
+email forwarding for the domain.
+
+Then sign in as admin, create your group, write its posting policy, and turn
+on "List this group publicly" — your welcome page is your group's front door.
+
 ## Top 19 User Features
 
 1. **Get Started** simple, passwordless entry for new users with self-provisioning wizard.

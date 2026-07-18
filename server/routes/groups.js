@@ -348,10 +348,42 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
   // what the design allows ANYONE to see: name, description, posting
   // policy, aggregate liquidity — never a roster. The join link is
   // included only when the group accepts link-approval join requests.
+  // Featured PEER registries (Refinement 8): FEATURED_GROUP_REGISTRIES is
+  // a comma-separated list of other MAIA deployments whose public groups
+  // this welcome page also features (e.g. the standalone Trustee demo).
+  // Fetched server-to-server (no CORS) with a short cache; each remote
+  // card carries originHost so the UI can say "hosted at trustee.ai".
+  // Join links are absolute and carry their own registry= param, so
+  // Ask-to-join works cross-host via the existing federation path.
+  let featuredCache = { at: 0, groups: [] };
+  const fetchFeaturedGroups = async () => {
+    const raw = (process.env.FEATURED_GROUP_REGISTRIES || '').trim();
+    if (!raw) return [];
+    if (Date.now() - featuredCache.at < 60_000) return featuredCache.groups;
+    const peers = raw.split(',').map((u) => u.trim().replace(/\/$/, '')).filter(Boolean);
+    const out = [];
+    for (const peer of peers) {
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 3000);
+        const r = await fetch(`${peer}/api/groups/public`, { signal: ctrl.signal });
+        clearTimeout(t);
+        const data = await r.json().catch(() => ({}));
+        if (r.ok && data.success) {
+          for (const g of data.groups || []) {
+            out.push({ ...g, origin: peer, originHost: new URL(peer).hostname });
+          }
+        }
+      } catch { /* peer down — skip */ }
+    }
+    featuredCache = { at: Date.now(), groups: out };
+    return out;
+  };
+
   app.get('/api/groups/public', async (req, res) => {
     try {
       const all = await cloudant.getAllDocuments(GROUPS_DB);
-      const groups = (all || [])
+      const local = (all || [])
         .filter((d) => d && d.type === 'group' && d.publiclyListed === true)
         .map((d) => ({
           groupId: d._id,
@@ -359,10 +391,15 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
           description: d.description || '',
           postingPolicy: d.postingPolicy || '',
           activeMemberCount: memberCounts(d).active,
-          joinLink: joinLinkFor(d)
-        }))
-        .sort((a, b) => a.name.localeCompare(b.name));
-      res.json({ success: true, groups });
+          joinLink: joinLinkFor(d),
+          origin: null,
+          originHost: null
+        }));
+      const featured = await fetchFeaturedGroups();
+      // Featured (remote) groups first — they are the deployment's chosen
+      // demo — then local, both alphabetical.
+      const byName = (a, b) => a.name.localeCompare(b.name);
+      res.json({ success: true, groups: [...featured.sort(byName), ...local.sort(byName)] });
     } catch (error) {
       console.error('[groups] public list failed:', error);
       res.status(500).json({ success: false, error: 'Failed to list groups' });
