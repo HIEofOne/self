@@ -1010,3 +1010,19 @@ and any design decisions resolved.
   (guarded: never removes cards for a group you belong to). Verified:
   2 cards previewed into the live list under the correct group label,
   DISMISS removed exactly those 2, membership cards untouched.
+- **2026-07-18** — **Deleting a MAIA leaves its groups**. The shared
+  deletion path (Welcome-page X and admin delete) removed the agent,
+  KB, files, and chats but never told any group registry — leaving
+  permanently unreachable "active" ghosts: publicly counted,
+  mentor-listable, receiving Everyone broadcasts into the void, and
+  silently eating peer messages (the pairwise keys die with the
+  userDoc, so no later cleanup is possible). deleteUserAndResources
+  now, FIRST, while the keys still exist, signs a leave claim for
+  every membership AND every pending join request (the registry's
+  leave endpoint accepts any signed non-invited member, so the same
+  claim withdraws a 'requested' entry) and posts it to each entry's
+  own registryUrl — federation-safe, best-effort, never blocks the
+  deletion. Verified live: deleting a member-mentor via the Welcome-X
+  endpoint reported groupsLeft:1 and the public list dropped the
+  member count and mentor row instantly. The four pre-fix ghosts in
+  the local Trustee demo were purged via the admin member-remove API.

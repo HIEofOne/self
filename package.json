@@ -1,6 +1,6 @@
 {
   "name": "maia-cloud-user-app",
-  "version": "1.5.52",
+  "version": "1.5.53",
   "description": "Authenticated User app for MAIA (Medical AI Assistant) - user.agropper.xyz",
   "type": "module",
   "engines": {
