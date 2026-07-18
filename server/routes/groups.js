@@ -2289,6 +2289,85 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     }
   });
 
+  // POST /api/user-groups/import-suggested-policies — pull a group's
+  // suggested sharing policies into the user's OWN list while a join is
+  // still pending, so the normal Sharing Policies editor shows them in
+  // canonical form (real toggles, real edit) BEFORE the user commits.
+  // Server-fetches the registry payload (never trusts client-supplied
+  // cards) and reuses the same skip-if-present import the join paths
+  // use, so joining afterwards never duplicates or clobbers edits.
+  app.post('/api/user-groups/import-suggested-policies', async (req, res) => {
+    const userId = requireMatchingUser(req, res);
+    if (!userId) return;
+    try {
+      const { groupId, token, registryUrl, kind } = req.body || {};
+      const base = safeRegistryBase(registryUrl || `http://localhost:${process.env.PORT || 3001}`);
+      if (!groupId || !token || !base) {
+        return res.status(400).json({ success: false, error: 'groupId, token and a valid registryUrl are required' });
+      }
+      const info = kind === 'invite' ? 'invite-info' : 'join-info';
+      const r = await fetch(`${base}/api/groups/${encodeURIComponent(groupId)}/${info}?token=${encodeURIComponent(token)}`);
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || !data.success) {
+        return res.status(502).json({ success: false, error: data.error || 'Registry unavailable' });
+      }
+      const tokenValid = kind === 'invite' ? data.invite?.valid !== false : data.valid !== false;
+      if (!tokenValid) {
+        return res.status(410).json({ success: false, error: 'This invitation is no longer valid' });
+      }
+      const cards = (data.group?.suggestedPolicies || []).map((c) => normalizeCard(c)).filter(Boolean);
+      const userDoc = await cloudant.getDocument(USERS_DB, userId);
+      if (!userDoc) return res.status(404).json({ success: false, error: 'User not found' });
+      const before = (userDoc.sharingPolicies || []).length;
+      importSuggestedPolicies(userDoc, groupId, cards);
+      const imported = (userDoc.sharingPolicies || []).length - before;
+      if (imported > 0) {
+        userDoc.updatedAt = new Date().toISOString();
+        await cloudant.saveDocument(USERS_DB, userDoc);
+        auditLog.logEvent({
+          type: 'suggested_policies_previewed',
+          userId,
+          ip: req.ip,
+          details: { groupId, imported }
+        });
+      }
+      res.json({ success: true, imported, groupName: data.group?.name || null });
+    } catch (error) {
+      console.error('[user-groups] import-suggested failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to import suggested policies' });
+    }
+  });
+
+  // POST /api/user-groups/remove-suggested-policies — the DISMISS side:
+  // the user declined the join, so the previewed cards for that group
+  // leave with it.
+  app.post('/api/user-groups/remove-suggested-policies', async (req, res) => {
+    const userId = requireMatchingUser(req, res);
+    if (!userId) return;
+    try {
+      const { groupId } = req.body || {};
+      if (!groupId) return res.status(400).json({ success: false, error: 'groupId is required' });
+      const userDoc = await cloudant.getDocument(USERS_DB, userId);
+      if (!userDoc) return res.status(404).json({ success: false, error: 'User not found' });
+      // Never remove cards for a group the user actually belongs to.
+      if ((userDoc.groupMemberships || []).some((m) => m.groupId === groupId)) {
+        return res.status(409).json({ success: false, error: 'You are a member of this group' });
+      }
+      const prov = `group:${groupId}`;
+      const before = (userDoc.sharingPolicies || []).length;
+      userDoc.sharingPolicies = (userDoc.sharingPolicies || []).filter((c) => c.provenance !== prov);
+      const removed = before - userDoc.sharingPolicies.length;
+      if (removed > 0) {
+        userDoc.updatedAt = new Date().toISOString();
+        await cloudant.saveDocument(USERS_DB, userDoc);
+      }
+      res.json({ success: true, removed });
+    } catch (error) {
+      console.error('[user-groups] remove-suggested failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to remove suggested policies' });
+    }
+  });
+
   // POST /api/user-groups/alias — the member's side of a display-name
   // change: sign, update the registry, mirror locally.
   app.post('/api/user-groups/alias', async (req, res) => {
