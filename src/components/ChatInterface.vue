@@ -852,6 +852,7 @@
       :draft-ps-meds="draftPsMeds"
       :show-close-prompt="showWorkbookClosePrompt"
       :saved-chat-count="savedChatCount"
+      @group-joined="handleGroupJoined"
       @chat-selected="handleChatSelected"
       @indexing-started="handleIndexingStarted"
       @indexing-status-update="handleIndexingStatusUpdate"
@@ -1374,6 +1375,19 @@ const sendShareToPeer = async () => {
   }
 };
 const showWorkbookClosePrompt = ref(false);
+/** Joining a group ends setup for this session: the wizard's attention
+ *  markers go quiet (quick-start setup IS complete — records are a
+ *  later, optional upgrade), and the Workbook shows the same blue
+ *  "Close the Workbook to chat" prompt the indexing wizard ends with. */
+const wizardSuspendedByJoin = ref(false);
+const handleGroupJoined = () => {
+  wizardSuspendedByJoin.value = true;
+  wizardResumeAttempted.value = true;
+  wizardFlowPhase.value = 'done';
+  showAgentSetupDialog.value = false;
+  showWorkbookClosePrompt.value = true;
+  void refreshWizardState(); // pick up workflowStage 'chat_ready'
+};
 const myStuffInitialTab = ref<string>('files');
 const myStuffDialogRef = ref<InstanceType<typeof MyStuffDialog> | null>(null);
 
@@ -2186,6 +2200,7 @@ const userResourceStatus = ref<{
 const WIZARD_DONE_STAGES = new Set(['patient_summary', 'link_stored', 'chat_ready']);
 
 const wizardActive = computed<boolean>(() => {
+  if (wizardSuspendedByJoin.value) return false;
   if (wizardPatientSummary.value) return false;
   if (showAgentSetupDialog.value) return true;
   if (wizardFlowPhase.value !== 'done') return true;

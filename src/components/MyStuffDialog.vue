@@ -1089,11 +1089,11 @@
 
           <!-- Groups Tab (Groups & AS feature — Documentation/Groups.md §7.4) -->
           <q-tab-panel name="groups" class="q-pa-none" style="display: flex; flex-direction: column; height: 100%;">
-            <GroupsPanel :userId="userId" style="flex: 1; min-height: 0;" @open-thread="(t) => emit('open-peer-thread', t)" />
+            <GroupsPanel :userId="userId" style="flex: 1; min-height: 0;" @open-thread="(t) => emit('open-peer-thread', t)" @group-joined="emit('group-joined')" />
           </q-tab-panel>
 
           <q-tab-panel name="policies" class="q-pa-none" style="overflow-y: auto;">
-            <PoliciesPanel :userId="userId" />
+            <PoliciesPanel :userId="userId" @group-joined="emit('group-joined')" />
           </q-tab-panel>
 
           <!-- Privacy Filter Tab -->
@@ -1954,6 +1954,7 @@ const props = withDefaults(defineProps<Props>(), {
 });
 
 const emit = defineEmits<{
+  'group-joined': [];
   'index-now-triggered': [];
   'update:modelValue': [value: boolean];
   'chat-selected': [chat: SavedChat];
