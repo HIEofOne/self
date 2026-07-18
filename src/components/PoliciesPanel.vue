@@ -2,6 +2,18 @@
   <div class="q-pa-md" style="max-width: 860px">
     <div class="text-h6 q-mb-xs">Sharing Policies</div>
 
+    <!-- A new member's landing: the wizard sends users with a captured
+         invite/join link HERE, so joining and reviewing the group's
+         suggested policies are one screen. Joining imports the group's
+         suggestions as the user's own cards — reload to show them. -->
+    <PendingJoinCard
+      class="q-mb-md"
+      :user-id="props.userId"
+      :memberships="memberships"
+      @joined="loadAll"
+      @requested="loadAll"
+    />
+
     <!-- The default mental model, stated up front -->
     <q-banner dense rounded class="bg-blue-1 text-blue-10 q-mb-md">
       <template #avatar><q-icon name="shield" color="blue-8" /></template>
@@ -104,6 +116,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
+import PendingJoinCard from './PendingJoinCard.vue';
 import { useQuasar } from 'quasar';
 import {
   sentenceFor, evaluate,

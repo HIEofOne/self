@@ -7988,20 +7988,29 @@ watch(
     // (usual) folder-less quick start and correct if a folder exists.
     void generateSetupLogPdf();
     void saveStateToLocalFolder();
-    // Land on Workbook → Groups FIRST, synchronously. The status refresh
+    // Land on the Workbook FIRST, synchronously. The status refresh
     // below can trigger the wizard-resume machinery against a stale
     // workflowStage (CouchDB read-after-write lag on the POST above),
-    // which opens My Lists and would stomp the Groups landing — so mark
+    // which opens My Lists and would stomp this landing — so mark
     // the resume as already attempted and refresh only after the UI is
-    // where we want it.
+    // where we want it. An invitee with a captured invite/join link
+    // lands on Sharing Policies, where the join card sits on top of the
+    // policies they're accepting — one calm screen, one decision.
+    // Everyone else lands on Groups.
     showAgentSetupDialog.value = false;
     wizardQuickStart.value = false; // reopening the wizard shows the normal fork
     wizardResumeAttempted.value = true;
-    myStuffInitialTab.value = 'groups';
+    let hasPendingJoin = false;
+    try {
+      hasPendingJoin = !!(localStorage.getItem('maiaGroupInvite') || localStorage.getItem('maiaGroupJoin'));
+    } catch { /* storage unavailable */ }
+    myStuffInitialTab.value = hasPendingJoin ? 'policies' : 'groups';
     showMyStuffDialog.value = true;
     $q.notify({
       type: 'positive',
-      message: 'Your private AI is ready. You can join groups and chat now — add health records anytime later.',
+      message: hasPendingJoin
+        ? 'Your private AI is ready. One more step — review the group\'s policies and join.'
+        : 'Your private AI is ready. You can join groups and chat now — add health records anytime later.',
       timeout: 8000
     });
     void refreshWizardState(); // pick up workflowStage 'chat_ready'
@@ -9025,10 +9034,10 @@ onMounted(async () => {
           timeout: 15000,
           actions: [
             {
-              label: 'Open Groups',
+              label: 'Review & join',
               color: 'white',
               handler: () => {
-                myStuffInitialTab.value = 'groups';
+                myStuffInitialTab.value = 'policies';
                 showMyStuffDialog.value = true;
               }
             },
