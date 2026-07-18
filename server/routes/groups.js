@@ -162,7 +162,7 @@ const memberCounts = (doc) => {
  *  REQUEST to join; the admin approves each request, so a leaked link
  *  never grants membership by itself. */
 const joinLinkFor = (doc) => {
-  if (doc.joinMode !== 'link-approval' || !doc.joinLinkToken) return null;
+  if (!['link-approval', 'open'].includes(doc.joinMode) || !doc.joinLinkToken) return null;
   const appUrl = (process.env.PUBLIC_APP_URL || 'http://localhost:5173').replace(/\/$/, '');
   return `${appUrl}/?groupJoin=${doc.joinLinkToken}&groupId=${encodeURIComponent(doc._id)}&registry=${encodeURIComponent(appUrl)}`;
 };
@@ -179,10 +179,12 @@ const adminGroupView = (doc) => ({
   // can turn it off per group.
   memberInvitesAllowed: doc.memberInvitesAllowed !== false,
   postingPolicy: doc.postingPolicy || '',
-  // Admin policy: how people join. 'invite-only' (default) or
-  // 'link-approval' (anyone with the join link can REQUEST; admin
-  // approves each). The link itself never grants membership.
-  joinMode: doc.joinMode === 'link-approval' ? 'link-approval' : 'invite-only',
+  // Admin policy: how people join. 'invite-only' (default),
+  // 'link-approval' (anyone with the link can REQUEST; admin approves
+  // each), or 'open' (anyone with the link becomes a member INSTANTLY —
+  // the zero-latency bootstrap mode; the admin can still revoke, and the
+  // link is still rotatable).
+  joinMode: ['link-approval', 'open'].includes(doc.joinMode) ? doc.joinMode : 'invite-only',
   joinLink: joinLinkFor(doc),
   // Welcome-page listing (Refinement 8): admin opt-in, default OFF —
   // invite-only groups stay invisible (no honeypot directory).
@@ -321,10 +323,10 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         doc.publiclyListed = !!req.body.publiclyListed;
       }
       if (req.body?.joinMode !== undefined) {
-        doc.joinMode = req.body.joinMode === 'link-approval' ? 'link-approval' : 'invite-only';
+        doc.joinMode = ['link-approval', 'open'].includes(req.body.joinMode) ? req.body.joinMode : 'invite-only';
         // Mint the shareable link token on first enable; rotation is a
         // separate explicit action (POST rotate-join-link).
-        if (doc.joinMode === 'link-approval' && !doc.joinLinkToken) {
+        if (['link-approval', 'open'].includes(doc.joinMode) && !doc.joinLinkToken) {
           doc.joinLinkToken = randomBytes(16).toString('hex');
         }
       }
@@ -392,6 +394,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
           postingPolicy: d.postingPolicy || '',
           activeMemberCount: memberCounts(d).active,
           joinLink: joinLinkFor(d),
+          joinMode: ['link-approval', 'open'].includes(d.joinMode) ? d.joinMode : 'invite-only',
           origin: null,
           originHost: null
         }));
@@ -712,12 +715,13 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       if (!doc || doc.type !== 'group') {
         return res.status(404).json({ success: false, error: 'Group not found' });
       }
-      const valid = doc.joinMode === 'link-approval'
+      const valid = ['link-approval', 'open'].includes(doc.joinMode)
         && !!doc.joinLinkToken
         && String(req.query?.token || '') === doc.joinLinkToken;
       res.json({
         success: true,
         valid,
+        joinMode: valid ? doc.joinMode : null,
         group: valid ? { name: doc.name, description: doc.description || '', postingPolicy: doc.postingPolicy || '' } : null
       });
     } catch (error) {
@@ -738,19 +742,24 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         return res.status(404).json({ success: false, error: 'Group not found' });
       }
       const { token, alias, signingPublicKeyJwk, encryptionPublicKeyJwk } = req.body || {};
-      if (doc.joinMode !== 'link-approval' || !doc.joinLinkToken || String(token || '') !== doc.joinLinkToken) {
+      if (!['link-approval', 'open'].includes(doc.joinMode) || !doc.joinLinkToken || String(token || '') !== doc.joinLinkToken) {
         return res.status(403).json({ success: false, error: 'This group is not accepting join requests via link' });
       }
       if (!alias || !String(alias).trim() || !signingPublicKeyJwk || !encryptionPublicKeyJwk) {
         return res.status(400).json({ success: false, error: 'alias, signingPublicKeyJwk and encryptionPublicKeyJwk are required' });
       }
+      // Open mode (zero-latency bootstrap): the link admits instantly —
+      // the entry is born ACTIVE; the admin can still revoke and the
+      // link is still rotatable. Approval mode: born 'requested'.
+      const isOpen = doc.joinMode === 'open';
+      const nowIso = new Date().toISOString();
       const entry = {
         pairwiseId: randomBytes(12).toString('hex'),
-        status: 'requested',
+        status: isOpen ? 'active' : 'requested',
         alias: String(alias).trim().slice(0, 60),
         signingPublicKeyJwk,
         encryptionPublicKeyJwk,
-        requestedAt: new Date().toISOString()
+        ...(isOpen ? { joinedAt: nowIso, lastRefreshAt: nowIso } : { requestedAt: nowIso })
       };
       doc.members = [...(doc.members || []), entry];
       doc.updatedAt = entry.requestedAt;
@@ -761,7 +770,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         ip: req.ip,
         details: { groupId: doc._id, pairwiseId: entry.pairwiseId }
       });
-      res.json({ success: true, pairwiseId: entry.pairwiseId, groupName: doc.name });
+      res.json({ success: true, pairwiseId: entry.pairwiseId, groupName: doc.name, immediate: isOpen });
     } catch (error) {
       console.error('[groups] join request failed:', error);
       res.status(500).json({ success: false, error: 'Failed to submit join request' });
@@ -1655,6 +1664,51 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         },
         requestedAt: new Date().toISOString()
       };
+
+      // Open-mode group (data.immediate): the registry admitted us on the
+      // spot — collect the credential NOW via the signed status endpoint
+      // and return a full membership in this same round trip. No pending
+      // state, no polling, no dead air.
+      if (data.immediate) {
+        try {
+          const { payload: sp, signature: ss } = signWithMembership(pending, {
+            action: 'join-status', groupId, caller: pending.pairwiseId, ts: new Date().toISOString()
+          });
+          const sr = await fetch(
+            `${base}/api/groups/${encodeURIComponent(groupId)}/join-requests/${encodeURIComponent(pending.pairwiseId)}/status` +
+            `?payload=${encodeURIComponent(sp)}&signature=${encodeURIComponent(ss)}`
+          );
+          const sd = await sr.json().catch(() => ({}));
+          if (sr.ok && sd.success && sd.status === 'active' && sd.membership) {
+            const m = sd.membership;
+            const membership = {
+              groupId: m.groupId,
+              groupName: m.groupName,
+              registryUrl: base,
+              pairwiseId: m.pairwiseId,
+              alias: m.alias,
+              signingKeyPair: pending.signingKeyPair,
+              encryptionKeyPair: pending.encryptionKeyPair,
+              credential: m.credential,
+              groupPublicKeyJwk: m.groupPublicKeyJwk,
+              joinedAt: new Date().toISOString(),
+              invitedBy: null,
+              acceptedSenders: []
+            };
+            userDoc.groupMemberships = [...(userDoc.groupMemberships || []), membership];
+            userDoc.updatedAt = membership.joinedAt;
+            await cloudant.saveDocument(USERS_DB, userDoc);
+            auditLog.logEvent({
+              type: 'user_group_joined',
+              userId,
+              ip: req.ip,
+              details: { groupId, pairwiseId: m.pairwiseId, via: 'open-link' }
+            });
+            return res.json({ success: true, joined: true, membership: membershipView(membership) });
+          }
+        } catch { /* fall through to the pending path — the poll will finish it */ }
+      }
+
       userDoc.pendingGroupJoins = [...(userDoc.pendingGroupJoins || []), pending];
       userDoc.updatedAt = pending.requestedAt;
       await cloudant.saveDocument(USERS_DB, userDoc);

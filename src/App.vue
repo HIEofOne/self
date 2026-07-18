@@ -293,7 +293,8 @@
                           <q-btn flat dense size="sm" color="primary" :label="expandedPublicGroup === g.groupId ? 'Hide details' : 'Look around'" @click="expandedPublicGroup = expandedPublicGroup === g.groupId ? null : g.groupId" />
                           <q-btn
                             v-if="g.joinLink && pendingGroupJoinLink?.groupId !== g.groupId"
-                            flat dense size="sm" color="primary" label="Ask to join"
+                            flat dense size="sm" color="primary"
+                            :label="g.joinMode === 'open' ? 'Join now' : 'Ask to join'"
                             @click="askToJoinPublic(g)"
                           />
                         </div>
@@ -304,11 +305,16 @@
                       </div>
                       <div v-if="pendingGroupJoinLink?.groupId === g.groupId" class="q-mt-sm q-pa-sm" style="border-left: 3px solid #1976d2; background: #e3f2fd;">
                         <div class="text-caption q-mb-xs">
-                          To send your request, create your MAIA (about a minute) — the group's
-                          administrator approves requests, not a company.
+                          <template v-if="g.joinMode === 'open'">
+                            Create your MAIA (about a minute) and you're in — no approval wait.
+                          </template>
+                          <template v-else>
+                            To send your request, create your MAIA (about a minute) — the group's
+                            administrator approves requests, not a company.
+                          </template>
                         </div>
                         <q-btn unelevated dense color="primary" size="sm"
-                          :label="`CREATE MY MAIA & REQUEST TO JOIN ${g.name.toUpperCase()}`"
+                          :label="g.joinMode === 'open' ? `CREATE MY MAIA & JOIN ${g.name.toUpperCase()}` : `CREATE MY MAIA & REQUEST TO JOIN ${g.name.toUpperCase()}`"
                           :loading="tempStartLoading"
                           @click="handleGetStartedNoPassword" />
                       </div>
@@ -1137,7 +1143,7 @@ const showAdminPage = ref(false);
 
 // ── Organizer-first welcome (Refinement 8) ─────────────────────────
 /** Publicly-listed groups on this deployment (admin opt-in per group). */
-const publicGroups = ref<Array<{ groupId: string; name: string; description: string; postingPolicy: string; activeMemberCount: number; joinLink: string | null; origin?: string | null; originHost?: string | null }>>([]);
+const publicGroups = ref<Array<{ groupId: string; name: string; description: string; postingPolicy: string; activeMemberCount: number; joinLink: string | null; joinMode?: string; origin?: string | null; originHost?: string | null }>>([]);
 const expandedPublicGroup = ref<string | null>(null);
 const loadPublicGroups = async () => {
   try {

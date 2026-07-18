@@ -165,18 +165,18 @@
               Off = invisible to visitors.
             </q-tooltip>
           </q-toggle>
-          <q-toggle
-            v-model="form.joinByLink"
-            label="Anyone with the link may request to join"
-            dense
-          >
-            <q-tooltip>
-              Creates a shareable link (and QR code) anyone can use to
-              REQUEST membership. You approve each request — the link alone
-              never admits anyone. Rotate it any time to void old copies.
-            </q-tooltip>
-          </q-toggle>
-          <div v-if="form.joinByLink && editingJoinLink" class="q-mt-sm">
+          <q-select
+            v-model="form.joinMode"
+            :options="[
+              { value: 'invite-only', label: 'Invite only — you send each invitation' },
+              { value: 'link-approval', label: 'Link + approval — anyone may request; you approve each' },
+              { value: 'open', label: 'Open — anyone with the link joins instantly' }
+            ]"
+            emit-value map-options dense outlined
+            label="How people join"
+            hint="Open is the zero-friction bootstrap mode: you can still revoke members and rotate the link."
+          />
+          <div v-if="form.joinMode !== 'invite-only' && editingJoinLink" class="q-mt-sm">
             <div class="text-caption text-grey-7">Share this link or QR code:</div>
             <div class="text-caption q-mt-xs" style="word-break: break-all">
               {{ editingJoinLink }}
@@ -191,10 +191,10 @@
               </q-btn>
             </div>
           </div>
-          <div v-else-if="form.joinByLink && editingGroupId" class="text-caption text-grey-7">
+          <div v-else-if="form.joinMode !== 'invite-only' && editingGroupId" class="text-caption text-grey-7">
             Save to generate the link and QR code.
           </div>
-          <div v-else-if="form.joinByLink" class="text-caption text-grey-7">
+          <div v-else-if="form.joinMode !== 'invite-only'" class="text-caption text-grey-7">
             The link and QR code appear after the group is created (edit the group to see them).
           </div>
         </q-card-section>
@@ -313,7 +313,7 @@ const loadingMembers = ref<Record<string, boolean>>({});
 const showDialog = ref(false);
 const saving = ref(false);
 const editingGroupId = ref<string | null>(null);
-const form = ref({ name: '', description: '', tags: '', postingPolicy: '', memberInvitesAllowed: true, joinByLink: false, publiclyListed: false });
+const form = ref({ name: '', description: '', tags: '', postingPolicy: '', memberInvitesAllowed: true, joinMode: 'invite-only', publiclyListed: false });
 
 /** Join link of the group being edited (server-computed once saved). */
 const editingJoinLink = computed(() => {
@@ -421,7 +421,7 @@ const loadGroups = async () => {
 
 const openCreateDialog = () => {
   editingGroupId.value = null;
-  form.value = { name: '', description: '', tags: '', postingPolicy: '', memberInvitesAllowed: true, joinByLink: false, publiclyListed: false };
+  form.value = { name: '', description: '', tags: '', postingPolicy: '', memberInvitesAllowed: true, joinMode: 'invite-only', publiclyListed: false };
   showDialog.value = true;
 };
 
@@ -433,7 +433,7 @@ const openEditDialog = (g: GroupSummary) => {
     tags: g.tagVocabulary.join(', '),
     postingPolicy: g.postingPolicy || '',
     memberInvitesAllowed: g.memberInvitesAllowed !== false,
-    joinByLink: g.joinMode === 'link-approval',
+    joinMode: g.joinMode || 'invite-only',
     publiclyListed: g.publiclyListed === true
   };
   showDialog.value = true;
@@ -449,7 +449,7 @@ const saveGroup = async () => {
       tagVocabulary: form.value.tags,
       postingPolicy: form.value.postingPolicy.trim(),
       memberInvitesAllowed: form.value.memberInvitesAllowed,
-      joinMode: form.value.joinByLink ? 'link-approval' : 'invite-only',
+      joinMode: form.value.joinMode,
       publiclyListed: form.value.publiclyListed
     };
     const url = editingGroupId.value
