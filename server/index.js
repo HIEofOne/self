@@ -12,7 +12,7 @@ import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { readFileSync, existsSync, readdirSync } from 'fs';
-import { createHmac } from 'crypto';
+import { createHmac, createPrivateKey, sign as edSign } from 'crypto';
 
 import { CloudantClient, CloudantSessionStore, AuditLogService } from '../lib/cloudant/index.js';
 import { DigitalOceanClient } from '../lib/do-client/index.js';
@@ -8893,8 +8893,50 @@ async function deleteUserAndResources(userId, options = {}) {
     sessionsDeleted: 0,
     deepLinkUsersDeleted: 0,
     chatsDeleted: 0,
+    groupsLeft: 0,
     errors: []
   };
+
+  // 0. Leave every group (and withdraw pending join requests) BEFORE the
+  // userDoc — and with it the pairwise signing keys — is destroyed.
+  // Skipping this leaves a permanently unreachable "active" ghost at the
+  // registry: publicly counted, mentor-listable, receiving Everyone
+  // broadcasts into the void, and silently eating peer messages. The
+  // registry's leave endpoint accepts any signed non-invited member, so
+  // the same claim withdraws a pending ('requested') join. Best-effort
+  // per group; a down registry never blocks account deletion.
+  const groupEntries = [
+    ...(userDoc.groupMemberships || []),
+    ...(userDoc.pendingGroupJoins || [])
+  ];
+  for (const m of groupEntries) {
+    try {
+      if (!m?.groupId || !m?.pairwiseId || !m?.signingKeyPair?.privateKeyJwk) continue;
+      const payload = JSON.stringify({
+        action: 'leave',
+        groupId: m.groupId,
+        pairwiseId: m.pairwiseId,
+        ts: new Date().toISOString()
+      });
+      const priv = createPrivateKey({ key: m.signingKeyPair.privateKeyJwk, format: 'jwk' });
+      const signature = edSign(null, Buffer.from(payload), priv).toString('base64url');
+      const base = String(m.registryUrl || `http://localhost:${process.env.PORT || 3001}`).replace(/\/$/, '');
+      const r = await fetch(`${base}/api/groups/${encodeURIComponent(m.groupId)}/leave`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pairwiseId: m.pairwiseId, payload, signature })
+      });
+      if (r.ok) {
+        deletionDetails.groupsLeft++;
+        console.log(`[DESTROY] Left group ${m.groupId} (${m.groupName || 'unnamed'}) for ${userId}`);
+      } else {
+        console.warn(`[DESTROY] Registry declined leave for ${m.groupId} (HTTP ${r.status})`);
+      }
+    } catch (error) {
+      console.warn(`[DESTROY] Group leave failed for ${m?.groupId}:`, error?.message || error);
+      deletionDetails.errors.push(`Group leave failed: ${m?.groupId}`);
+    }
+  }
 
   // 1. Delete all files from Spaces folder
   try {
