@@ -834,3 +834,20 @@ and any design decisions resolved.
   port 3002 featuring port 3001 lists the peer's group first with
   originHost set. This is how maia.agropper.xyz will feature the
   standalone Trustee group at trustee.ai.
+- **2026-07-18** — **Open join mode** (the last funnel gap: approval
+  latency). `joinMode` gains 'open': anyone with the join link becomes a
+  member INSTANTLY — the registry creates the entry born ACTIVE and the
+  member's MAIA collects its credential in the same round trip
+  (join-requests returns `immediate`; request-join then fetches the
+  signed status inline and responds `joined:true` with the full
+  membership — no pending state, no polling, no dead air; if the inline
+  collection fails it falls back to the normal pending+poll path). The
+  admin can still revoke members and rotate the link; approval mode and
+  invite-only are unchanged. Admin dialog: the join toggle became a
+  three-way select. Join cards and the welcome page's public group cards
+  adapt their copy ("Join now" / "CREATE MY MAIA & JOIN <group>" / "no
+  approval wait"); the public list exposes joinMode. Verified end to end
+  locally: throwaway temp user → request-join against an open group →
+  joined:true with complete membership in one request (test member
+  revoked, demo group's mode restored). Intended use: the Trustee
+  bootstrap group runs open; cautious groups keep approval.

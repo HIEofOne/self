@@ -68,9 +68,15 @@
         <div class="row items-center no-wrap q-gutter-xs">
           <q-icon name="how_to_reg" color="primary" size="18px" />
           <div class="text-caption">
-            Request to join
-            <strong>{{ pendingJoinLinkGroupName || 'this group' }}</strong>
-            — the group's administrator approves each request.
+            <template v-if="joinLinkMode === 'open'">
+              Join <strong>{{ pendingJoinLinkGroupName || 'this group' }}</strong>
+              — you'll be a member immediately.
+            </template>
+            <template v-else>
+              Request to join
+              <strong>{{ pendingJoinLinkGroupName || 'this group' }}</strong>
+              — the group's administrator approves each request.
+            </template>
           </div>
         </div>
         <div v-if="joinLinkGroupPolicy" class="groups-policy-note q-mt-xs">
@@ -87,7 +93,8 @@
         />
         <div class="row q-gutter-xs q-mt-sm">
           <q-btn
-            dense unelevated size="sm" color="primary" label="Request to join"
+            dense unelevated size="sm" color="primary"
+            :label="joinLinkMode === 'open' ? 'Join group' : 'Request to join'"
             :loading="requestingJoin" :disable="!joinAliasInput.trim()"
             @click="submitJoinRequest"
           />
@@ -924,6 +931,7 @@ const pendingJoins = ref<PendingJoin[]>([]);
 const pendingJoinLink = ref<{ token: string; groupId: string; registry: string } | null>(null);
 const pendingJoinLinkGroupName = ref('');
 const joinLinkGroupPolicy = ref('');
+const joinLinkMode = ref<'link-approval' | 'open'>('link-approval');
 const joinAliasInput = ref('');
 const requestingJoin = ref(false);
 
@@ -961,6 +969,7 @@ const loadPendingJoinLink = async () => {
         }
         pendingJoinLinkGroupName.value = data.group?.name || '';
         joinLinkGroupPolicy.value = data.group?.postingPolicy || '';
+        joinLinkMode.value = data.joinMode || 'link-approval';
       }
     } catch { /* generic card text */ }
   } catch {
@@ -988,11 +997,19 @@ const submitJoinRequest = async () => {
     if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
     localStorage.removeItem(JOIN_LINK_LS_KEY);
     pendingJoinLink.value = null;
-    await loadMemberships(); // pendingJoins now includes it
-    $q.notify({
-      type: 'positive',
-      message: `Request sent. You'll be connected as soon as ${data.pending?.groupName || 'the group'}'s administrator approves.`
-    });
+    await loadMemberships(); // membership (open mode) or pendingJoins now includes it
+    if (data.joined && data.membership) {
+      // Open-mode group: admitted in the same round trip — land in it.
+      await loadAllDirectories();
+      $q.notify({ type: 'positive', message: `You're in — welcome to ${data.membership.groupName}!` });
+      const joined = memberships.value.find((m) => m.groupId === data.membership.groupId);
+      if (joined) await selectGroup(joined);
+    } else {
+      $q.notify({
+        type: 'positive',
+        message: `Request sent. You'll be connected as soon as ${data.pending?.groupName || 'the group'}'s administrator approves.`
+      });
+    }
   } catch (err) {
     $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to send join request' });
   } finally {
