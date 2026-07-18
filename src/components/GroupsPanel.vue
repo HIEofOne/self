@@ -267,6 +267,7 @@ const props = defineProps<{ userId: string }>();
 // hands it to the main chat area; this panel is discovery + group info.
 const emit = defineEmits<{
   'open-thread': [payload: { groupId: string; peerId: string; alias: string | null; groupName: string }];
+  'group-joined': [];
 }>();
 
 interface Membership {
@@ -298,6 +299,7 @@ const joinCardActive = ref(false);
 /** After the card reports a join: refresh and land the member somewhere
  *  with an obvious next move — the inviter's conversation, else the group. */
 const handleCardJoined = async (p: { groupId: string }) => {
+  emit('group-joined');
   await loadMemberships();
   await loadAllDirectories();
   const joined = memberships.value.find((m) => m.groupId === p.groupId);

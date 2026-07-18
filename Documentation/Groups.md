@@ -1026,3 +1026,13 @@ and any design decisions resolved.
   endpoint reported groupsLeft:1 and the public list dropped the
   member count and mentor row instantly. The four pre-fix ghosts in
   the local Trustee demo were purged via the admin member-remove API.
+- **2026-07-18** — **Joining ends setup**. After JOIN GROUP, the setup
+  wizard's attention markers kept running — confusing, since
+  quick-start setup IS complete (records are an optional later
+  upgrade). Joining now emits group-joined up the chain (PoliciesPanel
+  / GroupsPanel → Workbook → app): the wizard is suspended for the
+  session (attention triangle off, resume machinery disarmed), the
+  Workbook stays open, and the same blue "Close the Workbook to chat"
+  prompt the indexing wizard ends with appears (pulsing chevron +
+  banner — machinery that existed but had gone dormant). Verified
+  live: JOIN GROUP → wizard quiet + prompt visible.

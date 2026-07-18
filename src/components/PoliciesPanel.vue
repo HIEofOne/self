@@ -10,7 +10,7 @@
       class="q-mb-md"
       :user-id="props.userId"
       :memberships="memberships"
-      @joined="loadAll"
+      @joined="handleJoined"
       @requested="loadAll"
       @policies-changed="loadAll"
     />
@@ -198,6 +198,15 @@ import {
 
 const $q = useQuasar();
 const props = defineProps<{ userId: string }>();
+const emit = defineEmits<{ 'group-joined': [] }>();
+
+/** Joined from this tab: refresh the list (imported cards keep any
+ *  pre-join edits) and tell the app — it suspends the setup wizard and
+ *  shows the "Close the Workbook to chat" prompt. */
+const handleJoined = () => {
+  void loadAll();
+  emit('group-joined');
+};
 
 const policies = ref<PolicyCard[]>([]);
 const loading = ref(false);
