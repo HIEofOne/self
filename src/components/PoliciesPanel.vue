@@ -81,6 +81,28 @@
       </div>
     </template>
 
+    <!-- Display name: member-signed rename, no leave-and-rejoin -->
+    <q-separator class="q-my-md" />
+    <div class="text-subtitle2 q-mb-xs">Your display name</div>
+    <div v-for="m in memberships" :key="`alias:${m.groupId}`" class="row items-center q-col-gutter-sm q-mb-xs">
+      <div class="col-3 text-body2 ellipsis">{{ m.groupName }}</div>
+      <div class="col">
+        <q-input
+          v-model="m.alias"
+          dense outlined
+          label="Your display name in this group"
+          maxlength="40"
+          :disable="aliasSaving === m.groupId"
+          @blur="saveAlias(m)"
+          @keydown.enter.prevent="saveAlias(m)"
+        />
+      </div>
+    </div>
+    <div v-if="memberships.length" class="text-caption text-grey-7 q-mb-md">
+      Members see the new name on your future messages and in the mentor
+      list; messages they already received may keep the old name.
+    </div>
+
     <!-- Group messages: the "Everyone" switch (delivery-level muting;
          may become a policy card with finer muting later) -->
     <q-separator class="q-my-md" />
@@ -178,7 +200,34 @@ const props = defineProps<{ userId: string }>();
 
 const policies = ref<PolicyCard[]>([]);
 const loading = ref(false);
-const memberships = ref<Array<{ groupId: string; groupName: string; mentor: boolean; mentorTag: string; broadcastMessages: boolean }>>([]);
+const memberships = ref<Array<{ groupId: string; groupName: string; alias: string; mentor: boolean; mentorTag: string; broadcastMessages: boolean }>>([]);
+
+// ── Display-name change (member-signed; no leave-and-rejoin) ────────
+const aliasSaving = ref<string | null>(null);
+const aliasSaved = ref<Record<string, string>>({});
+const saveAlias = async (m: { groupId: string; groupName: string; alias: string }) => {
+  const clean = (m.alias || '').trim();
+  if (!clean || aliasSaved.value[m.groupId] === clean) { m.alias = aliasSaved.value[m.groupId] || clean; return; }
+  aliasSaving.value = m.groupId;
+  try {
+    const res = await fetch('/api/user-groups/alias', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ userId: props.userId, groupId: m.groupId, alias: clean })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    m.alias = data.alias;
+    aliasSaved.value[m.groupId] = data.alias;
+    $q.notify({ type: 'positive', message: `You're now "${data.alias}" in ${m.groupName}.` });
+  } catch (err) {
+    m.alias = aliasSaved.value[m.groupId] || m.alias;
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to change display name' });
+  } finally {
+    aliasSaving.value = null;
+  }
+};
 
 // ── "Everyone in the group messages" switch (default ON) ────────────
 const prefSaving = ref<string | null>(null);
@@ -347,13 +396,16 @@ const loadAll = async () => {
     const gData = await gRes.json();
     if (gRes.ok && gData.success) {
       memberships.value = (gData.memberships || []).map(
-        (m: { groupId: string; groupName: string; mentor?: boolean; mentorTag?: string; broadcastMessages?: boolean }) => ({
-          groupId: m.groupId, groupName: m.groupName, mentor: !!m.mentor, mentorTag: m.mentorTag || '',
+        (m: { groupId: string; groupName: string; alias?: string; mentor?: boolean; mentorTag?: string; broadcastMessages?: boolean }) => ({
+          groupId: m.groupId, groupName: m.groupName, alias: m.alias || '', mentor: !!m.mentor, mentorTag: m.mentorTag || '',
           broadcastMessages: m.broadcastMessages !== false
         })
       );
       mentorSaved.value = Object.fromEntries(
         memberships.value.map((m) => [m.groupId, `${m.mentor}|${m.mentorTag.trim()}`])
+      );
+      aliasSaved.value = Object.fromEntries(
+        memberships.value.map((m) => [m.groupId, m.alias])
       );
     }
   } catch { /* empty panel */ } finally {

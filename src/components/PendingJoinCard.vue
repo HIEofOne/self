@@ -166,7 +166,7 @@ const loadPendingInvite = async () => {
       localStorage.removeItem(INVITE_LS_KEY);
       invalidMessage.value =
         `You're already a member of this group as "${existing.alias || 'your current name'}". ` +
-        `A new invitation isn't needed. To join under a different name, open the group and use Leave, then open the new invitation.`;
+        `A new invitation isn't needed. To change your display name, use the Sharing Policies tab.`;
       return;
     }
     pendingInvite.value = invite;

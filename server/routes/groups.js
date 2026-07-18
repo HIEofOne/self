@@ -1576,6 +1576,48 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     }
   });
 
+  // POST /api/groups/:groupId/alias-change — member-signed display-name
+  // change (no more leave-and-rejoin to rename). The directory, mentor
+  // list, and future message attributions pick the new alias up
+  // immediately; peers' devices keep cached old-alias attributions on
+  // messages already delivered (same as renaming a phone contact).
+  app.post('/api/groups/:groupId/alias-change', async (req, res) => {
+    try {
+      const doc = await cloudant.getDocument(GROUPS_DB, req.params.groupId);
+      if (!doc || doc.type !== 'group') {
+        return res.status(404).json({ success: false, error: 'Group not found' });
+      }
+      const { pairwiseId, payload, signature } = req.body || {};
+      const member = findActiveMember(doc, pairwiseId);
+      if (!member || !member.signingPublicKeyJwk) {
+        return res.status(403).json({ success: false, error: 'Not an active member' });
+      }
+      const claim = verifySignedClaim(payload, signature, member.signingPublicKeyJwk, {
+        action: 'alias-change', groupId: doc._id, pairwiseId
+      });
+      if (!claim) {
+        return res.status(403).json({ success: false, error: 'Invalid signature' });
+      }
+      const alias = String(claim.alias || '').trim().slice(0, 40);
+      if (!alias) {
+        return res.status(400).json({ success: false, error: 'A display name is required' });
+      }
+      member.alias = alias;
+      doc.updatedAt = new Date().toISOString();
+      await cloudant.saveDocument(GROUPS_DB, doc);
+      auditLog.logEvent({
+        type: 'group_member_alias_changed',
+        userId: 'member',
+        ip: req.ip,
+        details: { groupId: doc._id, pairwiseId, alias }
+      });
+      res.json({ success: true, alias });
+    } catch (error) {
+      console.error('[groups] alias change failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to change display name' });
+    }
+  });
+
   // Sweep expired relay messages + expired invites (called by the daily
   // cron in server/index.js). Returns counts for logging.
   const sweepExpired = async () => {
@@ -2244,6 +2286,54 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     } catch (error) {
       console.error('[user-groups] message-prefs failed:', error);
       res.status(500).json({ success: false, error: 'Failed to update message preferences' });
+    }
+  });
+
+  // POST /api/user-groups/alias — the member's side of a display-name
+  // change: sign, update the registry, mirror locally.
+  app.post('/api/user-groups/alias', async (req, res) => {
+    const userId = requireMatchingUser(req, res);
+    if (!userId) return;
+    try {
+      const { groupId, alias } = req.body || {};
+      const cleanAlias = String(alias || '').trim().slice(0, 40);
+      if (!groupId || !cleanAlias) {
+        return res.status(400).json({ success: false, error: 'groupId and a display name are required' });
+      }
+      const userDoc = await cloudant.getDocument(USERS_DB, userId);
+      const membership = (userDoc?.groupMemberships || []).find((m) => m.groupId === groupId);
+      if (!membership) {
+        return res.status(404).json({ success: false, error: 'Not a member of this group' });
+      }
+      const { payload, signature } = signWithMembership(membership, {
+        action: 'alias-change',
+        groupId,
+        pairwiseId: membership.pairwiseId,
+        alias: cleanAlias,
+        ts: new Date().toISOString()
+      });
+      const r = await fetch(`${registryBase(membership)}/api/groups/${encodeURIComponent(groupId)}/alias-change`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pairwiseId: membership.pairwiseId, payload, signature })
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || !data.success) {
+        return res.status(502).json({ success: false, error: data.error || 'Registry rejected the name change' });
+      }
+      membership.alias = data.alias;
+      userDoc.updatedAt = new Date().toISOString();
+      await cloudant.saveDocument(USERS_DB, userDoc);
+      auditLog.logEvent({
+        type: 'user_group_alias_changed',
+        userId,
+        ip: req.ip,
+        details: { groupId, alias: data.alias }
+      });
+      res.json({ success: true, alias: data.alias });
+    } catch (error) {
+      console.error('[user-groups] alias change failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to change display name' });
     }
   });
 

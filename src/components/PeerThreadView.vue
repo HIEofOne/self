@@ -38,6 +38,14 @@
           <div class="peer-thread__who">{{ item.direction === 'out' ? 'You' : (item.who || peerAlias || 'Member') }}</div>
           <div style="white-space: pre-wrap; word-break: break-word">{{ item.text }}</div>
           <div class="peer-thread__time">{{ bubbleTime(item.at) }}</div>
+          <div v-if="isEveryone && item.direction === 'in' && item.fromId" class="q-mt-xs">
+            <q-btn
+              dense flat size="sm" color="primary" icon="reply" label="Reply privately"
+              @click="emit('open-peer', { groupId: props.groupId, peerId: item.fromId, alias: item.who || null, groupName: props.groupName })"
+            >
+              <q-tooltip>Start a private, end-to-end encrypted thread with {{ item.who || 'this member' }}</q-tooltip>
+            </q-btn>
+          </div>
         </div>
       </div>
 
@@ -140,7 +148,7 @@ const props = defineProps<{
   aiEntries: Array<{ label: string; kind: 'private' | 'public' }>;
   consult: (label: string, question: string) => Promise<string>;
 }>();
-const emit = defineEmits<{ close: []; 'thread-activity': [] }>();
+const emit = defineEmits<{ close: []; 'thread-activity': []; 'open-peer': [payload: { groupId: string; peerId: string; alias: string | null; groupName: string }] }>();
 
 // Private AI consultations shown inline (never sent to the peer or relay).
 interface Consult { id: string; aiLabel: string; question: string; answer: string; pending: boolean; sharing: boolean }
@@ -164,10 +172,10 @@ const deciding = ref(false);
 const scrollEl = ref<HTMLElement | null>(null);
 
 const threadItems = computed(() => {
-  const items: Array<{ id: string; direction: 'in' | 'out'; text: string; at: string; who?: string }> = [];
+  const items: Array<{ id: string; direction: 'in' | 'out'; text: string; at: string; who?: string; fromId?: string }> = [];
   if (props.peerId === '@everyone') {
     // The Everyone thread: all broadcasts in, all your broadcasts out.
-    for (const m of inbox.value) if (m.broadcast) items.push({ id: m.id, direction: 'in', text: m.text, at: m.receivedAt, who: m.fromAlias || 'Member' });
+    for (const m of inbox.value) if (m.broadcast) items.push({ id: m.id, direction: 'in', text: m.text, at: m.receivedAt, who: m.fromAlias || 'Member', fromId: m.fromPairwiseId });
     for (const s of sent.value) if (s.toPairwiseId === '@everyone') items.push({ id: s.id, direction: 'out', text: s.text, at: s.sentAt });
   } else {
     for (const m of inbox.value) if (m.fromPairwiseId === props.peerId && !m.broadcast) items.push({ id: m.id, direction: 'in', text: m.text, at: m.receivedAt });

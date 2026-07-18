@@ -44,6 +44,7 @@
           :consult="consultAiOnce"
           style="flex: 1; min-height: 0;"
           @close="handlePeerThreadClose"
+          @open-peer="handleOpenPeerThread"
         />
         <template v-else>
         <!-- Phase 5: Passkey-only session warning banner -->

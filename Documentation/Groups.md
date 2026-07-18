@@ -942,3 +942,22 @@ and any design decisions resolved.
   "sealed individually to every member" caption, To: Everyone
   composer), and the switch round-trips off→on with the local
   membership mirror updating.
+- **2026-07-18** — **Main-rail parity, Reply privately, and self-serve
+  rename** (the main conversation rail becomes the whole social
+  surface; the Groups tab recedes to admin work). (1) The main rail's
+  group sections now show what the Groups tab showed: mentors (teal
+  star + tag tooltip) even with no history, your inviter, and request
+  senders flagged "wants to connect" — silent non-mentors stay
+  invisible, preserving the no-browsable-roster stance. (2) Posting to
+  EVERYONE is self-revealing, so every incoming Everyone bubble gets
+  REPLY PRIVATELY — one click opens a private E2E thread with that
+  sender (the Zoom pattern: you can DM whoever spoke). This is the
+  sanctioned way to reach a non-mentor: they speak first, in public or
+  to you. (3) Sharing Policies gains YOUR DISPLAY NAME per group —
+  a member-signed alias-change claim (new registry endpoint) replaces
+  leave-and-rejoin renaming; the directory, mentor list, and future
+  attributions update immediately (peers' cached old attributions
+  persist, like a renamed phone contact). Verified live: rail showed
+  Everyone + two outside requesters + mentor-starred justin33 (silent
+  jack89 correctly absent); rename to "Aiden the Advocate" propagated
+  to the public mentor list via the signed claim.

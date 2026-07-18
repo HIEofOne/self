@@ -59,7 +59,13 @@
           <template v-else>{{ (p.alias || '?').slice(0,1).toUpperCase() }}</template>
         </div>
         <span class="conv-rail__label">{{ p.alias || 'Group member' }}</span>
+        <q-icon v-if="p.mentor" name="star" size="12px" color="teal" style="flex: 0 0 auto">
+          <q-tooltip>Mentor{{ p.tag ? ` — ${p.tag}` : '' }}</q-tooltip>
+        </q-icon>
         <q-badge v-if="p.unread" rounded color="teal" :label="p.unread" class="conv-rail__tag" />
+        <q-icon v-else-if="p.pending" name="person_add" size="13px" color="primary" style="flex: 0 0 auto">
+          <q-tooltip>Wants to connect — a request is waiting</q-tooltip>
+        </q-icon>
       </button>
       <div v-if="!g.peers.length" class="conv-rail__empty">No conversations — tap ＋ to find peers</div>
     </template>
@@ -118,7 +124,7 @@ const loadStoredChats = async () => {
 };
 
 // ── Group peer conversations ─────────────────────────────────────────
-interface RailPeer { peerId: string; alias: string | null; lastAt: string; unread: number }
+interface RailPeer { peerId: string; alias: string | null; lastAt: string; unread: number; mentor?: boolean; tag?: string; pending?: boolean }
 interface RailGroup { groupId: string; groupName: string; peers: RailPeer[] }
 const groups = ref<RailGroup[]>([]);
 const SEEN_KEY = () => `maia.groupThreadSeen.${props.userId}`;
@@ -129,6 +135,13 @@ const loadGroups = async () => {
     const gRes = await fetch(`/api/user-groups?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
     const gData = await gRes.json();
     if (!gRes.ok || !gData.success) return;
+    // Requests once (they carry groupId); the rail flags their senders.
+    let allRequests: Array<{ groupId: string; fromPairwiseId: string; fromAlias?: string | null; receivedAt: string; status: string }> = [];
+    try {
+      const rRes = await fetch(`/api/user-groups/requests?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
+      const rData = await rRes.json();
+      if (rRes.ok && rData.success) allRequests = rData.requests || [];
+    } catch { /* rail works without */ }
     const seenMap = seen();
     const out: RailGroup[] = [];
     for (const m of (gData.memberships || [])) {
@@ -150,6 +163,26 @@ const loadGroups = async () => {
         bump(pid, alias, msg.receivedAt, msg.receivedAt > s ? 1 : 0);
       }
       for (const sent of (mData.sent || [])) bump(sent.toPairwiseId, sent.toAlias || null, sent.sentAt, 0);
+      // Request senders (e.g. an outside requester) — "Wants to connect".
+      for (const r of allRequests) {
+        if (r.groupId !== m.groupId) continue;
+        bump(r.fromPairwiseId, r.fromAlias || null, r.receivedAt, 0);
+        if (r.status === 'pending') (peers.get(r.fromPairwiseId) as RailPeer).pending = true;
+      }
+      // Mentors appear even with no history — the "say hello" affordance
+      // (rail parity with the Groups tab, so daily life never needs it).
+      try {
+        const dRes = await fetch(`/api/user-groups/directory?userId=${encodeURIComponent(props.userId)}&groupId=${encodeURIComponent(m.groupId)}`, { credentials: 'include' });
+        const dData = await dRes.json();
+        if (dRes.ok && dData.success) {
+          for (const mt of (dData.mentors || [])) {
+            bump(mt.pairwiseId, mt.alias || null, '', 0);
+            const p = peers.get(mt.pairwiseId) as RailPeer;
+            p.mentor = true;
+            if (mt.tag) p.tag = mt.tag;
+          }
+        }
+      } catch { /* rail works without */ }
       // The inviter is always a conversation, even before any messages.
       if (m.invitedBy?.pairwiseId && !peers.has(m.invitedBy.pairwiseId)) {
         bump(m.invitedBy.pairwiseId, m.invitedBy.alias || null, '', 0);
