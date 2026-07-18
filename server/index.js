@@ -19,7 +19,7 @@ import { DigitalOceanClient } from '../lib/do-client/index.js';
 import { PasskeyService } from '../lib/passkey/index.js';
 import { generateCurrentMedicationsToken } from './utils/token-service.js';
 import { moveObjectWithVerify } from './utils/spaces-move.js';
-import { deleteObjectWithLog } from './utils/spaces-ops.js';
+import { deleteObjectWithLog , asciiSafeMetadata } from './utils/spaces-ops.js';
 import { ChatClient } from '../lib/chat-client/index.js';
 import { findUserAgent, getOrCreateAgentApiKey } from './utils/agent-helper.js';
 import { getClinicalPrompt } from './utils/clinical-prompts.js';
@@ -3922,11 +3922,11 @@ async function provisionUserAsync(userId, token) {
             Key: markdownBucketKey,
             Body: fullMarkdown,
             ContentType: 'text/markdown',
-            Metadata: {
+            Metadata: asciiSafeMetadata({
               fileName: initialFileName,
               processedAt: new Date().toISOString(),
               userId: userId
-            }
+            })
           }));
           
           logProvisioning(userId, `Saved markdown file: ${markdownBucketKey}`, 'success');
