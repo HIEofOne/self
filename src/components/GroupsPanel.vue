@@ -313,6 +313,7 @@ interface GroupMessage {
   fromPairwiseId: string;
   fromAlias?: string | null;
   text: string;
+  broadcast?: boolean; // an Everyone message (group-wide)
   receivedAt: string;
 }
 interface SentMessage {
@@ -377,6 +378,7 @@ const markThreadSeen = (groupId: string, peerId: string) => {
 
 // ── Alias resolution: message tags → requests → directory → fallback ──
 const aliasFor = (groupId: string, peerId: string): string | null => {
+  if (peerId === '@everyone') return 'Everyone';
   for (const msg of messagesByGroup.value[groupId] || []) {
     if (msg.fromPairwiseId === peerId && msg.fromAlias) return msg.fromAlias;
   }
@@ -415,8 +417,12 @@ const conversationsFor = (groupId: string): Convo[] => {
     peers.set(peerId, cur);
   };
   for (const msg of messagesByGroup.value[groupId] || []) {
-    const seen = threadSeen.value[seenKey(groupId, msg.fromPairwiseId)] || '';
-    bump(msg.fromPairwiseId, msg.receivedAt, msg.text, msg.receivedAt > seen ? 1 : 0);
+    // Everyone messages thread under the pinned Everyone conversation,
+    // not under the sender's private thread.
+    const pid = msg.broadcast ? '@everyone' : msg.fromPairwiseId;
+    const seen = threadSeen.value[seenKey(groupId, pid)] || '';
+    const snippet = msg.broadcast ? `${msg.fromAlias || 'Member'}: ${msg.text}` : msg.text;
+    bump(pid, msg.receivedAt, snippet, msg.receivedAt > seen ? 1 : 0);
   }
   for (const s of sentByGroup.value[groupId] || []) {
     bump(s.toPairwiseId, s.sentAt, `You: ${s.text}`, 0);
@@ -448,6 +454,12 @@ const conversationsFor = (groupId: string): Convo[] => {
       lastAt: '', snippet: 'Invited you — say hi', unread: 0, hasPendingRequest: false, mentor: false
     });
   }
+  // Everyone (like a Zoom conference) is always a destination.
+  if (!peers.has('@everyone')) {
+    peers.set('@everyone', {
+      lastAt: '', snippet: 'Message everyone in the group', unread: 0, hasPendingRequest: false, mentor: false
+    });
+  }
   return Array.from(peers.entries())
     .map(([peerId, p]) => ({
       peerId,
@@ -458,8 +470,13 @@ const conversationsFor = (groupId: string): Convo[] => {
       hasPendingRequest: p.hasPendingRequest,
       mentor: p.mentor
     }))
-    // Real conversations first (newest on top); history-less mentors last.
-    .sort((a, b) => (b.lastAt || '').localeCompare(a.lastAt || ''));
+    // Everyone pinned on top; then real conversations (newest first);
+    // history-less mentors last.
+    .sort((a, b) => {
+      if (a.peerId === '@everyone') return -1;
+      if (b.peerId === '@everyone') return 1;
+      return (b.lastAt || '').localeCompare(a.lastAt || '');
+    });
 };
 
 

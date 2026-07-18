@@ -921,3 +921,24 @@ and any design decisions resolved.
   latent duplicate-ingest bug: as-request relay rows were never ACKed
   (only inbox ids were), so every refresh re-ingested pending requests;
   processed request ids are now tracked and ACKed.
+- **2026-07-18** — **"Everyone" group messages + the mute switch**. Each
+  group's conversation rail (main rail and Groups tab) gets a pinned
+  EVERYONE destination — like Everyone in a Zoom conference. Sending to
+  it fans the message out SEALED INDIVIDUALLY to each member: the
+  sender's MAIA asks the registry for the sealing keys of members who
+  accept broadcasts (new signed-claim endpoint broadcast-keys — returns
+  pseudonymous {pairwiseId, key} pairs only, so the no-browsable-roster
+  stance holds), wraps the text in a {maiaType:'broadcast'} envelope,
+  and relays one box per recipient — E2E is unchanged and the relay
+  still reads nothing. Recipients thread broadcasts under their own
+  pinned Everyone conversation with per-message sender labels. Sharing
+  Policies gains a GROUP MESSAGES section: an "Everyone in the group
+  messages" switch per membership, ON by default; off is delivery-level
+  muting (the member's key is simply left out of fan-outs, so muted
+  members never receive the ciphertext). Registry endpoint
+  message-prefs (signed claim) stores it; may become a policy card with
+  finer muting later. Verified live: broadcast from a member reported
+  recipients:1, the Everyone thread renders (megaphone avatar,
+  "sealed individually to every member" caption, To: Everyone
+  composer), and the switch round-trips off→on with the local
+  membership mirror updating.

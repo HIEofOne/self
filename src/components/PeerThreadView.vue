@@ -5,20 +5,23 @@
       <q-btn flat dense round icon="arrow_back" @click="emit('close')">
         <q-tooltip>Back to your AI chat</q-tooltip>
       </q-btn>
-      <div class="peer-thread__avatar" :style="{ background: avatarColor(peerId) }">
-        {{ (peerAlias || '?').slice(0, 1).toUpperCase() }}
+      <div class="peer-thread__avatar" :style="{ background: isEveryone ? '#00897b' : avatarColor(peerId) }">
+        <q-icon v-if="isEveryone" name="campaign" size="18px" />
+        <template v-else>{{ (peerAlias || '?').slice(0, 1).toUpperCase() }}</template>
       </div>
       <div style="min-width: 0">
         <div class="text-subtitle2 row items-center q-gutter-xs no-wrap">
-          <span>{{ peerAlias || (isOutsider ? 'Outside requester' : 'Group member') }}</span>
-          <q-badge v-if="isOutsider" color="deep-orange" outline label="outside the group" />
+          <span>{{ isEveryone ? 'Everyone' : (peerAlias || (isOutsider ? 'Outside requester' : 'Group member')) }}</span>
+          <q-badge v-if="isEveryone" color="teal" :label="`everyone in ${groupName}`" />
+          <q-badge v-else-if="isOutsider" color="deep-orange" outline label="outside the group" />
           <q-badge v-else color="teal" outline :label="`member of ${groupName}`" />
         </div>
-        <div v-if="isOutsider" class="text-caption text-grey-7">not a member — no identity check · reply by email if you choose</div>
+        <div v-if="isEveryone" class="text-caption text-grey-7">sealed individually to every member — all members of the group see this thread</div>
+        <div v-else-if="isOutsider" class="text-caption text-grey-7">not a member — no identity check · reply by email if you choose</div>
         <div v-else class="text-caption text-grey-7">end-to-end encrypted · your AI is not part of this conversation</div>
       </div>
       <q-space />
-      <q-btn v-if="!isOutsider" flat dense round size="sm" icon="rule" color="primary" @click="openRequestDialog">
+      <q-btn v-if="!isOutsider && !isEveryone" flat dense round size="sm" icon="rule" color="primary" @click="openRequestDialog">
         <q-tooltip>Request records from {{ peerAlias || 'this member' }} — their sharing policies (or they themselves) decide</q-tooltip>
       </q-btn>
     </div>
@@ -32,7 +35,7 @@
 
       <div v-for="item in threadItems" :key="item.id" class="peer-thread__row" :class="item.direction === 'out' ? 'is-out' : 'is-in'">
         <div class="peer-thread__bubble" :class="item.direction === 'out' ? 'peer-thread__bubble--out' : 'peer-thread__bubble--in'">
-          <div class="peer-thread__who">{{ item.direction === 'out' ? 'You' : (peerAlias || 'Member') }}</div>
+          <div class="peer-thread__who">{{ item.direction === 'out' ? 'You' : (item.who || peerAlias || 'Member') }}</div>
           <div style="white-space: pre-wrap; word-break: break-word">{{ item.text }}</div>
           <div class="peer-thread__time">{{ bubbleTime(item.at) }}</div>
         </div>
@@ -143,7 +146,7 @@ const emit = defineEmits<{ close: []; 'thread-activity': [] }>();
 interface Consult { id: string; aiLabel: string; question: string; answer: string; pending: boolean; sharing: boolean }
 const privateConsults = ref<Consult[]>([]);
 
-interface InMsg { id: string; fromPairwiseId: string; text: string; receivedAt: string }
+interface InMsg { id: string; fromPairwiseId: string; fromAlias?: string | null; text: string; broadcast?: boolean; receivedAt: string }
 interface OutMsg { id: string; toPairwiseId: string; text: string; sentAt: string }
 interface AsRequest {
   id: string; groupId: string; fromPairwiseId: string; action: string; resource: string;
@@ -161,9 +164,15 @@ const deciding = ref(false);
 const scrollEl = ref<HTMLElement | null>(null);
 
 const threadItems = computed(() => {
-  const items: Array<{ id: string; direction: 'in' | 'out'; text: string; at: string }> = [];
-  for (const m of inbox.value) if (m.fromPairwiseId === props.peerId) items.push({ id: m.id, direction: 'in', text: m.text, at: m.receivedAt });
-  for (const s of sent.value) if (s.toPairwiseId === props.peerId) items.push({ id: s.id, direction: 'out', text: s.text, at: s.sentAt });
+  const items: Array<{ id: string; direction: 'in' | 'out'; text: string; at: string; who?: string }> = [];
+  if (props.peerId === '@everyone') {
+    // The Everyone thread: all broadcasts in, all your broadcasts out.
+    for (const m of inbox.value) if (m.broadcast) items.push({ id: m.id, direction: 'in', text: m.text, at: m.receivedAt, who: m.fromAlias || 'Member' });
+    for (const s of sent.value) if (s.toPairwiseId === '@everyone') items.push({ id: s.id, direction: 'out', text: s.text, at: s.sentAt });
+  } else {
+    for (const m of inbox.value) if (m.fromPairwiseId === props.peerId && !m.broadcast) items.push({ id: m.id, direction: 'in', text: m.text, at: m.receivedAt });
+    for (const s of sent.value) if (s.toPairwiseId === props.peerId) items.push({ id: s.id, direction: 'out', text: s.text, at: s.sentAt });
+  }
   return items.sort((a, b) => (a.at || '').localeCompare(b.at || ''));
 });
 
@@ -171,6 +180,7 @@ const pendingRequest = computed(() =>
   requests.value.find((r) => r.groupId === props.groupId && r.fromPairwiseId === props.peerId && r.status === 'pending') || null
 );
 const isOutsider = computed(() => String(props.peerId || '').startsWith('outsider:'));
+const isEveryone = computed(() => props.peerId === '@everyone');
 const outsiderMessage = computed(() => {
   const p = pendingRequest.value;
   if (!p?.fromOutsider) return '';

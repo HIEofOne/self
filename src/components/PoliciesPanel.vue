@@ -81,6 +81,23 @@
       </div>
     </template>
 
+    <!-- Group messages: the "Everyone" switch (delivery-level muting;
+         may become a policy card with finer muting later) -->
+    <q-separator class="q-my-md" />
+    <div class="text-subtitle2 q-mb-xs">Group messages</div>
+    <div v-for="m in memberships" :key="`bcast:${m.groupId}`" class="q-mb-xs">
+      <q-toggle
+        :model-value="m.broadcastMessages"
+        :label="`Everyone in the group messages — ${m.groupName}`"
+        :disable="prefSaving === m.groupId"
+        @update:model-value="(v: boolean) => saveMessagePrefs(m, v)"
+      />
+    </div>
+    <div class="text-caption text-grey-7 q-mb-md">
+      On (the default), group-wide "Everyone" messages reach you like any
+      other message. Off, they are never even delivered to you.
+    </div>
+
     <!-- Mentors: member self-opt-in to the public directory -->
     <q-separator class="q-my-md" />
     <div class="text-subtitle2 q-mb-xs">Mentors</div>
@@ -161,7 +178,34 @@ const props = defineProps<{ userId: string }>();
 
 const policies = ref<PolicyCard[]>([]);
 const loading = ref(false);
-const memberships = ref<Array<{ groupId: string; groupName: string; mentor: boolean; mentorTag: string }>>([]);
+const memberships = ref<Array<{ groupId: string; groupName: string; mentor: boolean; mentorTag: string; broadcastMessages: boolean }>>([]);
+
+// ── "Everyone in the group messages" switch (default ON) ────────────
+const prefSaving = ref<string | null>(null);
+const saveMessagePrefs = async (m: { groupId: string; groupName: string; broadcastMessages: boolean }, everyone: boolean) => {
+  prefSaving.value = m.groupId;
+  try {
+    const res = await fetch('/api/user-groups/message-prefs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ userId: props.userId, groupId: m.groupId, everyone })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    m.broadcastMessages = data.everyone;
+    $q.notify({
+      type: 'positive',
+      message: data.everyone
+        ? `Everyone messages from ${m.groupName} are on.`
+        : `Everyone messages from ${m.groupName} are muted — they won't be delivered to you.`
+    });
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to update message preferences' });
+  } finally {
+    prefSaving.value = null;
+  }
+};
 
 // ── Mentor self-opt-in (listed publicly; accepts peer messages) ─────
 const mentorSaving = ref<string | null>(null);
@@ -303,8 +347,9 @@ const loadAll = async () => {
     const gData = await gRes.json();
     if (gRes.ok && gData.success) {
       memberships.value = (gData.memberships || []).map(
-        (m: { groupId: string; groupName: string; mentor?: boolean; mentorTag?: string }) => ({
-          groupId: m.groupId, groupName: m.groupName, mentor: !!m.mentor, mentorTag: m.mentorTag || ''
+        (m: { groupId: string; groupName: string; mentor?: boolean; mentorTag?: string; broadcastMessages?: boolean }) => ({
+          groupId: m.groupId, groupName: m.groupName, mentor: !!m.mentor, mentorTag: m.mentorTag || '',
+          broadcastMessages: m.broadcastMessages !== false
         })
       );
       mentorSaved.value = Object.fromEntries(

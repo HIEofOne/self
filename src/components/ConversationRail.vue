@@ -54,7 +54,10 @@
         :class="{ 'is-active': props.activeKind === 'peer' && activePeer && activePeer.groupId === g.groupId && activePeer.peerId === p.peerId }"
         @click="emit('open-peer', { groupId: g.groupId, peerId: p.peerId, alias: p.alias, groupName: g.groupName })"
       >
-        <div class="conv-rail__avatar" :style="{ background: avatarColor(p.peerId) }">{{ (p.alias || '?').slice(0,1).toUpperCase() }}</div>
+        <div class="conv-rail__avatar" :style="{ background: p.peerId === '@everyone' ? '#00897b' : avatarColor(p.peerId) }">
+          <q-icon v-if="p.peerId === '@everyone'" name="campaign" size="12px" />
+          <template v-else>{{ (p.alias || '?').slice(0,1).toUpperCase() }}</template>
+        </div>
         <span class="conv-rail__label">{{ p.alias || 'Group member' }}</span>
         <q-badge v-if="p.unread" rounded color="teal" :label="p.unread" class="conv-rail__tag" />
       </button>
@@ -140,18 +143,27 @@ const loadGroups = async () => {
         peers.set(pid, cur);
       };
       for (const msg of (mData.messages || [])) {
-        const s = seenMap[`${m.groupId}|${msg.fromPairwiseId}`] || '';
-        bump(msg.fromPairwiseId, msg.fromAlias || null, msg.receivedAt, msg.receivedAt > s ? 1 : 0);
+        // Everyone messages thread under the pinned Everyone entry.
+        const pid = msg.broadcast ? '@everyone' : msg.fromPairwiseId;
+        const alias = msg.broadcast ? 'Everyone' : (msg.fromAlias || null);
+        const s = seenMap[`${m.groupId}|${pid}`] || '';
+        bump(pid, alias, msg.receivedAt, msg.receivedAt > s ? 1 : 0);
       }
       for (const sent of (mData.sent || [])) bump(sent.toPairwiseId, sent.toAlias || null, sent.sentAt, 0);
       // The inviter is always a conversation, even before any messages.
       if (m.invitedBy?.pairwiseId && !peers.has(m.invitedBy.pairwiseId)) {
         bump(m.invitedBy.pairwiseId, m.invitedBy.alias || null, '', 0);
       }
+      // Everyone (like a Zoom conference) is always a destination.
+      if (!peers.has('@everyone')) bump('@everyone', 'Everyone', '', 0);
       out.push({
         groupId: m.groupId,
         groupName: m.groupName,
-        peers: Array.from(peers.values()).sort((a, b) => (b.lastAt || '').localeCompare(a.lastAt || ''))
+        peers: Array.from(peers.values()).sort((a, b) => {
+          if (a.peerId === '@everyone') return -1;
+          if (b.peerId === '@everyone') return 1;
+          return (b.lastAt || '').localeCompare(a.lastAt || '');
+        })
       });
     }
     groups.value = out;

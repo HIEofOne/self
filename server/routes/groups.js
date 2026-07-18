@@ -1501,6 +1501,81 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     }
   });
 
+  // POST /api/groups/:groupId/broadcast-keys — an active member asks for
+  // the sealing keys of everyone who accepts Everyone-messages, to send a
+  // group-wide message ("Everyone", like a Zoom conference). Returns
+  // pseudonymous {pairwiseId, encryptionPublicKeyJwk} pairs only — no
+  // aliases, so the browsable-roster privacy stance holds — excluding the
+  // caller and anyone whose "Everyone in the group messages" switch is
+  // off (delivery-level muting; a policy-card version may follow).
+  app.post('/api/groups/:groupId/broadcast-keys', async (req, res) => {
+    try {
+      const doc = await cloudant.getDocument(GROUPS_DB, req.params.groupId);
+      if (!doc || doc.type !== 'group') {
+        return res.status(404).json({ success: false, error: 'Group not found' });
+      }
+      const { pairwiseId, payload, signature } = req.body || {};
+      const caller = findActiveMember(doc, pairwiseId);
+      if (!caller || !caller.signingPublicKeyJwk) {
+        return res.status(403).json({ success: false, error: 'Not an active member' });
+      }
+      if (!verifySignedClaim(payload, signature, caller.signingPublicKeyJwk, {
+        action: 'broadcast-keys', groupId: doc._id, pairwiseId
+      })) {
+        return res.status(403).json({ success: false, error: 'Invalid signature' });
+      }
+      const active = (doc.members || []).filter((m) => m.status === 'active' && m.encryptionPublicKeyJwk);
+      const recipients = active
+        .filter((m) => m.pairwiseId !== pairwiseId && m.broadcastMessages !== false)
+        .map((m) => ({ pairwiseId: m.pairwiseId, encryptionPublicKeyJwk: m.encryptionPublicKeyJwk }));
+      res.json({
+        success: true,
+        recipients,
+        muted: active.length - 1 - recipients.length
+      });
+    } catch (error) {
+      console.error('[groups] broadcast-keys failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to fetch broadcast keys' });
+    }
+  });
+
+  // POST /api/groups/:groupId/message-prefs — member-signed switch:
+  // "Everyone in the group messages" (default ON). Off = the member's
+  // sealing key is left out of broadcast fan-outs, so muted members
+  // never even receive the ciphertext.
+  app.post('/api/groups/:groupId/message-prefs', async (req, res) => {
+    try {
+      const doc = await cloudant.getDocument(GROUPS_DB, req.params.groupId);
+      if (!doc || doc.type !== 'group') {
+        return res.status(404).json({ success: false, error: 'Group not found' });
+      }
+      const { pairwiseId, payload, signature } = req.body || {};
+      const member = findActiveMember(doc, pairwiseId);
+      if (!member || !member.signingPublicKeyJwk) {
+        return res.status(403).json({ success: false, error: 'Not an active member' });
+      }
+      const claim = verifySignedClaim(payload, signature, member.signingPublicKeyJwk, {
+        action: 'message-prefs', groupId: doc._id, pairwiseId
+      });
+      if (!claim) {
+        return res.status(403).json({ success: false, error: 'Invalid signature' });
+      }
+      member.broadcastMessages = claim.everyone !== false;
+      doc.updatedAt = new Date().toISOString();
+      await cloudant.saveDocument(GROUPS_DB, doc);
+      auditLog.logEvent({
+        type: 'group_member_message_prefs',
+        userId: 'member',
+        ip: req.ip,
+        details: { groupId: doc._id, pairwiseId, everyone: member.broadcastMessages }
+      });
+      res.json({ success: true, everyone: member.broadcastMessages });
+    } catch (error) {
+      console.error('[groups] message-prefs failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to update message preferences' });
+    }
+  });
+
   // Sweep expired relay messages + expired invites (called by the daily
   // cron in server/index.js). Returns counts for logging.
   const sweepExpired = async () => {
@@ -1585,6 +1660,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     credentialExpiresAt: m.credential?.expiresAt || null,
     mentor: !!m.mentor,
     mentorTag: m.mentorTag || '',
+    broadcastMessages: m.broadcastMessages !== false,
     invitedBy: m.invitedBy || null
   });
 
@@ -2123,6 +2199,54 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     }
   });
 
+  // POST /api/user-groups/message-prefs — the member's side of the
+  // "Everyone in the group messages" switch (default ON). Signs the
+  // claim, updates the registry, mirrors the flag locally.
+  app.post('/api/user-groups/message-prefs', async (req, res) => {
+    const userId = requireMatchingUser(req, res);
+    if (!userId) return;
+    try {
+      const { groupId, everyone } = req.body || {};
+      if (!groupId) {
+        return res.status(400).json({ success: false, error: 'groupId is required' });
+      }
+      const userDoc = await cloudant.getDocument(USERS_DB, userId);
+      const membership = (userDoc?.groupMemberships || []).find((m) => m.groupId === groupId);
+      if (!membership) {
+        return res.status(404).json({ success: false, error: 'Not a member of this group' });
+      }
+      const { payload, signature } = signWithMembership(membership, {
+        action: 'message-prefs',
+        groupId,
+        pairwiseId: membership.pairwiseId,
+        everyone: everyone !== false,
+        ts: new Date().toISOString()
+      });
+      const r = await fetch(`${registryBase(membership)}/api/groups/${encodeURIComponent(groupId)}/message-prefs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pairwiseId: membership.pairwiseId, payload, signature })
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || !data.success) {
+        return res.status(502).json({ success: false, error: data.error || 'Registry rejected the preference update' });
+      }
+      membership.broadcastMessages = everyone !== false;
+      userDoc.updatedAt = new Date().toISOString();
+      await cloudant.saveDocument(USERS_DB, userDoc);
+      auditLog.logEvent({
+        type: 'user_group_message_prefs',
+        userId,
+        ip: req.ip,
+        details: { groupId, everyone: everyone !== false }
+      });
+      res.json({ success: true, everyone: everyone !== false });
+    } catch (error) {
+      console.error('[user-groups] message-prefs failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to update message preferences' });
+    }
+  });
+
   // ── PR-3: relay + heartbeat (member side) ──────────────────────────
 
   const signWithMembership = (membership, claimObj) => {
@@ -2220,10 +2344,13 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       if (text == null) continue;
 
       // AS request envelope? (sealed JSON with maiaType === 'as-request')
+      // Broadcast envelope? ('broadcast' — an Everyone message)
       let envelope = null;
+      let broadcast = null;
       try {
         const parsed = JSON.parse(text);
         if (parsed && parsed.maiaType === 'as-request') envelope = parsed;
+        else if (parsed && parsed.maiaType === 'broadcast' && typeof parsed.text === 'string') broadcast = parsed;
       } catch { /* plain text message */ }
 
       // Outsider requests (W3) are sealed by the REGISTRY itself under a
@@ -2259,7 +2386,12 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       }
 
       membership.inbox = membership.inbox || [];
-      membership.inbox.push({ id: m.id, fromPairwiseId: m.fromPairwiseId, fromAlias, text, receivedAt: m.createdAt });
+      membership.inbox.push({
+        id: m.id, fromPairwiseId: m.fromPairwiseId, fromAlias,
+        text: broadcast ? broadcast.text : text,
+        ...(broadcast ? { broadcast: true } : {}),
+        receivedAt: m.createdAt
+      });
       added++;
     }
     // Cap inbox size (oldest dropped).
@@ -2319,6 +2451,43 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     return { ok: true, toAlias: keyData.alias || null };
   };
 
+  /** Fan a plain message out to every member who accepts Everyone
+   *  messages. Sealed per recipient with their own key — the "Everyone"
+   *  destination weakens nothing cryptographically. */
+  const deliverBroadcast = async (membership, plaintext) => {
+    const base = registryBase(membership);
+    const kq = signWithMembership(membership, {
+      action: 'broadcast-keys', groupId: membership.groupId, pairwiseId: membership.pairwiseId, ts: new Date().toISOString()
+    });
+    const keyRes = await fetch(`${base}/api/groups/${encodeURIComponent(membership.groupId)}/broadcast-keys`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pairwiseId: membership.pairwiseId, payload: kq.payload, signature: kq.signature })
+    });
+    const keyData = await keyRes.json().catch(() => ({}));
+    if (!keyRes.ok || !keyData.success) {
+      return { ok: false, status: 502, error: keyData.error || 'Could not fetch group keys' };
+    }
+    const envelope = JSON.stringify({ maiaType: 'broadcast', text: plaintext });
+    let recipients = 0;
+    for (const r of keyData.recipients || []) {
+      try {
+        const box = sealTo(r.encryptionPublicKeyJwk, envelope);
+        const rq = signWithMembership(membership, {
+          action: 'relay', groupId: membership.groupId, fromPairwiseId: membership.pairwiseId, toPairwiseId: r.pairwiseId, ts: new Date().toISOString()
+        });
+        const relayRes = await fetch(`${base}/api/groups/${encodeURIComponent(membership.groupId)}/relay`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fromPairwiseId: membership.pairwiseId, toPairwiseId: r.pairwiseId, box, payload: rq.payload, signature: rq.signature })
+        });
+        const relayData = await relayRes.json().catch(() => ({}));
+        if (relayRes.ok && relayData.success) recipients++;
+      } catch { /* skip this recipient; count reflects reality */ }
+    }
+    return { ok: true, recipients };
+  };
+
   // POST /api/user-groups/send — seal a plain message to another member and
   // relay it. Reply-to-sender needs no directory.
   app.post('/api/user-groups/send', async (req, res) => {
@@ -2332,16 +2501,25 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       const userDoc = await cloudant.getDocument(USERS_DB, userId);
       const membership = (userDoc?.groupMemberships || []).find((m) => m.groupId === groupId);
       if (!membership) return res.status(404).json({ success: false, error: 'Not a member of this group' });
-      const result = await deliverSealed(membership, toPairwiseId, String(text));
+      let result;
+      if (toPairwiseId === '@everyone') {
+        // Everyone (like a Zoom conference): fetch the sealing keys of all
+        // members who accept broadcasts, then seal + relay INDIVIDUALLY to
+        // each — E2E holds; the relay still never reads a byte.
+        result = await deliverBroadcast(membership, String(text));
+      } else {
+        result = await deliverSealed(membership, toPairwiseId, String(text));
+      }
       if (!result.ok) return res.status(result.status).json({ success: false, error: result.error });
       // Record the sent message locally (userDoc only — never the registry)
       // so the Groups conversation view can show both sides of a thread.
       const sent = {
         id: `out_${Date.now()}_${randomBytes(4).toString('hex')}`,
         toPairwiseId,
-        toAlias: result.toAlias || null,
+        toAlias: toPairwiseId === '@everyone' ? 'Everyone' : (result.toAlias || null),
         text: String(text),
-        sentAt: new Date().toISOString()
+        sentAt: new Date().toISOString(),
+        ...(toPairwiseId === '@everyone' ? { recipients: result.recipients } : {})
       };
       membership.outbox = [...(membership.outbox || []), sent].slice(-OUTBOX_MAX);
       userDoc.updatedAt = new Date().toISOString();
