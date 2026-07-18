@@ -9,6 +9,10 @@ import { findUserAgent } from '../utils/agent-helper.js';
 import { getProjectIdForGenAI } from '../utils/project-config.js';
 import { getDoRegion } from '../utils/new-agent-config.js';
 
+// Wizard-done workflow stages (mirrors WIZARD_DONE_STAGES in
+// ChatInterface.vue): agent-status writers must never downgrade these.
+const WIZARD_DONE_STAGES_AUTH = new Set(['chat_ready', 'patient_summary', 'link_stored']);
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Helper to get client info for audit logging
@@ -409,7 +413,9 @@ export async function ensureUserAgent(doClient, cloudant, userDoc) {
   userDoc.assignedAgentName = resolvedAgent.name || userDoc.assignedAgentName;
   userDoc.agentEndpoint = endpoint || userDoc.agentEndpoint || null;
   userDoc.agentModelName = resolvedAgent.model?.inference_name || resolvedAgent.model?.name || userDoc.agentModelName || null;
-  userDoc.workflowStage = endpoint ? 'agent_deployed' : 'agent_named';
+  if (!WIZARD_DONE_STAGES_AUTH.has(userDoc.workflowStage)) {
+    userDoc.workflowStage = endpoint ? 'agent_deployed' : 'agent_named';
+  }
   userDoc.agentSetupInProgress = !endpoint;
   userDoc.updatedAt = new Date().toISOString();
   // Mirror the primary agent into the 'default' profile so the chat
@@ -436,7 +442,9 @@ export async function ensureUserAgent(doClient, cloudant, userDoc) {
         userDoc.assignedAgentName = resolvedAgent.name || userDoc.assignedAgentName;
         userDoc.agentEndpoint = endpoint || userDoc.agentEndpoint || null;
         userDoc.agentModelName = resolvedAgent.model?.inference_name || resolvedAgent.model?.name || userDoc.agentModelName || null;
-        userDoc.workflowStage = endpoint ? 'agent_deployed' : 'agent_named';
+        if (!WIZARD_DONE_STAGES_AUTH.has(userDoc.workflowStage)) {
+          userDoc.workflowStage = endpoint ? 'agent_deployed' : 'agent_named';
+        }
         userDoc.agentSetupInProgress = !endpoint;
         userDoc.updatedAt = new Date().toISOString();
         setAgentProfile(userDoc, PROFILE_DEFAULT, {
@@ -1567,7 +1575,14 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
         await saveUserDocWithRetry(cloudant, userId, (doc) => {
           doc.agentEndpoint = endpoint;
           doc.agentSetupInProgress = false;
-          doc.workflowStage = 'agent_deployed';
+          // Never DOWNGRADE a wizard-done stage: the quick-start flow
+          // marks 'chat_ready' the moment the primary agent turns ready,
+          // and this poll (e.g. the secondary agent turning ready a beat
+          // later) used to clobber it back to 'agent_deployed' — which
+          // made the setup wizard reopen on every reload.
+          if (!WIZARD_DONE_STAGES_AUTH.has(doc.workflowStage)) {
+            doc.workflowStage = 'agent_deployed';
+          }
           doc.updatedAt = new Date().toISOString();
         });
       } else if (!endpointReady && userDoc.agentSetupInProgress !== true) {
