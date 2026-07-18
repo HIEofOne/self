@@ -174,6 +174,7 @@
               </div>
               <span class="text-body2">{{ mentor.alias }}</span>
               <q-badge color="teal" label="mentor" />
+              <span v-if="mentor.tag" class="text-caption text-grey-7">{{ mentor.tag }}</span>
               <q-space />
               <q-btn
                 dense flat size="sm" color="primary" label="Message"
@@ -328,7 +329,7 @@ const refreshingAll = ref(false);
 interface Directory {
   stats: { activeMembers: number; recentlyActiveMembers: number };
   postingPolicy?: string;
-  mentors: { pairwiseId: string; alias: string }[];
+  mentors: { pairwiseId: string; alias: string; tag?: string }[];
 }
 const directoryByGroup = ref<Record<string, Directory>>({});
 const loadingDirectory = ref<string | null>(null);

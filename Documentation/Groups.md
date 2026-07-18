@@ -894,3 +894,30 @@ and any design decisions resolved.
   browser: landing → JOIN → provisioned temp user → Sharing Policies +
   join card → JOIN GROUP → instant membership + both Trustee cards
   imported, editable; Groups tab clean.
+- **2026-07-18** — **Policy vocabulary v2, mentor self-opt-in, and
+  outside requests (W3 ships)**. (1) Scope options are now exactly:
+  Current Medications and Allergies / Patient Summary / My record
+  except sensitive categories / Everything in my record; Purpose adds
+  PEER SUPPORT (any/peer-support/clinical/research/public-health/
+  marketing). past-months and apple-health-category scopes retired.
+  (2) Sharing Policies gains a MENTORS section — "Mentors are listed
+  publicly and accept peer messages without prior approval" — with a
+  Mentor switch and a "Tag the name with:" box per membership. Opt-in
+  is member-signed (new registry endpoint mentor-optin verifies the
+  pairwise signing key), so it works across deployments; tags surface
+  in the group directory, member views, and the public groups list.
+  (3) The Welcome page groups list shows member count plus mentor
+  chips (alias — tag), and every group gets a MAKE A REQUEST TO THE
+  GROUP link: a public form (name, contact email, organization, scope,
+  purpose, message) that the registry seals to every active member's
+  relay inbox under a reserved 'outsider:' sender id (members can't
+  forge one — relay sends verify member signatures). Each member's own
+  policy cards evaluate it as an UNVERIFIED 'anyone' request: deny
+  drops silently (verified: a marketing request vanished against a
+  deny card), no match escalates as a question (verified: research
+  request appeared as "Dr. Riva Chen — outside the group · Wants to
+  connect" with reply address and Accept/Decline/Block). Remote
+  featured groups reachable via a same-origin proxy. Also fixed a
+  latent duplicate-ingest bug: as-request relay rows were never ACKed
+  (only inbox ids were), so every refresh re-ingested pending requests;
+  processed request ids are now tracked and ACKed.

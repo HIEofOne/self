@@ -405,6 +405,9 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
           description: d.description || '',
           postingPolicy: d.postingPolicy || '',
           activeMemberCount: memberCounts(d).active,
+          mentors: (d.members || [])
+            .filter((m) => m.status === 'active' && m.mentor)
+            .map((m) => ({ alias: m.alias || '(member)', tag: m.mentorTag || '' })),
           joinLink: joinLinkFor(d),
           joinMode: ['link-approval', 'open'].includes(d.joinMode) ? d.joinMode : 'invite-only',
           origin: null,
@@ -418,6 +421,110 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     } catch (error) {
       console.error('[groups] public list failed:', error);
       res.status(500).json({ success: false, error: 'Failed to list groups' });
+    }
+  });
+
+  // POST /api/groups/:groupId/outside-request — W3: anyone (a physician,
+  // a researcher, a company, a patient kicking the tires) may ASK the
+  // members of a group for something. No account needed. The registry
+  // seals the request to every active member's relay inbox; each member's
+  // OWN policy cards then decide — a matching deny drops it silently, a
+  // matching allow auto-accepts, anything else escalates to the member as
+  // a question ("MAIA asks you about everything unless you've told it
+  // otherwise"). The requester's contact email rides inside the sealed
+  // envelope so a member who chooses to respond can reach them; the
+  // registry never brokers the reply.
+  app.post('/api/groups/:groupId/outside-request', async (req, res) => {
+    try {
+      const doc = await cloudant.getDocument(GROUPS_DB, req.params.groupId);
+      if (!doc || doc.type !== 'group') {
+        return res.status(404).json({ success: false, error: 'Group not found' });
+      }
+      const b = req.body || {};
+      const name = String(b.name || '').trim().slice(0, 80);
+      const email = String(b.email || '').trim().slice(0, 120);
+      const organization = String(b.organization || '').trim().slice(0, 120);
+      const message = String(b.message || '').trim().slice(0, 2000);
+      const scope = POLICY_SCOPES.includes(b.scope) ? b.scope : null;
+      const purpose = POLICY_PURPOSES.includes(b.purpose) ? b.purpose : null;
+      if (!name || !email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return res.status(400).json({ success: false, error: 'A name and a valid contact email are required' });
+      }
+      if (!scope || !purpose) {
+        return res.status(400).json({ success: false, error: 'A valid scope and purpose are required' });
+      }
+      const members = (doc.members || []).filter((m) => m.status === 'active' && m.encryptionPublicKeyJwk);
+      if (members.length === 0) {
+        return res.status(409).json({ success: false, error: 'This group has no members who can receive requests yet' });
+      }
+      const now = Date.now();
+      const reqId = randomBytes(8).toString('hex');
+      const envelope = JSON.stringify({
+        maiaType: 'as-request',
+        action: 'share',
+        resource: scope,
+        purpose,
+        created: new Date(now).toISOString(),
+        nonce: reqId,
+        payload: {
+          message,
+          requester: { name, email, organization: organization || null }
+        }
+      });
+      let delivered = 0;
+      for (const m of members) {
+        try {
+          const box = sealTo(m.encryptionPublicKeyJwk, envelope);
+          await cloudant.saveDocument(RELAY_DB, {
+            _id: `relay_${now}_${randomBytes(6).toString('hex')}`,
+            type: 'relay_message',
+            groupId: doc._id,
+            fromPairwiseId: `outsider:${reqId}`,
+            toPairwiseId: m.pairwiseId,
+            box,
+            createdAt: new Date(now).toISOString(),
+            expiresAt: new Date(now + RELAY_TTL_MS).toISOString()
+          });
+          delivered++;
+        } catch (e) {
+          console.warn('[groups] outside-request seal/store failed:', e?.message || e);
+        }
+      }
+      auditLog.logEvent({
+        type: 'group_outside_request',
+        userId: 'public',
+        ip: req.ip,
+        details: { groupId: doc._id, requestId: reqId, scope, purpose, recipients: delivered }
+      });
+      res.json({ success: true, requestId: reqId, delivered });
+    } catch (error) {
+      console.error('[groups] outside-request failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to send request' });
+    }
+  });
+
+  // POST /api/groups/outside-request-proxy — same-origin helper for the
+  // welcome page: forwards an outside request to a FEATURED (remote)
+  // group's registry, since the browser can't POST cross-origin (CORS
+  // stays closed). Same federation trust seam as join/request-join,
+  // which already fetch caller-supplied registry URLs server-side.
+  app.post('/api/groups/outside-request-proxy', async (req, res) => {
+    try {
+      const { origin, groupId, ...body } = req.body || {};
+      const base = safeRegistryBase(origin);
+      if (!base || !groupId) {
+        return res.status(400).json({ success: false, error: 'origin and groupId are required' });
+      }
+      const r = await fetch(`${base}/api/groups/${encodeURIComponent(groupId)}/outside-request`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const data = await r.json().catch(() => ({}));
+      res.status(r.status).json(data);
+    } catch (error) {
+      console.error('[groups] outside-request proxy failed:', error);
+      res.status(502).json({ success: false, error: 'The group\'s registry could not be reached' });
     }
   });
 
@@ -546,7 +653,8 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     inviteExpiresAt: m.status === 'invited' ? (m.inviteExpiresAt || null) : null,
     inviteOpenedAt: m.status === 'invited' ? (m.inviteOpenedAt || null) : null,
     requestedAt: m.status === 'requested' ? (m.requestedAt || null) : null,
-    mentor: !!m.mentor
+    mentor: !!m.mentor,
+    mentorTag: m.mentorTag || ''
   });
 
   /** Mint an invite on `doc` (replacing any pending invite for the same
@@ -1281,7 +1389,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       const recentlyActive = active.filter((m) => m.lastRefreshAt && new Date(m.lastRefreshAt).getTime() >= cutoff);
       const mentors = active
         .filter((m) => m.mentor && m.pairwiseId !== caller)
-        .map((m) => ({ pairwiseId: m.pairwiseId, alias: m.alias || '(member)' }));
+        .map((m) => ({ pairwiseId: m.pairwiseId, alias: m.alias || '(member)', tag: m.mentorTag || '' }));
       res.json({
         success: true,
         stats: { activeMembers: active.length, recentlyActiveMembers: recentlyActive.length },
@@ -1351,6 +1459,45 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     } catch (error) {
       console.error('[groups] mentor toggle failed:', error);
       res.status(500).json({ success: false, error: 'Failed to update mentor flag' });
+    }
+  });
+
+  // POST /api/groups/:groupId/mentor-optin — member SELF-opt-in (the
+  // follow-up noted on the admin toggle above). Mentors are listed
+  // publicly and accept peer messages without prior approval, so the
+  // choice belongs to the member: a signed claim from the pairwise
+  // signing key flips their own flag and sets the public tag.
+  app.post('/api/groups/:groupId/mentor-optin', async (req, res) => {
+    try {
+      const doc = await cloudant.getDocument(GROUPS_DB, req.params.groupId);
+      if (!doc || doc.type !== 'group') {
+        return res.status(404).json({ success: false, error: 'Group not found' });
+      }
+      const { pairwiseId, payload, signature } = req.body || {};
+      const member = findActiveMember(doc, pairwiseId);
+      if (!member || !member.signingPublicKeyJwk) {
+        return res.status(403).json({ success: false, error: 'Not an active member' });
+      }
+      const claim = verifySignedClaim(payload, signature, member.signingPublicKeyJwk, {
+        action: 'mentor-optin', groupId: doc._id, pairwiseId
+      });
+      if (!claim) {
+        return res.status(403).json({ success: false, error: 'Invalid signature' });
+      }
+      member.mentor = !!claim.mentor;
+      member.mentorTag = String(claim.tag || '').trim().slice(0, 60);
+      doc.updatedAt = new Date().toISOString();
+      await cloudant.saveDocument(GROUPS_DB, doc);
+      auditLog.logEvent({
+        type: 'group_member_mentor_optin',
+        userId: 'member',
+        ip: req.ip,
+        details: { groupId: doc._id, pairwiseId, mentor: member.mentor, tag: member.mentorTag }
+      });
+      res.json({ success: true, mentor: member.mentor, tag: member.mentorTag });
+    } catch (error) {
+      console.error('[groups] mentor opt-in failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to update mentor listing' });
     }
   });
 
@@ -1437,6 +1584,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     joinedAt: m.joinedAt,
     credentialExpiresAt: m.credential?.expiresAt || null,
     mentor: !!m.mentor,
+    mentorTag: m.mentorTag || '',
     invitedBy: m.invitedBy || null
   });
 
@@ -1923,6 +2071,58 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     }
   });
 
+  // POST /api/user-groups/mentor — the member's side of mentor self-opt-in
+  // (Sharing Policies tab). Signs a claim with the pairwise key, updates
+  // the registry (possibly a different deployment), then mirrors the flag
+  // and tag onto the local membership so the UI reflects it immediately.
+  app.post('/api/user-groups/mentor', async (req, res) => {
+    const userId = requireMatchingUser(req, res);
+    if (!userId) return;
+    try {
+      const { groupId, mentor, tag } = req.body || {};
+      if (!groupId) {
+        return res.status(400).json({ success: false, error: 'groupId is required' });
+      }
+      const userDoc = await cloudant.getDocument(USERS_DB, userId);
+      const membership = (userDoc?.groupMemberships || []).find((m) => m.groupId === groupId);
+      if (!membership) {
+        return res.status(404).json({ success: false, error: 'Not a member of this group' });
+      }
+      const cleanTag = String(tag || '').trim().slice(0, 60);
+      const { payload, signature } = signWithMembership(membership, {
+        action: 'mentor-optin',
+        groupId,
+        pairwiseId: membership.pairwiseId,
+        mentor: !!mentor,
+        tag: cleanTag,
+        ts: new Date().toISOString()
+      });
+      const r = await fetch(`${registryBase(membership)}/api/groups/${encodeURIComponent(groupId)}/mentor-optin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pairwiseId: membership.pairwiseId, payload, signature })
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || !data.success) {
+        return res.status(502).json({ success: false, error: data.error || 'Registry rejected the mentor update' });
+      }
+      membership.mentor = !!mentor;
+      membership.mentorTag = cleanTag;
+      userDoc.updatedAt = new Date().toISOString();
+      await cloudant.saveDocument(USERS_DB, userDoc);
+      auditLog.logEvent({
+        type: 'user_group_mentor_optin',
+        userId,
+        ip: req.ip,
+        details: { groupId, mentor: !!mentor, tag: cleanTag }
+      });
+      res.json({ success: true, mentor: !!mentor, tag: cleanTag });
+    } catch (error) {
+      console.error('[user-groups] mentor opt-in failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to update mentor listing' });
+    }
+  });
+
   // ── PR-3: relay + heartbeat (member side) ──────────────────────────
 
   const signWithMembership = (membership, claimObj) => {
@@ -1973,8 +2173,14 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       pairwiseId: membership.pairwiseId,
       ts: new Date().toISOString()
     });
-    // Ack messages we already stored last time (delivered).
-    const ackMessageIds = (membership.inbox || []).map((msg) => msg.id).filter(Boolean);
+    // Ack messages we already stored last time (delivered) — including
+    // AS-request envelopes, which never enter the inbox: without acking
+    // their relay ids too, every refresh would re-pull and re-ingest the
+    // same request as a fresh duplicate.
+    const ackMessageIds = [
+      ...(membership.inbox || []).map((msg) => msg.id),
+      ...(membership.seenRequestRelayIds || [])
+    ].filter(Boolean);
     const res = await fetch(`${registryBase(membership)}/api/groups/${encodeURIComponent(membership.groupId)}/refresh`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1998,12 +2204,13 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     // (an envelope the caller routes to maia_as_requests — PR-4). The kind
     // is inside the SEALED payload, so the relay never sees which is which.
     const existingIds = new Set((membership.inbox || []).map((m) => m.id));
+    const seenRequestIds = new Set(membership.seenRequestRelayIds || []);
     let added = 0;
     const asRequests = [];
     // One alias lookup per unique sender per refresh (best-effort).
     const aliasCache = new Map();
     for (const m of data.messages || []) {
-      if (existingIds.has(m.id)) continue;
+      if (existingIds.has(m.id) || seenRequestIds.has(m.id)) continue;
       let text = null;
       try {
         text = openFrom(membership.encryptionKeyPair.privateKeyJwk, m.box);
@@ -2019,13 +2226,21 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         if (parsed && parsed.maiaType === 'as-request') envelope = parsed;
       } catch { /* plain text message */ }
 
-      const fromAlias = await lookupMemberAlias(membership, m.fromPairwiseId, aliasCache);
+      // Outsider requests (W3) are sealed by the REGISTRY itself under a
+      // reserved 'outsider:' sender id (members can never push under one:
+      // the relay endpoint verifies the sender's signed member claim), so
+      // the prefix is proof the request came from outside the group.
+      const isOutsider = String(m.fromPairwiseId || '').startsWith('outsider:');
+      const fromAlias = isOutsider
+        ? (envelope?.payload?.requester?.name ? `${envelope.payload.requester.name} — outside the group` : 'Outside requester')
+        : await lookupMemberAlias(membership, m.fromPairwiseId, aliasCache);
 
       if (envelope) {
         asRequests.push({
           relayId: m.id,
           fromPairwiseId: m.fromPairwiseId,
           fromAlias,
+          fromOutsider: isOutsider,
           receivedAt: m.createdAt,
           action: String(envelope.action || 'message'),
           purpose: POLICY_PURPOSES.includes(envelope.purpose) ? envelope.purpose : 'any',
@@ -2036,6 +2251,9 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
           created: envelope.created || null,
           payload: envelope.payload ?? null
         });
+        // Remember the relay id so the next refresh ACKs it (deleting it
+        // at the relay) instead of re-ingesting a duplicate. Capped FIFO.
+        membership.seenRequestRelayIds = [...(membership.seenRequestRelayIds || []), m.id].slice(-500);
         added++;
         continue;
       }
@@ -2188,6 +2406,8 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
           groupName: r.groupName,
           fromPairwiseId: r.fromPairwiseId,
           fromAlias: r.fromAlias || null,
+          fromOutsider: !!r.fromOutsider,
+          requester: r.requester || null,
           action: r.action,
           purpose: r.purpose || 'any',
           decidedBySentence: r.decidedBySentence || null,
@@ -2337,11 +2557,17 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       // Payment: the envelope's §3.4 slot is unused in Phase 1 → 'none'.
       let decision = { outcome: 'ask', decidedBy: null };
       if (POLICY_SCOPES.includes(r.resource)) {
+        // Outsiders (W3) present no membership and no identity: they
+        // evaluate as an unverified 'anyone' — which is exactly what
+        // "Anyone (no identity check) may NOT receive ... for Marketing
+        // use" deny cards exist to drop.
         decision = evaluatePolicies(userDoc.sharingPolicies || [], {
-          party: { type: 'group', groupId: membership.groupId, pairwiseId: r.fromPairwiseId },
+          party: r.fromOutsider
+            ? { type: 'anyone' }
+            : { type: 'group', groupId: membership.groupId, pairwiseId: r.fromPairwiseId },
           purpose: r.purpose || 'any',
           scope: r.resource,
-          signature: 'group-member',
+          signature: r.fromOutsider ? 'unverified' : 'group-member',
           payment: 'none'
         });
       }
@@ -2364,6 +2590,8 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         toPairwiseId: membership.pairwiseId,
         fromPairwiseId: r.fromPairwiseId,
         fromAlias: r.fromAlias || null,
+        fromOutsider: !!r.fromOutsider,
+        requester: r.fromOutsider ? (r.payload?.requester || null) : null,
         action: r.action,
         resource: r.resource,
         purpose: r.purpose || 'any',

@@ -13,8 +13,8 @@
  */
 
 export type PartyType = 'anyone' | 'group' | 'peer';
-export type Purpose = 'any' | 'clinical' | 'research' | 'public-health' | 'marketing';
-export type Scope = 'everything' | 'not-sensitive' | 'past-months' | 'apple-health-category' | 'meds-allergies' | 'patient-summary';
+export type Purpose = 'any' | 'peer-support' | 'clinical' | 'research' | 'public-health' | 'marketing';
+export type Scope = 'meds-allergies' | 'patient-summary' | 'not-sensitive' | 'everything';
 export type Signature = 'unverified' | 'verified-email' | 'group-member' | 'npi' | 'doximity';
 export type Payment = 'none' | 'spam-deposit' | 'notification-deposit' | 'ai-prepay' | 'sharing-payment';
 
@@ -22,8 +22,6 @@ export interface PolicyElements {
   party: { type: PartyType; groupId?: string; groupName?: string; pairwiseId?: string; alias?: string };
   purpose: Purpose;
   scope: Scope;
-  scopeMonths?: number;
-  scopeCategory?: string;
   filtered: boolean;
   signature: Signature; // MINIMUM identity level the requester must present
   payment: Payment;
@@ -51,7 +49,8 @@ export interface PolicyRequest {
 }
 
 export const PURPOSE_OPTIONS: Array<{ value: Purpose; label: string }> = [
-  { value: 'any', label: 'any purpose' },
+  { value: 'any', label: 'Any Purpose' },
+  { value: 'peer-support', label: 'Peer Support' },
   { value: 'clinical', label: 'Clinical' },
   { value: 'research', label: 'Research' },
   { value: 'public-health', label: 'Public Health' },
@@ -59,13 +58,20 @@ export const PURPOSE_OPTIONS: Array<{ value: Purpose; label: string }> = [
 ];
 
 export const SCOPE_OPTIONS: Array<{ value: Scope; label: string }> = [
-  { value: 'everything', label: 'everything in my record' },
-  { value: 'not-sensitive', label: 'my record except sensitive categories' },
-  { value: 'past-months', label: 'records from the past N months' },
-  { value: 'apple-health-category', label: 'one Apple Health category' },
   { value: 'meds-allergies', label: 'Current Medications and Allergies' },
-  { value: 'patient-summary', label: 'my Patient Summary' }
+  { value: 'patient-summary', label: 'Patient Summary' },
+  { value: 'not-sensitive', label: 'My record except sensitive categories' },
+  { value: 'everything', label: 'Everything in my record' }
 ];
+
+/** Sentence-friendly scope phrases (select labels are Title-case;
+ *  sentences need "my Patient Summary", "everything in my record"). */
+const SCOPE_SENTENCES: Record<Scope, string> = {
+  'meds-allergies': 'Current Medications and Allergies',
+  'patient-summary': 'my Patient Summary',
+  'not-sensitive': 'my record except sensitive categories',
+  everything: 'everything in my record'
+};
 
 export const SIGNATURE_OPTIONS: Array<{ value: Signature; label: string }> = [
   { value: 'unverified', label: 'unverified' },
@@ -99,13 +105,8 @@ const partyPhrase = (e: PolicyElements): string => {
   return 'Anyone';
 };
 
-const scopePhrase = (e: PolicyElements): string => {
-  switch (e.scope) {
-    case 'past-months': return `records from the past ${e.scopeMonths || 12} months`;
-    case 'apple-health-category': return `my "${e.scopeCategory || 'selected'}" Apple Health records`;
-    default: return SCOPE_OPTIONS.find((o) => o.value === e.scope)?.label || e.scope;
-  }
-};
+const scopePhrase = (e: PolicyElements): string =>
+  SCOPE_SENTENCES[e.scope] || e.scope;
 
 const paymentPhrase = (p: Payment): string =>
   PAYMENT_OPTIONS.find((o) => o.value === p)?.label || p;

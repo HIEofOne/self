@@ -334,6 +334,12 @@
                           </div>
                           <div class="text-caption text-grey-8">{{ g.description }}</div>
                           <div class="text-caption text-grey-6">{{ g.activeMemberCount }} member(s)</div>
+                          <div v-if="g.mentors?.length" class="q-mt-xs row items-center q-gutter-xs">
+                            <span class="text-caption text-grey-7">Mentors:</span>
+                            <q-chip v-for="mt in g.mentors" :key="mt.alias" dense size="sm" color="teal-1" text-color="teal-9" icon="star">
+                              {{ mt.alias }}<template v-if="mt.tag"> — {{ mt.tag }}</template>
+                            </q-chip>
+                          </div>
                         </div>
                         <div class="col-auto">
                           <q-btn flat dense size="sm" color="primary" :label="expandedPublicGroup === g.groupId ? 'Hide details' : 'Look around'" @click="expandedPublicGroup = expandedPublicGroup === g.groupId ? null : g.groupId" />
@@ -342,6 +348,11 @@
                             flat dense size="sm" color="primary"
                             :label="g.joinMode === 'open' ? 'Join now' : 'Ask to join'"
                             @click="askToJoinPublic(g)"
+                          />
+                          <q-btn
+                            flat dense size="sm" color="deep-orange-8"
+                            label="Make a request to the group"
+                            @click="openOutsideRequest(g)"
                           />
                         </div>
                       </div>
@@ -366,6 +377,46 @@
                       </div>
                     </div>
                   </div>
+
+                  <!-- Outside request (W3): anyone may ASK a group's members
+                       for something — each member's own policies decide. -->
+                  <q-dialog v-model="showOutsideRequestDialog">
+                    <q-card style="min-width: 460px; max-width: 620px">
+                      <q-card-section>
+                        <div class="text-h6">Make a request to {{ outsideReqGroup?.name || 'the group' }}</div>
+                        <div class="text-caption text-grey-7">
+                          Your request goes to every member's MAIA. Each member's own
+                          sharing policies decide — some may answer automatically, some
+                          will be asked, and some policies drop requests silently.
+                          Anyone who chooses to respond will contact you by email.
+                        </div>
+                      </q-card-section>
+                      <q-card-section class="q-pt-none">
+                        <div v-if="outsideReqResult" class="q-pa-sm" style="background: #e8f5e9; border-radius: 8px">
+                          <div class="text-body2">{{ outsideReqResult }}</div>
+                        </div>
+                        <div v-else class="row q-col-gutter-sm">
+                          <q-input v-model="outsideReq.name" dense outlined label="Your name" class="col-6" />
+                          <q-input v-model="outsideReq.email" dense outlined type="email" label="Contact email (for replies)" class="col-6" />
+                          <q-input v-model="outsideReq.organization" dense outlined label="Organization (optional)" class="col-12" />
+                          <q-select v-model="outsideReq.scope" :options="SCOPE_OPTIONS" emit-value map-options dense outlined label="What you're asking for" class="col-6" />
+                          <q-select v-model="outsideReq.purpose" :options="PURPOSE_OPTIONS" emit-value map-options dense outlined label="Purpose" class="col-6" />
+                          <q-input v-model="outsideReq.message" dense outlined autogrow type="textarea" label="Your request — who you are and why" class="col-12" />
+                        </div>
+                        <div v-if="outsideReqError" class="text-negative text-caption q-mt-sm">{{ outsideReqError }}</div>
+                      </q-card-section>
+                      <q-card-actions align="right">
+                        <q-btn flat :label="outsideReqResult ? 'Close' : 'Cancel'" v-close-popup :disable="outsideReqSending" />
+                        <q-btn
+                          v-if="!outsideReqResult"
+                          unelevated color="primary" label="Send request"
+                          :loading="outsideReqSending"
+                          :disable="!outsideReq.name.trim() || !outsideReq.email.trim()"
+                          @click="submitOutsideRequest"
+                        />
+                      </q-card-actions>
+                    </q-card>
+                  </q-dialog>
 
                   <!-- Paste an invite / join link (pre-auth capture) -->
                   <q-dialog v-model="showWelcomePasteDialog">
@@ -1039,6 +1090,7 @@ import {
   setRestoreActive, clearRestoreActive, getRestoreActive,
   type MaiaState, type DiscoveredUser
 } from './utils/localFolder';
+import { SCOPE_OPTIONS, PURPOSE_OPTIONS } from './utils/policyCards';
 import packageJson from '../package.json';
 
 const appVersion = packageJson.version;
@@ -1207,8 +1259,54 @@ const showAdminPage = ref(false);
 
 // ── Organizer-first welcome (Refinement 8) ─────────────────────────
 /** Publicly-listed groups on this deployment (admin opt-in per group). */
-const publicGroups = ref<Array<{ groupId: string; name: string; description: string; postingPolicy: string; activeMemberCount: number; joinLink: string | null; joinMode?: string; origin?: string | null; originHost?: string | null }>>([]);
+const publicGroups = ref<Array<{ groupId: string; name: string; description: string; postingPolicy: string; activeMemberCount: number; mentors?: Array<{ alias: string; tag: string }>; joinLink: string | null; joinMode?: string; origin?: string | null; originHost?: string | null }>>([]);
 const expandedPublicGroup = ref<string | null>(null);
+
+// ── Outside request (W3): the welcome page's "ask the group" form ───
+const showOutsideRequestDialog = ref(false);
+const outsideReqGroup = ref<{ groupId: string; name: string; origin?: string | null } | null>(null);
+const outsideReq = ref({ name: '', email: '', organization: '', scope: 'patient-summary', purpose: 'clinical', message: '' });
+const outsideReqSending = ref(false);
+const outsideReqResult = ref('');
+const outsideReqError = ref('');
+const openOutsideRequest = (g: { groupId: string; name: string; origin?: string | null }) => {
+  outsideReqGroup.value = g;
+  outsideReqResult.value = '';
+  outsideReqError.value = '';
+  showOutsideRequestDialog.value = true;
+};
+const submitOutsideRequest = async () => {
+  const g = outsideReqGroup.value;
+  if (!g) return;
+  outsideReqSending.value = true;
+  outsideReqError.value = '';
+  try {
+    // Featured (remote) groups go through our server-side proxy: the
+    // browser can't POST cross-origin (CORS stays closed).
+    const url = g.origin
+      ? '/api/groups/outside-request-proxy'
+      : `/api/groups/${encodeURIComponent(g.groupId)}/outside-request`;
+    const body = g.origin
+      ? { origin: g.origin, groupId: g.groupId, ...outsideReq.value }
+      : outsideReq.value;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    outsideReqResult.value =
+      `Your request went to ${data.delivered} member(s) of ${g.name}. ` +
+      `Each member's own MAIA applies their sharing policies; anyone who ` +
+      `chooses to respond will reach you at ${outsideReq.value.email}.`;
+  } catch (err) {
+    outsideReqError.value = err instanceof Error ? err.message : 'Failed to send the request';
+  } finally {
+    outsideReqSending.value = false;
+  }
+};
+
 const loadPublicGroups = async () => {
   try {
     const res = await fetch('/api/groups/public');

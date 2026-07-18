@@ -10,13 +10,15 @@
       </div>
       <div style="min-width: 0">
         <div class="text-subtitle2 row items-center q-gutter-xs no-wrap">
-          <span>{{ peerAlias || 'Group member' }}</span>
-          <q-badge color="teal" outline :label="`member of ${groupName}`" />
+          <span>{{ peerAlias || (isOutsider ? 'Outside requester' : 'Group member') }}</span>
+          <q-badge v-if="isOutsider" color="deep-orange" outline label="outside the group" />
+          <q-badge v-else color="teal" outline :label="`member of ${groupName}`" />
         </div>
-        <div class="text-caption text-grey-7">end-to-end encrypted · your AI is not part of this conversation</div>
+        <div v-if="isOutsider" class="text-caption text-grey-7">not a member — no identity check · reply by email if you choose</div>
+        <div v-else class="text-caption text-grey-7">end-to-end encrypted · your AI is not part of this conversation</div>
       </div>
       <q-space />
-      <q-btn flat dense round size="sm" icon="rule" color="primary" @click="openRequestDialog">
+      <q-btn v-if="!isOutsider" flat dense round size="sm" icon="rule" color="primary" @click="openRequestDialog">
         <q-tooltip>Request records from {{ peerAlias || 'this member' }} — their sharing policies (or they themselves) decide</q-tooltip>
       </q-btn>
     </div>
@@ -67,11 +69,24 @@
       <!-- Pending request from this peer -->
       <div v-if="pendingRequest" class="peer-thread__request">
         <div class="text-body2">
-          <strong>{{ peerAlias || 'A group member' }}</strong> sent a request
-          <span class="text-grey-7">({{ pendingRequest.action }}<template v-if="pendingRequest.resource && pendingRequest.resource !== 'inbox'"> · {{ pendingRequest.resource }}</template>)</span>
+          <strong>{{ peerAlias || (pendingRequest.fromOutsider ? 'An outside requester' : 'A group member') }}</strong>
+          <template v-if="pendingRequest.fromOutsider"> asks for</template>
+          <template v-else> sent a request</template>
+          <span class="text-grey-7 q-ml-xs">({{ pendingRequest.action }}<template v-if="pendingRequest.resource && pendingRequest.resource !== 'inbox'"> · {{ pendingRequest.resource }}</template><template v-if="pendingRequest.purpose && pendingRequest.purpose !== 'any'"> · {{ pendingRequest.purpose }}</template>)</span>
         </div>
-        <div v-if="pendingRequest.payload" class="text-caption text-grey-8 q-mt-xs" style="white-space: pre-wrap; word-break: break-word">
+        <div v-if="pendingRequest.fromOutsider && pendingRequest.requester" class="text-caption text-grey-8 q-mt-xs">
+          {{ pendingRequest.requester.name }}<template v-if="pendingRequest.requester.organization"> · {{ pendingRequest.requester.organization }}</template>
+          · reply address: <strong>{{ pendingRequest.requester.email }}</strong>
+        </div>
+        <div v-if="outsiderMessage" class="text-caption text-grey-8 q-mt-xs" style="white-space: pre-wrap; word-break: break-word">
+          {{ outsiderMessage }}
+        </div>
+        <div v-else-if="pendingRequest.payload && !pendingRequest.fromOutsider" class="text-caption text-grey-8 q-mt-xs" style="white-space: pre-wrap; word-break: break-word">
           {{ typeof pendingRequest.payload === 'string' ? pendingRequest.payload : JSON.stringify(pendingRequest.payload) }}
+        </div>
+        <div v-if="pendingRequest.fromOutsider" class="text-caption text-grey-6 q-mt-xs">
+          Accepting only records your choice — nothing is sent automatically.
+          If you want to respond, use the reply address above.
         </div>
         <div class="q-mt-sm q-gutter-sm">
           <q-btn dense unelevated size="sm" color="primary" label="Accept" :loading="deciding" @click="decide('accept')" />
@@ -132,6 +147,9 @@ interface InMsg { id: string; fromPairwiseId: string; text: string; receivedAt: 
 interface OutMsg { id: string; toPairwiseId: string; text: string; sentAt: string }
 interface AsRequest {
   id: string; groupId: string; fromPairwiseId: string; action: string; resource: string;
+  purpose?: string;
+  fromOutsider?: boolean;
+  requester?: { name: string; email: string; organization?: string | null } | null;
   payload: unknown; receivedAt: string; status: string; decidedBySentence?: string | null;
 }
 
@@ -152,6 +170,13 @@ const threadItems = computed(() => {
 const pendingRequest = computed(() =>
   requests.value.find((r) => r.groupId === props.groupId && r.fromPairwiseId === props.peerId && r.status === 'pending') || null
 );
+const isOutsider = computed(() => String(props.peerId || '').startsWith('outsider:'));
+const outsiderMessage = computed(() => {
+  const p = pendingRequest.value;
+  if (!p?.fromOutsider) return '';
+  const payload = p.payload as { message?: string } | null;
+  return payload && typeof payload.message === 'string' ? payload.message : '';
+});
 const policyDecidedSentence = computed(() =>
   requests.value.find((r) => r.groupId === props.groupId && r.fromPairwiseId === props.peerId && r.decidedBySentence)?.decidedBySentence || ''
 );

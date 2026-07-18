@@ -18,8 +18,8 @@
 const USERS_DB = 'maia_users';
 const MAX_POLICIES = 200;
 
-const PURPOSES = ['any', 'clinical', 'research', 'public-health', 'marketing'];
-const SCOPES = ['everything', 'not-sensitive', 'past-months', 'apple-health-category', 'meds-allergies', 'patient-summary'];
+const PURPOSES = ['any', 'peer-support', 'clinical', 'research', 'public-health', 'marketing'];
+const SCOPES = ['meds-allergies', 'patient-summary', 'not-sensitive', 'everything'];
 const SIGNATURES = ['unverified', 'verified-email', 'group-member', 'npi', 'doximity'];
 const PAYMENTS = ['none', 'spam-deposit', 'notification-deposit', 'ai-prepay', 'sharing-payment'];
 const PARTY_TYPES = ['anyone', 'group', 'peer'];
@@ -58,8 +58,6 @@ export const normalizeCard = (raw) => {
       },
       purpose: e.purpose,
       scope: e.scope,
-      ...(e.scope === 'past-months' ? { scopeMonths: Math.max(1, Math.min(120, parseInt(e.scopeMonths, 10) || 12)) } : {}),
-      ...(e.scope === 'apple-health-category' ? { scopeCategory: String(e.scopeCategory || '').slice(0, 80) } : {}),
       filtered: e.filtered !== false, // privacy-filtered response is the safe default
       signature: e.signature,
       payment: e.payment
@@ -100,9 +98,7 @@ export const policySentence = (card) => {
     : e.party.type === 'peer' ? (e.party.alias || 'This member') : 'Anyone';
   const sig = e.signature === 'unverified' ? '(no identity check)' : `with ${e.signature} identity or stronger`;
   const verb = card.outcome === 'allow' ? 'may receive' : 'may NOT receive';
-  const what = e.scope === 'past-months' ? `records from the past ${e.scopeMonths || 12} months`
-    : e.scope === 'apple-health-category' ? `my "${e.scopeCategory || 'selected'}" Apple Health records`
-    : (SCOPE_LABELS[e.scope] || e.scope);
+  const what = SCOPE_LABELS[e.scope] || e.scope;
   const why = e.purpose === 'any' ? 'for any purpose' : `for ${e.purpose} use`;
   const filt = e.filtered !== false ? 'privacy-filtered' : 'unfiltered';
   const pay = e.payment === 'none' ? '' : `, if they provide ${PAYMENT_LABELS[e.payment] || e.payment}`;

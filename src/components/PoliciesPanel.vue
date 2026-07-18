@@ -81,6 +81,40 @@
       </div>
     </template>
 
+    <!-- Mentors: member self-opt-in to the public directory -->
+    <q-separator class="q-my-md" />
+    <div class="text-subtitle2 q-mb-xs">Mentors</div>
+    <div class="text-caption text-grey-7 q-mb-sm">
+      Mentors are listed publicly and accept peer messages without prior
+      approval.
+    </div>
+    <div v-if="!memberships.length" class="text-caption text-grey-6 q-mb-md">
+      Join a group to offer yourself as a mentor.
+    </div>
+    <div v-for="m in memberships" :key="`mentor:${m.groupId}`" class="row items-center q-col-gutter-sm q-mb-xs">
+      <div class="col-3 text-body2 ellipsis">{{ m.groupName }}</div>
+      <div class="col-auto">
+        <q-toggle
+          :model-value="m.mentor"
+          label="Mentor"
+          :disable="mentorSaving === m.groupId"
+          @update:model-value="(v: boolean) => saveMentor(m, v, m.mentorTag)"
+        />
+      </div>
+      <div class="col">
+        <q-input
+          v-model="m.mentorTag"
+          dense outlined
+          label="Tag the name with:"
+          placeholder="e.g. IBD parent · 10 years"
+          :disable="!m.mentor || mentorSaving === m.groupId"
+          maxlength="60"
+          @blur="saveMentor(m, m.mentor, m.mentorTag)"
+          @keydown.enter.prevent="saveMentor(m, m.mentor, m.mentorTag)"
+        />
+      </div>
+    </div>
+
     <!-- Editor: the sentence IS the policy; chips fill the slots -->
     <q-dialog v-model="showEditor">
       <q-card style="min-width: 520px; max-width: 680px">
@@ -97,8 +131,6 @@
             <q-select v-model="form.signature" :options="SIGNATURE_OPTIONS" emit-value map-options dense outlined label="Minimum identity" class="col-6" />
             <q-select v-model="form.purpose" :options="PURPOSE_OPTIONS" emit-value map-options dense outlined label="Purpose" class="col-6" />
             <q-select v-model="form.scope" :options="SCOPE_OPTIONS" emit-value map-options dense outlined label="Scope" class="col-6" />
-            <q-input v-if="form.scope === 'past-months'" v-model.number="form.scopeMonths" type="number" dense outlined label="Months" class="col-3" />
-            <q-input v-if="form.scope === 'apple-health-category'" v-model="form.scopeCategory" dense outlined label="Apple Health category" class="col-6" />
             <q-select v-model="form.payment" :options="PAYMENT_OPTIONS" emit-value map-options dense outlined label="Required payment" class="col-6" />
             <div class="col-6 row items-center">
               <q-toggle v-model="form.filtered" dense label="Privacy-filtered response" />
@@ -129,7 +161,40 @@ const props = defineProps<{ userId: string }>();
 
 const policies = ref<PolicyCard[]>([]);
 const loading = ref(false);
-const memberships = ref<Array<{ groupId: string; groupName: string }>>([]);
+const memberships = ref<Array<{ groupId: string; groupName: string; mentor: boolean; mentorTag: string }>>([]);
+
+// ── Mentor self-opt-in (listed publicly; accepts peer messages) ─────
+const mentorSaving = ref<string | null>(null);
+const mentorSaved = ref<Record<string, string>>({}); // groupId → last saved "<mentor>|<tag>"
+const saveMentor = async (m: { groupId: string; groupName: string; mentor: boolean; mentorTag: string }, mentor: boolean, tag: string) => {
+  const key = `${mentor}|${(tag || '').trim()}`;
+  if (mentorSaved.value[m.groupId] === key) { m.mentor = mentor; return; }
+  mentorSaving.value = m.groupId;
+  try {
+    const res = await fetch('/api/user-groups/mentor', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ userId: props.userId, groupId: m.groupId, mentor, tag })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    m.mentor = data.mentor;
+    m.mentorTag = data.tag;
+    mentorSaved.value[m.groupId] = `${data.mentor}|${data.tag}`;
+    $q.notify({
+      type: 'positive',
+      message: data.mentor
+        ? `You're listed as a mentor in ${m.groupName}.`
+        : `You're no longer listed as a mentor in ${m.groupName}.`
+    });
+  } catch (err) {
+    m.mentor = !mentor; // revert the toggle
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to update mentor listing' });
+  } finally {
+    mentorSaving.value = null;
+  }
+};
 
 // ── Sections: group-suggested first (badged), then the user's own ──
 const sections = computed(() => {
@@ -180,8 +245,6 @@ const form = ref({
   partyKind: 'anyone',
   purpose: 'clinical' as Purpose,
   scope: 'patient-summary' as Scope,
-  scopeMonths: 12,
-  scopeCategory: '',
   filtered: true,
   signature: 'group-member' as Signature,
   payment: 'none' as Payment
@@ -200,8 +263,6 @@ const formToCard = (): PolicyCard => {
         : { type: 'anyone' },
       purpose: form.value.purpose,
       scope: form.value.scope,
-      ...(form.value.scope === 'past-months' ? { scopeMonths: form.value.scopeMonths } : {}),
-      ...(form.value.scope === 'apple-health-category' ? { scopeCategory: form.value.scopeCategory } : {}),
       filtered: form.value.filtered,
       signature: form.value.signature,
       payment: form.value.payment
@@ -219,8 +280,6 @@ const openEditor = (card: PolicyCard | null) => {
       partyKind: e.party.type === 'group' ? `group:${e.party.groupId}` : 'anyone',
       purpose: e.purpose,
       scope: e.scope,
-      scopeMonths: e.scopeMonths || 12,
-      scopeCategory: e.scopeCategory || '',
       filtered: e.filtered !== false,
       signature: e.signature,
       payment: e.payment
@@ -243,7 +302,14 @@ const loadAll = async () => {
     if (pRes.ok && pData.success) policies.value = pData.policies || [];
     const gData = await gRes.json();
     if (gRes.ok && gData.success) {
-      memberships.value = (gData.memberships || []).map((m: { groupId: string; groupName: string }) => ({ groupId: m.groupId, groupName: m.groupName }));
+      memberships.value = (gData.memberships || []).map(
+        (m: { groupId: string; groupName: string; mentor?: boolean; mentorTag?: string }) => ({
+          groupId: m.groupId, groupName: m.groupName, mentor: !!m.mentor, mentorTag: m.mentorTag || ''
+        })
+      );
+      mentorSaved.value = Object.fromEntries(
+        memberships.value.map((m) => [m.groupId, `${m.mentor}|${m.mentorTag.trim()}`])
+      );
     }
   } catch { /* empty panel */ } finally {
     loading.value = false;
