@@ -157,6 +157,26 @@
               When off, only you can invite.
             </q-tooltip>
           </q-toggle>
+          <div v-if="editingGroupId">
+            <div class="text-subtitle2 q-mt-sm">Suggested member policies</div>
+            <div class="text-caption text-grey-7 q-mb-xs">
+              Shown on the join page; each joiner imports them as their own
+              editable Sharing Policies cards.
+            </div>
+            <div v-for="(c, i) in form.suggestedPolicies" :key="i" class="row items-center no-wrap q-mb-xs">
+              <div class="col text-caption" style="min-width: 0;">{{ suggestedSentence(c) }}</div>
+              <q-btn flat dense round size="sm" icon="delete" color="negative" @click="form.suggestedPolicies.splice(i, 1)" />
+            </div>
+            <div class="row q-col-gutter-xs items-center">
+              <q-select v-model="sugForm.outcome" :options="[{value:'allow',label:'Allow'},{value:'deny',label:'Deny'}]" emit-value map-options dense outlined label="Decision" class="col-3" />
+              <q-select v-model="sugForm.scope" :options="SCOPE_OPTIONS" emit-value map-options dense outlined label="Scope" class="col-5" />
+              <q-select v-model="sugForm.purpose" :options="PURPOSE_OPTIONS" emit-value map-options dense outlined label="Purpose" class="col-4" />
+              <q-select v-model="sugForm.signature" :options="SIGNATURE_OPTIONS" emit-value map-options dense outlined label="Min identity" class="col-4" />
+              <q-select v-model="sugForm.payment" :options="PAYMENT_OPTIONS" emit-value map-options dense outlined label="Payment" class="col-4" />
+              <div class="col-3"><q-toggle v-model="sugForm.filtered" dense label="Filtered" /></div>
+              <div class="col-1"><q-btn dense flat round icon="add" color="primary" @click="addSuggestedPolicy" /></div>
+            </div>
+          </div>
           <q-toggle
             v-model="form.publiclyListed"
             label="List this group publicly on the welcome page"
@@ -271,6 +291,7 @@
 import { ref, computed, watch, onMounted } from 'vue';
 import { useQuasar } from 'quasar';
 import QRCode from 'qrcode';
+import { sentenceFor, SCOPE_OPTIONS, PURPOSE_OPTIONS, SIGNATURE_OPTIONS, PAYMENT_OPTIONS, type PolicyCard } from '../utils/policyCards';
 
 const $q = useQuasar();
 
@@ -281,6 +302,7 @@ interface GroupSummary {
   memberInvitesAllowed?: boolean;
   postingPolicy?: string;
   publiclyListed?: boolean;
+  suggestedPolicies?: any[];
   joinMode?: string;
   joinLink?: string | null;
   tagVocabulary: string[];
@@ -316,7 +338,27 @@ const loadingMembers = ref<Record<string, boolean>>({});
 const showDialog = ref(false);
 const saving = ref(false);
 const editingGroupId = ref<string | null>(null);
-const form = ref({ name: '', description: '', tags: '', postingPolicy: '', memberInvitesAllowed: true, joinMode: 'invite-only', publiclyListed: false });
+const form = ref<{ name: string; description: string; tags: string; postingPolicy: string; memberInvitesAllowed: boolean; joinMode: string; publiclyListed: boolean; suggestedPolicies: any[] }>({ name: '', description: '', tags: '', postingPolicy: '', memberInvitesAllowed: true, joinMode: 'invite-only', publiclyListed: false, suggestedPolicies: [] });
+
+// Mini-editor for one suggested policy (party is fixed to "anyone in
+// this group" — the natural subject of a group's suggestions).
+const sugForm = ref({ outcome: 'allow', scope: 'patient-summary', purpose: 'any', signature: 'group-member', payment: 'none', filtered: true });
+const suggestedSentence = (c: any) => sentenceFor(c as PolicyCard);
+const addSuggestedPolicy = () => {
+  form.value.suggestedPolicies.push({
+    outcome: sugForm.value.outcome,
+    enabled: true,
+    provenance: 'user',
+    elements: {
+      party: { type: 'group', groupId: editingGroupId.value || '', groupName: form.value.name },
+      purpose: sugForm.value.purpose,
+      scope: sugForm.value.scope,
+      filtered: sugForm.value.filtered,
+      signature: sugForm.value.signature,
+      payment: sugForm.value.payment
+    }
+  });
+};
 
 /** Join link of the group being edited (server-computed once saved). */
 const editingJoinLink = computed(() => {
@@ -424,7 +466,7 @@ const loadGroups = async () => {
 
 const openCreateDialog = () => {
   editingGroupId.value = null;
-  form.value = { name: '', description: '', tags: '', postingPolicy: '', memberInvitesAllowed: true, joinMode: 'invite-only', publiclyListed: false };
+  form.value = { name: '', description: '', tags: '', postingPolicy: '', memberInvitesAllowed: true, joinMode: 'invite-only', publiclyListed: false, suggestedPolicies: [] };
   showDialog.value = true;
 };
 
@@ -470,7 +512,8 @@ const openEditDialog = (g: GroupSummary) => {
     postingPolicy: g.postingPolicy || '',
     memberInvitesAllowed: g.memberInvitesAllowed !== false,
     joinMode: g.joinMode || 'invite-only',
-    publiclyListed: g.publiclyListed === true
+    publiclyListed: g.publiclyListed === true,
+    suggestedPolicies: JSON.parse(JSON.stringify(g.suggestedPolicies || []))
   };
   showDialog.value = true;
 };
@@ -486,7 +529,8 @@ const saveGroup = async () => {
       postingPolicy: form.value.postingPolicy.trim(),
       memberInvitesAllowed: form.value.memberInvitesAllowed,
       joinMode: form.value.joinMode,
-      publiclyListed: form.value.publiclyListed
+      publiclyListed: form.value.publiclyListed,
+      suggestedPolicies: form.value.suggestedPolicies
     };
     const url = editingGroupId.value
       ? `/api/groups/${encodeURIComponent(editingGroupId.value)}`

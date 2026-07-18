@@ -860,3 +860,21 @@ and any design decisions resolved.
   exactly like a revoked membership, so every member's MAIA drops the
   membership cleanly on its next refresh instead of erroring forever
   against a missing group. Verified live: create → delete → /info 404.
+- **2026-07-18** — **Focused invite landing + group suggested policies**
+  (calm door for invitees; the reserved group policy pack ships). An
+  invite/join link now REPLACES the busy welcome page with one decision:
+  "You are about to join the <group> group" · where the MAIA account
+  will be hosted + the host's Privacy link · a scrolling list of the
+  group's policies (posting policy plus SUGGESTED POLICY CARDS rendered
+  as their deterministic sentences, green/red edged by outcome) · "you
+  can edit these at any time" · [MAIA Welcome Page] [JOIN]. JOIN runs
+  the quick-start + open-join chain directly. Groups gain
+  `suggestedPolicies` (validated cards, admin-authored in the edit
+  dialog with a compact chip editor; exposed on join-info/invite-info/
+  public views with server-rendered sentences) and every join path
+  (invite, open-link instant, poll activation) IMPORTS them as the
+  member's own editable cards (provenance 'group:<id>' — the Sharing
+  Policies tab already renders that section; skipped if the member
+  already has cards from that group, so rejoins never clobber edits).
+  Verified in the preview browser: landing renders name, host, privacy
+  link, posting policy + two suggested cards, and the two buttons.
