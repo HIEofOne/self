@@ -49,7 +49,7 @@
                      min-width:0 so long content wraps instead of
                      overflowing the box. -->
                 <div
-                  v-if="pendingGroupInvite"
+                  v-if="pendingGroupInvite && !inviteLandingActive"
                   class="q-mb-md"
                   style="display: flex; gap: 12px; align-items: flex-start; padding: 12px 16px; border-radius: 8px; background: #e3f2fd;"
                 >
@@ -168,7 +168,53 @@
                   </p>
                 </div>
 
-                <div v-if="!showAuth">
+                <!-- Focused invite landing: one decision, no noise -->
+                <div v-if="!showAuth && inviteLandingActive" class="q-mx-auto" style="max-width: 560px;">
+                  <div class="text-h5 text-center q-mb-md" style="font-weight: 600;">
+                    You are about to join the {{ landingGroupName }} group
+                  </div>
+                  <div class="text-body2 text-grey-8 q-mb-sm">
+                    If you don't already have one, you will be given a MAIA account
+                    hosted at <strong>{{ hostName }}</strong>.
+                    The MAIA host's privacy policies are
+                    <a href="/page.html?doc=Privacy" target="_blank" class="welcome-footer-link">here</a>.
+                  </div>
+                  <div class="text-body2 text-grey-8 q-mb-xs">The {{ landingGroupName }} group policies are:</div>
+                  <div class="q-mb-sm" style="max-height: 240px; overflow-y: auto; border: 1px solid #e0e0e0; border-radius: 10px; padding: 8px 12px;">
+                    <div v-if="landingPostingPolicy" class="q-pa-sm q-mb-xs" style="border-left: 3px solid #90caf9; background: #fafafa;">
+                      <div class="text-caption" style="white-space: pre-wrap;">{{ landingPostingPolicy }}</div>
+                    </div>
+                    <div
+                      v-for="(c, i) in landingPolicies" :key="i"
+                      class="q-pa-sm q-mb-xs"
+                      :style="`border-left: 3px solid ${c.outcome === 'deny' ? '#ef5350' : '#4caf50'}; background: #fafafa;`"
+                    >
+                      <div class="text-caption">{{ c.sentence }}</div>
+                    </div>
+                    <div v-if="!landingPostingPolicy && !landingPolicies.length" class="text-caption text-grey-6">
+                      This group hasn't published policies yet.
+                    </div>
+                  </div>
+                  <div class="text-caption text-grey-7 q-mb-md">
+                    You can edit the {{ landingGroupName }} group policies to adjust privacy
+                    and notification preferences at any time.
+                  </div>
+                  <div class="row q-col-gutter-sm">
+                    <div class="col-auto">
+                      <q-btn outline color="primary" label="MAIA Welcome Page" @click="landingDismissed = true" />
+                    </div>
+                    <div class="col">
+                      <q-btn
+                        unelevated color="primary" class="full-width" size="lg" label="JOIN"
+                        :loading="tempStartLoading"
+                        @click="handleGetStartedNoPassword"
+                      />
+                    </div>
+                  </div>
+                  <div v-if="tempStartError" class="text-negative text-center q-mt-sm">{{ tempStartError }}</div>
+                </div>
+
+                <div v-if="!showAuth && !inviteLandingActive">
                   <!-- Organizer-first welcome (Refinement 8). The page
                        recruits GROUP ORGANIZERS: invitations arrive three
                        steps downstream via the groups themselves. Video and
@@ -1039,6 +1085,20 @@ const pendingGroupInvite = ref<{ token: string; groupId: string; registry: strin
 /** Shareable join-request link (PR-9), captured from ?groupJoin=. */
 const pendingGroupJoinLink = ref<{ token: string; groupId: string; registry: string } | null>(null);
 const pendingJoinLinkGroupName = ref('');
+// ── Focused invite landing (calm door for invitees) ────────────────
+// When someone arrives with an invite/join link, the busy welcome page
+// is replaced by one decision: read the group's policies → JOIN. The
+// full welcome page stays one click away.
+const landingDismissed = ref(false);
+const landingPostingPolicy = ref('');
+const landingPolicies = ref<Array<{ sentence?: string; outcome?: string }>>([]);
+const inviteLandingActive = computed(() =>
+  !landingDismissed.value && !!(pendingGroupInvite.value || pendingGroupJoinLink.value)
+);
+const hostName = window.location.host;
+const landingGroupName = computed(() =>
+  pendingInviteGroupName.value || pendingJoinLinkGroupName.value || 'the group'
+);
 const loadPendingGroupJoinLink = async () => {
   try {
     const raw = localStorage.getItem('maiaGroupJoin');
@@ -1064,6 +1124,8 @@ const loadPendingGroupJoinLink = async () => {
           return;
         }
         pendingJoinLinkGroupName.value = data.group?.name || '';
+        landingPostingPolicy.value = data.group?.postingPolicy || '';
+        landingPolicies.value = data.group?.suggestedPolicies || [];
       }
     } catch { /* name stays generic */ }
   } catch {
@@ -1103,6 +1165,8 @@ const loadPendingGroupInvite = async () => {
       const data = await res.json();
       if (res.ok && data.success) {
         pendingInviteGroupName.value = data.group?.name || '';
+        landingPostingPolicy.value = data.group?.postingPolicy || '';
+        landingPolicies.value = data.group?.suggestedPolicies || [];
         if (data.invite && data.invite.valid === false) {
           // Dead token — replace the invite banner with a persistent
           // explanation instead of silently vanishing.

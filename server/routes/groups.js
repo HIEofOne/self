@@ -13,7 +13,7 @@
  *       and the patient-side /api/user-groups endpoints.
  * PR-3 (relay/heartbeat), PR-4 (requests inbox), PR-5 (directory) follow.
  */
-import { evaluatePolicies, policySentence, POLICY_SCOPES, POLICY_PURPOSES } from './policies.js';
+import { evaluatePolicies, policySentence, normalizeCard, POLICY_SCOPES, POLICY_PURPOSES } from './policies.js';
 import {
   generateKeyPairSync, createHash, createPrivateKey, createPublicKey,
   randomBytes, sign as edSign, verify as edVerify,
@@ -189,6 +189,9 @@ const adminGroupView = (doc) => ({
   // Welcome-page listing (Refinement 8): admin opt-in, default OFF —
   // invite-only groups stay invisible (no honeypot directory).
   publiclyListed: doc.publiclyListed === true,
+  // Suggested member policies (group policy pack v1): cards each joiner
+  // imports as editable provenance-'group:<id>' cards.
+  suggestedPolicies: doc.suggestedPolicies || [],
   tagVocabulary: doc.tagVocabulary || [],
   publicKeyJwk: doc.signingKey?.publicKeyJwk || null,
   policyPackVersion: doc.policyPackVersion ?? 0,
@@ -209,6 +212,7 @@ const publicGroupView = (doc) => ({
   // Posting policy (PR-10, Layer-1 "displayed" policy): shown on the
   // join/invite cards — joining is accepting. Free text, admin-authored.
   postingPolicy: doc.postingPolicy || '',
+  suggestedPolicies: (doc.suggestedPolicies || []).map((c) => ({ ...c, sentence: policySentence(c) })),
   tagVocabulary: doc.tagVocabulary || [],
   publicKeyJwk: doc.signingKey?.publicKeyJwk || null,
   activeMemberCount: memberCounts(doc).active
@@ -321,6 +325,14 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       }
       if (req.body?.publiclyListed !== undefined) {
         doc.publiclyListed = !!req.body.publiclyListed;
+      }
+      if (req.body?.suggestedPolicies !== undefined) {
+        const raw = Array.isArray(req.body.suggestedPolicies) ? req.body.suggestedPolicies : [];
+        const clean = raw.map((c) => normalizeCard(c)).filter(Boolean).slice(0, 20);
+        if (clean.length !== raw.length) {
+          return res.status(400).json({ success: false, error: 'One or more suggested policies are invalid' });
+        }
+        doc.suggestedPolicies = clean;
       }
       if (req.body?.joinMode !== undefined) {
         doc.joinMode = ['link-approval', 'open'].includes(req.body.joinMode) ? req.body.joinMode : 'invite-only';
@@ -722,7 +734,12 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         success: true,
         valid,
         joinMode: valid ? doc.joinMode : null,
-        group: valid ? { name: doc.name, description: doc.description || '', postingPolicy: doc.postingPolicy || '' } : null
+        group: valid ? {
+          name: doc.name,
+          description: doc.description || '',
+          postingPolicy: doc.postingPolicy || '',
+          suggestedPolicies: (doc.suggestedPolicies || []).map((c) => ({ ...c, sentence: policySentence(c) }))
+        } : null
       });
     } catch (error) {
       console.error('[groups] join-info failed:', error);
@@ -814,7 +831,8 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
           pairwiseId: member.pairwiseId,
           alias: member.alias,
           credential,
-          groupPublicKeyJwk: doc.signingKey?.publicKeyJwk || null
+          groupPublicKeyJwk: doc.signingKey?.publicKeyJwk || null,
+          suggestedPolicies: doc.suggestedPolicies || []
         }
       });
     } catch (error) {
@@ -940,7 +958,8 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
           alias: member.alias,
           credential,
           groupPublicKeyJwk: doc.signingKey?.publicKeyJwk || null,
-          inviter
+          inviter,
+          suggestedPolicies: doc.suggestedPolicies || []
         }
       });
     } catch (error) {
@@ -1385,6 +1404,30 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
 
   /** Membership view returned to the patient's browser: NO private keys —
    *  those stay on the userDoc for the server-side AS to use. */
+  /** Import a group's suggested policy cards as the member's own EDITABLE
+   *  cards (provenance 'group:<id>') on first join — the Sharing Policies
+   *  tab already renders them in a "Suggested by <group>" section with
+   *  enable/edit/delete. Skipped if any card with that provenance exists
+   *  (rejoin / re-import must not clobber the member's edits). */
+  const importSuggestedPolicies = (userDoc, groupId, cards) => {
+    if (!Array.isArray(cards) || cards.length === 0) return;
+    const prov = `group:${groupId}`;
+    const existing = userDoc.sharingPolicies || [];
+    if (existing.some((c) => c.provenance === prov)) return;
+    const now = new Date().toISOString();
+    const imported = cards.slice(0, 20).map((c, i) => ({
+      id: `pol_${Date.now()}_${i}_${randomBytes(3).toString('hex')}`,
+      outcome: c.outcome,
+      enabled: c.enabled !== false,
+      provenance: prov,
+      elements: c.elements,
+      createdFrom: 'manual',
+      createdAt: now,
+      updatedAt: now
+    }));
+    userDoc.sharingPolicies = [...existing, ...imported];
+  };
+
   const membershipView = (m) => ({
     groupId: m.groupId,
     groupName: m.groupName,
@@ -1466,6 +1509,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       };
       if (!userDoc.asId) userDoc.asId = randomBytes(16).toString('hex');
       userDoc.groupMemberships = [...(userDoc.groupMemberships || []), membership];
+      importSuggestedPolicies(userDoc, m.groupId, m.suggestedPolicies);
       userDoc.updatedAt = membership.joinedAt;
       await cloudant.saveDocument(USERS_DB, userDoc);
 
@@ -1724,6 +1768,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
               acceptedSenders: []
             };
             userDoc.groupMemberships = [...(userDoc.groupMemberships || []), membership];
+            importSuggestedPolicies(userDoc, m.groupId, m.suggestedPolicies);
             userDoc.updatedAt = membership.joinedAt;
             await cloudant.saveDocument(USERS_DB, userDoc);
             auditLog.logEvent({
@@ -1793,6 +1838,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
               invitedBy: null,
               acceptedSenders: []
             }];
+            importSuggestedPolicies(userDoc, m.groupId, m.suggestedPolicies);
             activated.push({ groupId: m.groupId, groupName: m.groupName });
           } else if (r.ok && data.success && data.status === 'rejected') {
             rejected.push({ groupId: p.groupId, groupName: p.groupName });

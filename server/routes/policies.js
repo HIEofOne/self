@@ -28,7 +28,7 @@ const OUTCOMES = ['allow', 'deny'];
 /** Validate + normalize a card sent by the client. Returns the clean
  *  card or null. Unknown enum values are rejected rather than coerced —
  *  a policy that silently means something else is worse than an error. */
-const normalizeCard = (raw) => {
+export const normalizeCard = (raw) => {
   if (!raw || typeof raw !== 'object') return null;
   const e = raw.elements || {};
   const party = e.party || {};
