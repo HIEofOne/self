@@ -18,95 +18,23 @@
         </div>
       </div>
 
-      <!-- Pending invite (compact card) -->
-      <div v-if="pendingInvite" class="groups-invite-card">
-        <div class="row items-center no-wrap q-gutter-xs">
-          <q-icon name="mail" color="primary" size="18px" />
-          <div class="text-caption">
-            <template v-if="inviteGroupName">
-              Invited to <strong>{{ inviteGroupName }}</strong>
-            </template>
-            <template v-else>Group invitation</template>
-          </div>
-        </div>
-        <div v-if="inviteGroupDescription" class="text-caption text-grey-7 q-mt-xs">
-          {{ inviteGroupDescription }}
-        </div>
-        <div v-if="inviteGroupPolicy" class="groups-policy-note q-mt-xs">
-          <div class="text-caption text-weight-medium">Group policy — joining means you accept it:</div>
-          <div class="text-caption" style="white-space: pre-wrap">{{ inviteGroupPolicy }}</div>
-        </div>
-        <q-input
-          v-model="aliasInput"
-          dense outlined
-          class="q-mt-sm"
-          label="Your display name in this group"
-          hint="Members will know you by this name — change it if you like"
-          :disable="joining"
-        />
-        <div class="row q-gutter-xs q-mt-sm">
-          <q-btn
-            dense unelevated size="sm" color="primary" label="Join"
-            :loading="joining" :disable="!aliasInput.trim()"
-            @click="joinPendingGroup"
-          />
-          <q-btn dense flat size="sm" color="grey-7" label="Dismiss" :disable="joining" @click="dismissInvite" />
-        </div>
-      </div>
-
-      <!-- Dead invite token: persistent explanation, dismissible -->
-      <div v-if="invalidInviteMessage" class="groups-invite-card groups-invite-card--invalid">
-        <div class="row items-start no-wrap q-gutter-xs">
-          <q-icon name="link_off" color="negative" size="18px" class="q-mt-xs" />
-          <div class="text-caption">{{ invalidInviteMessage }}</div>
-        </div>
-        <q-btn dense flat size="sm" color="negative" label="Dismiss" class="q-mt-xs" @click="invalidInviteMessage = ''" />
-      </div>
-
-      <!-- Shareable join link (PR-9): request to join, admin approves -->
-      <div v-if="pendingJoinLink" class="groups-invite-card">
-        <div class="row items-center no-wrap q-gutter-xs">
-          <q-icon name="how_to_reg" color="primary" size="18px" />
-          <div class="text-caption">
-            <template v-if="joinLinkMode === 'open'">
-              Join <strong>{{ pendingJoinLinkGroupName || 'this group' }}</strong>
-              — you'll be a member immediately.
-            </template>
-            <template v-else>
-              Request to join
-              <strong>{{ pendingJoinLinkGroupName || 'this group' }}</strong>
-              — the group's administrator approves each request.
-            </template>
-          </div>
-        </div>
-        <div v-if="joinLinkGroupPolicy" class="groups-policy-note q-mt-xs">
-          <div class="text-caption text-weight-medium">Group policy — joining means you accept it:</div>
-          <div class="text-caption" style="white-space: pre-wrap">{{ joinLinkGroupPolicy }}</div>
-        </div>
-        <q-input
-          v-model="joinAliasInput"
-          dense outlined
-          class="q-mt-sm"
-          label="Your display name in this group"
-          hint="Members will know you by this name — change it if you like"
-          :disable="requestingJoin"
-        />
-        <div class="row q-gutter-xs q-mt-sm">
-          <q-btn
-            dense unelevated size="sm" color="primary"
-            :label="joinLinkMode === 'open' ? 'Join group' : 'Request to join'"
-            :loading="requestingJoin" :disable="!joinAliasInput.trim()"
-            @click="submitJoinRequest"
-          />
-          <q-btn dense flat size="sm" color="grey-7" label="Dismiss" :disable="requestingJoin" @click="dismissJoinLink" />
-        </div>
-      </div>
+      <!-- Pending invite / join link (shared card — also shown on the
+           Sharing Policies tab, where a new member lands after the wizard) -->
+      <PendingJoinCard
+        ref="pendingJoinCardRef"
+        :user-id="props.userId"
+        :memberships="memberships"
+        :pending-join-group-ids="pendingJoins.map((p) => p.groupId)"
+        @active="joinCardActive = $event"
+        @joined="handleCardJoined"
+        @requested="loadMemberships"
+      />
 
       <div v-if="loading" class="text-center q-pa-md">
         <q-spinner size="1.5em" />
       </div>
       <div
-        v-else-if="memberships.length === 0 && !pendingInvite"
+        v-else-if="memberships.length === 0 && !joinCardActive"
         class="text-caption text-grey-7 q-pa-md"
       >
         You're not in any groups yet. Group admins send invitations by email —
@@ -328,6 +256,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue';
+import PendingJoinCard from './PendingJoinCard.vue';
 import { useQuasar } from 'quasar';
 
 const $q = useQuasar();
@@ -353,13 +282,6 @@ interface Membership {
   invitedBy?: { pairwiseId: string; alias: string | null } | null;
 }
 
-interface PendingInvite {
-  token: string;
-  groupId: string;
-  registry: string;
-  capturedAt?: string;
-}
-
 const INVITE_LS_KEY = 'maiaGroupInvite';
 const JOIN_LINK_LS_KEY = 'maiaGroupJoin';
 /** Per-thread "last seen" timestamps (client-side unread tracking). */
@@ -367,15 +289,23 @@ const THREAD_SEEN_LS_KEY = 'maia.groupThreadSeen';
 
 const memberships = ref<Membership[]>([]);
 const loading = ref(false);
-const pendingInvite = ref<PendingInvite | null>(null);
-/** Persistent explanation when the invite token is dead (used/replaced/expired). */
-const invalidInviteMessage = ref('');
-const inviteGroupName = ref('');
-const inviteGroupDescription = ref('');
-const inviteGroupPolicy = ref('');
-const aliasInput = ref('');
-const joining = ref(false);
 const leaving = ref<string | null>(null);
+
+// ── Pending invite/join card (shared component) ─────────────────────
+const pendingJoinCardRef = ref<InstanceType<typeof PendingJoinCard> | null>(null);
+const joinCardActive = ref(false);
+/** After the card reports a join: refresh and land the member somewhere
+ *  with an obvious next move — the inviter's conversation, else the group. */
+const handleCardJoined = async (p: { groupId: string }) => {
+  await loadMemberships();
+  await loadAllDirectories();
+  const joined = memberships.value.find((m) => m.groupId === p.groupId);
+  if (joined?.invitedBy) {
+    await selectPeer(joined, joined.invitedBy.pairwiseId);
+  } else if (joined) {
+    await selectGroup(joined);
+  }
+};
 
 interface GroupMessage {
   id: string;
@@ -720,127 +650,6 @@ const autoPull = async () => {
   finally { autoPullBusy = false; }
 };
 
-// ── Invite join flow ────────────────────────────────────────────────
-const loadPendingInvite = async () => {
-  try {
-    const raw = localStorage.getItem(INVITE_LS_KEY);
-    if (!raw) return;
-    const invite = JSON.parse(raw) as PendingInvite;
-    if (!invite?.token || !invite?.groupId) {
-      localStorage.removeItem(INVITE_LS_KEY);
-      return;
-    }
-    // Already a member of this group? A MAIA holds one membership per
-    // group, so a second invite (e.g. to a different email) can't be
-    // accepted as a new identity. Explain that clearly instead of silently
-    // dropping it — and tell them how to switch aliases (leave, then use
-    // the new invite).
-    const existing = memberships.value.find((m) => m.groupId === invite.groupId);
-    if (existing) {
-      localStorage.removeItem(INVITE_LS_KEY);
-      invalidInviteMessage.value =
-        `You're already a member of this group as "${existing.alias}". ` +
-        `A new invitation isn't needed. To join under a different name, open the group and use Leave, then open the new invitation.`;
-      return;
-    }
-    pendingInvite.value = invite;
-    // Prefill the group display name with the MAIA pseudonym (userId) so
-    // joining is one click — no second naming ceremony. Editable: members
-    // who prefer a different name in this group just type over it.
-    if (!aliasInput.value.trim() && props.userId) {
-      aliasInput.value = props.userId;
-    }
-    // Group metadata for the banner + invite validity. invite-info also
-    // marks the invite "opened" at the registry (admin-visible progress).
-    try {
-      // Proxied through OUR server (PR-11): works when the group's
-      // registry is a different deployment, with CORS staying closed.
-      const base = (invite.registry || window.location.origin).replace(/\/$/, '');
-      const res = await fetch(
-        `/api/user-groups/invite-info?userId=${encodeURIComponent(props.userId)}&registry=${encodeURIComponent(base)}` +
-        `&groupId=${encodeURIComponent(invite.groupId)}&token=${encodeURIComponent(invite.token)}`,
-        { credentials: 'include' }
-      );
-      const data = await res.json();
-      if (res.ok && data.success) {
-        inviteGroupName.value = data.group?.name || '';
-        inviteGroupDescription.value = data.group?.description || '';
-        inviteGroupPolicy.value = data.group?.postingPolicy || '';
-        if (data.invite && data.invite.valid === false) {
-          // Dead token — persistent explanation, never a silent vanish.
-          localStorage.removeItem(INVITE_LS_KEY);
-          pendingInvite.value = null;
-          const label = data.group?.name ? `"${data.group.name}"` : 'a patient group';
-          invalidInviteMessage.value = data.invite.expired
-            ? `Your invitation to join ${label} has expired. Ask your group administrator to send a new one.`
-            : `This invitation link to join ${label} is no longer valid — it may have already been used, or a newer invitation replaced it (only the most recent invitation link works). Check your email for a newer invitation, or ask your group administrator to send one.`;
-          return;
-        }
-      }
-    } catch {
-      /* banner falls back to generic text */
-    }
-  } catch {
-    /* corrupted storage — clear it */
-    localStorage.removeItem(INVITE_LS_KEY);
-  }
-};
-
-const joinPendingGroup = async () => {
-  if (!pendingInvite.value || !aliasInput.value.trim()) return;
-  joining.value = true;
-  try {
-    const res = await fetch('/api/user-groups/join', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({
-        userId: props.userId,
-        groupId: pendingInvite.value.groupId,
-        token: pendingInvite.value.token,
-        alias: aliasInput.value.trim(),
-        registryUrl: pendingInvite.value.registry || window.location.origin
-      })
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) {
-      throw new Error(data.error || `HTTP ${res.status}`);
-    }
-    localStorage.removeItem(INVITE_LS_KEY);
-    pendingInvite.value = null;
-    await loadMemberships();
-    $q.notify({ type: 'positive', message: `Welcome to ${data.membership?.groupName || 'the group'}!` });
-    // Land the new member somewhere with an obvious next move: the
-    // conversation with whoever invited them (member invite), else the
-    // group's info pane where mentors/"Find peers" live.
-    const joined = memberships.value.find((m) => m.groupId === data.membership?.groupId);
-    if (joined?.invitedBy) {
-      await loadDirectory(joined.groupId); // aliases for the rail
-      await selectPeer(joined, joined.invitedBy.pairwiseId);
-    } else if (joined) {
-      await selectGroup(joined);
-    }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : 'Failed to join group';
-    // A dead token can't succeed on retry — swap the join banner for a
-    // persistent explanation.
-    if (/invalid|already|expired/i.test(msg)) {
-      localStorage.removeItem(INVITE_LS_KEY);
-      pendingInvite.value = null;
-      invalidInviteMessage.value =
-        `${msg}. Ask your group administrator to send a new invitation if needed.`;
-    }
-    $q.notify({ type: 'negative', message: msg });
-  } finally {
-    joining.value = false;
-  }
-};
-
-const dismissInvite = () => {
-  localStorage.removeItem(INVITE_LS_KEY);
-  pendingInvite.value = null;
-};
-
 // ── Leave group ─────────────────────────────────────────────────────
 const confirmLeave = (m: Membership) => {
   $q.dialog({
@@ -921,107 +730,12 @@ const applyPastedLink = async () => {
   } catch { /* storage unavailable */ }
   showPasteLinkDialog.value = false;
   pasteLinkInput.value = '';
-  if (inviteToken) await loadPendingInvite();
-  else await loadPendingJoinLink();
+  await pendingJoinCardRef.value?.reload();
 };
 
 // ── Shareable join link (PR-9): request → admin approval ───────────
 interface PendingJoin { groupId: string; groupName: string; alias: string; requestedAt: string }
 const pendingJoins = ref<PendingJoin[]>([]);
-const pendingJoinLink = ref<{ token: string; groupId: string; registry: string } | null>(null);
-const pendingJoinLinkGroupName = ref('');
-const joinLinkGroupPolicy = ref('');
-const joinLinkMode = ref<'link-approval' | 'open'>('link-approval');
-const joinAliasInput = ref('');
-const requestingJoin = ref(false);
-
-const loadPendingJoinLink = async () => {
-  try {
-    const raw = localStorage.getItem(JOIN_LINK_LS_KEY);
-    if (!raw) return;
-    const link = JSON.parse(raw);
-    if (!link?.token || !link?.groupId) {
-      localStorage.removeItem(JOIN_LINK_LS_KEY);
-      return;
-    }
-    if (memberships.value.some((m) => m.groupId === link.groupId) ||
-        pendingJoins.value.some((p) => p.groupId === link.groupId)) {
-      localStorage.removeItem(JOIN_LINK_LS_KEY); // already joined/requested
-      return;
-    }
-    pendingJoinLink.value = link;
-    if (!joinAliasInput.value.trim() && props.userId) joinAliasInput.value = props.userId;
-    try {
-      const base = String(link.registry || window.location.origin).replace(/\/$/, '');
-      const res = await fetch(
-        `/api/user-groups/join-info?userId=${encodeURIComponent(props.userId)}&registry=${encodeURIComponent(base)}` +
-        `&groupId=${encodeURIComponent(link.groupId)}&token=${encodeURIComponent(link.token)}`,
-        { credentials: 'include' }
-      );
-      const data = await res.json();
-      if (res.ok && data.success) {
-        if (!data.valid) {
-          localStorage.removeItem(JOIN_LINK_LS_KEY);
-          pendingJoinLink.value = null;
-          invalidInviteMessage.value =
-            'This join link is no longer active — it may have been rotated or turned off. Ask the group for a fresh link or QR code.';
-          return;
-        }
-        pendingJoinLinkGroupName.value = data.group?.name || '';
-        joinLinkGroupPolicy.value = data.group?.postingPolicy || '';
-        joinLinkMode.value = data.joinMode || 'link-approval';
-      }
-    } catch { /* generic card text */ }
-  } catch {
-    localStorage.removeItem(JOIN_LINK_LS_KEY);
-  }
-};
-
-const submitJoinRequest = async () => {
-  if (!pendingJoinLink.value || !joinAliasInput.value.trim()) return;
-  requestingJoin.value = true;
-  try {
-    const res = await fetch('/api/user-groups/request-join', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({
-        userId: props.userId,
-        groupId: pendingJoinLink.value.groupId,
-        token: pendingJoinLink.value.token,
-        alias: joinAliasInput.value.trim(),
-        registryUrl: pendingJoinLink.value.registry || window.location.origin
-      })
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
-    localStorage.removeItem(JOIN_LINK_LS_KEY);
-    pendingJoinLink.value = null;
-    await loadMemberships(); // membership (open mode) or pendingJoins now includes it
-    if (data.joined && data.membership) {
-      // Open-mode group: admitted in the same round trip — land in it.
-      await loadAllDirectories();
-      $q.notify({ type: 'positive', message: `You're in — welcome to ${data.membership.groupName}!` });
-      const joined = memberships.value.find((m) => m.groupId === data.membership.groupId);
-      if (joined) await selectGroup(joined);
-    } else {
-      $q.notify({
-        type: 'positive',
-        message: `Request sent. You'll be connected as soon as ${data.pending?.groupName || 'the group'}'s administrator approves.`
-      });
-    }
-  } catch (err) {
-    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to send join request' });
-  } finally {
-    requestingJoin.value = false;
-  }
-};
-
-const dismissJoinLink = () => {
-  localStorage.removeItem(JOIN_LINK_LS_KEY);
-  pendingJoinLink.value = null;
-};
-
 /** Poll pending join requests; an approval becomes a membership. */
 const pollJoins = async () => {
   try {
@@ -1105,8 +819,6 @@ onMounted(async () => {
   loadThreadSeen();
   await loadMemberships();
   await Promise.all([loadAllMessages(), loadRequests(), loadAllDirectories()]);
-  await loadPendingInvite();
-  await loadPendingJoinLink();
   autoPullTimer = setInterval(autoPull, AUTO_PULL_MS);
 });
 
@@ -1141,23 +853,6 @@ onUnmounted(() => {
   top: 0;
   background: #fafafa;
   z-index: 1;
-}
-.groups-policy-note {
-  border-left: 3px solid #90caf9;
-  padding-left: 8px;
-}
-
-.groups-invite-card {
-  margin: 0 8px 8px;
-  padding: 10px;
-  border: 1px solid #bbdefb;
-  border-radius: 10px;
-  background: #e3f2fd;
-
-  &--invalid {
-    border-color: #ffcdd2;
-    background: #ffebee;
-  }
 }
 .groups-rail__section {
   padding-bottom: 4px;

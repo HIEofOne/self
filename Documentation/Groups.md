@@ -878,3 +878,19 @@ and any design decisions resolved.
   already has cards from that group, so rejoins never clobber edits).
   Verified in the preview browser: landing renders name, host, privacy
   link, posting policy + two suggested cards, and the two buttons.
+- **2026-07-18** — **New members land on Sharing Policies to join** (the
+  join decision and the policies it implies become one screen). After
+  the wizard provisions an invitee's MAIA, the Workbook now opens on
+  the SHARING POLICIES tab — not Groups — with the join card on top:
+  group name, posting policy, "joining adds N suggested policies",
+  display-name field, [JOIN GROUP] [DISMISS]. Joining imports the
+  group's suggested cards and they appear immediately below under
+  "Suggested by <group> — yours to keep, change, or turn off". The
+  invite/join-link card is now ONE shared component
+  (PendingJoinCard.vue) used by both the Sharing Policies tab and the
+  Groups rail, replacing GroupsPanel's inline duplicate; the completion
+  toast reads "Your private AI is ready. One more step — review the
+  group's policies and join." Verified end to end in the preview
+  browser: landing → JOIN → provisioned temp user → Sharing Policies +
+  join card → JOIN GROUP → instant membership + both Trustee cards
+  imported, editable; Groups tab clean.
