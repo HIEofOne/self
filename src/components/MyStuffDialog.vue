@@ -2199,16 +2199,29 @@ const railClick = (name: string) => {
 // current rail width as a CSS variable on <body> so the chat
 // container can use `padding-left: var(--my-stuff-rail-width)`
 // to stay clear of the rail.
-const RAIL_LABEL_LS_KEY = 'maia.myStuffRailLabeled';
+// Per-user key: the old browser-global key made every NEW user inherit
+// whatever rail state the previous user left (usually collapsed after
+// any amount of testing) — and a brand-new user has no idea what the
+// Workbook sidebar even is yet. Labeled is the default until THIS user
+// collapses it themselves.
+const RAIL_LABEL_LS_KEY = () => `maia.myStuffRailLabeled.${props.userId || 'anon'}`;
 const readRailLabeledPref = (): boolean => {
   try {
-    const v = window.localStorage.getItem(RAIL_LABEL_LS_KEY);
+    const v = window.localStorage.getItem(RAIL_LABEL_LS_KEY());
     if (v === '0') return false;
     if (v === '1') return true;
   } catch { /* SSR / private mode */ }
   return true; // default: labeled
 };
 const railLabeled = ref<boolean>(readRailLabeledPref());
+
+// The close prompt is words, not an icon — if the rail is collapsed to
+// icons when it fires, expand it so "Close the Workbook to chat" is
+// actually readable (the pulsing chevron alone is far too subtle for a
+// user who doesn't know what the Workbook sidebar is yet).
+watch(() => props.showClosePrompt, (on) => {
+  if (on && !railLabeled.value) railLabeled.value = true;
+});
 
 const RAIL_WIDTH_LABELED = '180px';
 const RAIL_WIDTH_ICONS   = '60px';
@@ -2228,7 +2241,7 @@ watch(railLabeled, () => syncBodyRailWidth());
 
 const toggleRailLabeled = () => {
   railLabeled.value = !railLabeled.value;
-  try { window.localStorage.setItem(RAIL_LABEL_LS_KEY, railLabeled.value ? '1' : '0'); } catch { /* ignore */ }
+  try { window.localStorage.setItem(RAIL_LABEL_LS_KEY(), railLabeled.value ? '1' : '0'); } catch { /* ignore */ }
 };
 
 // Context-aware chevron at the top of the rail.

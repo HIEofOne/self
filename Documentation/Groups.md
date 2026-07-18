@@ -1036,3 +1036,13 @@ and any design decisions resolved.
   prompt the indexing wizard ends with appears (pulsing chevron +
   banner — machinery that existed but had gone dormant). Verified
   live: JOIN GROUP → wizard quiet + prompt visible.
+- **2026-07-18** — **"Close the Workbook to chat" made visible**. The
+  post-join prompt only rendered its words when the Workbook rail was
+  expanded; collapsed, all a new user saw was a pulsing green chevron —
+  far too subtle for someone who doesn't yet know what the Workbook
+  sidebar is. Two fixes: (1) the rail auto-expands when the prompt
+  fires, so the words always show; (2) the rail-collapsed preference
+  key is now PER-USER — it was browser-global, so every brand-new user
+  inherited whatever state the previous user left (usually collapsed
+  after any testing). New users now start with the sidebar expanded
+  until they collapse it themselves.
