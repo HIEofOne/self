@@ -982,3 +982,14 @@ and any design decisions resolved.
   member self-healed to chat_ready with no dialog on reload; attach →
   modal → Not yet → chat; re-attach → modal again → Run the Wizard →
   setup dialog.
+- **2026-07-18** — **Join card shows the policies BEFORE the button**.
+  The in-app join card (Sharing Policies tab / Groups rail) asked new
+  users to commit before seeing what they were agreeing to: the
+  suggested policies appeared only AFTER joining, summarized pre-join
+  as a bare count. The card now renders the group's suggested policy
+  SENTENCES (green/red-edged mini cards, same as the invite landing
+  page) plus the defaults being accepted ("Group-wide 'Everyone'
+  messages are on by default") and a note that name, policies, and
+  message settings are all changeable on this page after joining —
+  everything above [JOIN GROUP]. Verified pre-join with a throwaway
+  group carrying one allow + one deny suggestion.

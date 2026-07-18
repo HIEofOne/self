@@ -18,10 +18,24 @@
         <div class="text-caption text-weight-medium">Group policy — joining means you accept it:</div>
         <div class="text-caption" style="white-space: pre-wrap">{{ inviteGroupPolicy }}</div>
       </div>
-      <div v-if="inviteSuggestedCount" class="text-caption text-grey-7 q-mt-xs">
-        Joining adds {{ inviteSuggestedCount }} suggested sharing
-        {{ inviteSuggestedCount === 1 ? 'policy' : 'policies' }} from this group
-        to your list — yours to edit or turn off.
+      <div v-if="inviteSuggested.length" class="q-mt-xs">
+        <div class="text-caption text-weight-medium">
+          Joining adds these suggested sharing policies to your list —
+          yours to edit or turn off:
+        </div>
+        <div
+          v-for="(c, i) in inviteSuggested"
+          :key="`is:${i}`"
+          class="join-policy-card"
+          :class="c.outcome === 'deny' ? 'join-policy-card--deny' : 'join-policy-card--allow'"
+        >
+          {{ c.sentence }}
+        </div>
+      </div>
+      <div class="text-caption text-grey-7 q-mt-xs">
+        Group-wide "Everyone" messages are on by default. Your name, these
+        policies, and message settings can all be changed on this page at
+        any time after you join.
       </div>
       <q-input
         v-model="aliasInput"
@@ -61,10 +75,24 @@
         <div class="text-caption text-weight-medium">Group policy — joining means you accept it:</div>
         <div class="text-caption" style="white-space: pre-wrap">{{ joinLinkGroupPolicy }}</div>
       </div>
-      <div v-if="joinLinkSuggestedCount" class="text-caption text-grey-7 q-mt-xs">
-        Joining adds {{ joinLinkSuggestedCount }} suggested sharing
-        {{ joinLinkSuggestedCount === 1 ? 'policy' : 'policies' }} from this group
-        to your list — yours to edit or turn off.
+      <div v-if="joinLinkSuggested.length" class="q-mt-xs">
+        <div class="text-caption text-weight-medium">
+          Joining adds these suggested sharing policies to your list —
+          yours to edit or turn off:
+        </div>
+        <div
+          v-for="(c, i) in joinLinkSuggested"
+          :key="`js:${i}`"
+          class="join-policy-card"
+          :class="c.outcome === 'deny' ? 'join-policy-card--deny' : 'join-policy-card--allow'"
+        >
+          {{ c.sentence }}
+        </div>
+      </div>
+      <div class="text-caption text-grey-7 q-mt-xs">
+        Group-wide "Everyone" messages are on by default. Your name, these
+        policies, and message settings can all be changed on this page at
+        any time after you join.
       </div>
       <q-input
         v-model="joinAliasInput"
@@ -135,14 +163,14 @@ const invalidMessage = ref('');
 const inviteGroupName = ref('');
 const inviteGroupDescription = ref('');
 const inviteGroupPolicy = ref('');
-const inviteSuggestedCount = ref(0);
+const inviteSuggested = ref<Array<{ sentence?: string; outcome?: string }>>([]);
 const aliasInput = ref('');
 const joining = ref(false);
 
 const pendingJoinLink = ref<{ token: string; groupId: string; registry: string } | null>(null);
 const joinLinkGroupName = ref('');
 const joinLinkGroupPolicy = ref('');
-const joinLinkSuggestedCount = ref(0);
+const joinLinkSuggested = ref<Array<{ sentence?: string; outcome?: string }>>([]);
 const joinLinkMode = ref<'link-approval' | 'open'>('link-approval');
 const joinAliasInput = ref('');
 const requestingJoin = ref(false);
@@ -186,7 +214,7 @@ const loadPendingInvite = async () => {
         inviteGroupName.value = data.group?.name || '';
         inviteGroupDescription.value = data.group?.description || '';
         inviteGroupPolicy.value = data.group?.postingPolicy || '';
-        inviteSuggestedCount.value = (data.group?.suggestedPolicies || []).length;
+        inviteSuggested.value = data.group?.suggestedPolicies || [];
         if (data.invite && data.invite.valid === false) {
           // Dead token — persistent explanation, never a silent vanish.
           localStorage.removeItem(INVITE_LS_KEY);
@@ -238,7 +266,7 @@ const loadPendingJoinLink = async () => {
         }
         joinLinkGroupName.value = data.group?.name || '';
         joinLinkGroupPolicy.value = data.group?.postingPolicy || '';
-        joinLinkSuggestedCount.value = (data.group?.suggestedPolicies || []).length;
+        joinLinkSuggested.value = data.group?.suggestedPolicies || [];
         joinLinkMode.value = data.joinMode || 'link-approval';
       }
     } catch { /* generic card text */ }
@@ -381,5 +409,18 @@ onMounted(reload);
 .join-policy-note {
   border-left: 3px solid #90caf9;
   padding-left: 8px;
+}
+
+.join-policy-card {
+  margin-top: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+  background: #fff;
+  border-radius: 4px;
+  border-left: 3px solid #66bb6a;
+
+  &--deny {
+    border-left-color: #ef5350;
+  }
 }
 </style>
