@@ -1098,3 +1098,18 @@ and any design decisions resolved.
   ADD FILES. Verified live: fresh invitee saw disabled switches
   pre-join, joined, got the sticky prompt, fork bullets + all four
   buttons render, new nudge copy shows, old copy gone.
+- **2026-07-19** — **Patient-summary integrity round**. (1) Generated
+  summaries are NEVER auto-saved: generation and chat-derived
+  candidates both land in a review dialog ("Nothing is saved until you
+  choose") with [Save as new summary] when a slot is free, per-slot
+  Replace buttons, and Close-without-saving — the pre-index chat/meds
+  mix can no longer masquerade as the verified summary. (2) The
+  generation checklist keeps an ACTIVE line after its scripted steps
+  ("AI is drafting your summary — the long step, typically 1–3
+  minutes...") so long drafts never look stalled. (3) Summary links:
+  linkify on + links open in a new tab. (4) SAVE chat refreshes the
+  conversation rail immediately (was up to 15 s). (5) BACKUP writes
+  maia-state.json IN PLACE when a MAIA folder is connected; plain
+  downloads can never replace a file (browser design), and folder
+  creation requires Chrome's File System Access API — on other
+  browsers BACKUP remains a download.

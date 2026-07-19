@@ -5150,6 +5150,17 @@ const saveStateToLocalFolder = async () => {
 const downloadBackup = async () => {
   const userId = props.user?.userId;
   if (!userId) return;
+  // With a connected MAIA folder, BACKUP updates maia-state.json IN the
+  // folder (a true replace). Browser downloads can never replace a file —
+  // each one becomes "maia-state (2).json" — so the folder is the only
+  // clean-overwrite path, and it needs Chrome's File System Access API.
+  if (localFolderHandle.value) {
+    try {
+      await saveStateToLocalFolder();
+      $q.notify({ type: 'positive', message: `Backup written to your MAIA folder (${localFolderName.value || 'connected folder'}) — maia-state.json updated in place.` });
+      return;
+    } catch { /* fall through to a plain download */ }
+  }
   try {
     const res = await fetch('/api/user-doc/full', { credentials: 'include' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -7588,6 +7599,8 @@ const saveToGroup = async () => {
       alert(`Chat saved successfully!${result.shareId ? ` Share ID: ${result.shareId}` : ''}`);
 
     loadSavedChatCount();
+    // Show the new chat in the rail NOW — its own poll is 15s away.
+    conversationRailRef.value?.refresh();
     }
   } catch (error) {
     console.error('Error saving to group:', error);
