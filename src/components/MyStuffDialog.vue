@@ -135,6 +135,20 @@
              toolbar group that used to live in ChatInterface.vue's
              header. -->
         <div class="my-stuff-rail__user">
+          <!-- Backup: browser-universal download of maia-state.json (and
+               the setup log). The Chrome folder auto-writes these; this
+               is the always-available manual path for everyone else. -->
+          <button
+            type="button"
+            class="my-stuff-rail__signout"
+            :class="{ 'my-stuff-rail__signout--icon': !railLabeled }"
+            @click="emit('download-backup')"
+            aria-label="Download backup"
+            :title="railLabeled ? 'Download a backup of your MAIA (maia-state.json)' : 'Download backup'"
+          >
+            <q-icon name="download" size="20px" />
+            <span v-if="railLabeled" class="my-stuff-rail__signout-label">BACKUP</span>
+          </button>
           <div v-if="railLabeled" class="my-stuff-rail__user-id" :title="props.userId">
             {{ props.userId || 'Guest' }}
           </div>
@@ -1955,6 +1969,7 @@ const props = withDefaults(defineProps<Props>(), {
 
 const emit = defineEmits<{
   'group-joined': [];
+  'download-backup': [];
   'index-now-triggered': [];
   'update:modelValue': [value: boolean];
   'chat-selected': [chat: SavedChat];
