@@ -1966,6 +1966,10 @@ interface Props {
   modelValue: boolean;
   userId: string;
   initialTab?: string;
+  /** A chat-generated Patient Summary draft awaiting review — opening
+   *  the summary tab presents it in the review dialog (the ONLY save
+   *  path), so "open the Patient Summary tab" never lands on nothing. */
+  pendingSummary?: string;
   messages?: Message[];
   originalMessages?: Message[]; // Original unfiltered messages for privacy filtering
   rehydrationFiles?: Array<{ fileName?: string; bucketKey?: string; fileSize?: number; uploadedAt?: string }>;
@@ -1999,6 +2003,7 @@ const props = withDefaults(defineProps<Props>(), {
 
 const emit = defineEmits<{
   'group-joined': [];
+  'pending-summary-consumed': [];
   'download-backup': [];
   'index-now-triggered': [];
   'update:modelValue': [value: boolean];
@@ -6631,6 +6636,16 @@ const handleRequestNewSummary = () => {
   pendingSummaryRegeneration.value = true;
   requestNewSummary();
 };
+
+// Chat-generated draft handoff: when the summary tab is (or becomes)
+// visible with a pending draft, open the review dialog with it.
+watch([currentTab, () => props.pendingSummary], ([tab, pending]) => {
+  if (tab === 'summary' && pending && pending.trim()) {
+    newSummaryToReplace.value = pending.trim();
+    showReplaceSummaryDialog.value = true;
+    emit('pending-summary-consumed');
+  }
+}, { immediate: true });
 
 const requestNewSummary = async () => {
   if (!props.userId) return;

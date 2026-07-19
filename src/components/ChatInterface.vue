@@ -916,6 +916,8 @@
       v-model="showMyStuffDialog"
       :userId="props.user?.userId || ''"
       :initial-tab="myStuffInitialTab"
+      :pending-summary="chatDraftSummary"
+      @pending-summary-consumed="chatDraftSummary = ''"
       :messages="messages"
       :original-messages="trulyOriginalMessages.length > 0 ? trulyOriginalMessages : originalMessages"
       :rehydration-files="props.rehydrationFiles || []"
@@ -1521,6 +1523,10 @@ const showNewSummaryDialog = ref(false);
 /** Chat-typed "patient summary" runs the same long draft the tab runs —
  *  show the same checklist instead of a silent "Thinking...". */
 const chatSummaryProgress = ref(false);
+/** The chat-generated draft, handed to the Patient Summary tab's review
+ *  dialog when the user opens the tab — the modal's promise made real.
+ *  Cleared once consumed. */
+const chatDraftSummary = ref('');
 /** Once the user dismisses the post-indexing "Update Patient Summary?" prompt, do not show again this session. */
 const postIndexingSummaryDismissedThisSession = ref(false);
 /** Once the user dismisses "Index your records" with NOT YET, do not show it again this session. */
@@ -3241,6 +3247,7 @@ const sendMessage = async () => {
               name: psLabel
             };
             messages.value.push(psMessage);
+            chatDraftSummary.value = draftJson.summary;
             // NO auto-save: the summary shows in chat; saving happens in
             // the Patient Summary tab's review dialog (explicit consent).
             originalMessages.value = JSON.parse(JSON.stringify(messages.value));
@@ -3399,6 +3406,7 @@ const sendMessage = async () => {
               if (isPatientSummaryRequest && props.user?.userId && assistantMessage.content) {
                 // NO auto-save (review gate owns saving). Offer the tab.
                 if (mentionsSummary && !isUntouchedDefault) {
+                  chatDraftSummary.value = assistantMessage.content;
                   showNewSummaryDialog.value = true;
                 }
               }
@@ -3429,6 +3437,7 @@ const sendMessage = async () => {
     if (isPatientSummaryRequest && props.user?.userId && assistantMessage.content) {
       // NO auto-save (review gate owns saving). Offer the tab.
       if (mentionsSummary && !isUntouchedDefault) {
+        chatDraftSummary.value = assistantMessage.content;
         showNewSummaryDialog.value = true;
       }
     }
