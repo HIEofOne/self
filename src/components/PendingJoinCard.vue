@@ -127,6 +127,10 @@ const emit = defineEmits<{
   (e: 'active', value: boolean): void;
   /** Suggested policies were preview-imported or removed — reload lists. */
   (e: 'policies-changed'): void;
+  /** The pending group (id + name), or null once joined/dismissed — lets
+   *  the Sharing Policies tab show its per-group switches (disabled)
+   *  BEFORE the join, so every election is visible up front. */
+  (e: 'pending-info', payload: { groupId: string; groupName: string } | null): void;
 }>();
 
 const INVITE_LS_KEY = 'maiaGroupInvite';
@@ -153,6 +157,20 @@ const requestingJoin = ref(false);
 
 const isActive = computed(() => !!(pendingInvite.value || pendingJoinLink.value || invalidMessage.value));
 watch(isActive, (v) => emit('active', v), { immediate: true });
+
+watch(
+  [pendingInvite, pendingJoinLink, inviteGroupName, () => joinLinkGroupName.value],
+  () => {
+    if (pendingInvite.value) {
+      emit('pending-info', { groupId: pendingInvite.value.groupId, groupName: inviteGroupName.value || 'the group' });
+    } else if (pendingJoinLink.value) {
+      emit('pending-info', { groupId: pendingJoinLink.value.groupId, groupName: joinLinkGroupName.value || 'the group' });
+    } else {
+      emit('pending-info', null);
+    }
+  },
+  { immediate: true }
+);
 
 const loadPendingInvite = async () => {
   try {

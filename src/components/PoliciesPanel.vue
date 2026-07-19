@@ -13,6 +13,7 @@
       @joined="handleJoined"
       @requested="loadAll"
       @policies-changed="loadAll"
+      @pending-info="pendingGroup = $event"
     />
 
     <!-- The default mental model, stated up front -->
@@ -116,6 +117,14 @@
         @update:model-value="(v: boolean) => saveMessagePrefs(m, v)"
       />
     </div>
+    <div v-if="pendingGroupNotMember" class="q-mb-xs">
+      <q-toggle
+        :model-value="true"
+        disable
+        :label="`Everyone in the group messages — ${pendingGroupNotMember.groupName}`"
+      />
+      <span class="text-caption text-grey-6 q-ml-sm">on by default — available after you join</span>
+    </div>
     <div class="text-caption text-grey-7 q-mb-md">
       On (the default), group-wide "Everyone" messages reach you like any
       other message. Off, they are never even delivered to you.
@@ -130,6 +139,15 @@
     </div>
     <div v-if="!memberships.length" class="text-caption text-grey-6 q-mb-md">
       Join a group to offer yourself as a mentor.
+    </div>
+    <div v-if="pendingGroupNotMember" class="row items-center q-col-gutter-sm q-mb-xs">
+      <div class="col-3 text-body2 ellipsis">{{ pendingGroupNotMember.groupName }}</div>
+      <div class="col-auto">
+        <q-toggle :model-value="false" disable label="Mentor" />
+      </div>
+      <div class="col">
+        <q-input model-value="" dense outlined disable label="Tag the name with:" placeholder="available after you join" />
+      </div>
     </div>
     <div v-for="m in memberships" :key="`mentor:${m.groupId}`" class="row items-center q-col-gutter-sm q-mb-xs">
       <div class="col-3 text-body2 ellipsis">{{ m.groupName }}</div>
@@ -199,6 +217,16 @@ import {
 const $q = useQuasar();
 const props = defineProps<{ userId: string }>();
 const emit = defineEmits<{ 'group-joined': [] }>();
+
+/** The group a pending invite/join link points at (from PendingJoinCard).
+ *  Its per-group switches render DISABLED before the join, so the user
+ *  sees every election on one screen before committing. */
+const pendingGroup = ref<{ groupId: string; groupName: string } | null>(null);
+const pendingGroupNotMember = computed(() =>
+  pendingGroup.value && !memberships.value.some((m) => m.groupId === pendingGroup.value?.groupId)
+    ? pendingGroup.value
+    : null
+);
 
 /** Joined from this tab: refresh the list (imported cards keep any
  *  pre-join edits) and tell the app — it suspends the setup wizard and

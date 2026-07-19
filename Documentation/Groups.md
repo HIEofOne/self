@@ -1076,3 +1076,25 @@ and any design decisions resolved.
   summary generated → Lists opened with "Lisinopril 10 mg daily"
   extracted from the file awaiting VERIFY; BACKUP downloaded
   maia-state.json with the keys notice.
+- **2026-07-19** — **Wizard UX feedback round**. (1) Agent-deploy
+  estimate reads "(30 sec typical)" instead of "(10 min max)". (2) The
+  post-join backup prompt is STICKY (it vanished after 12s leaving no
+  visible affordance) and now names the always-present BACKUP button in
+  the Workbook sidebar. (3+4) The "Everyone in the group messages" and
+  "Mentor" switches render DISABLED for the pending group BEFORE
+  joining (PendingJoinCard emits pending-info; Sharing Policies shows
+  the rows with "available after you join"), so every election is
+  visible pre-commitment. (5) The index-nudge modal's copy replaced:
+  the file IS available as chat context un-indexed — the modal now
+  lists the four actual indexing benefits (exclusive Private-AI access
+  during public-AI chats, lists + source links, no per-chat reloading,
+  automatic policy responses). (6) The misleading "Setup complete"
+  after connecting an EMPTY folder is gone — the records fork is now
+  three explanation bullets (works better on Chrome; folder = backups
+  of chats and groups; wizard works without one) + four buttons:
+  [I have a local MAIA folder] [Create a new MAIA folder] [Just run
+  the wizard without a local folder] [Cancel]; an empty connected
+  folder shows "Folder connected — no record files in it yet" with
+  ADD FILES. Verified live: fresh invitee saw disabled switches
+  pre-join, joined, got the sticky prompt, fork bullets + all four
+  buttons render, new nudge copy shows, old copy gone.

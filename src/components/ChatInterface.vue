@@ -324,11 +324,19 @@
                   <q-card-section>
                     <div class="text-h6">File saved — make it part of your MAIA?</div>
                     <div class="text-body2 q-mt-sm">
-                      Your file is in Saved Files, but it isn't indexed yet, so
-                      your private AI can't use it. Run the Setup Wizard to
-                      index it and create your user-verified
-                      <strong>Current Medications</strong> list and
-                      <strong>Patient Summary</strong>.
+                      Your file is in Saved Files, but it isn't indexed into a
+                      knowledge base yet. Indexing benefits:
+                    </div>
+                    <ul class="text-body2 q-mt-sm q-mb-none" style="padding-left: 20px;">
+                      <li>Private AI has exclusive access even when chatting with public AIs like Claude, Gemini or ChatGPT.</li>
+                      <li>Indexing creates lists and links to source records when Private AI responds.</li>
+                      <li>Files in your private knowledge base do not have to be reloaded for every new chat.</li>
+                      <li>As your Sharing Policies get more sophisticated, Private AI can respond to some requests automatically and with better privacy.</li>
+                    </ul>
+                    <div class="text-body2 q-mt-sm">
+                      Run the Setup Wizard to index it and create your
+                      user-verified <strong>Current Medications</strong> list
+                      and <strong>Patient Summary</strong>.
                     </div>
                     <div class="text-caption text-grey-7 q-mt-sm">
                       This can take 5 minutes or more.
@@ -465,7 +473,7 @@
           <!-- Records actions. "Records present" is the trigger; the
                local folder is the optional AUTO-BACKUP upgrade (Chrome),
                never the gate. Hidden while a quick-start run is underway. -->
-          <div v-if="!setupFolderConnected && !wizardQuickStart" class="q-mb-md">
+          <div v-if="!wizardQuickStart" class="q-mb-md">
             <!-- Uploads present → indexing is the primary action, in ANY
                  browser. Chat "+" attaches land in the same list. -->
             <div v-if="stage3HasFiles && wizardFlowPhase === 'done' && indexingStatus?.phase !== 'complete'" class="q-mb-sm">
@@ -492,50 +500,64 @@
                 more — progress shows below.
               </div>
             </div>
-            <!-- No uploads yet: get files in (any browser), or connect the
-                 Chrome folder for automatic local copies + backup. -->
-            <template v-if="!stage3HasFiles">
-              <q-btn
-                unelevated
-                color="primary"
-                icon="note_add"
-                label="Add health record files"
-                :loading="wizardAddFilesBusy"
-                @click="triggerWizardFilesInput"
-              />
-            </template>
-            <!-- Chrome: persistent folder access (+ TEST on localhost) -->
-            <template v-if="localFolderSupported">
-              <div class="q-mt-sm">
+            <!-- No files, no folder: the explained fork — what the folder
+                 is FOR, then four honest choices. -->
+            <template v-else-if="!stage3HasFiles && !setupFolderConnected && !localFolderAutoRunActive">
+              <ul class="text-body2 q-mb-sm" style="padding-left: 20px;">
+                <li>The Setup Wizard works better on Chrome because it can access local folders as well as files.</li>
+                <li>The Setup Wizard uses a local folder to make backups of your chats and groups.</li>
+                <li>If you don't have or choose a local folder, the Wizard will still create your indexed private knowledge base.</li>
+              </ul>
+              <div class="row q-gutter-sm items-center">
                 <q-btn
-                  :unelevated="false"
-                  flat
+                  v-if="localFolderSupported"
+                  unelevated
                   color="primary"
-                  label="Choose the patient folder"
+                  label="I have a local MAIA folder"
                   icon="folder_open"
                   :disable="localFolderAutoRunActive"
                   @click="handleFullSetupClick"
                 />
                 <q-btn
-                  v-if="isLocalhost"
+                  v-else-if="props.folderAccessTier === 'safari'"
+                  unelevated
+                  color="primary"
+                  label="I have a local MAIA folder"
+                  icon="folder_open"
+                  :disable="localFolderAutoRunActive"
+                  @click="handlePickSafariFolder"
+                />
+                <q-btn
+                  v-if="localFolderSupported"
+                  outline
+                  color="primary"
+                  label="Create a new MAIA folder"
+                  icon="create_new_folder"
+                  :disable="localFolderAutoRunActive"
+                  @click="handleFullSetupClick"
+                />
+                <q-btn
+                  outline
+                  color="primary"
+                  label="Just run the wizard without a local folder"
+                  icon="note_add"
+                  :loading="wizardAddFilesBusy"
+                  @click="triggerWizardFilesInput"
+                />
+                <q-btn flat color="grey-7" label="Cancel" @click="dismissWizard" />
+                <q-btn
+                  v-if="isLocalhost && localFolderSupported"
                   flat
                   color="deep-orange"
                   label="TEST"
                   icon="science"
-                  class="q-ml-sm"
                   :disable="localFolderAutoRunActive || testMode"
                   @click="handleTestButton"
                 />
-                <div class="text-caption text-grey-7 q-mt-xs" style="max-width: 480px">
-                  Optional upgrade (Chrome): connect a MAIA folder and your
-                  records, backup, and setup log are kept on your computer
-                  automatically.
-                </div>
               </div>
               <!-- Quick-start tier: deploy the private AI without records
-                   (Groups adoption floor). No folder pick either — the
-                   local folder is deferred until first needed. -->
-              <div v-if="!props.restoreActive && !stage3HasFiles" class="q-mt-sm">
+                   (Groups adoption floor). -->
+              <div v-if="!props.restoreActive" class="q-mt-sm">
                 <q-btn
                   flat
                   dense
@@ -552,16 +574,22 @@
                 </div>
               </div>
             </template>
-            <!-- Safari: one-time folder read stays available -->
-            <div v-else-if="props.folderAccessTier === 'safari'" class="q-mt-sm">
+            <!-- Folder connected but empty: a starting point, not a finish
+                 line. Give the user the two honest next moves. -->
+            <div v-else-if="!stage3HasFiles && setupFolderConnected && !localFolderAutoRunActive" class="q-mb-sm">
               <q-btn
-                flat
+                unelevated
                 color="primary"
-                label="Select your MAIA folder"
-                icon="folder_open"
-                :disable="localFolderAutoRunActive"
-                @click="handlePickSafariFolder"
+                icon="note_add"
+                label="Add files"
+                :loading="wizardAddFilesBusy"
+                @click="triggerWizardFilesInput"
               />
+              <div class="text-caption text-grey-7 q-mt-xs" style="max-width: 480px">
+                Your MAIA folder is connected but has no record files yet.
+                Copy record PDFs into the folder, or add files here — then
+                the wizard indexes them and builds your lists.
+              </div>
             </div>
           </div>
 
@@ -598,7 +626,7 @@
                   <span v-if="wizardStage1Complete" class="text-green text-caption q-ml-sm">Ready{{ wizardAgentDeployElapsed ? ` (${Math.floor(wizardAgentDeployElapsed / 60)}m ${wizardAgentDeployElapsed % 60}s)` : '' }}</span>
                   <span v-else-if="agentSetupPollingActive" class="text-primary text-caption q-ml-sm">
                     {{ wizardStage1StatusLine }}
-                    <span class="text-grey-6">(10 min max)</span>
+                    <span class="text-grey-6">(30 sec typical)</span>
                   </span>
                   <span v-else-if="agentSetupTimedOut" class="text-negative text-caption q-ml-sm">Timed out</span>
                 </q-item-label>
@@ -4407,7 +4435,9 @@ const runSafariFolderWizard = async (files: File[]) => {
     if (uploadedCount > 0) {
       localFolderAutoRunPhase.value = 'Knowledge base indexing in progress...';
     } else {
-      localFolderAutoRunPhase.value = 'Setup complete';
+      // An empty (e.g. freshly created) folder is a starting point, not a
+      // finished setup — declaring "Setup complete" here was misleading.
+      localFolderAutoRunPhase.value = 'Folder connected — no record files in it yet. Copy your record PDFs into the folder, or use ADD FILES below.';
     }
   } catch (e) {
     localFolderAutoRunPhase.value = 'Setup completed with errors';
@@ -4562,7 +4592,9 @@ const runAutoWizard = async () => {
     if (uploadedCount > 0) {
       localFolderAutoRunPhase.value = 'Knowledge base indexing in progress...';
     } else {
-      localFolderAutoRunPhase.value = 'Setup complete';
+      // An empty (e.g. freshly created) folder is a starting point, not a
+      // finished setup — declaring "Setup complete" here was misleading.
+      localFolderAutoRunPhase.value = 'Folder connected — no record files in it yet. Copy your record PDFs into the folder, or use ADD FILES below.';
     }
   } catch (e) {
     localFolderAutoRunPhase.value = 'Setup completed with errors';
@@ -5153,8 +5185,8 @@ const offerBackupDownload = (reason: string) => {
   if (localFolderHandle.value) return;
   $q.notify({
     type: 'info',
-    message: reason,
-    timeout: 12000,
+    message: `${reason} (The BACKUP button in the Workbook sidebar always has the latest copy.)`,
+    timeout: 0, // sticky — vanishing after 12s left no visible affordance
     actions: [
       { label: 'Download backup', color: 'white', handler: () => { void downloadBackup(); } },
       { label: 'Later', color: 'white' }
