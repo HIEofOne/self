@@ -5763,9 +5763,15 @@ const detectAppleHealthFromBucket = async (bucketKey: string): Promise<boolean> 
       .toLowerCase()
       .replace(/\s+/g, ' ')
       .trim();
-    return pageText.includes(appleExportFooterNormalized);
+    if (pageText.includes(appleExportFooterNormalized)) return true;
+    // Fallback: Apple Health exports are named "Health Records - <name>
+    // - <date>.pdf" — trust the filename when the footer probe misses
+    // (locale variants, footer beyond page 1, parse hiccups).
+    const fname = decodeURIComponent(bucketKey.split('/').pop() || '').toLowerCase();
+    return /health records/.test(fname);
   } catch (error) {
-    return false;
+    const fname = decodeURIComponent(bucketKey.split('/').pop() || '').toLowerCase();
+    return /health records/.test(fname);
   }
 };
 
@@ -7730,7 +7736,10 @@ const handleChatSelected = async (chat: any) => {
   
   // Load the uploaded files
   if (chat.uploadedFiles) {
-    uploadedFiles.value = chat.uploadedFiles.map((file: any) => ({
+    if (Array.isArray(chat.uploadedFiles) && chat.uploadedFiles.length === 0 && uploadedFiles.value.length > 0) {
+      // An EMPTY restored list must not wipe live chips (the summary flow
+      // re-applies chat state with []); only a real list replaces them.
+    } else uploadedFiles.value = chat.uploadedFiles.map((file: any) => ({
       id: file.id || `file-${Date.now()}-${Math.random().toString(36).substring(7)}`,
       name: file.name,
       size: file.size,

@@ -49,7 +49,8 @@ export function processFileNCitations(
   nameFilter?: (text: string) => string
 ): string {
   if (!content || typeof content !== 'string') return content || '';
-  const pdfs = (availableFiles || []).filter(f => /\.pdf$/i.test(f.fileName || ''));
+  // Any registered PDF with a bucketKey is viewable — indexed or not.
+  const pdfs = (availableFiles || []).filter(f => /\.pdf$/i.test(f.fileName || '') && (f as any).bucketKey);
   if (pdfs.length === 0) return content;
 
   const referenced = new Set<number>();
