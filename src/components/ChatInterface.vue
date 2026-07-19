@@ -3964,6 +3964,17 @@ const processAppleHealthLists = async (bucketKey: string, fileName: string) => {
       body: JSON.stringify({ bucketKey, fileName, force: true })
     });
     $q.notify({ type: 'positive', message: 'Apple Health file detected — building your Lists (medications, encounters, labs)...' });
+    // The categories build above is deterministic parsing; the Current
+    // Medications CANDIDATES need one AI worksheet pass that only the
+    // wizard used to trigger. Fire it now so the Lists tab has meds to
+    // verify right after import (best-effort; the agent may still be
+    // deploying — the Lists tab's Generate button remains the retry).
+    void fetch('/api/medications/worksheet', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ userId: props.user?.userId })
+    }).catch(() => {});
   } catch { /* the wizard/indexing path can still build them later */ }
 };
 
