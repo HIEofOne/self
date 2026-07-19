@@ -1514,6 +1514,13 @@
                   <span :class="i <= summaryGenerationStep ? 'text-dark' : 'text-grey-5'">{{ step.label }}</span>
                   <q-spinner v-if="i === summaryGenerationStep" size="14px" color="primary" class="q-ml-sm" />
                 </div>
+                <!-- The real AI call outlives the scripted steps — keep an
+                     ACTIVE line so a long draft never looks stalled. -->
+                <div v-if="summaryGenerationStep >= summaryGenerationSteps.length" class="row items-center q-mb-xs" style="font-size: 0.85rem;">
+                  <q-icon name="hourglass_top" color="primary" size="18px" class="q-mr-sm" />
+                  <span class="text-dark">AI is drafting your summary — the long step (typically 1–3 minutes, up to 20 for large records)...</span>
+                  <q-spinner size="14px" color="primary" class="q-ml-sm" />
+                </div>
               </div>
               <div v-else class="text-center">
                 <q-spinner size="2em" />
@@ -1830,7 +1837,12 @@
 
         <q-card-section style="max-height: 60vh; overflow-y: auto;">
           <div class="text-body1 q-mb-md">
-            A new patient summary has been generated. Choose which summary to replace:
+            A new patient summary has been generated — review it below.
+            <template v-if="patientSummaries.length < 3">Save it as a new
+            summary, replace an existing one, or close without saving.</template>
+            <template v-else>All three slots are full — choose which to
+            replace, or close without saving.</template>
+            Nothing is saved until you choose.
           </div>
           <div
             class="text-body2 q-pa-md bg-grey-1 rounded-borders"
@@ -1849,6 +1861,13 @@
               @click="handleReplaceSummaryByIndex(index)"
             />
           </template>
+          <q-btn
+            v-if="patientSummaries.length < 3"
+            unelevated
+            label="Save as new summary"
+            color="primary"
+            @click="handleReplaceSummary('newest', newSummaryToReplace); showReplaceSummaryDialog = false"
+          />
           <q-btn
             flat
             label="Close without saving"
@@ -1896,7 +1915,18 @@ import { processFileNCitations } from '../utils/fileNCitations';
 // Local markdown-it with html: true so the <a class="page-link"> anchors
 // emitted by processFileNCitations survive rendering. vue-markdown-render
 // has html: false by default which would strip them.
-const psMarkdown = new MarkdownIt({ html: true, linkify: false, breaks: false });
+const psMarkdown = new MarkdownIt({ html: true, linkify: true, breaks: false });
+// Links in the rendered summary open in a new tab (they were rendered as
+// plain <a> inside the panel and read as unclickable text).
+{
+  const defaultLinkOpen = psMarkdown.renderer.rules.link_open
+    || ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
+  psMarkdown.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+    tokens[idx].attrSet('target', '_blank');
+    tokens[idx].attrSet('rel', 'noopener');
+    return defaultLinkOpen(tokens, idx, options, env, self);
+  };
+}
 
 interface UserFile {
   fileName: string;
@@ -6580,16 +6610,11 @@ watch(summarySubTab, (tab) => {
 const chooseSummaryCandidate = async (text: string) => {
   if (!text || !text.trim()) return;
   const trimmed = text.trim();
-  // Reuse the existing save path: auto-save to an empty slot if available,
-  // otherwise prompt the user to pick which existing summary to replace.
-  const summaryCount = patientSummaries.value.length;
-  if (summaryCount < 3) {
-    await handleReplaceSummary('newest', trimmed);
-  } else {
-    savedCurrentSummaryForUndo.value = patientSummaries.value[patientSummaries.value.length - 1] || null;
-    newSummaryToReplace.value = trimmed;
-    showReplaceSummaryDialog.value = true;
-  }
+  // Same review-before-save gate as generation: nothing writes a summary
+  // slot without the user's explicit choice.
+  savedCurrentSummaryForUndo.value = patientSummaries.value[patientSummaries.value.length - 1] || null;
+  newSummaryToReplace.value = trimmed;
+  showReplaceSummaryDialog.value = true;
   // Clear the chooser — the chosen summary now lives in patientSummary.
   summaryPair.value = null;
   pairError.value = '';
@@ -6643,23 +6668,16 @@ const requestNewSummary = async () => {
 
     const result = await response.json();
 
-    // Use server's summary count (from generate response) so we don't rely on stale client state
-    const summaryCount = result.summaries?.length ?? patientSummaries.value.length;
-    const hasEmptySlots = summaryCount < 3;
-    
-    if (hasEmptySlots) {
-      // Automatically save with 'newest' strategy (just adds to array)
-      await handleReplaceSummary('newest', (result.summary || '').trim());
-    } else {
-      // All slots full - show dialog to choose which summary to replace
-      // Sync local summaries from server so Replace buttons render correctly
-      if (result.summaries) {
-        patientSummaries.value = result.summaries;
-      }
-      savedCurrentSummaryForUndo.value = result.savedCurrentSummary || null;
-      newSummaryToReplace.value = (result.summary || '').trim();
-      showReplaceSummaryDialog.value = true;
+    // NEVER auto-save a generated summary: the user reviews it first,
+    // saves explicitly (into a free slot), or replaces one with consent.
+    // Auto-saving produced confusing pre-index chat/meds mixes that then
+    // masqueraded as the verified summary.
+    if (result.summaries) {
+      patientSummaries.value = result.summaries;
     }
+    savedCurrentSummaryForUndo.value = result.savedCurrentSummary || null;
+    newSummaryToReplace.value = (result.summary || '').trim();
+    showReplaceSummaryDialog.value = true;
   } catch (error) {
     console.error('Error generating patient summary:', error);
     summaryError.value = error instanceof Error ? error.message : 'Failed to generate patient summary';
