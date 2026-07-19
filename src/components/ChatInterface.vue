@@ -3226,6 +3226,25 @@ const sendMessage = async () => {
     {
       const providerKeyForCheck = getProviderKey(selectedProvider.value);
       if (mentionsSummary && !isUntouchedDefault && providerKeyForCheck === 'digitalocean' && props.user?.userId) {
+        // THE MEDS GATE (same rule as the tab): never draft a summary
+        // while meds are unverified but an Apple file exists — the
+        // prompt injects the verified list, so the draft would say
+        // "Not documented" while candidates sit in Lists.
+        try {
+          const stRes = await fetch(`/api/user-status?userId=${encodeURIComponent(props.user.userId)}`, { credentials: 'include' });
+          const st = stRes.ok ? await stRes.json() : null;
+          if (st && !st.currentMedications && st.hasAppleFile) {
+            isStreaming.value = false;
+            $q.notify({
+              type: 'warning',
+              message: 'Verify your Current Medications first — the Patient Summary is built from the verified list. Opening Lists...',
+              timeout: 6000
+            });
+            myStuffInitialTab.value = 'lists';
+            showMyStuffDialog.value = true;
+            return;
+          }
+        } catch { /* gate is best-effort; generation proceeds */ }
         chatSummaryProgress.value = true;
         try {
           const draftRes = await fetch('/api/patient-summary/draft', {

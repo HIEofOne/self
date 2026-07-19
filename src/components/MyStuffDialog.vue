@@ -6655,6 +6655,22 @@ const requestNewSummary = async () => {
       await loadPatientSummary();
       return;
     }
+    // THE MEDS GATE (all summary triggers share this rule): the summary
+    // prompt INJECTS Current Medications — it does not read them from the
+    // records text. Generating before the user verifies meds bakes in
+    // "Not documented in the available records" while candidates sit in
+    // Lists. The wizard always enforced this order; free-order surfaces
+    // must too.
+    const st = await sessionCheck.json();
+    if (!st.currentMedications && st.hasAppleFile) {
+      $q.notify({
+        type: 'warning',
+        message: 'Verify your Current Medications first — the Patient Summary is built from the verified list. Opening Lists...',
+        timeout: 6000
+      });
+      currentTab.value = 'lists';
+      return;
+    }
   } catch {
     await loadPatientSummary();
     return;
