@@ -9718,6 +9718,7 @@ app.get('/api/user-status', async (req, res) => {
       kbName, // KB folder name (e.g., 'userId-agent-YYYYMMDD-HHMMSS')
       hasAppleFile: (Array.isArray(userDoc.files) && userDoc.files.some((f) => f && f.isAppleHealth))
         || (typeof userDoc.hasAppleFile === 'boolean' ? userDoc.hasAppleFile : null),
+      listsBuild: userDoc.listsBuild || null,
       initialFile,
       currentMedications: userDoc.currentMedications || null
     });
