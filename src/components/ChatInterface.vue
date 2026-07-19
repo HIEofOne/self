@@ -3108,6 +3108,7 @@ const sendMessage = async () => {
               $q.notify({ type: 'warning', message: 'Your records aren\'t indexed yet — the Patient Summary is built from your indexed knowledge base. Opening the Setup Wizard...', timeout: 8000 });
               wizardDismissed.value = false;
               showAgentSetupDialog.value = true;
+              void handleIndexUploadsClick(); // start indexing NOW — the wizard shows progress
               return;
             }
             chatSummaryProgress.value = true;
@@ -3318,6 +3319,7 @@ const sendMessage = async () => {
             });
             wizardDismissed.value = false;
             showAgentSetupDialog.value = true;
+            void handleIndexUploadsClick(); // start indexing NOW — the wizard shows progress
             return;
           }
         } catch { /* gate is best-effort; generation proceeds */ }
@@ -4074,9 +4076,18 @@ const processAppleHealthLists = async (bucketKey: string, fileName: string) => {
       body: JSON.stringify({ bucketKey, fileName, force: true })
     });
     $q.notify({ type: 'positive', message: 'Apple Health file detected — building your Lists (medications, encounters, labs)...' });
-    // (The GPT/Kimi worksheet cards are separate, user-driven artifacts;
-    // the candidate list is deterministic and needs no agent — see
-    // Documentation/SummaryPipeline.md §4-5.)
+    // Every DETERMINISTIC artifact builds at import: encounters and
+    // out-of-range labs parse the source files directly (no agent, no
+    // KB) — they were only ever wired to their Generate buttons. The
+    // GPT/Kimi worksheet cards remain user-driven (they DO need the KB).
+    void fetch('/api/encounters/worksheet', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+      body: JSON.stringify({ userId: props.user?.userId })
+    }).catch(() => {});
+    void fetch('/api/labs/oor-worksheet', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+      body: JSON.stringify({ userId: props.user?.userId })
+    }).catch(() => {});
   } catch { /* the wizard/indexing path can still build them later */ }
 };
 
