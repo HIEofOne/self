@@ -338,7 +338,7 @@
                     <q-btn flat color="grey-8" label="Not yet" v-close-popup />
                     <q-btn
                       unelevated color="primary" label="Run the Wizard"
-                      @click="showIndexNudge = false; startRecordsUpgrade()"
+                      @click="handleNudgeRunWizard"
                     />
                   </q-card-actions>
                 </q-card>
@@ -453,35 +453,89 @@
             style="display: none"
             @change="handleSafariFolderSelected"
           />
+          <input
+            ref="wizardFilesInput"
+            type="file"
+            multiple
+            accept=".pdf,.txt,.md,.markdown"
+            style="display: none"
+            @change="handleWizardFilesSelected"
+          />
 
-          <!-- Action button: Choose the patient folder. Hidden while a
-               quick-start run is underway (agents-only: no folder, no
-               choices — the folder is deferred until first needed). -->
+          <!-- Records actions. "Records present" is the trigger; the
+               local folder is the optional AUTO-BACKUP upgrade (Chrome),
+               never the gate. Hidden while a quick-start run is underway. -->
           <div v-if="!setupFolderConnected && !wizardQuickStart" class="q-mb-md">
-            <!-- Chrome: persistent folder access (+ TEST on localhost) -->
-            <template v-if="localFolderSupported">
+            <!-- Uploads present → indexing is the primary action, in ANY
+                 browser. Chat "+" attaches land in the same list. -->
+            <div v-if="stage3HasFiles && wizardFlowPhase === 'done' && indexingStatus?.phase !== 'complete'" class="q-mb-sm">
               <q-btn
                 unelevated
                 color="primary"
-                label="Choose the patient folder"
-                icon="folder_open"
-                :disable="localFolderAutoRunActive"
-                @click="handleFullSetupClick"
+                icon="manage_search"
+                :label="`Index my records (${stage3DisplayFiles.length} file${stage3DisplayFiles.length === 1 ? '' : 's'})`"
+                :loading="stage3IndexingActive || restoreIndexingActive"
+                @click="handleIndexUploadsClick"
               />
               <q-btn
-                v-if="isLocalhost"
                 flat
-                color="deep-orange"
-                label="TEST"
-                icon="science"
+                color="primary"
+                icon="note_add"
+                label="Add files"
                 class="q-ml-sm"
-                :disable="localFolderAutoRunActive || testMode"
-                @click="handleTestButton"
+                :loading="wizardAddFilesBusy"
+                @click="triggerWizardFilesInput"
               />
+              <div class="text-caption text-grey-7 q-mt-xs" style="max-width: 480px">
+                Indexes your files and builds your user-verified Current
+                Medications and Patient Summary. This can take 5 minutes or
+                more — progress shows below.
+              </div>
+            </div>
+            <!-- No uploads yet: get files in (any browser), or connect the
+                 Chrome folder for automatic local copies + backup. -->
+            <template v-if="!stage3HasFiles">
+              <q-btn
+                unelevated
+                color="primary"
+                icon="note_add"
+                label="Add health record files"
+                :loading="wizardAddFilesBusy"
+                @click="triggerWizardFilesInput"
+              />
+            </template>
+            <!-- Chrome: persistent folder access (+ TEST on localhost) -->
+            <template v-if="localFolderSupported">
+              <div class="q-mt-sm">
+                <q-btn
+                  :unelevated="false"
+                  flat
+                  color="primary"
+                  label="Choose the patient folder"
+                  icon="folder_open"
+                  :disable="localFolderAutoRunActive"
+                  @click="handleFullSetupClick"
+                />
+                <q-btn
+                  v-if="isLocalhost"
+                  flat
+                  color="deep-orange"
+                  label="TEST"
+                  icon="science"
+                  class="q-ml-sm"
+                  :disable="localFolderAutoRunActive || testMode"
+                  @click="handleTestButton"
+                />
+                <div class="text-caption text-grey-7 q-mt-xs" style="max-width: 480px">
+                  Optional upgrade (Chrome): connect a MAIA folder and your
+                  records, backup, and setup log are kept on your computer
+                  automatically.
+                </div>
+              </div>
               <!-- Quick-start tier: deploy the private AI without records
                    (Groups adoption floor). No folder pick either — the
                    local folder is deferred until first needed. -->
-              <div v-if="!props.restoreActive" class="q-mt-sm">
+              <div v-if="!props.restoreActive && !stage3HasFiles" class="q-mt-sm">
                 <q-btn
                   flat
                   dense
@@ -498,26 +552,17 @@
                 </div>
               </div>
             </template>
-            <!-- Safari: one-time folder read -->
-            <q-btn
-              v-else-if="props.folderAccessTier === 'safari'"
-              unelevated
-              color="primary"
-              label="Select your MAIA folder"
-              icon="folder_open"
-              :disable="localFolderAutoRunActive"
-              @click="handlePickSafariFolder"
-            />
-            <!-- Other browsers: file upload -->
-            <q-btn
-              v-else
-              unelevated
-              color="primary"
-              label="Upload health files"
-              icon="upload_file"
-              :disable="isUploadingFile"
-              @click="triggerFileInput"
-            />
+            <!-- Safari: one-time folder read stays available -->
+            <div v-else-if="props.folderAccessTier === 'safari'" class="q-mt-sm">
+              <q-btn
+                flat
+                color="primary"
+                label="Select your MAIA folder"
+                icon="folder_open"
+                :disable="localFolderAutoRunActive"
+                @click="handlePickSafariFolder"
+              />
+            </div>
           </div>
 
           <!-- Progress checklist -->
@@ -853,6 +898,7 @@
       :show-close-prompt="showWorkbookClosePrompt"
       :saved-chat-count="savedChatCount"
       @group-joined="handleGroupJoined"
+      @download-backup="downloadBackup"
       @chat-selected="handleChatSelected"
       @indexing-started="handleIndexingStarted"
       @indexing-status-update="handleIndexingStatusUpdate"
@@ -1181,6 +1227,22 @@ const fileInput = ref<HTMLInputElement | null>(null);
  *  records tier (verified meds + patient summary) doesn't exist yet.
  *  Re-offered on every new attach — "Not yet" is per-file, not forever. */
 const showIndexNudge = ref(false);
+/** The modal already said "5 minutes or more" — so Run the Wizard's job
+ *  is FEEDBACK, not another fork: open the wizard and start indexing the
+ *  uploads immediately. A connected Chrome folder keeps its richer
+ *  records-upgrade path (rescans the folder first). */
+const handleNudgeRunWizard = async () => {
+  showIndexNudge.value = false;
+  if (localFolderHandle.value) {
+    await startRecordsUpgrade();
+    return;
+  }
+  wizardQuickStart.value = false;
+  wizardDismissed.value = false;
+  showAgentSetupDialog.value = true;
+  await refreshWizardState();
+  await handleIndexUploadsClick();
+};
 const isUploadingFile = ref(false);
 const showPdfViewer = ref(false);
 const showTextViewer = ref(false);
@@ -1387,6 +1449,9 @@ const handleGroupJoined = () => {
   showAgentSetupDialog.value = false;
   showWorkbookClosePrompt.value = true;
   void refreshWizardState(); // pick up workflowStage 'chat_ready'
+  // Joining minted pairwise group keys that exist ONLY in the userDoc —
+  // without a folder, a downloaded backup is the member's only escrow.
+  offerBackupDownload('You joined a group — your MAIA now holds its keys. Download a backup copy?');
 };
 const myStuffInitialTab = ref<string>('files');
 const myStuffDialogRef = ref<InstanceType<typeof MyStuffDialog> | null>(null);
@@ -1556,6 +1621,88 @@ const wizardRestoreActive = computed(() => !!props.rehydrationActive && (Array.i
 const showRestoreCompleteDialog = ref(false);
 const restoreIndexingActive = ref(false);
 const restoreIndexingQueued = ref(false);
+
+// ── Folder-less records run (records in ANY browser) ────────────────
+// "Records present" is the trigger; the local folder is an optional
+// auto-backup upgrade, not the gate. Indexing runs over the user's
+// uploaded files (chat "+" attaches land in the same place the wizard
+// reads), and the guided draft-summary → medications → summary flow
+// proceeds exactly as the folder path does.
+const wizardFolderlessRun = ref(false);
+const handleIndexUploadsClick = async () => {
+  if (stage3IndexingActive.value || restoreIndexingActive.value) return;
+  await refreshWizardState();
+  const names = Array.from(new Set(wizardStage3Files.value.map(f => f.name)));
+  if (names.length === 0) {
+    $q.notify({ type: 'info', message: 'No files to index yet — use ADD FILES first.' });
+    return;
+  }
+  wizardFolderlessRun.value = true;
+  wizardFlowPhase.value = 'running';
+  logProvisioningEvent({ event: 'folderless-index-started', fileCount: names.length });
+  // Straight to the indexing core (moves root uploads into the KB folder
+  // and starts the DO job). NOT startRestoreIndexing: its idempotency
+  // guard treats "no files in the KB yet" as "nothing to do", which is
+  // exactly backwards for a first-time folder-less run.
+  await handleStage3Index(names, false);
+};
+
+// ADD FILES: plain multi-file input — the records path for every
+// browser (Safari/Firefox included), and a second way in for Chrome.
+const wizardFilesInput = ref<HTMLInputElement | null>(null);
+const wizardAddFilesBusy = ref(false);
+const triggerWizardFilesInput = () => wizardFilesInput.value?.click();
+const handleWizardFilesSelected = async (e: Event) => {
+  const input = e.target as HTMLInputElement;
+  const files = Array.from(input.files || []);
+  input.value = '';
+  if (!files.length) return;
+  wizardAddFilesBusy.value = true;
+  try {
+    for (const f of files) {
+      const fd = new FormData();
+      fd.append('file', f);
+      const res = await fetch('/api/files/upload', { method: 'POST', credentials: 'include', body: fd });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d.message || d.error || `Failed to upload ${f.name}`);
+      }
+      const uploadResult = await res.json();
+      // Register in userDoc.files — the wizard's file list (and the
+      // Saved Files tab) read the DB registry, not the bucket.
+      const ext = (f.name.toLowerCase().split('.').pop() || '');
+      const isPdf = ext === 'pdf';
+      let isAppleHealth = false;
+      if (isPdf) {
+        try { isAppleHealth = await detectAppleHealthFromBucket(uploadResult.fileInfo.bucketKey); } catch { /* best effort */ }
+      }
+      await fetch('/api/user-file-metadata', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          userId: props.user?.userId,
+          fileMetadata: {
+            fileName: uploadResult.fileInfo.fileName,
+            bucketKey: uploadResult.fileInfo.bucketKey,
+            bucketPath: uploadResult.fileInfo.userFolder,
+            fileSize: uploadResult.fileInfo.size,
+            fileType: isPdf ? 'pdf' : 'text',
+            uploadedAt: uploadResult.fileInfo.uploadedAt,
+            isAppleHealth
+          },
+          updateInitialFile: false
+        })
+      });
+    }
+    await refreshWizardState();
+    $q.notify({ type: 'positive', message: `${files.length} file(s) added — ready to index.` });
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Upload failed' });
+  } finally {
+    wizardAddFilesBusy.value = false;
+  }
+};
 const wizardRestoreTargetName = ref<string | null>(null);
 const wizardStage2NoDevice = ref(false);
 
@@ -4425,8 +4572,8 @@ const runAutoWizard = async () => {
 };
 
 /** Generate maia-log.pdf summary and write to local folder. */
-const generateSetupLogPdf = async () => {
-  if (!localFolderHandle.value) return;
+const generateSetupLogPdf = async (opts: { download?: boolean } = {}) => {
+  if (!localFolderHandle.value && !opts.download) return;
   // Refresh providers right before rendering so a freshly deployed agent (e.g. after
   // a long restore) is reflected in the "Chat providers:" header. Without this, the
   // PDF can be generated before the post-restore providers refetch settles.
@@ -4889,6 +5036,11 @@ const generateSetupLogPdf = async () => {
   // only, not reference docs. If you want the explainer, read
   // Documentation/Clinical.md §1 directly.)
 
+  if (opts.download) {
+    doc.save('maia-log.pdf');
+    return;
+  }
+  if (!localFolderHandle.value) return;
   const pdfBlob = doc.output('blob');
   await writeFileToFolder(localFolderHandle.value, 'maia-log.pdf', pdfBlob);
   // Clean up legacy filename
@@ -4956,6 +5108,58 @@ const saveStateToLocalFolder = async () => {
       }, SAVE_STATE_MIN_INTERVAL_MS);
     }
   }
+};
+
+/** Browser-universal backup: download maia-state.json (schemaVersion 2
+ *  — the full userDoc, which includes the GROUP PAIRWISE KEYS). The
+ *  Chrome folder writes this automatically; everyone else gets it on
+ *  demand and at the moments it matters (setup done, group joined).
+ *  Restore accepts the downloaded file exactly like a folder copy. */
+const downloadBackup = async () => {
+  const userId = props.user?.userId;
+  if (!userId) return;
+  try {
+    const res = await fetch('/api/user-doc/full', { credentials: 'include' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (!data?.userDoc) throw new Error('Backup unavailable');
+    const state = {
+      schemaVersion: 2,
+      userDoc: data.userDoc,
+      version: 2,
+      userId,
+      displayName: props.user?.displayName,
+      updatedAt: new Date().toISOString(),
+      source: 'download'
+    };
+    const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'maia-state.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    $q.notify({ type: 'positive', message: 'Backup downloaded — keep maia-state.json somewhere safe. It can restore your MAIA, including your group keys.' });
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Backup download failed' });
+  }
+};
+
+/** Prompt for a backup at moments the userDoc materially changed. The
+ *  Chrome folder auto-writes instead, so the prompt is folder-less only. */
+const offerBackupDownload = (reason: string) => {
+  if (localFolderHandle.value) return;
+  $q.notify({
+    type: 'info',
+    message: reason,
+    timeout: 12000,
+    actions: [
+      { label: 'Download backup', color: 'white', handler: () => { void downloadBackup(); } },
+      { label: 'Later', color: 'white' }
+    ]
+  });
 };
 
 const saveStateToLocalFolderImpl = async () => {
@@ -8027,6 +8231,8 @@ watch(
   (verified, was) => {
     if (verified && !was && (localFolderHandle.value || safariFolderName.value)) {
       void generateSetupLogPdf();
+    } else if (verified && !was) {
+      offerBackupDownload('Setup complete. Download a backup of your MAIA (records index, lists, and keys)?');
     }
   }
 );
@@ -8113,7 +8319,7 @@ watch(
     if (
       phase === 'complete' &&
       agentReady &&
-      (localFolderHandle.value || safariFolderName.value) &&
+      (localFolderHandle.value || safariFolderName.value || wizardFolderlessRun.value) &&
       flowPhase === 'running' &&
       !wizardPreparingRecords.value
     ) {

@@ -434,6 +434,22 @@ export async function getUserBucketSize(s3Client, bucketName, userId) {
 }
 
 // Configure multer for file uploads (in memory)
+/** Multer (busboy) decodes multipart filenames as latin1, so a UTF-8
+ *  name like macOS's "...6.40.59<U+202F>PM.png" arrives mangled.
+ *  Re-decode when the string looks like a latin1 misread (all chars
+ *  <= 0xFF with some >= 0x80) and the round-trip is clean. Pure-ASCII
+ *  and already-proper-UTF-8 names pass through untouched. */
+const decodeUploadName = (name) => {
+  const s = String(name || '');
+  if (!/[\u0080-\u00ff]/.test(s) || !/^[\u0000-\u00ff]*$/.test(s)) return s;
+  try {
+    const decoded = Buffer.from(s, 'latin1').toString('utf8');
+    return decoded.includes('\ufffd') ? s : decoded;
+  } catch {
+    return s;
+  }
+};
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
@@ -695,7 +711,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       
       console.log(`[NEW FLOW 2] File upload - userId: ${userId}, isInitialImport: ${isInitialImport}, userFolder: ${userFolder}`);
       
-      const fileName = req.file.originalname;
+      const fileName = decodeUploadName(req.file.originalname);
       
       // Generate a unique key for the file
       const cleanName = fileName.replace(/[^a-zA-Z0-9.-]/g, '_');
@@ -1404,7 +1420,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       let savedPdfBucketKey = null;
       let savedResultsBucketKey = null;
       try {
-        const cleanFileName = req.file.originalname.replace(/[^a-zA-Z0-9.-]/g, '_');
+        const cleanFileName = decodeUploadName(req.file.originalname).replace(/[^a-zA-Z0-9.-]/g, '_');
         
         // Save PDF file to Lists folder
         savedPdfBucketKey = `${listsFolder}${cleanFileName}`;
@@ -1415,7 +1431,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
           body: req.file.buffer,
           contentType: 'application/pdf',
           metadata: {
-            originalName: req.file.originalname,
+            originalName: decodeUploadName(req.file.originalname),
             processedAt: new Date().toISOString(),
             userId: userId
           }
@@ -1425,7 +1441,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         const resultsFileName = cleanFileName.replace(/\.pdf$/i, '_results.json');
         savedResultsBucketKey = `${listsFolder}${resultsFileName}`;
         const processingResults = {
-          fileName: req.file.originalname,
+          fileName: decodeUploadName(req.file.originalname),
           totalPages: result.totalPages,
           pages: result.pages,
           categories: categories,
@@ -1442,7 +1458,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
           body: JSON.stringify(processingResults, null, 2),
           contentType: 'application/json',
           metadata: {
-            originalName: req.file.originalname,
+            originalName: decodeUploadName(req.file.originalname),
             processedAt: new Date().toISOString(),
             userId: userId
           }

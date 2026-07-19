@@ -1046,3 +1046,33 @@ and any design decisions resolved.
   inherited whatever state the previous user left (usually collapsed
   after any testing). New users now start with the sidebar expanded
   until they collapse it themselves.
+- **2026-07-19** — **Records in any browser; folder = the auto-backup
+  upgrade**. The two competing file paths ("+ then wizard" vs "folder
+  then wizard — IF you have Chrome") converge: "records present" is now
+  the trigger and the wizard is the feedback surface either way. The
+  wizard leads with ADD HEALTH RECORD FILES (plain multi-file input —
+  works in every browser; uploads register in userDoc.files like chat
+  attaches) and, once files exist, INDEX MY RECORDS (n) — which calls
+  the indexing core directly (NOT the restore path, whose idempotency
+  guard reads "no KB files yet" as "nothing to do") and then runs the
+  same guided draft-summary → medications → summary flow, folder or
+  not (the folder gate in the guided-flow watcher now also accepts a
+  folder-less run). The post-attach nudge's [Run the Wizard] opens the
+  wizard AND starts indexing (a folder-connected Chrome keeps its
+  richer records-upgrade path). CHOOSE THE PATIENT FOLDER is reworded
+  to what it really is: "Optional upgrade (Chrome): records, backup,
+  and setup log kept on your computer automatically." For everyone
+  else, sovereignty gets a universal floor: a BACKUP button in the
+  Workbook rail downloads maia-state.json (schemaVersion 2 — the full
+  userDoc including GROUP PAIRWISE KEYS; Restore accepts it exactly
+  like a folder copy), the setup log is downloadable via
+  generateSetupLogPdf({download}), and download prompts fire at the
+  moments the userDoc materially changes (records setup completed
+  without a folder; joined a group = new keys). Multer's latin1
+  filename mangling ("6.40.59a-hat-euro...PM") is re-decoded to UTF-8
+  at every upload entry. Verified live end to end with a fresh user
+  and NO folder: ADD FILES → med-note.txt uploaded+registered → INDEX
+  MY RECORDS → KB created, DO job indexed (1 file, 23 tokens) → draft
+  summary generated → Lists opened with "Lisinopril 10 mg daily"
+  extracted from the file awaiting VERIFY; BACKUP downloaded
+  maia-state.json with the keys notice.
