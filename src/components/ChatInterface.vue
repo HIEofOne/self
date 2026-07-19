@@ -5192,17 +5192,11 @@ const downloadBackup = async () => {
 
 /** Prompt for a backup at moments the userDoc materially changed. The
  *  Chrome folder auto-writes instead, so the prompt is folder-less only. */
-const offerBackupDownload = (reason: string) => {
-  if (localFolderHandle.value) return;
-  $q.notify({
-    type: 'info',
-    message: `${reason} (The BACKUP button in the Workbook sidebar always has the latest copy.)`,
-    timeout: 0, // sticky — vanishing after 12s left no visible affordance
-    actions: [
-      { label: 'Download backup', color: 'white', handler: () => { void downloadBackup(); } },
-      { label: 'Later', color: 'white' }
-    ]
-  });
+const offerBackupDownload = (_reason: string) => {
+  // Intentionally silent. The pop-up toast ("Setup complete. Download a
+  // backup...?") was obnoxious in practice; the BACKUP button in the
+  // Workbook sidebar is the standing affordance. Kept as a hook so the
+  // call sites document WHERE backups matter (setup done, group joined).
 };
 
 const saveStateToLocalFolderImpl = async () => {
