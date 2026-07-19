@@ -1124,3 +1124,16 @@ and any design decisions resolved.
   file list (e.g. after a summary request re-applied chat state) — it
   now MERGES: chips persist unless a stored chat explicitly carries
   its own file list.
+- **2026-07-19** — **Chat summary requests: same checklist, no silent
+  saves; Lists build at Apple import**. (1) A chat-typed "patient
+  summary" now shows the SAME progress checklist as the Patient Summary
+  tab (shared SummaryProgress.vue, modal over the chat) instead of
+  minutes of silent "Thinking...". (2) The chat paths were STILL
+  auto-saving drafts (three sites bypassing the #189 review gate) —
+  removed; the Patient Summary tab's review dialog is now the only save
+  path anywhere. (3) Apple Health imports build the Lists worksheets
+  (Current Medications, Encounters, Out-of-Range Labs) IMMEDIATELY at
+  import — the processing is deterministic PDF parsing that never
+  needed a KB; it was merely wired only to wizard/indexing triggers.
+  Both import doors (chat + and wizard ADD FILES) now fire it, with a
+  toast confirming Apple Health detection.
