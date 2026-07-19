@@ -1088,6 +1088,12 @@
     </q-dialog>
 
     <!-- Shown after a manual "patient summary" chat request completes -->
+    <q-dialog :model-value="chatSummaryProgress" persistent>
+      <q-card style="min-width: 420px; max-width: 560px" class="q-pa-md">
+        <SummaryProgress />
+      </q-card>
+    </q-dialog>
+
     <q-dialog v-model="showNewSummaryDialog" persistent>
       <q-card style="min-width: 420px; max-width: 540px">
         <q-card-section>
@@ -1127,6 +1133,7 @@ import ConversationRail from './ConversationRail.vue';
 import { jsPDF } from 'jspdf';
 import MarkdownIt from 'markdown-it';
 import { processFileNCitations } from '../utils/fileNCitations';
+import SummaryProgress from './SummaryProgress.vue';
 import {
   isFileSystemAccessSupported,
   pickLocalFolder,
@@ -1511,6 +1518,9 @@ const showPostIndexingSummaryPrompt = ref(false);
 // the prefilled-default SEND), offering to jump to the Patient Summary
 // tab where the freshly-generated summary was just saved.
 const showNewSummaryDialog = ref(false);
+/** Chat-typed "patient summary" runs the same long draft the tab runs —
+ *  show the same checklist instead of a silent "Thinking...". */
+const chatSummaryProgress = ref(false);
 /** Once the user dismisses the post-indexing "Update Patient Summary?" prompt, do not show again this session. */
 const postIndexingSummaryDismissedThisSession = ref(false);
 /** Once the user dismisses "Index your records" with NOT YET, do not show it again this session. */
@@ -1722,6 +1732,7 @@ const handleWizardFilesSelected = async (e: Event) => {
           updateInitialFile: false
         })
       });
+      if (isAppleHealth) void processAppleHealthLists(uploadResult.fileInfo.bucketKey, uploadResult.fileInfo.fileName);
     }
     await refreshWizardState();
     $q.notify({ type: 'positive', message: `${files.length} file(s) added — ready to index.` });
@@ -3209,6 +3220,7 @@ const sendMessage = async () => {
     {
       const providerKeyForCheck = getProviderKey(selectedProvider.value);
       if (mentionsSummary && !isUntouchedDefault && providerKeyForCheck === 'digitalocean' && props.user?.userId) {
+        chatSummaryProgress.value = true;
         try {
           const draftRes = await fetch('/api/patient-summary/draft', {
             method: 'POST',
@@ -3229,7 +3241,8 @@ const sendMessage = async () => {
               name: psLabel
             };
             messages.value.push(psMessage);
-            await savePatientSummary(draftJson.summary);
+            // NO auto-save: the summary shows in chat; saving happens in
+            // the Patient Summary tab's review dialog (explicit consent).
             originalMessages.value = JSON.parse(JSON.stringify(messages.value));
             trulyOriginalMessages.value = JSON.parse(JSON.stringify(messages.value));
             isStreaming.value = false;
@@ -3246,6 +3259,8 @@ const sendMessage = async () => {
           }
         } catch (err) {
           console.warn('[chat→patient-summary] draft request failed; falling back to raw chat:', err);
+        } finally {
+          chatSummaryProgress.value = false;
         }
       }
     }
@@ -3382,8 +3397,7 @@ const sendMessage = async () => {
 
               // Save patient summary if this was a summary request
               if (isPatientSummaryRequest && props.user?.userId && assistantMessage.content) {
-                await savePatientSummary(assistantMessage.content);
-                // Manual (typed) request — offer to jump to the tab.
+                // NO auto-save (review gate owns saving). Offer the tab.
                 if (mentionsSummary && !isUntouchedDefault) {
                   showNewSummaryDialog.value = true;
                 }
@@ -3413,7 +3427,7 @@ const sendMessage = async () => {
 
     // Save patient summary if this was a summary request
     if (isPatientSummaryRequest && props.user?.userId && assistantMessage.content) {
-      await savePatientSummary(assistantMessage.content);
+      // NO auto-save (review gate owns saving). Offer the tab.
       if (mentionsSummary && !isUntouchedDefault) {
         showNewSummaryDialog.value = true;
       }
@@ -3937,29 +3951,22 @@ const shouldHideSetupWizard = computed(() =>
   (!wizardRestoreActive.value && wizardPatientSummary.value) || !!props.user?.isAdmin || !!props.suppressWizard
 );
 
-const savePatientSummary = async (summary: string) => {
-  if (!props.user?.userId || !summary) return;
-  
+/** Apple Health import → build the Lists worksheets (Current
+ *  Medications, Encounters, Out-of-Range Labs) IMMEDIATELY. This is
+ *  deterministic PDF parsing (Lists/*.md sidecars) — it never needed a
+ *  KB; it was merely only WIRED to the wizard/indexing triggers. */
+const processAppleHealthLists = async (bucketKey: string, fileName: string) => {
   try {
-    const response = await fetch('/api/patient-summary', {
+    await fetch('/api/files/lists/process-initial-file', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
+      headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify({
-        userId: props.user.userId,
-        summary: summary
-      })
+      body: JSON.stringify({ bucketKey, fileName, force: true })
     });
-    
-    if (!response.ok) {
-      console.error('Failed to save patient summary');
-    }
-  } catch (error) {
-    console.error('Error saving patient summary:', error);
-  }
+    $q.notify({ type: 'positive', message: 'Apple Health file detected — building your Lists (medications, encounters, labs)...' });
+  } catch { /* the wizard/indexing path can still build them later */ }
 };
+
 
 const triggerFileInput = () => {
   if (isRequestSent.value) return;
@@ -5900,6 +5907,7 @@ const uploadPDFFile = async (file: File) => {
           updateInitialFile: false
         })
       });
+      if (isAppleHealth) void processAppleHealthLists(uploadResult.fileInfo.bucketKey, uploadResult.fileInfo.fileName);
       await refreshWizardState();
 
       // Copy file to local MAIA folder so it's available for offline restore
