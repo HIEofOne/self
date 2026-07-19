@@ -6671,6 +6671,15 @@ const requestNewSummary = async () => {
       currentTab.value = 'lists';
       return;
     }
+    // THE INDEX GATE (same rule as chat): no indexed KB → no AI summary.
+    if (!st.hasFilesInKB) {
+      $q.notify({
+        type: 'warning',
+        message: 'Your records aren\'t indexed yet — the Patient Summary is built from your indexed knowledge base. Run the Setup Wizard to index first.',
+        timeout: 8000
+      });
+      return;
+    }
   } catch {
     await loadPatientSummary();
     return;
