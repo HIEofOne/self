@@ -3265,6 +3265,12 @@ const sendMessage = async () => {
               authorLabel: psLabel,
               name: psLabel
             };
+            // Same preload the stored-summary path does: without the file
+            // list, processFileNCitations has nothing to resolve against
+            // and every citation renders as dead text (map §3).
+            if (availableUserFiles.value.length === 0) {
+              await loadUserFilesForChooser(false);
+            }
             messages.value.push(psMessage);
             chatDraftSummary.value = draftJson.summary;
             // NO auto-save: the summary shows in chat; saving happens in

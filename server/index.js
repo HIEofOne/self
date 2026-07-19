@@ -11491,6 +11491,7 @@ async function buildPatientSummaryPromptForUser(userId, userDoc, profileKey = 'd
   // spec falls through to KB-RAG → "Not documented" as a last resort.
   let medicalHistory = '';
   let socialHistory = '';
+  let globalCitationContract = '';
   let radiology = '';
   if (ahBuf) {
     try {
@@ -11553,6 +11554,12 @@ async function buildPatientSummaryPromptForUser(userId, userDoc, profileKey = 'd
       .join('; ');
     const citationRule =
       `\n\n**Citation format for the Radiology section:** When citing any imaging study, use \`[File N p.<page>]\` only (e.g. \`[File 3 p.118]\`). NEVER spell out the raw filename — many filenames are long Epic export strings that render unreadably. (Legend: ${fileLegend})`;
+    // Step 2 of the stabilization plan (Documentation/SummaryPipeline.md):
+    // the same contract, TOP-LEVEL — every section, not just Radiology.
+    // Raw-filename citations are the #1 cause of dead links: only
+    // [File N p.X] is guaranteed linkable by both renderers.
+    globalCitationContract =
+      `\n\n**Citation format (ALL sections):** cite sources ONLY as \`[File N p.<page>]\` (e.g. \`[File 2 p.81]\`). NEVER write a raw filename inside a citation. (Legend: ${fileLegend})`;
     if (radiology) {
       radiology += citationRule;
     } else {
@@ -11628,10 +11635,10 @@ async function buildPatientSummaryPromptForUser(userId, userDoc, profileKey = 'd
   // template and still get the injected data.
   const override = userDoc?.agentProfiles?.[profileKey]?.patientSummaryPrompt;
   if (override && override.trim()) {
-    return substitutePromptPlaceholders(override, vars);
+    return substitutePromptPlaceholders(override, vars) + globalCitationContract;
   }
-  return getClinicalPrompt('patient-summary.draft', vars)
-    || 'Please generate a patient summary.';
+  return (getClinicalPrompt('patient-summary.draft', vars)
+    || 'Please generate a patient summary.') + globalCitationContract;
 }
 
 /**
@@ -12610,10 +12617,19 @@ async function resolvePatientMedicationSource(userId, userDoc) {
   if (!userDoc) userDoc = await cloudant.getDocument('maia_users', userId);
   if (!userDoc) return { mode: 'none', meds: [], legend: [] };
 
-  const kbName = getKBNameFromUserDoc(userDoc, userId);
-  const kbPrefix = kbName ? `${userId}/${kbName}/` : null;
+  // Step 3 of the stabilization plan (Documentation/SummaryPipeline.md):
+  // resolve from ANY registered file — indexing changes a file's storage
+  // location, not its truth. The old KB-prefix filter made a freshly
+  // imported (un-indexed) Apple Health file invisible here, so the
+  // candidates card showed "enter manually" while Saved Files and the
+  // categories panel plainly displayed the same file. Filter mirrors
+  // /api/user-files (References excluded) so File-N numbering matches
+  // the prompt legend and the client.
+  const referencesPrefixMeds = `${userId}/References/`;
   const kbFiles = (userDoc.files || []).filter(f =>
-    f?.fileName && (!kbPrefix || (f.bucketKey || '').startsWith(kbPrefix))
+    f?.fileName &&
+    !(f.bucketKey || '').startsWith(referencesPrefixMeds) &&
+    f.isReference !== true
   );
   const legend = kbFiles.map((f, i) => ({ tag: `File ${i + 1}`, fileName: f.fileName, bucketKey: f.bucketKey || null, isAppleHealth: !!f.isAppleHealth }));
 
