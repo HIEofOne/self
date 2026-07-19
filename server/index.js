@@ -12859,11 +12859,13 @@ app.post('/api/encounters/worksheet', async (req, res) => {
     if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
 
     // Source files: PDFs in the patient's KB folder.
-    const kbName = getKBNameFromUserDoc(userDoc, userId);
-    const kbPrefix = kbName ? `${userId}/${kbName}/` : null;
+    // Location-free (stabilization step 3 rule): indexing changes where a
+    // file is stored, not its truth. Mirror /api/user-files.
+    const referencesPrefixEnc = `${userId}/References/`;
     const pdfFiles = (userDoc.files || []).filter(f =>
       f?.fileName &&
-      (!kbPrefix || (f.bucketKey || '').startsWith(kbPrefix)) &&
+      !(f.bucketKey || '').startsWith(referencesPrefixEnc) &&
+      f.isReference !== true &&
       (/\.pdf$/i.test(f.fileName) || /pdf/i.test(f.fileType || ''))
     );
     if (pdfFiles.length === 0) {

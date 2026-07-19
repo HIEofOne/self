@@ -3086,6 +3086,67 @@ const sendMessage = async () => {
             return;
           }
         }
+        // NO stored summary → the governed pipeline (gates + checklist +
+        // draft endpoint). The old fallthrough to raw RAG chat was the
+        // ungoverned third generator (SummaryPipeline.md §1): no
+        // contract, no injections, no gate — the "mess of broken links
+        // and partial markdown" every brand-new user hit on their very
+        // first SEND.
+        if (getProviderKey(selectedProvider.value) === 'digitalocean') {
+          try {
+            const stRes2 = await fetch(`/api/user-status?userId=${encodeURIComponent(props.user.userId)}`, { credentials: 'include' });
+            const st2 = stRes2.ok ? await stRes2.json() : null;
+            if (st2 && !st2.currentMedications && st2.hasAppleFile) {
+              isStreaming.value = false;
+              $q.notify({ type: 'warning', message: 'Verify your Current Medications first — the Patient Summary is built from the verified list. Opening Lists...', timeout: 6000 });
+              myStuffInitialTab.value = 'lists';
+              showMyStuffDialog.value = true;
+              return;
+            }
+            if (st2 && !st2.hasFilesInKB) {
+              isStreaming.value = false;
+              $q.notify({ type: 'warning', message: 'Your records aren\'t indexed yet — the Patient Summary is built from your indexed knowledge base. Opening the Setup Wizard...', timeout: 8000 });
+              wizardDismissed.value = false;
+              showAgentSetupDialog.value = true;
+              return;
+            }
+            chatSummaryProgress.value = true;
+            try {
+              const draftRes2 = await fetch('/api/patient-summary/draft', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify({ userId: props.user.userId })
+              });
+              const draftJson2 = await draftRes2.json().catch(() => ({}));
+              if (draftRes2.ok && draftJson2.success && draftJson2.summary) {
+                const psLabel2 = assistantLabelForKey(getProviderKey(selectedProvider.value));
+                if (availableUserFiles.value.length === 0) {
+                  await loadUserFilesForChooser(false);
+                }
+                messages.value.push({
+                  role: 'assistant',
+                  content: draftJson2.summary,
+                  authorType: 'assistant',
+                  providerKey: getProviderKey(selectedProvider.value),
+                  authorId: getProviderKey(selectedProvider.value),
+                  authorLabel: psLabel2,
+                  name: psLabel2
+                });
+                chatDraftSummary.value = draftJson2.summary;
+                originalMessages.value = JSON.parse(JSON.stringify(messages.value));
+                trulyOriginalMessages.value = JSON.parse(JSON.stringify(messages.value));
+                isStreaming.value = false;
+                showNewSummaryDialog.value = true;
+                return;
+              }
+              // Draft unavailable (agent deploying etc.) → fall through to
+              // regular chat so the user still gets a response.
+            } finally {
+              chatSummaryProgress.value = false;
+            }
+          } catch { /* gates are best-effort; fall through */ }
+        }
       } catch (err) {
         // If fetching summary fails, continue with normal chat flow
         console.warn('Could not fetch existing summary, generating new one:', err);
@@ -3242,6 +3303,21 @@ const sendMessage = async () => {
             });
             myStuffInitialTab.value = 'lists';
             showMyStuffDialog.value = true;
+            return;
+          }
+          // THE INDEX GATE: pre-indexing, the KB-backed sections have
+          // nothing real to stand on and model variability fills the
+          // vacuum (broken links, free-form markdown). The sequence is
+          // import → verify → index → summarize.
+          if (st && !st.hasFilesInKB) {
+            isStreaming.value = false;
+            $q.notify({
+              type: 'warning',
+              message: 'Your records aren\'t indexed yet — the Patient Summary is built from your indexed knowledge base. Opening the Setup Wizard...',
+              timeout: 8000
+            });
+            wizardDismissed.value = false;
+            showAgentSetupDialog.value = true;
             return;
           }
         } catch { /* gate is best-effort; generation proceeds */ }
