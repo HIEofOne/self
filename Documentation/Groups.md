@@ -1113,3 +1113,14 @@ and any design decisions resolved.
   downloads can never replace a file (browser design), and folder
   creation requires Chrome's File System Access API — on other
   browsers BACKUP remains a download.
+- **2026-07-19** — **One file registry, everything derives**. Chat-
+  imported (+) files were inconsistent across tabs: (1) user-status's
+  hasAppleFile was a SEPARATE stored flag set only by the wizard path,
+  so the Lists tab was blind to a chat-imported Apple Health file that
+  Saved Files displayed — it now DERIVES from userDoc.files (any entry
+  with isAppleHealth), with the stored flag as fallback; the two tabs
+  can no longer disagree. (2) The chat-state restore path wiped the
+  live session's file chips whenever the restored payload carried no
+  file list (e.g. after a summary request re-applied chat state) — it
+  now MERGES: chips persist unless a stored chat explicitly carries
+  its own file list.

@@ -7747,9 +7747,11 @@ const handleChatSelected = async (chat: any) => {
       bucketPath: file.bucketPath,
       uploadedAt: file.uploadedAt ? new Date(file.uploadedAt) : new Date()
     }));
-  } else {
-    uploadedFiles.value = [];
   }
+  // else: the restored payload carries no file list — KEEP the live
+  // session's chips. Wiping them here made the imported-file badge
+  // vanish whenever anything (e.g. a summary request) re-applied chat
+  // state mid-session. Chips clear only on explicit new-conversation.
 
   nextTick(() => {
     const snapshot = currentChatSnapshot.value;

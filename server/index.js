@@ -9716,7 +9716,8 @@ app.get('/api/user-status', async (req, res) => {
       hasFilesInKB,
       kbStatus: resolvedKbStatus, // 'none' | 'not_attached' | 'attached'
       kbName, // KB folder name (e.g., 'userId-agent-YYYYMMDD-HHMMSS')
-      hasAppleFile: typeof userDoc.hasAppleFile === 'boolean' ? userDoc.hasAppleFile : null,
+      hasAppleFile: (Array.isArray(userDoc.files) && userDoc.files.some((f) => f && f.isAppleHealth))
+        || (typeof userDoc.hasAppleFile === 'boolean' ? userDoc.hasAppleFile : null),
       initialFile,
       currentMedications: userDoc.currentMedications || null
     });
