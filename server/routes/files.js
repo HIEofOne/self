@@ -1884,6 +1884,26 @@ export default function setupFileRoutes(app, cloudant, doClient) {
    * POST /api/files/lists/process-initial-file
    * Accepts optional bucketKey and fileName in request body to process a specific file
    */
+  /** Persisted status for the Lists build job — the async sidecar/
+   *  categories pass was fire-and-forget, which made the Lists tab
+   *  nondeterministic ("empty, then filled in after a few seconds",
+   *  or empty forever if the build died silently). Best-effort with
+   *  409 retry; never fails the build over bookkeeping. */
+  const setListsBuild = async (userId, patch) => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const doc = await cloudant.getDocument('maia_users', userId);
+        if (!doc) return;
+        doc.listsBuild = { ...(doc.listsBuild || {}), ...patch };
+        doc.updatedAt = new Date().toISOString();
+        await cloudant.saveDocument('maia_users', doc);
+        return;
+      } catch (e) {
+        if (e?.statusCode !== 409) return;
+      }
+    }
+  };
+
   app.post('/api/files/lists/process-initial-file', async (req, res) => {
     try {
       // Require authentication
@@ -1929,6 +1949,13 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         userId,
         initialFileBucketKey,
         initialFileName
+      });
+      await setListsBuild(userId, {
+        status: 'running',
+        fileName: initialFileName,
+        startedAt: new Date().toISOString(),
+        finishedAt: null,
+        error: null
       });
 
       if (!userDoc) {
@@ -2271,6 +2298,13 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         console.log(`[VIZ] Categories built for Apple Health file: ${initialFileName} (detected via ${appleHealthSource ? 'flag' : 'content footer'}, force=${forceRebuild === true}, sourceChanged=${sourceChanged})`);
       }
 
+      await setListsBuild(userId, {
+        status: 'done',
+        finishedAt: new Date().toISOString(),
+        categories: Array.isArray(categoryFiles) ? categoryFiles.length : 0,
+        error: null
+      });
+
       res.json({
         success: true,
         fileName: initialFileName,
@@ -2282,6 +2316,16 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       });
     } catch (error) {
       console.error('❌ Error processing initial file for Lists:', error);
+      try {
+        const uid = req.session?.userId || req.session?.deepLinkUserId;
+        if (uid) {
+          await setListsBuild(uid, {
+            status: 'error',
+            finishedAt: new Date().toISOString(),
+            error: String(error?.message || error)
+          });
+        }
+      } catch { /* bookkeeping only */ }
       res.status(500).json({ error: `Failed to process initial file: ${error.message}` });
     }
   });

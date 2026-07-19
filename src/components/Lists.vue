@@ -15,6 +15,22 @@
       </div>
     </div>
 
+    <!-- Lists build job status: the async categories/sidecar pass is a
+         VISIBLE, retryable job now — no more silent nondeterminism. -->
+    <q-banner v-if="listsBuild && listsBuild.status === 'running'" dense rounded class="bg-blue-1 text-blue-10 q-mb-md">
+      <template #avatar><q-spinner color="blue-8" size="20px" /></template>
+      Building your lists from {{ listsBuild.fileName || 'your records' }}…
+      medications, encounters, and labs appear here when it finishes
+      (typically under a minute).
+    </q-banner>
+    <q-banner v-else-if="listsBuild && listsBuild.status === 'error'" dense rounded class="bg-orange-1 text-orange-10 q-mb-md">
+      <template #avatar><q-icon name="warning" color="orange-8" /></template>
+      The lists build failed{{ listsBuild.error ? ` — ${listsBuild.error}` : '' }}.
+      <template #action>
+        <q-btn flat dense color="orange-10" label="Retry" :loading="retryingBuild" @click="retryListsBuild" />
+      </template>
+    </q-banner>
+
     <!-- Current Medications - Always visible -->
     <q-card class="q-mb-md">
       <q-card-section>
@@ -1052,6 +1068,57 @@ const formatWorksheetTime = (iso?: string): string => {
 const showPdfViewer = ref(false);
 const viewingPdfFile = ref<{ bucketKey?: string; name?: string; fileUrl?: string; originalFile?: File } | undefined>(undefined);
 const pdfInitialPage = ref<number | undefined>(undefined);
+// ── Lists build job (persisted server-side by process-initial-file) ──
+interface ListsBuild { status: string; fileName?: string; startedAt?: string; finishedAt?: string; error?: string | null }
+const listsBuild = ref<ListsBuild | null>(null);
+const retryingBuild = ref(false);
+let listsBuildTimer: ReturnType<typeof setInterval> | null = null;
+const refreshListsBuild = async () => {
+  if (!props.userId) return;
+  try {
+    const res = await fetch(`/api/user-status?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
+    if (!res.ok) return;
+    const st = await res.json();
+    const prev = listsBuild.value?.status;
+    listsBuild.value = st.listsBuild || null;
+    const now = listsBuild.value?.status;
+    // Poll while running; on the running→done edge, reload the tab's data
+    // so candidates appear without a manual refresh.
+    if (now === 'running' && !listsBuildTimer) {
+      listsBuildTimer = setInterval(refreshListsBuild, 3000);
+    } else if (now !== 'running' && listsBuildTimer) {
+      clearInterval(listsBuildTimer);
+      listsBuildTimer = null;
+      if (prev === 'running' && now === 'done') {
+        void loadCurrentMedications(true);
+      }
+    }
+  } catch { /* next poll */ }
+};
+const retryListsBuild = async () => {
+  retryingBuild.value = true;
+  try {
+    // Find the Apple Health file (root or KB) and re-run the build on it.
+    const res = await fetch(`/api/user-files?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
+    const data = await res.json();
+    const ah = (data.files || []).find((f: any) => f.isAppleHealth && f.bucketKey);
+    if (!ah) throw new Error('No Apple Health file found to build from');
+    const r = await fetch('/api/files/lists/process-initial-file', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ bucketKey: ah.bucketKey, fileName: ah.fileName, force: true })
+    });
+    if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || `HTTP ${r.status}`); }
+    await refreshListsBuild();
+    void loadCurrentMedications(true);
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Retry failed' });
+  } finally {
+    retryingBuild.value = false;
+  }
+};
+
 const currentMedications = ref<string | null>(null);
 const isLoadingCurrentMedications = ref(false);
 const isEditingCurrentMedications = ref(false);
@@ -2669,6 +2736,7 @@ const reloadCategories = async () => {
 };
 
 onMounted(async () => {
+  void refreshListsBuild();
   loadWizardAutoFlow();
 
   // Resolve Apple Health presence BEFORE attempting medications extraction.
@@ -2753,6 +2821,7 @@ onActivated(() => {
 });
 
 onDeactivated(() => {
+  if (listsBuildTimer) { clearInterval(listsBuildTimer); listsBuildTimer = null; }
   if (needsVerifyAction.value && !isEditingCurrentMedications.value && !medsDismissedThisSession.value) {
     showVerifyPrompt.value = true;
     verifyPromptPending.value = true;
