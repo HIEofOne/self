@@ -295,7 +295,8 @@
                         <div class="text-subtitle2 q-mb-xs"><q-icon name="menu_book" size="18px" class="q-mr-xs" />Learn more</div>
                         <div class="text-caption text-grey-8 q-mb-sm">
                           Why patient-controlled matters, and the design behind MAIA.
-                          Or <a href="/welcome-video.mp4" target="_blank" class="welcome-footer-link">watch the demo video</a>.
+                          See the <a href="/MAIA-overview.pdf" target="_blank" class="welcome-footer-link">slide show</a>
+                          or the <a href="/welcome-video.mp4" target="_blank" class="welcome-footer-link">Get records video</a>.
                         </div>
                         <q-btn outline color="primary" size="md" class="full-width" label="Read on Substack" icon-right="open_in_new" type="a" href="https://trustee.substack.com" target="_blank" />
                       </div>
