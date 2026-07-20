@@ -6672,12 +6672,16 @@ const requestNewSummary = async () => {
       return;
     }
     // THE INDEX GATE (same rule as chat): no indexed KB → no AI summary.
+    // And same as the chat gates since #200: the gate ACTS — a
+    // warning-only gate looped the user (verify meds → request → told
+    // to index → request → told again) with no way forward.
     if (!st.hasFilesInKB) {
       $q.notify({
         type: 'warning',
-        message: 'Your records aren\'t indexed yet — the Patient Summary is built from your indexed knowledge base. Run the Setup Wizard to index first.',
+        message: 'Your records aren\'t indexed yet — starting the Setup Wizard indexing now. The summary is one click away once it finishes.',
         timeout: 8000
       });
+      emit('index-now-triggered');
       return;
     }
   } catch {

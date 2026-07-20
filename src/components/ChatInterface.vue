@@ -928,6 +928,7 @@
       :show-close-prompt="showWorkbookClosePrompt"
       :saved-chat-count="savedChatCount"
       @group-joined="handleGroupJoined"
+      @index-now-triggered="handleWorkbookIndexNow"
       @download-backup="downloadBackup"
       @chat-selected="handleChatSelected"
       @indexing-started="handleIndexingStarted"
@@ -1479,6 +1480,16 @@ const showWorkbookClosePrompt = ref(false);
  *  later, optional upgrade), and the Workbook shows the same blue
  *  "Close the Workbook to chat" prompt the indexing wizard ends with. */
 const wizardSuspendedByJoin = ref(false);
+/** The Workbook's index gate fired (e.g. Patient Summary tab with no
+ *  indexed KB): close the Workbook so the wizard is visible, and start
+ *  indexing immediately — the gate acts, never loops. */
+const handleWorkbookIndexNow = () => {
+  showMyStuffDialog.value = false;
+  wizardDismissed.value = false;
+  showAgentSetupDialog.value = true;
+  void handleIndexUploadsClick();
+};
+
 const handleGroupJoined = () => {
   wizardSuspendedByJoin.value = true;
   wizardResumeAttempted.value = true;
