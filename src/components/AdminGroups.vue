@@ -158,7 +158,19 @@
             </q-tooltip>
           </q-toggle>
           <div v-if="editingGroupId">
-            <div class="text-subtitle2 q-mt-sm">Suggested member policies</div>
+            <div class="row items-center q-mt-sm">
+              <div class="text-subtitle2">Suggested member policies</div>
+              <q-space />
+              <q-btn flat dense size="sm" color="primary" icon="download" label="Export"
+                     :disable="!form.suggestedPolicies.length && !form.postingPolicy"
+                     @click="exportPolicies">
+                <q-tooltip>Save this group's posting policy + suggested policy cards to a local JSON file</q-tooltip>
+              </q-btn>
+              <q-btn flat dense size="sm" color="primary" icon="upload" label="Import" @click="policyFileInput?.click()">
+                <q-tooltip>Load a policy file exported from this or another group — replaces the lists below until you Save</q-tooltip>
+              </q-btn>
+              <input ref="policyFileInput" type="file" accept=".json,application/json" style="display: none" @change="importPolicies" />
+            </div>
             <div class="text-caption text-grey-7 q-mb-xs">
               Shown on the join page; each joiner imports them as their own
               editable Sharing Policies cards.
@@ -343,6 +355,63 @@ const form = ref<{ name: string; description: string; tags: string; postingPolic
 // Mini-editor for one suggested policy (party is fixed to "anyone in
 // this group" — the natural subject of a group's suggestions).
 const sugForm = ref({ outcome: 'allow', scope: 'patient-summary', purpose: 'any', signature: 'group-member', payment: 'none', filtered: true });
+
+// ── Policy pack export/import (local JSON file) ─────────────────────
+// The portable unit is { postingPolicy, suggestedPolicies } — a group's
+// whole policy stance. Import fills the FORM only; nothing reaches the
+// registry until the admin clicks Save (the server re-validates every
+// card with normalizeCard on PUT).
+const policyFileInput = ref<HTMLInputElement | null>(null);
+const exportPolicies = () => {
+  const pack = {
+    maiaPolicyPack: 1,
+    groupName: form.value.name || null,
+    exportedAt: new Date().toISOString(),
+    postingPolicy: form.value.postingPolicy || '',
+    suggestedPolicies: form.value.suggestedPolicies || []
+  };
+  const blob = new Blob([JSON.stringify(pack, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  const safeName = (form.value.name || 'group').replace(/[^a-zA-Z0-9-]+/g, '-').toLowerCase();
+  a.download = `${safeName}-policies.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  $q.notify({ type: 'positive', message: `Policies exported to ${a.download}.` });
+};
+const importPolicies = async (e: Event) => {
+  const input = e.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = '';
+  if (!file) return;
+  try {
+    const pack = JSON.parse(await file.text());
+    const cards = Array.isArray(pack.suggestedPolicies) ? pack.suggestedPolicies : null;
+    if (!cards && typeof pack.postingPolicy !== 'string') {
+      throw new Error('Not a MAIA policy file (expected postingPolicy and/or suggestedPolicies)');
+    }
+    const looksLikeCard = (c: any) => c && (c.outcome === 'allow' || c.outcome === 'deny') && c.elements;
+    const validCards = (cards || []).filter(looksLikeCard).slice(0, 20);
+    if (cards && validCards.length !== cards.length) {
+      $q.notify({ type: 'warning', message: `${cards.length - validCards.length} entr(y/ies) skipped — not recognizable policy cards.` });
+    }
+    if (typeof pack.postingPolicy === 'string' && pack.postingPolicy.trim()) {
+      form.value.postingPolicy = pack.postingPolicy;
+    }
+    if (validCards.length) {
+      form.value.suggestedPolicies = validCards;
+    }
+    $q.notify({
+      type: 'positive',
+      message: `Imported ${validCards.length} suggested polic${validCards.length === 1 ? 'y' : 'ies'}${typeof pack.postingPolicy === 'string' && pack.postingPolicy.trim() ? ' + posting policy' : ''} — review below, then Save.`
+    });
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Could not read the policy file' });
+  }
+};
 const suggestedSentence = (c: any) => sentenceFor(c as PolicyCard);
 const addSuggestedPolicy = () => {
   form.value.suggestedPolicies.push({
