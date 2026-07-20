@@ -1913,6 +1913,13 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       }
 
       const { bucketKey: providedBucketKey, fileName: providedFileName, force: forceRebuild } = req.body || {};
+      await setListsBuild(userId, {
+        status: 'running',
+        fileName: providedFileName || null,
+        startedAt: new Date().toISOString(),
+        finishedAt: null,
+        error: null
+      });
       console.log('[SAVE-RESTORE] process-initial-file request', {
         userId,
         providedBucketKey: providedBucketKey || null,
@@ -1939,6 +1946,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
             userId,
             hasInitialFile: !!userDoc.initialFile
           });
+          await setListsBuild(userId, { status: 'error', finishedAt: new Date().toISOString(), error: 'No initial file found' });
           return res.status(400).json({ error: 'No initial file found for this user' });
         }
 
@@ -1980,9 +1988,10 @@ export default function setupFileRoutes(app, cloudant, doClient) {
           bucketKey: initialFileBucketKey,
           error: err?.message || String(err)
         });
-        if (providedBucketKey) {
-          return res.status(404).json({ error: `Initial file not found: ${err.message}` });
-        }
+        // A provided bucketKey can be STALE: files legitimately move
+        // (root → archived, root → KB folder) after registration. Fall
+        // through to the same fallback search the userDoc path uses —
+        // it already knows about the KB and archived locations.
 
         const cleanName = (initialFileName || 'Initial File').replace(/[^a-zA-Z0-9.-]/g, '_');
         const kbName = userDoc.kbName || (Array.isArray(userDoc.connectedKBs) ? userDoc.connectedKBs[0] : null) || userDoc.connectedKB;
