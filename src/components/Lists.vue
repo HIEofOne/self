@@ -1095,6 +1095,41 @@ const refreshListsBuild = async () => {
     }
   } catch { /* next poll */ }
 };
+let selfHealAttempted = false;
+const ensureListsArtifacts = async () => {
+  if (selfHealAttempted || !props.userId) return;
+  selfHealAttempted = true;
+  try {
+    const res = await fetch(`/api/user-files?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
+    const data = await res.json();
+    const ah = (data.files || []).find((f: any) => f.isAppleHealth && f.bucketKey);
+    if (!ah) return;
+    if (listsBuild.value?.status === 'running') return;
+    if (listsBuild.value?.status !== 'done') {
+      // Categories + medication sidecar (the meds candidates' source).
+      const r = await fetch('/api/files/lists/process-initial-file', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ bucketKey: ah.bucketKey, fileName: ah.fileName, force: true })
+      });
+      if (r.ok) {
+        await refreshListsBuild();
+        void loadCurrentMedications(true);
+      }
+      // The other deterministic worksheets (no agent, no KB needed).
+      void fetch('/api/encounters/worksheet', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+        body: JSON.stringify({ userId: props.userId })
+      }).catch(() => {});
+      void fetch('/api/labs/oor-worksheet', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+        body: JSON.stringify({ userId: props.userId })
+      }).catch(() => {});
+    }
+  } catch { /* the banner + RETRY remain the manual path */ }
+};
+
 const retryListsBuild = async () => {
   retryingBuild.value = true;
   try {
@@ -2736,7 +2771,8 @@ const reloadCategories = async () => {
 };
 
 onMounted(async () => {
-  void refreshListsBuild();
+  await refreshListsBuild();
+  void ensureListsArtifacts();
   loadWizardAutoFlow();
 
   // Resolve Apple Health presence BEFORE attempting medications extraction.
