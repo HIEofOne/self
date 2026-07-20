@@ -2789,6 +2789,14 @@ const performSignOut = async () => {
   });
 
   if (response.ok) {
+    // Sign-out ends the arrival flow: clear any captured invite/join
+    // link so the logged-out view is the WELCOME page, not a stale JOIN
+    // landing resurrected from localStorage. (A real invitee still
+    // holds the link — clicking it re-captures.)
+    try {
+      localStorage.removeItem('maiaGroupInvite');
+      localStorage.removeItem('maiaGroupJoin');
+    } catch { /* storage unavailable */ }
     resetAuthState();
     if (deepLinkShareId.value) {
       await checkDeepLinkSession(deepLinkShareId.value);
