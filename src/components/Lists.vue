@@ -1097,39 +1097,32 @@ const refreshListsBuild = async () => {
   } catch { /* next poll */ }
 };
 let selfHealAttempted = false;
+// The deterministic worksheets that ride along with a fresh build
+// (no agent, no KB needed).
+const fireCompanionWorksheets = () => {
+  void fetch('/api/encounters/worksheet', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+    body: JSON.stringify({ userId: props.userId })
+  }).catch(() => {});
+  void fetch('/api/labs/oor-worksheet', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+    body: JSON.stringify({ userId: props.userId })
+  }).catch(() => {});
+};
+
 const ensureListsArtifacts = async () => {
   if (selfHealAttempted || !props.userId) return;
   selfHealAttempted = true;
   try {
-    // The pipeline decides whether a build is needed (New_User_Flows.md
-    // §5 step 2) — this surface no longer re-derives it from listsBuild.
+    // Step 3: one call. The server decides whether a build is needed AND
+    // runs it (advance executes the Lists build server-side). This
+    // surface no longer looks up bucket keys or fires the build itself.
     const adv = await advancePipeline(props.userId);
-    if (!adv || adv.next.action !== 'process-initial-file') return;
-    const res = await fetch(`/api/user-files?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
-    const data = await res.json();
-    const ah = (data.files || []).find((f: any) => f.isAppleHealth && f.bucketKey);
-    if (!ah) return;
-    {
-      // Categories + medication sidecar (the meds candidates' source).
-      const r = await fetch('/api/files/lists/process-initial-file', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ bucketKey: ah.bucketKey, fileName: ah.fileName, force: true })
-      });
-      if (r.ok) {
-        await refreshListsBuild();
-        void loadCurrentMedications(true);
-      }
-      // The other deterministic worksheets (no agent, no KB needed).
-      void fetch('/api/encounters/worksheet', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
-        body: JSON.stringify({ userId: props.userId })
-      }).catch(() => {});
-      void fetch('/api/labs/oor-worksheet', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
-        body: JSON.stringify({ userId: props.userId })
-      }).catch(() => {});
+    if (!adv) return;
+    if (adv.next.started || adv.next.action === 'lists-build-running') {
+      await refreshListsBuild();
+      void loadCurrentMedications(true);
+      fireCompanionWorksheets();
     }
   } catch { /* the banner + RETRY remain the manual path */ }
 };
@@ -1137,20 +1130,16 @@ const ensureListsArtifacts = async () => {
 const retryListsBuild = async () => {
   retryingBuild.value = true;
   try {
-    // Find the Apple Health file (root or KB) and re-run the build on it.
-    const res = await fetch(`/api/user-files?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
-    const data = await res.json();
-    const ah = (data.files || []).find((f: any) => f.isAppleHealth && f.bucketKey);
-    if (!ah) throw new Error('No Apple Health file found to build from');
-    const r = await fetch('/api/files/lists/process-initial-file', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({ bucketKey: ah.bucketKey, fileName: ah.fileName, force: true })
-    });
-    if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || `HTTP ${r.status}`); }
+    // Same one call as the self-heal: on an error-state build the server
+    // decides force:true and re-runs it.
+    const adv = await advancePipeline(props.userId);
+    if (!adv) throw new Error('Could not reach the pipeline');
+    if (!adv.next.started && adv.next.action !== 'lists-build-running') {
+      throw new Error(`Nothing to rebuild (pipeline says: ${adv.next.action})`);
+    }
     await refreshListsBuild();
     void loadCurrentMedications(true);
+    fireCompanionWorksheets();
   } catch (err) {
     $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Retry failed' });
   } finally {

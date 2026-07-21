@@ -28,6 +28,8 @@ export interface PipelineNext {
   params?: { fileName?: string | null; force?: boolean };
   phase?: string | null;
   description?: string;
+  /** advance executed this step server-side just now (step 3) */
+  started?: boolean;
 }
 
 export interface PipelineAdvance {
@@ -35,7 +37,22 @@ export interface PipelineAdvance {
   next: PipelineNext;
 }
 
-/** The one trigger. Best-effort: returns null on any failure (gates fall open, as before). */
+/** Pure read — never triggers work. Use for visibility checks (nudges, banners). */
+export async function fetchPipeline(userId: string): Promise<PipelineAdvance | null> {
+  try {
+    const res = await fetch(`/api/pipeline?userId=${encodeURIComponent(userId)}`, { credentials: 'include' });
+    const j = await res.json().catch(() => null);
+    if (res.ok && j?.success && j.pipeline && j.next) {
+      return { pipeline: j.pipeline, next: j.next };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** The one trigger — advances the pipeline (may start server-side work).
+ *  Best-effort: returns null on any failure (gates fall open, as before). */
 export async function advancePipeline(userId: string): Promise<PipelineAdvance | null> {
   try {
     const res = await fetch('/api/pipeline/advance', {

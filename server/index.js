@@ -9803,7 +9803,17 @@ app.post('/api/pipeline/advance', async (req, res) => {
       return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
     }
     const pipeline = computeRecordsPipeline(userDoc);
-    const next = decideNextAction(pipeline);
+    let next = decideNextAction(pipeline);
+    // Step 3: advance EXECUTES what the server can. The Lists build runs
+    // here (fire-and-forget; the guard in runInitialFileBuild dedupes
+    // races with the upload-time trigger); the caller polls the pipeline.
+    if (next.action === 'process-initial-file' && typeof req.app.locals.runInitialFileBuild === 'function') {
+      const force = !!next.params?.force;
+      void req.app.locals.runInitialFileBuild({ userId, force })
+        .then((out) => console.log(`[pipeline] lists build for ${userId} finished: ${out.httpStatus}${out.body?.alreadyRunning ? ' (already running)' : ''}`))
+        .catch((e) => console.error(`[pipeline] lists build for ${userId} failed:`, e.message));
+      next = { kind: 'wait', action: 'lists-build-running', started: true };
+    }
     console.log(`[pipeline] advance ${userId}: current=${pipeline.current} next=${next.kind}/${next.action}`);
     res.json({ success: true, pipeline, next });
   } catch (error) {
