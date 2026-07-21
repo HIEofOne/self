@@ -20,13 +20,16 @@
 - **Local storage:** File System Access API (primary, Chrome 122+), PouchDB/IndexedDB (fallback)
 
 ## Key files
-- `server/index.js` — main backend (~9,800 lines)
-- `src/App.vue` — main frontend entry, auth, welcome page
-- `src/components/ChatInterface.vue` — wizard, chat UI
-- `src/components/MyStuffDialog.vue` — saved files management
-- `server/routes/auth.js` — passkey auth, agent provisioning
-- `server/routes/files.js` — file upload, PDF parsing
-- `server/routes/chat.js` — chat providers, deep link resolution
+Line counts as of v1.5.79 (July 2026); whole repo ≈ 62,000 lines (`src/` 34,216 + `server/` 27,378 + `scripts/` 645).
+- `server/index.js` — main backend (~14,100 lines)
+- `src/components/ChatInterface.vue` — wizard, chat UI (~10,000 lines)
+- `src/components/MyStuffDialog.vue` — Workbook: saved files, patient summary, lists, privacy filter (~7,900 lines)
+- `src/App.vue` — main frontend entry, auth, welcome page (~4,000 lines)
+- `src/components/Lists.vue` — deterministic lists, meds verification (~3,400 lines)
+- `server/routes/files.js` — file upload, PDF parsing (~3,100 lines)
+- `server/routes/groups.js` — group registry, membership, messaging (~3,100 lines)
+- `server/routes/auth.js` — passkey auth, agent provisioning (~1,600 lines)
+- `server/routes/chat.js` — chat providers, deep link resolution (~750 lines)
 
 ## Environment Variables
 
