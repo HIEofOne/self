@@ -63,10 +63,16 @@ export function computeRecordsPipeline(userDoc, opts = {}) {
     stages.listsBuilt = { status: 'pending', at: null };
   }
 
-  // medsVerified — the user has confirmed Current Medications (the meds gate)
-  stages.medsVerified = trimmed(userDoc?.currentMedications)
-    ? { status: 'done', at: null }
-    : { status: 'pending', at: null };
+  // medsVerified — the user has confirmed Current Medications (the meds
+  // gate). Only REQUIRED when an Apple Health file exists: the historic
+  // gates never blocked Epic-only users (their candidates come from the
+  // slower Epic extraction and verification stays optional), and step 2
+  // preserves that behavior.
+  if (trimmed(userDoc?.currentMedications)) {
+    stages.medsVerified = { status: 'done', at: null };
+  } else {
+    stages.medsVerified = { status: hasAppleFile ? 'pending' : 'skipped', at: null };
+  }
 
   // indexed — KB has indexed files. Mirror user-status: trust the caller's
   // DO-verified value when given, else the doc's own fallbacks.
