@@ -18,6 +18,7 @@ import { CloudantClient, CloudantSessionStore, AuditLogService } from '../lib/cl
 import { DigitalOceanClient } from '../lib/do-client/index.js';
 import { PasskeyService } from '../lib/passkey/index.js';
 import { generateCurrentMedicationsToken } from './utils/token-service.js';
+import { computeRecordsPipeline, decideNextAction } from './records-pipeline.js';
 import { moveObjectWithVerify } from './utils/spaces-move.js';
 import { deleteObjectWithLog , asciiSafeMetadata } from './utils/spaces-ops.js';
 import { ChatClient } from '../lib/chat-client/index.js';
@@ -9720,7 +9721,8 @@ app.get('/api/user-status', async (req, res) => {
         || (typeof userDoc.hasAppleFile === 'boolean' ? userDoc.hasAppleFile : null),
       listsBuild: userDoc.listsBuild || null,
       initialFile,
-      currentMedications: userDoc.currentMedications || null
+      currentMedications: userDoc.currentMedications || null,
+      recordsPipeline: computeRecordsPipeline(userDoc, { hasFilesInKB })
     });
   } catch (error) {
     console.error('❌ Error fetching user status:', error);
@@ -9762,6 +9764,50 @@ app.post('/api/user-status', async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     console.error('[user-status POST] Error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ── recordsPipeline (New_User_Flows.md §5, step 1) ──────────────────────
+// The server-owned view of the records journey: imported → listsBuilt →
+// medsVerified → indexed → summaryDrafted → summaryVerified. Derived from
+// existing userDoc fields (no migration). GET reads it; POST /advance is
+// THE trigger — it returns the server's decision on the next step. In
+// step 1 execution stays on the existing surfaces (the response says what
+// to run); step 3 moves 'client'-kind executions here.
+
+app.get('/api/pipeline', async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) {
+      return res.status(400).json({ success: false, error: 'MISSING_USER_ID' });
+    }
+    const userDoc = await cloudant.getDocument('maia_users', userId);
+    if (!userDoc) {
+      return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+    }
+    const pipeline = computeRecordsPipeline(userDoc);
+    res.json({ success: true, pipeline, next: decideNextAction(pipeline) });
+  } catch (error) {
+    console.error('[pipeline GET] Error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/pipeline/advance', async (req, res) => {
+  try {
+    const userId = resolveUserId(req, res);
+    if (!userId) return; // 403 already sent on mismatch
+    const userDoc = await cloudant.getDocument('maia_users', userId);
+    if (!userDoc) {
+      return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+    }
+    const pipeline = computeRecordsPipeline(userDoc);
+    const next = decideNextAction(pipeline);
+    console.log(`[pipeline] advance ${userId}: current=${pipeline.current} next=${next.kind}/${next.action}`);
+    res.json({ success: true, pipeline, next });
+  } catch (error) {
+    console.error('[pipeline advance] Error:', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
