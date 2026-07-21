@@ -1136,7 +1136,7 @@ import ConversationRail from './ConversationRail.vue';
 import { jsPDF } from 'jspdf';
 import MarkdownIt from 'markdown-it';
 import { processFileNCitations } from '../utils/fileNCitations';
-import { advancePipeline } from '../utils/pipeline';
+import { advancePipeline, fetchPipeline } from '../utils/pipeline';
 import SummaryProgress from './SummaryProgress.vue';
 import {
   isFileSystemAccessSupported,
@@ -5859,7 +5859,7 @@ const handleFileSelect = async (event: Event) => {
         !wizardPatientSummary.value &&
         userResourceStatus.value?.hasPatientSummary !== true &&
         !showAgentSetupDialog.value) {
-      const adv = props.user?.userId ? await advancePipeline(props.user.userId) : null;
+      const adv = props.user?.userId ? await fetchPipeline(props.user.userId) : null;
       if (!adv || adv.pipeline.stages.indexed?.status !== 'done') {
         showIndexNudge.value = true;
       }

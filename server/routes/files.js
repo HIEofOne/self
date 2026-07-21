@@ -1904,15 +1904,22 @@ export default function setupFileRoutes(app, cloudant, doClient) {
     }
   };
 
-  app.post('/api/files/lists/process-initial-file', async (req, res) => {
+  // ── The Lists build worker (recordsPipeline step 3) ──────────────────
+  // Extracted from the route body so /api/pipeline/advance can execute
+  // the build server-side (exposed via app.locals.runInitialFileBuild).
+  // Returns { httpStatus, body } instead of writing to res.
+  const runInitialFileBuild = async ({ userId, bucketKey: providedBucketKey, fileName: providedFileName, force: forceRebuild }) => {
     try {
-      // Require authentication
-      const userId = req.session?.userId || req.session?.deepLinkUserId;
-      if (!userId) {
-        return res.status(401).json({ error: 'Authentication required' });
+      // Idempotency guard: advance-driven callers (gates, Lists mount)
+      // can race the upload-time trigger; a build already running within
+      // the last 5 minutes is not restarted unless forced.
+      if (!forceRebuild) {
+        const guardDoc = await cloudant.getDocument('maia_users', userId).catch(() => null);
+        const lb = guardDoc?.listsBuild;
+        if (lb?.status === 'running' && lb.startedAt && (Date.now() - Date.parse(lb.startedAt)) < 5 * 60 * 1000) {
+          return { httpStatus: 202, body: { success: true, alreadyRunning: true } };
+        }
       }
-
-      const { bucketKey: providedBucketKey, fileName: providedFileName, force: forceRebuild } = req.body || {};
       await setListsBuild(userId, {
         status: 'running',
         fileName: providedFileName || null,
@@ -1938,20 +1945,31 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         // Otherwise, get from user document (original flow)
         userDoc = await cloudant.getDocument('maia_users', userId);
         if (!userDoc) {
-          return res.status(404).json({ error: 'User not found' });
+          return { httpStatus: 404, body: { error: 'User not found' } };
         }
 
-        if (!userDoc.initialFile || !userDoc.initialFile.bucketKey) {
-          console.log('[SAVE-RESTORE] process-initial-file missing initial file', {
-            userId,
-            hasInitialFile: !!userDoc.initialFile
-          });
-          await setListsBuild(userId, { status: 'error', finishedAt: new Date().toISOString(), error: 'No initial file found' });
-          return res.status(400).json({ error: 'No initial file found for this user' });
+        if (userDoc.initialFile?.bucketKey) {
+          initialFileBucketKey = userDoc.initialFile.bucketKey;
+          initialFileName = userDoc.initialFile.fileName;
+        } else {
+          // Chat-imported users have no initialFile — resolve from the
+          // registered files instead (bucket keys are lookups, never
+          // client-supplied; the stale-key fallback downstream still
+          // applies if this key has since moved).
+          const ah = (Array.isArray(userDoc.files) ? userDoc.files : [])
+            .find((f) => f?.isAppleHealth && f?.bucketKey);
+          if (!ah) {
+            console.log('[SAVE-RESTORE] process-initial-file missing initial file', {
+              userId,
+              hasInitialFile: !!userDoc.initialFile,
+              fileCount: Array.isArray(userDoc.files) ? userDoc.files.length : 0
+            });
+            await setListsBuild(userId, { status: 'error', finishedAt: new Date().toISOString(), error: 'No initial file found' });
+            return { httpStatus: 400, body: { error: 'No initial file found for this user' } };
+          }
+          initialFileBucketKey = ah.bucketKey;
+          initialFileName = ah.fileName;
         }
-
-        initialFileBucketKey = userDoc.initialFile.bucketKey;
-        initialFileName = userDoc.initialFile.fileName;
       }
       console.log('[SAVE-RESTORE] process-initial-file resolved initial file', {
         userId,
@@ -2037,7 +2055,8 @@ export default function setupFileRoutes(app, cloudant, doClient) {
             initialFileName,
             attempted: Array.from(fallbackKeys)
           });
-          return res.status(404).json({ error: `Initial file not found: ${err.message}` });
+          await setListsBuild(userId, { status: 'error', finishedAt: new Date().toISOString(), error: `Initial file not found: ${err.message}` });
+          return { httpStatus: 404, body: { error: `Initial file not found: ${err.message}` } };
         }
 
         try {
@@ -2314,29 +2333,41 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         error: null
       });
 
-      res.json({
-        success: true,
-        fileName: initialFileName,
-        totalPages: result.totalPages,
-        pages: result.pages,
-        fullMarkdown: fullMarkdown,
-        markdownBucketKey: markdownBucketKey,
-        categoryFiles: categoryFiles
-      });
+      return {
+        httpStatus: 200,
+        body: {
+          success: true,
+          fileName: initialFileName,
+          totalPages: result.totalPages,
+          pages: result.pages,
+          fullMarkdown: fullMarkdown,
+          markdownBucketKey: markdownBucketKey,
+          categoryFiles: categoryFiles
+        }
+      };
     } catch (error) {
       console.error('❌ Error processing initial file for Lists:', error);
       try {
-        const uid = req.session?.userId || req.session?.deepLinkUserId;
-        if (uid) {
-          await setListsBuild(uid, {
-            status: 'error',
-            finishedAt: new Date().toISOString(),
-            error: String(error?.message || error)
-          });
-        }
+        await setListsBuild(userId, {
+          status: 'error',
+          finishedAt: new Date().toISOString(),
+          error: String(error?.message || error)
+        });
       } catch { /* bookkeeping only */ }
-      res.status(500).json({ error: `Failed to process initial file: ${error.message}` });
+      return { httpStatus: 500, body: { error: `Failed to process initial file: ${error.message}` } };
     }
+  };
+  // Let /api/pipeline/advance (server/index.js) execute the build directly.
+  app.locals.runInitialFileBuild = runInitialFileBuild;
+
+  app.post('/api/files/lists/process-initial-file', async (req, res) => {
+    const userId = req.session?.userId || req.session?.deepLinkUserId;
+    if (!userId) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+    const { bucketKey, fileName, force } = req.body || {};
+    const out = await runInitialFileBuild({ userId, bucketKey, fileName, force });
+    res.status(out.httpStatus).json(out.body);
   });
 
   /**
