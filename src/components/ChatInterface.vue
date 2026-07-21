@@ -1136,6 +1136,7 @@ import ConversationRail from './ConversationRail.vue';
 import { jsPDF } from 'jspdf';
 import MarkdownIt from 'markdown-it';
 import { processFileNCitations } from '../utils/fileNCitations';
+import { advancePipeline } from '../utils/pipeline';
 import SummaryProgress from './SummaryProgress.vue';
 import {
   isFileSystemAccessSupported,
@@ -1676,6 +1677,48 @@ const wizardRestoreActive = computed(() => !!props.rehydrationActive && (Array.i
 const showRestoreCompleteDialog = ref(false);
 const restoreIndexingActive = ref(false);
 const restoreIndexingQueued = ref(false);
+
+// ── The summary gates, pipeline edition (New_User_Flows.md §5 step 2) ──
+// One call to /api/pipeline/advance replaces the per-surface fragment
+// checks (meds gate, index gate). The SERVER decides what stands between
+// this user and a Patient Summary; this surface only acts on the
+// decision. Returns true when generation must stop (a gate acted).
+const summaryPipelineGate = async (): Promise<boolean> => {
+  if (!props.user?.userId) return false;
+  const adv = await advancePipeline(props.user.userId);
+  if (!adv) return false; // best-effort, as the old gates were
+  switch (adv.next.action) {
+    case 'add-records':
+      $q.notify({ type: 'warning', message: 'Add your health records first — the Patient Summary is built from them. Opening the Setup Wizard...', timeout: 8000 });
+      wizardDismissed.value = false;
+      showAgentSetupDialog.value = true;
+      return true;
+    case 'process-initial-file':
+    case 'lists-build-running':
+      $q.notify({ type: 'warning', message: 'Your Lists are still being built from your records — opening Lists...', timeout: 6000 });
+      myStuffInitialTab.value = 'lists';
+      showMyStuffDialog.value = true;
+      return true;
+    case 'verify-medications':
+      $q.notify({ type: 'warning', message: 'Verify your Current Medications first — the Patient Summary is built from the verified list. Opening Lists...', timeout: 6000 });
+      myStuffInitialTab.value = 'lists';
+      showMyStuffDialog.value = true;
+      return true;
+    case 'start-indexing':
+      $q.notify({ type: 'warning', message: 'Your records aren\'t indexed yet — the Patient Summary is built from your indexed knowledge base. Opening the Setup Wizard...', timeout: 8000 });
+      wizardDismissed.value = false;
+      showAgentSetupDialog.value = true;
+      void handleIndexUploadsClick(); // the gate ACTS: indexing starts now
+      return true;
+    case 'indexing-running':
+      $q.notify({ type: 'warning', message: 'Indexing is running — the summary is one click away once it finishes. Opening the Setup Wizard to show progress...', timeout: 8000 });
+      wizardDismissed.value = false;
+      showAgentSetupDialog.value = true;
+      return true;
+    default:
+      return false; // request-draft / review-summary / complete → proceed
+  }
+};
 
 // ── Folder-less records run (records in ANY browser) ────────────────
 // "Records present" is the trigger; the local folder is an optional
@@ -3105,21 +3148,8 @@ const sendMessage = async () => {
         // first SEND.
         if (getProviderKey(selectedProvider.value) === 'digitalocean') {
           try {
-            const stRes2 = await fetch(`/api/user-status?userId=${encodeURIComponent(props.user.userId)}`, { credentials: 'include' });
-            const st2 = stRes2.ok ? await stRes2.json() : null;
-            if (st2 && !st2.currentMedications && st2.hasAppleFile) {
+            if (await summaryPipelineGate()) {
               isStreaming.value = false;
-              $q.notify({ type: 'warning', message: 'Verify your Current Medications first — the Patient Summary is built from the verified list. Opening Lists...', timeout: 6000 });
-              myStuffInitialTab.value = 'lists';
-              showMyStuffDialog.value = true;
-              return;
-            }
-            if (st2 && !st2.hasFilesInKB) {
-              isStreaming.value = false;
-              $q.notify({ type: 'warning', message: 'Your records aren\'t indexed yet — the Patient Summary is built from your indexed knowledge base. Opening the Setup Wizard...', timeout: 8000 });
-              wizardDismissed.value = false;
-              showAgentSetupDialog.value = true;
-              void handleIndexUploadsClick(); // start indexing NOW — the wizard shows progress
               return;
             }
             chatSummaryProgress.value = true;
@@ -3299,38 +3329,12 @@ const sendMessage = async () => {
     {
       const providerKeyForCheck = getProviderKey(selectedProvider.value);
       if (mentionsSummary && !isUntouchedDefault && providerKeyForCheck === 'digitalocean' && props.user?.userId) {
-        // THE MEDS GATE (same rule as the tab): never draft a summary
-        // while meds are unverified but an Apple file exists — the
-        // prompt injects the verified list, so the draft would say
-        // "Not documented" while candidates sit in Lists.
+        // THE GATES, pipeline edition: the server decides what stands
+        // between this user and a summary (records, lists, meds
+        // verification, indexing) and this surface just acts on it.
         try {
-          const stRes = await fetch(`/api/user-status?userId=${encodeURIComponent(props.user.userId)}`, { credentials: 'include' });
-          const st = stRes.ok ? await stRes.json() : null;
-          if (st && !st.currentMedications && st.hasAppleFile) {
+          if (await summaryPipelineGate()) {
             isStreaming.value = false;
-            $q.notify({
-              type: 'warning',
-              message: 'Verify your Current Medications first — the Patient Summary is built from the verified list. Opening Lists...',
-              timeout: 6000
-            });
-            myStuffInitialTab.value = 'lists';
-            showMyStuffDialog.value = true;
-            return;
-          }
-          // THE INDEX GATE: pre-indexing, the KB-backed sections have
-          // nothing real to stand on and model variability fills the
-          // vacuum (broken links, free-form markdown). The sequence is
-          // import → verify → index → summarize.
-          if (st && !st.hasFilesInKB) {
-            isStreaming.value = false;
-            $q.notify({
-              type: 'warning',
-              message: 'Your records aren\'t indexed yet — the Patient Summary is built from your indexed knowledge base. Opening the Setup Wizard...',
-              timeout: 8000
-            });
-            wizardDismissed.value = false;
-            showAgentSetupDialog.value = true;
-            void handleIndexUploadsClick(); // start indexing NOW — the wizard shows progress
             return;
           }
         } catch { /* gate is best-effort; generation proceeds */ }
@@ -5849,11 +5853,16 @@ const handleFileSelect = async (event: Event) => {
     // A plain chat attach saved the file but did NOT index it — nothing
     // else tells the user that. If they haven't built the records tier
     // yet, offer the wizard (it indexes root uploads like this one).
+    // The pipeline is the authority on "indexed": no nudge when the KB
+    // already has this user's records.
     if (!wizardUploadIntent.value &&
         !wizardPatientSummary.value &&
         userResourceStatus.value?.hasPatientSummary !== true &&
         !showAgentSetupDialog.value) {
-      showIndexNudge.value = true;
+      const adv = props.user?.userId ? await advancePipeline(props.user.userId) : null;
+      if (!adv || adv.pipeline.stages.indexed?.status !== 'done') {
+        showIndexNudge.value = true;
+      }
     }
   } catch (error) {
     console.error('Error uploading file:', error);

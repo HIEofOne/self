@@ -642,6 +642,7 @@ import PdfViewerModal from './PdfViewerModal.vue';
 import { ref, computed, onMounted, watch, onActivated, onDeactivated, nextTick } from 'vue';
 import { useQuasar } from 'quasar';
 import { processFileNCitations, type FileNFile } from '../utils/fileNCitations';
+import { advancePipeline } from '../utils/pipeline';
 
 const $q = useQuasar();
 
@@ -1100,12 +1101,15 @@ const ensureListsArtifacts = async () => {
   if (selfHealAttempted || !props.userId) return;
   selfHealAttempted = true;
   try {
+    // The pipeline decides whether a build is needed (New_User_Flows.md
+    // §5 step 2) — this surface no longer re-derives it from listsBuild.
+    const adv = await advancePipeline(props.userId);
+    if (!adv || adv.next.action !== 'process-initial-file') return;
     const res = await fetch(`/api/user-files?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
     const data = await res.json();
     const ah = (data.files || []).find((f: any) => f.isAppleHealth && f.bucketKey);
     if (!ah) return;
-    if (listsBuild.value?.status === 'running') return;
-    if (listsBuild.value?.status !== 'done') {
+    {
       // Categories + medication sidecar (the meds candidates' source).
       const r = await fetch('/api/files/lists/process-initial-file', {
         method: 'POST',

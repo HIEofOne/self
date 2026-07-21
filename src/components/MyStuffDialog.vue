@@ -1911,6 +1911,7 @@ import PoliciesPanel from './PoliciesPanel.vue';
 import { useQuasar } from 'quasar';
 import { deleteChatById } from '../utils/chatApi';
 import { processFileNCitations } from '../utils/fileNCitations';
+import { advancePipeline } from '../utils/pipeline';
 
 // Local markdown-it with html: true so the <a class="page-link"> anchors
 // emitted by processFileNCitations survive rendering. vue-markdown-render
@@ -6650,39 +6651,43 @@ watch([currentTab, () => props.pendingSummary], ([tab, pending]) => {
 const requestNewSummary = async () => {
   if (!props.userId) return;
   try {
-    const sessionCheck = await fetch(`/api/user-status?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
-    if (!sessionCheck.ok) {
+    // THE GATES, pipeline edition (New_User_Flows.md §5 step 2): the
+    // server decides what stands between this user and a summary; this
+    // tab only acts on the decision. Same rules as the chat gates —
+    // meds are INJECTED into the prompt (unverified → "Not documented"),
+    // no indexed KB → no AI summary, and every gate ACTS (a warning-only
+    // gate looped the user with no way forward).
+    const adv = await advancePipeline(props.userId);
+    if (!adv) {
       await loadPatientSummary();
       return;
     }
-    // THE MEDS GATE (all summary triggers share this rule): the summary
-    // prompt INJECTS Current Medications — it does not read them from the
-    // records text. Generating before the user verifies meds bakes in
-    // "Not documented in the available records" while candidates sit in
-    // Lists. The wizard always enforced this order; free-order surfaces
-    // must too.
-    const st = await sessionCheck.json();
-    if (!st.currentMedications && st.hasAppleFile) {
-      $q.notify({
-        type: 'warning',
-        message: 'Verify your Current Medications first — the Patient Summary is built from the verified list. Opening Lists...',
-        timeout: 6000
-      });
-      currentTab.value = 'lists';
-      return;
-    }
-    // THE INDEX GATE (same rule as chat): no indexed KB → no AI summary.
-    // And same as the chat gates since #200: the gate ACTS — a
-    // warning-only gate looped the user (verify meds → request → told
-    // to index → request → told again) with no way forward.
-    if (!st.hasFilesInKB) {
-      $q.notify({
-        type: 'warning',
-        message: 'Your records aren\'t indexed yet — starting the Setup Wizard indexing now. The summary is one click away once it finishes.',
-        timeout: 8000
-      });
-      emit('index-now-triggered');
-      return;
+    switch (adv.next.action) {
+      case 'process-initial-file':
+      case 'lists-build-running':
+        $q.notify({ type: 'warning', message: 'Your Lists are still being built from your records — opening Lists...', timeout: 6000 });
+        currentTab.value = 'lists';
+        return;
+      case 'verify-medications':
+        $q.notify({
+          type: 'warning',
+          message: 'Verify your Current Medications first — the Patient Summary is built from the verified list. Opening Lists...',
+          timeout: 6000
+        });
+        currentTab.value = 'lists';
+        return;
+      case 'add-records':
+      case 'start-indexing':
+      case 'indexing-running':
+        $q.notify({
+          type: 'warning',
+          message: 'Your records aren\'t indexed yet — starting the Setup Wizard indexing now. The summary is one click away once it finishes.',
+          timeout: 8000
+        });
+        emit('index-now-triggered');
+        return;
+      default:
+        break; // request-draft / review-summary / complete → proceed
     }
   } catch {
     await loadPatientSummary();
