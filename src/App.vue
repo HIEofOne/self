@@ -1450,9 +1450,6 @@ const askToJoinPublic = async (g: { groupId: string; joinLink: string | null }) 
   await loadPendingGroupJoinLink();
 };
 
-const scrollToHostedGroups = () => {
-  document.getElementById('hosted-groups')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-};
 /** Pre-auth paste capture: same localStorage hand-off a clicked link uses,
  *  so the GET STARTED button immediately becomes JOIN / REQUEST TO JOIN. */
 const showWelcomePasteDialog = ref(false);
