@@ -1912,6 +1912,7 @@ import { useQuasar } from 'quasar';
 import { deleteChatById } from '../utils/chatApi';
 import { processFileNCitations } from '../utils/fileNCitations';
 import { advancePipeline, waitForStageDone } from '../utils/pipeline';
+import { logModalEvent } from '../utils/modalLog';
 
 // Local markdown-it with html: true so the <a class="page-link"> anchors
 // emitted by processFileNCitations survive rendering. vue-markdown-render
@@ -2703,6 +2704,9 @@ const selectedReferenceForChat = ref<{ fileName: string; bucketKey: string; file
 const savedCurrentSummaryForUndo = ref<{ text: string; createdAt: string; updatedAt: string } | null>(null);
 const showReplaceSummaryDialog = ref(false);
 const newSummaryToReplace = ref('');
+// Step 4 (modal diet): S1 is THE save path — its opens and choices are
+// the most important lines in any "where did my summary go" replay.
+watch(showReplaceSummaryDialog, (v) => { if (v) logModalEvent(props.userId, 'review-summary', 'shown'); });
 
 // PDF Viewer
 const showPdfViewer = ref(false);
@@ -4458,6 +4462,7 @@ const handleReplaceSummaryByIndex = async (indexToReplace: number) => {
 
 // Handle replace summary dialog choice (for empty slots or keep strategy)
 const handleReplaceSummary = async (replaceStrategy: 'keep' | 'oldest' | 'newest', summaryText?: string) => {
+  logModalEvent(props.userId, 'review-summary', `save-${replaceStrategy}`);
   showReplaceSummaryDialog.value = false;
   
   const summaryToSave = summaryText || newSummaryToReplace.value;
@@ -4626,6 +4631,7 @@ const handleSaveEditedSummary = async () => {
 };
 
 const handleCloseWithoutSaving = () => {
+  logModalEvent(props.userId, 'review-summary', 'close-without-saving');
   if (editingSummary.value) {
     // Revert changes
     summaryViewText.value = newPatientSummary.value;
