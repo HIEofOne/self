@@ -1484,10 +1484,15 @@ const wizardSuspendedByJoin = ref(false);
 /** The Workbook's index gate fired (e.g. Patient Summary tab with no
  *  indexed KB): close the Workbook so the wizard is visible, and start
  *  indexing immediately — the gate acts, never loops. */
-const handleWorkbookIndexNow = () => {
+const handleWorkbookIndexNow = async () => {
   showMyStuffDialog.value = false;
   wizardDismissed.value = false;
   showAgentSetupDialog.value = true;
+  // Step 3c: if the server already started indexing (advance executes
+  // start-indexing now), the wizard is just the progress view — firing
+  // the client flow too would double-run the DO orchestration.
+  const p = props.user?.userId ? await fetchPipeline(props.user.userId) : null;
+  if (p?.pipeline.stages.indexed?.status === 'running') return;
   void handleIndexUploadsClick();
 };
 
