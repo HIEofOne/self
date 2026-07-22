@@ -643,6 +643,7 @@ import { ref, computed, onMounted, watch, onActivated, onDeactivated, nextTick }
 import { useQuasar } from 'quasar';
 import { processFileNCitations, type FileNFile } from '../utils/fileNCitations';
 import { advancePipeline } from '../utils/pipeline';
+import { logModalEvent } from '../utils/modalLog';
 
 const $q = useQuasar();
 
@@ -1604,9 +1605,13 @@ const handleVerifyCurrentMedications = async () => {
   await saveCurrentMedicationsValue(medsToSave, true, true, true);
 };
 
+// Step 4 (modal diet): L1 is the meds gate's destination — log open + choice.
+watch(showVerifyPrompt, (v) => { if (v) logModalEvent(props.userId, 'verify-meds-prompt', 'shown'); });
+
 /** User dismisses the verify prompt without verifying — don't show the dialog again this session,
  *  but keep the red borders on EDIT/VERIFY until the user acts. */
 const handleVerifyDismissed = () => {
+  logModalEvent(props.userId, 'verify-meds-prompt', 'dismissed');
   medsDismissedThisSession.value = true;
   showVerifyPrompt.value = false;
   // Keep needsVerifyAction true — red borders stay until user clicks EDIT or VERIFY

@@ -10560,6 +10560,13 @@ app.post('/api/wizard-log', (req, res) => {
     const details = req.body?.details || {};
     const timestamp = new Date().toISOString();
     console.log(`[WIZARD] ${timestamp} ${userId} ${event}`, details);
+    // Step 4 (modal diet): modal open/choice events go into the user's
+    // provisioning log so any flow report can be replayed from
+    // maia-log.pdf — that was the whole point; console-only logging
+    // reconstructed nothing.
+    if (userId !== 'unknown' && String(event).startsWith('modal:')) {
+      void appendUserProvisioningEvent(userId, { event, ...details }).catch(() => {});
+    }
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });

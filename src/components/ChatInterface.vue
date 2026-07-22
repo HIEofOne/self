@@ -343,10 +343,10 @@
                     </div>
                   </q-card-section>
                   <q-card-actions align="right">
-                    <q-btn flat color="grey-8" label="Not yet" v-close-popup />
+                    <q-btn flat color="grey-8" label="Not yet" v-close-popup @click="logModal('index-nudge', 'not-yet')" />
                     <q-btn
                       unelevated color="primary" label="Run the Wizard"
-                      @click="handleNudgeRunWizard"
+                      @click="logModal('index-nudge', 'run-wizard'); handleNudgeRunWizard()"
                     />
                   </q-card-actions>
                 </q-card>
@@ -967,13 +967,13 @@
             flat
             label="NOT YET"
             color="grey-8"
-            @click="needsIndexingPromptDismissedThisSession = true; showNeedsIndexingPrompt = false"
+            @click="logModal('needs-indexing', 'not-yet'); needsIndexingPromptDismissedThisSession = true; showNeedsIndexingPrompt = false"
           />
           <q-btn
             unelevated
             label="INDEX NOW"
             color="primary"
-            @click="handleNeedsIndexingIndexNow"
+            @click="logModal('needs-indexing', 'index-now'); handleNeedsIndexingIndexNow()"
           />
         </q-card-actions>
       </q-card>
@@ -1078,13 +1078,13 @@
             flat
             label="Not yet"
             color="grey-8"
-            @click="showPostIndexingSummaryPrompt = false; postIndexingSummaryDismissedThisSession = true"
+            @click="logModal('post-indexing-summary', 'not-yet'); showPostIndexingSummaryPrompt = false; postIndexingSummaryDismissedThisSession = true"
           />
           <q-btn
             unelevated
             label="Update the Patient Summary"
             color="primary"
-            @click="handlePostIndexingUpdateSummary"
+            @click="logModal('post-indexing-summary', 'update'); handlePostIndexingUpdateSummary()"
           />
         </q-card-actions>
       </q-card>
@@ -1110,13 +1110,13 @@
             flat
             label="Continue with chat only"
             color="grey-8"
-            @click="showNewSummaryDialog = false"
+            @click="logModal('new-summary-offer', 'chat-only'); showNewSummaryDialog = false"
           />
           <q-btn
             unelevated
             label="Open Patient Summary tab"
             color="primary"
-            @click="showNewSummaryDialog = false; myStuffInitialTab = 'summary'; showMyStuffDialog = true;"
+            @click="logModal('new-summary-offer', 'open-tab'); showNewSummaryDialog = false; myStuffInitialTab = 'summary'; showMyStuffDialog = true;"
           />
         </q-card-actions>
       </q-card>
@@ -1137,6 +1137,7 @@ import { jsPDF } from 'jspdf';
 import MarkdownIt from 'markdown-it';
 import { processFileNCitations } from '../utils/fileNCitations';
 import { advancePipeline, fetchPipeline, waitForStageDone } from '../utils/pipeline';
+import { logModalEvent } from '../utils/modalLog';
 import SummaryProgress from './SummaryProgress.vue';
 import {
   isFileSystemAccessSupported,
@@ -2354,6 +2355,11 @@ const handleNeedsIndexingIndexNow = async () => {
   showNeedsIndexingPrompt.value = false;
   wizardDismissed.value = false;
   showAgentSetupDialog.value = true;
+  // Step 4: route through the pipeline first — the server runs the
+  // indexing (step 3c) and the wizard is just the progress view. The
+  // restore-specific client flow stays as the fallback.
+  const adv = props.user?.userId ? await advancePipeline(props.user.userId) : null;
+  if (adv?.next.action === 'indexing-running') return;
   await nextTick();
   await startRestoreIndexing();
 };
@@ -2853,6 +2859,16 @@ const selectFirstNonPrivateProvider = () => {
     selectedProvider.value = providerLabels[fallback] || fallback;
   }
 };
+
+// Step 4 (modal diet): every records-flow modal logs open + choice so a
+// user report can be replayed from maia-log.pdf. One line per event.
+const logModal = (modal: string, action: string) => logModalEvent(props.user?.userId, modal, action);
+watch(showAgentSetupDialog, (v) => logModal('wizard', v ? 'opened' : 'closed'));
+watch(showIndexNudge, (v) => { if (v) logModal('index-nudge', 'shown'); });
+watch(chatSummaryProgress, (v) => { if (v) logModal('summary-progress', 'shown'); });
+watch(showNewSummaryDialog, (v) => { if (v) logModal('new-summary-offer', 'shown'); });
+watch(showNeedsIndexingPrompt, (v) => { if (v) logModal('needs-indexing', 'shown'); });
+watch(showPostIndexingSummaryPrompt, (v) => { if (v) logModal('post-indexing-summary', 'shown'); });
 
 const logWizardEvent = async (event: string, details?: Record<string, unknown>) => {
   try {
