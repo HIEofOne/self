@@ -9776,6 +9776,50 @@ app.post('/api/user-status', async (req, res) => {
 // step 1 execution stays on the existing surfaces (the response says what
 // to run); step 3 moves 'client'-kind executions here.
 
+// ── The start-indexing worker (recordsPipeline step 3c) ────────────────
+// Reuses the EXACT flow the wizard's client ran: move each root file
+// into the KB folder (toggle endpoint), then /api/update-knowledge-base
+// (the DO data-source orchestration, ~860 lines, already server-side).
+// Both accept a body userId, so the worker drives them as internal HTTP
+// calls rather than extracting them. kbIndexingStatus is the job marker
+// the pipeline derives from; 'starting' makes the stage show 'running'
+// immediately.
+const runStartIndexing = async (userId) => {
+  const base = `http://127.0.0.1:${PORT}`;
+  try {
+    await persistKbIndexingStatus(userId, { phase: 'starting', startedAt: new Date().toISOString(), backendCompleted: false, error: null });
+    const userDoc = await cloudant.getDocument('maia_users', userId);
+    if (!userDoc) throw new Error('USER_NOT_FOUND');
+    const files = Array.isArray(userDoc.files) ? userDoc.files : [];
+    const candidates = files.filter((f) => f?.bucketKey
+      && !f.inKnowledgeBase
+      && !f.isReference
+      && !/\/archived\//i.test(f.bucketKey)
+      && !/references\//i.test(f.bucketKey));
+    for (const f of candidates) {
+      const r = await fetch(`${base}/api/toggle-file-knowledge-base`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId, bucketKey: f.bucketKey, inKnowledgeBase: true })
+      });
+      if (!r.ok) console.warn(`[pipeline] toggle→KB failed for ${f.fileName || f.bucketKey}: ${r.status}`);
+    }
+    const r2 = await fetch(`${base}/api/update-knowledge-base`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId })
+    });
+    console.log(`[pipeline] indexing for ${userId}: update-knowledge-base ${r2.status}`);
+    if (!r2.ok) {
+      const j = await r2.json().catch(() => ({}));
+      await persistKbIndexingStatus(userId, { phase: 'error', error: j.message || j.error || `HTTP ${r2.status}` });
+    }
+  } catch (e) {
+    console.error(`[pipeline] indexing for ${userId} failed:`, e.message);
+    try { await persistKbIndexingStatus(userId, { phase: 'error', error: String(e?.message || e) }); } catch { /* bookkeeping */ }
+  }
+};
+
 app.get('/api/pipeline', async (req, res) => {
   try {
     const { userId } = req.query;
@@ -9814,6 +9858,15 @@ app.post('/api/pipeline/advance', async (req, res) => {
         .then((out) => console.log(`[pipeline] lists build for ${userId} finished: ${out.httpStatus}${out.body?.alreadyRunning ? ' (already running)' : ''}`))
         .catch((e) => console.error(`[pipeline] lists build for ${userId} failed:`, e.message));
       next = { kind: 'wait', action: 'lists-build-running', started: true };
+    }
+    // Step 3c: indexing. The worker replays the wizard's client flow
+    // (toggle files into the KB folder → update-knowledge-base) entirely
+    // server-side; kbIndexingStatus is the visible job state.
+    if (next.action === 'start-indexing') {
+      void runStartIndexing(userId)
+        .then(() => console.log(`[pipeline] indexing kick for ${userId} finished`))
+        .catch((e) => console.error(`[pipeline] indexing kick for ${userId} failed:`, e.message));
+      next = { kind: 'wait', action: 'indexing-running', started: true };
     }
     // Step 3b: the draft-summary job. Runs when the pipeline itself asks
     // for a draft (stage pending/error) — or on the caller's explicit
