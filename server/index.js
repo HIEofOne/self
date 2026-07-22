@@ -5373,15 +5373,31 @@ app.post('/api/archive-user-files', async (req, res) => {
     const listResult = await s3Client.send(listCommand);
     
     // Find files at root level (exactly userId/filename, not in subfolders)
+    //
+    // THE AUTO-ARCHIVER FIX (found via hannah71, 2026-07-22): this sweep
+    // used to take EVERY root file — including freshly imported records
+    // that were registered in userDoc.files and waiting to be indexed.
+    // Any Saved Files load between import and indexing stranded the
+    // records in archived/ and indexing then found nothing ("Missing
+    // bucket keys", update-knowledge-base 400). Root files registered in
+    // userDoc.files are the pipeline's `imported` stage — off limits.
+    // Only genuinely unregistered strays (orphaned paperclip uploads,
+    // the sweep's original purpose) are archived.
+    const registeredKeys = new Set(
+      (Array.isArray(userDoc.files) ? userDoc.files : [])
+        .map((f) => f?.bucketKey)
+        .filter(Boolean)
+    );
     const rootFiles = (listResult.Contents || []).filter(file => {
       const key = file.Key || '';
       // Only files at exactly userId/filename (not userId/archived/filename or userId/kb/filename)
       // Check that key has exactly 2 parts when split by '/' (userId and filename)
       const parts = key.split('/').filter(p => p !== ''); // Filter empty parts
-      return parts.length === 2 && 
-             parts[0] === userId && 
+      return parts.length === 2 &&
+             parts[0] === userId &&
              !key.endsWith('.keep') &&
-             parts[1] !== '.keep'; // Exclude .keep files
+             parts[1] !== '.keep' && // Exclude .keep files
+             !registeredKeys.has(key); // NEVER archive registered (pipeline-tracked) files
     });
 
     let archivedCount = 0;
@@ -9791,11 +9807,23 @@ const runStartIndexing = async (userId) => {
     const userDoc = await cloudant.getDocument('maia_users', userId);
     if (!userDoc) throw new Error('USER_NOT_FOUND');
     const files = Array.isArray(userDoc.files) ? userDoc.files : [];
-    const candidates = files.filter((f) => f?.bucketKey
+    let candidates = files.filter((f) => f?.bucketKey
       && !f.inKnowledgeBase
       && !f.isReference
       && !/\/archived\//i.test(f.bucketKey)
       && !/references\//i.test(f.bucketKey));
+    if (candidates.length === 0) {
+      // Rescue: the old auto-archiver stranded REGISTERED files in
+      // archived/ before they were ever indexed. A registered file is
+      // the user's record wherever it sits — index it from there.
+      candidates = files.filter((f) => f?.bucketKey
+        && !f.inKnowledgeBase
+        && !f.isReference
+        && /\/archived\//i.test(f.bucketKey));
+      if (candidates.length > 0) {
+        console.log(`[pipeline] indexing for ${userId}: rescuing ${candidates.length} registered file(s) stranded in archived/`);
+      }
+    }
     for (const f of candidates) {
       const r = await fetch(`${base}/api/toggle-file-knowledge-base`, {
         method: 'POST',
@@ -9863,6 +9891,10 @@ app.post('/api/pipeline/advance', async (req, res) => {
     // (toggle files into the KB folder → update-knowledge-base) entirely
     // server-side; kbIndexingStatus is the visible job state.
     if (next.action === 'start-indexing') {
+      // Persist the running marker BEFORE responding: any caller that
+      // sees started:true must observe indexed=running on its next read,
+      // or the client-side double-run guards race (hannah71, 2026-07-22).
+      await persistKbIndexingStatus(userId, { phase: 'starting', startedAt: new Date().toISOString(), backendCompleted: false, error: null });
       void runStartIndexing(userId)
         .then(() => console.log(`[pipeline] indexing kick for ${userId} finished`))
         .catch((e) => console.error(`[pipeline] indexing kick for ${userId} failed:`, e.message));
