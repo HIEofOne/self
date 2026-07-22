@@ -90,10 +90,24 @@ export function computeRecordsPipeline(userDoc, opts = {}) {
     stages.indexed = { status: 'pending', at: null };
   }
 
-  // summaryDrafted — a governed draft exists (userDoc.draftPatientSummary)
-  stages.summaryDrafted = trimmed(userDoc?.draftPatientSummary?.text)
-    ? { status: 'done', at: userDoc.draftPatientSummary.generatedAt || null }
-    : { status: 'pending', at: null };
+  // summaryDrafted — a governed draft exists (userDoc.draftPatientSummary),
+  // or the draft job (userDoc.draftJob, written by runDraftGeneration) is
+  // running/failed. A 'running' older than 10 minutes is treated as an
+  // error so a died process can't wedge the stage.
+  const dj = userDoc?.draftJob || null;
+  const djRunningFresh = dj?.status === 'running' && dj.startedAt
+    && (Date.now() - Date.parse(dj.startedAt)) < 10 * 60 * 1000;
+  if (dj?.status === 'running' && djRunningFresh) {
+    stages.summaryDrafted = { status: 'running', at: dj.startedAt || null };
+  } else if (dj?.status === 'error' || (dj?.status === 'running' && !djRunningFresh)) {
+    stages.summaryDrafted = trimmed(userDoc?.draftPatientSummary?.text)
+      ? { status: 'done', at: userDoc.draftPatientSummary.draftAt || null }
+      : { status: 'error', at: dj.finishedAt || dj.startedAt || null, error: dj.error || 'stalled' };
+  } else if (trimmed(userDoc?.draftPatientSummary?.text)) {
+    stages.summaryDrafted = { status: 'done', at: userDoc.draftPatientSummary.draftAt || null };
+  } else {
+    stages.summaryDrafted = { status: 'pending', at: null };
+  }
 
   // summaryVerified — a summary was saved through the review dialog
   // (patientSummaries array, or the legacy single field)
@@ -141,6 +155,7 @@ export function decideNextAction(pipeline) {
       if (st.indexed.status === 'running') return { kind: 'wait', action: 'indexing-running', phase: st.indexed.phase || null };
       return { kind: 'client', action: 'start-indexing', description: 'Index the records into the knowledge base (wizard INDEX MY RECORDS)' };
     case 'summaryDrafted':
+      if (st.summaryDrafted.status === 'running') return { kind: 'wait', action: 'draft-running' };
       return { kind: 'client', action: 'request-draft', endpoint: '/api/patient-summary/draft', description: 'Generate the governed Patient Summary draft' };
     case 'summaryVerified':
       return { kind: 'user', action: 'review-summary', target: 'patient-summary', description: 'Review the draft and save it (the review dialog is the only save path)' };

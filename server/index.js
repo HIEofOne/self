@@ -9802,6 +9802,7 @@ app.post('/api/pipeline/advance', async (req, res) => {
     if (!userDoc) {
       return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
     }
+    const { intent } = req.body || {};
     const pipeline = computeRecordsPipeline(userDoc);
     let next = decideNextAction(pipeline);
     // Step 3: advance EXECUTES what the server can. The Lists build runs
@@ -9814,7 +9815,22 @@ app.post('/api/pipeline/advance', async (req, res) => {
         .catch((e) => console.error(`[pipeline] lists build for ${userId} failed:`, e.message));
       next = { kind: 'wait', action: 'lists-build-running', started: true };
     }
-    console.log(`[pipeline] advance ${userId}: current=${pipeline.current} next=${next.kind}/${next.action}`);
+    // Step 3b: the draft-summary job. Runs when the pipeline itself asks
+    // for a draft (stage pending/error) — or on the caller's explicit
+    // intent, which also covers REGENERATION for users whose pipeline is
+    // already complete. Gates always win: an intent never bypasses them.
+    const gateActions = ['add-records', 'process-initial-file', 'lists-build-running', 'verify-medications', 'start-indexing', 'indexing-running'];
+    if (!gateActions.includes(next.action)) {
+      if (pipeline.stages.summaryDrafted.status === 'running') {
+        next = { kind: 'wait', action: 'draft-running' };
+      } else if (next.action === 'request-draft' || intent === 'draft-summary') {
+        void runDraftGeneration(userId)
+          .then((out) => console.log(`[pipeline] draft for ${userId} finished: ${out.httpStatus}`))
+          .catch((e) => console.error(`[pipeline] draft for ${userId} failed:`, e.message));
+        next = { kind: 'wait', action: 'draft-running', started: true };
+      }
+    }
+    console.log(`[pipeline] advance ${userId}${intent ? ` intent=${intent}` : ''}: current=${pipeline.current} next=${next.kind}/${next.action}`);
     res.json({ success: true, pipeline, next });
   } catch (error) {
     console.error('[pipeline advance] Error:', error.message);
@@ -11896,15 +11912,36 @@ app.post('/api/agent-instructions/patient-summary', async (req, res) => {
 // Generate a DRAFT patient summary against the full KB and store it on userDoc.draftPatientSummary
 // (separate from the committed patientSummaries array). The wizard runs this after indexing
 // completes; the draft is NOT shown to the user until they verify medications and the summary.
-app.post('/api/patient-summary/draft', async (req, res) => {
+/** Persisted status for the draft-summary job (same pattern as
+ *  listsBuild): the ~3-minute generation is a VISIBLE, retryable job so
+ *  /api/pipeline/advance can run it in the background and every surface
+ *  can render its progress. Best-effort with 409 retry. */
+const setDraftJob = async (userId, patch) => {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const doc = await cloudant.getDocument('maia_users', userId);
+      if (!doc) return;
+      doc.draftJob = { ...(doc.draftJob || {}), ...patch };
+      doc.updatedAt = new Date().toISOString();
+      await cloudant.saveDocument('maia_users', doc);
+      return;
+    } catch (e) {
+      if (e?.statusCode !== 409) return;
+    }
+  }
+};
+
+// ── The draft-summary worker (recordsPipeline step 3b) ─────────────────
+// Extracted from the route body so /api/pipeline/advance can execute the
+// generation server-side. Returns { httpStatus, body }.
+const runDraftGeneration = async (userId) => {
   const startedAt = Date.now();
   try {
-    const userId = resolveUserId(req, res);
-    if (!userId) return;
-
+    await setDraftJob(userId, { status: 'running', startedAt: new Date().toISOString(), finishedAt: null, error: null });
     let userDoc = await cloudant.getDocument('maia_users', userId);
     if (!userDoc) {
-      return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+      await setDraftJob(userId, { status: 'error', finishedAt: new Date().toISOString(), error: 'USER_NOT_FOUND' });
+      return { httpStatus: 404, body: { success: false, error: 'USER_NOT_FOUND' } };
     }
 
     // Self-healing: provision missing agents instead of failing
@@ -11925,7 +11962,8 @@ app.post('/api/patient-summary/draft', async (req, res) => {
     }
     const hasPrimaryAgent = userDoc.assignedAgentId && userDoc.agentEndpoint;
     if (!hasPrimaryAgent) {
-      return res.status(400).json({ success: false, error: 'AGENT_NOT_CONFIGURED' });
+      await setDraftJob(userId, { status: 'error', finishedAt: new Date().toISOString(), error: 'AGENT_NOT_CONFIGURED' });
+      return { httpStatus: 400, body: { success: false, error: 'AGENT_NOT_CONFIGURED' } };
     }
 
     await appendUserProvisioningEvent(userId, { event: 'draft-summary-started', primaryModel: userDoc.agentModelName || null });
@@ -11942,7 +11980,8 @@ app.post('/api/patient-summary/draft', async (req, res) => {
       }
       await ensureAgentRetrieval(userDoc.assignedAgentId);
     } else if (!userDoc.kbId) {
-      return res.status(400).json({ success: false, error: 'NO_KB' });
+      await setDraftJob(userId, { status: 'error', finishedAt: new Date().toISOString(), error: 'NO_KB' });
+      return { httpStatus: 400, body: { success: false, error: 'NO_KB' } };
     }
 
     const { DigitalOceanProvider } = await import('../lib/chat-client/providers/digitalocean.js');
@@ -12059,7 +12098,10 @@ app.post('/api/patient-summary/draft', async (req, res) => {
     while (!saved && attempts < 3) {
       attempts += 1;
       const freshDoc = await cloudant.getDocument('maia_users', userId);
-      if (!freshDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+      if (!freshDoc) {
+        await setDraftJob(userId, { status: 'error', finishedAt: new Date().toISOString(), error: 'USER_NOT_FOUND' });
+        return { httpStatus: 404, body: { success: false, error: 'USER_NOT_FOUND' } };
+      }
       freshDoc.draftPatientSummary = {
         text: summary,
         draftAt: new Date().toISOString(),
@@ -12077,14 +12119,23 @@ app.post('/api/patient-summary/draft', async (req, res) => {
     const lines = summary.split('\n').filter(l => l.trim()).length;
     const totalElapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
     await appendUserProvisioningEvent(userId, { event: 'draft-summary-succeeded', model: usedModel, elapsedSeconds: Number(totalElapsed), lines, chars: summary.length });
-    res.json({ success: true, summary, lines, chars: summary.length, generationSeconds });
+    await setDraftJob(userId, { status: 'done', finishedAt: new Date().toISOString(), error: null });
+    return { httpStatus: 200, body: { success: true, summary, lines, chars: summary.length, generationSeconds } };
   } catch (error) {
     console.error('Error generating draft patient summary:', error);
     const sc = error.status || error.statusCode || 0;
     const failElapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
     try { await appendUserProvisioningEvent(userId, { event: 'draft-summary-failed', reason: error.message || 'error', status: sc || undefined, totalElapsedSeconds: Number(failElapsed) }); } catch { /* non-fatal */ }
-    res.status(500).json({ success: false, error: error.message });
+    await setDraftJob(userId, { status: 'error', finishedAt: new Date().toISOString(), error: String(error?.message || error) });
+    return { httpStatus: 500, body: { success: false, error: error.message } };
   }
+};
+
+app.post('/api/patient-summary/draft', async (req, res) => {
+  const userId = resolveUserId(req, res);
+  if (!userId) return;
+  const out = await runDraftGeneration(userId);
+  res.status(out.httpStatus).json(out.body);
 });
 
 // Extract a Current Medications list using the user's agent (so their system-prompt

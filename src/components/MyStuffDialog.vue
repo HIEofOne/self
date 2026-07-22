@@ -1911,7 +1911,7 @@ import PoliciesPanel from './PoliciesPanel.vue';
 import { useQuasar } from 'quasar';
 import { deleteChatById } from '../utils/chatApi';
 import { processFileNCitations } from '../utils/fileNCitations';
-import { advancePipeline } from '../utils/pipeline';
+import { advancePipeline, waitForStageDone } from '../utils/pipeline';
 
 // Local markdown-it with html: true so the <a class="page-link"> anchors
 // emitted by processFileNCitations survive rendering. vue-markdown-render
@@ -6657,9 +6657,42 @@ const requestNewSummary = async () => {
     // meds are INJECTED into the prompt (unverified → "Not documented"),
     // no indexed KB → no AI summary, and every gate ACTS (a warning-only
     // gate looped the user with no way forward).
-    const adv = await advancePipeline(props.userId);
+    const adv = await advancePipeline(props.userId, 'draft-summary');
     if (!adv) {
       await loadPatientSummary();
+      return;
+    }
+    if (adv.next.action === 'draft-running') {
+      // Step 3b: the server runs the draft job; poll the pipeline, then
+      // load the draft into the review dialog (the ONLY save path).
+      loadingSummary.value = true;
+      generatingSummary.value = true;
+      summaryError.value = '';
+      startSummaryProgress();
+      try {
+        const status = await waitForStageDone(props.userId, 'summaryDrafted');
+        if (status !== 'done') {
+          throw new Error(status === 'timeout'
+            ? 'The draft is taking too long — check back in a few minutes.'
+            : 'The Patient Summary draft failed. RETRY will run it again.');
+        }
+        const g = await fetch(`/api/patient-summary?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
+        const gj = await g.json().catch(() => ({} as any));
+        const draftText = String(gj?.draft?.text || '').trim();
+        if (!draftText) throw new Error('The draft finished but could not be loaded.');
+        if (gj.summaries) patientSummaries.value = gj.summaries;
+        newSummaryToReplace.value = draftText;
+        showReplaceSummaryDialog.value = true;
+      } catch (error) {
+        summaryError.value = error instanceof Error ? error.message : 'Failed to generate patient summary';
+        if ($q && typeof $q.notify === 'function') {
+          $q.notify({ type: 'negative', message: summaryError.value, timeout: 5000 });
+        }
+      } finally {
+        stopSummaryProgress();
+        loadingSummary.value = false;
+        generatingSummary.value = false;
+      }
       return;
     }
     switch (adv.next.action) {
@@ -6687,57 +6720,15 @@ const requestNewSummary = async () => {
         emit('index-now-triggered');
         return;
       default:
-        break; // request-draft / review-summary / complete → proceed
+        // Unexpected decision — nothing to run (step 3b deleted the
+        // legacy /api/generate-patient-summary trigger from this tab;
+        // the draft job above is the only generator).
+        await loadPatientSummary();
+        return;
     }
   } catch {
     await loadPatientSummary();
     return;
-  }
-
-  loadingSummary.value = true;
-  generatingSummary.value = true;
-  summaryError.value = '';
-  startSummaryProgress();
-
-  try {
-    const response = await fetch('/api/generate-patient-summary', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      credentials: 'include',
-      body: JSON.stringify({
-        userId: props.userId
-      })
-    });
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData.message || 'Failed to generate patient summary');
-    }
-
-    const result = await response.json();
-
-    // NEVER auto-save a generated summary: the user reviews it first,
-    // saves explicitly (into a free slot), or replaces one with consent.
-    // Auto-saving produced confusing pre-index chat/meds mixes that then
-    // masqueraded as the verified summary.
-    if (result.summaries) {
-      patientSummaries.value = result.summaries;
-    }
-    savedCurrentSummaryForUndo.value = result.savedCurrentSummary || null;
-    newSummaryToReplace.value = (result.summary || '').trim();
-    showReplaceSummaryDialog.value = true;
-  } catch (error) {
-    console.error('Error generating patient summary:', error);
-    summaryError.value = error instanceof Error ? error.message : 'Failed to generate patient summary';
-    
-    if ($q && typeof $q.notify === 'function') {
-      $q.notify({
-        type: 'negative',
-        message: summaryError.value,
-        timeout: 5000
-      });
-    }
   } finally {
     stopSummaryProgress();
     loadingSummary.value = false;
