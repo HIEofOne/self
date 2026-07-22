@@ -229,85 +229,84 @@
                     </div>
                   </div>
 
-                  <!-- Two organizer doors -->
-                  <div class="row q-col-gutter-md q-mb-md">
-                    <div class="col-12 col-md-6">
-                      <div class="welcome-door welcome-door--accent">
-                        <div class="text-subtitle1 q-mb-xs"><q-icon name="visibility" size="20px" class="q-mr-xs" />See a live group</div>
-                        <div class="text-body2 text-grey-8 q-mb-sm">
-                          Walk into our demo group right now — read its sharing policies and see
-                          that it's alive. You can't browse members' conversations. That's the point.
-                        </div>
-                        <q-btn unelevated color="primary" label="Explore the groups hosted here" @click="scrollToHostedGroups" />
-                      </div>
-                    </div>
-                    <div class="col-12 col-md-6">
-                      <div class="welcome-door welcome-door--accent">
-                        <div class="text-subtitle1 q-mb-xs"><q-icon name="groups" size="20px" class="q-mr-xs" />Start a group</div>
-                        <div class="text-body2 text-grey-8 q-mb-sm">
-                          Host a group for people like you, on a server you control. Write the
-                          sharing policies. Invite whoever you trust. About $10–40 a month for DigitalOcean hosting.
-                        </div>
-                        <q-btn unelevated color="primary" label="Set up a group" type="a" href="https://github.com/HIEofOne/self#readme" target="_blank" />
-                      </div>
-                    </div>
-                  </div>
+                  <!-- Modal-free setup form (New_User_Flows.md §5 step 4):
+                       every decision the arrival dialogs used to ask —
+                       device privacy, group join, records, folder — is a
+                       checkbox HERE, answered before GET STARTED. Setup
+                       then runs with zero dialogs and lands in the chat
+                       with the Workbook sidebar open. -->
+                  <div v-if="!justLooking" class="welcome-door q-mb-md" style="max-width: 680px; margin: 0 auto;">
+                    <div class="text-subtitle1 text-weight-medium q-mb-sm">Start as:</div>
 
-                  <!-- The organizer journey, stated up front -->
-                  <div class="text-center text-caption text-grey-7 q-mb-md">
-                    <strong>1</strong> See it working &nbsp;→&nbsp;
-                    <strong>2</strong> Start your group and its policies &nbsp;→&nbsp;
-                    <strong>3</strong> Get your own MAIA &nbsp;→&nbsp;
-                    <strong>4</strong> Invite your members
-                  </div>
+                    <div><q-checkbox v-model="wf.privateComputer" dense label="New User on a private computer" /></div>
+                    <div class="text-caption text-grey-7 q-mb-sm" style="margin-left: 28px;">
+                      New MAIA accounts need a computer. Mobile access is possible later, after passkey creation.
+                    </div>
 
-                  <!-- Member-shaped doors (demoted row) -->
-                  <div class="row q-col-gutter-md q-mb-md">
-                    <div class="col-12 col-md-4">
-                      <div class="welcome-door">
-                        <div class="text-subtitle2 q-mb-xs"><q-icon name="favorite_border" size="18px" class="q-mr-xs" />Get your own MAIA</div>
-                        <div class="text-caption text-grey-8 q-mb-sm">
-                          A private AI and a health record that stays yours. Ready in about a
-                          minute. Add and index your records as you get them.
-                        </div>
+                    <div><q-checkbox v-model="wf.emailOptIn" dense label="Willing to share an email address for notifications (optional)" /></div>
+                    <div v-if="wf.emailOptIn" class="q-mb-sm" style="margin-left: 28px; max-width: 380px;">
+                      <q-input v-model="wf.email" dense outlined type="email" label="Email address" />
+                    </div>
+
+                    <template v-if="trusteeGroup">
+                      <div><q-checkbox v-model="wf.joinTrustee" dense :label="`Willing to join the ${trusteeGroup.name} user group (recommended)`" /></div>
+                      <div v-if="wf.joinTrustee" class="text-caption q-mb-sm" style="margin-left: 28px;">
+                        MAIA ID&nbsp;<strong>&lt;&nbsp;{{ wfSuggestedId || '…' }}&nbsp;&gt;</strong>
+                        <span class="text-grey-7">&nbsp;You can add a display name later.</span>
+                      </div>
+                    </template>
+
+                    <div><q-checkbox v-model="wf.haveFile" dense label="Have an Apple Health or other PDF health record file to start with (optional)" /></div>
+                    <div v-if="wf.haveFile" class="q-mb-sm row items-center q-gutter-sm" style="margin-left: 28px;">
+                      <q-btn outline dense color="primary" label="SELECT" @click="wfFileInput?.click()" />
+                      <span v-if="wfFile" class="text-caption">{{ wfFile.name }} ({{ (wfFile.size / 1e6).toFixed(1) }} MB)</span>
+                      <input ref="wfFileInput" type="file" accept="application/pdf,.pdf" style="display: none" @change="wfOnFilePicked" />
+                    </div>
+
+                    <div><q-checkbox v-model="wf.haveFolder" dense :disable="!isChromeCapable" label="Have a folder with copies of my health records for my MAIA (can be added later)" /></div>
+                    <div v-if="!isChromeCapable" class="text-caption text-grey-7 q-mb-sm" style="margin-left: 28px;">
+                      Available only with Chrome browsers.
+                    </div>
+                    <div v-else-if="wf.haveFolder" class="q-mb-sm row items-center q-gutter-sm" style="margin-left: 28px;">
+                      <q-btn outline dense color="primary" label="SELECT" @click="wfPickFolder" />
+                      <span v-if="wfFolderName" class="text-caption">
+                        {{ wfFolderName }} — {{ wfFolderPdfCount }} PDF file(s), {{ (wfFolderPdfBytes / 1e6).toFixed(1) }} MB
+                        <span v-if="wfFolderPdfCount === 0" class="text-negative">— no PDF files to index in this folder</span>
+                      </span>
+                    </div>
+
+                    <div class="q-mt-sm text-body2">Estimated setup time: <strong>{{ wfEstimate }}</strong></div>
+
+                    <div class="row q-col-gutter-sm q-mt-md">
+                      <div class="col">
                         <q-btn
-                          unelevated color="primary" size="md" class="full-width"
-                          :label="pendingGroupInvite ? `JOIN ${(pendingInviteGroupName || 'THE GROUP').toUpperCase()}`
-                            : pendingGroupJoinLink ? `REQUEST TO JOIN ${(pendingJoinLinkGroupName || 'THE GROUP').toUpperCase()}`
-                            : 'GET STARTED'"
-                          :loading="tempStartLoading"
-                          @click="handleGetStartedNoPassword"
+                          unelevated color="primary" class="full-width" size="lg" label="GET STARTED"
+                          :disable="!wf.privateComputer" :loading="tempStartLoading" @click="welcomeFormStart"
                         />
                       </div>
-                    </div>
-                    <div class="col-12 col-md-4">
-                      <div class="welcome-door">
-                        <div class="text-subtitle2 q-mb-xs"><q-icon name="mail_outline" size="18px" class="q-mr-xs" />Have an invitation?</div>
-                        <div class="text-caption text-grey-8 q-mb-sm">
-                          Paste your invite or join link — the group's own admin approves,
-                          not a company.
-                        </div>
-                        <q-btn outline color="primary" size="md" class="full-width" label="Use my invitation or link" @click="showWelcomePasteDialog = true" />
+                      <div class="col-auto">
+                        <q-btn outline color="primary" size="lg" label="JUST LOOKING" @click="justLooking = true" />
                       </div>
                     </div>
-                    <div class="col-12 col-md-4">
-                      <div class="welcome-door">
-                        <div class="text-subtitle2 q-mb-xs"><q-icon name="menu_book" size="18px" class="q-mr-xs" />Learn more</div>
-                        <div class="text-caption text-grey-8 q-mb-sm">
-                          Why patient-controlled matters, and the design behind MAIA.
-                          See the <a href="/MAIA-overview.pdf" target="_blank" class="welcome-footer-link">slide show</a>
-                          or the older <a href="/welcome-video.mp4" target="_blank" class="welcome-footer-link">get records video</a>.
-                        </div>
-                        <q-btn outline color="primary" size="md" class="full-width" label="Read on Substack" icon-right="open_in_new" type="a" href="https://trustee.substack.com" target="_blank" />
-                      </div>
+                    <div class="text-caption text-grey-7 q-mt-sm">
+                      Have an invitation? <a href="#" class="welcome-footer-link" @click.prevent="showWelcomePasteDialog = true">Use my invitation or link</a>.
                     </div>
+                    <div v-if="tempStartError" class="text-negative q-mt-sm">{{ tempStartError }}</div>
                   </div>
-                  <div v-if="tempStartError" class="text-negative text-center q-mb-md">
-                    {{ tempStartError }}
+
+                  <!-- JUST LOOKING: the exploration content (groups, comparison, links) -->
+                  <div v-if="justLooking" class="text-center q-mb-md">
+                    <q-btn flat dense color="primary" icon="arrow_back" label="Back to setup" @click="justLooking = false" />
+                    <div class="text-caption text-grey-7 q-mt-xs">
+                      See the <a href="/MAIA-overview.pdf" target="_blank" class="welcome-footer-link">slide show</a>,
+                      the older <a href="/welcome-video.mp4" target="_blank" class="welcome-footer-link">get records video</a>,
+                      read on <a href="https://trustee.substack.com" target="_blank" class="welcome-footer-link">Substack</a>,
+                      or <a href="https://github.com/HIEofOne/self#readme" target="_blank" class="welcome-footer-link">set up a group of your own</a>.
+                    </div>
                   </div>
 
                   <!-- How MAIA is different (generic; named comparisons live on Substack) -->
-                  <div class="q-mb-md" style="border-top: 1px solid #eee; padding-top: 12px;">
+                  <div v-if="justLooking" class="q-mb-md" style="border-top: 1px solid #eee; padding-top: 12px;">
                     <table class="welcome-compare-table">
                       <thead>
                         <tr><th class="welcome-compare-title">How MAIA is different</th><th>MAIA</th><th>Typical health-AI apps</th></tr>
@@ -321,7 +320,7 @@
                   </div>
 
                   <!-- Groups hosted on this deployment (publicly listed only) -->
-                  <div id="hosted-groups" class="q-mb-md" style="border-top: 1px solid #eee; padding-top: 12px;">
+                  <div v-if="justLooking" id="hosted-groups" class="q-mb-md" style="border-top: 1px solid #eee; padding-top: 12px;">
                     <div class="text-caption text-weight-medium text-grey-7 q-mb-xs">Groups hosted here</div>
                     <div v-if="!publicGroups.length" class="text-caption text-grey-6">
                       No groups are publicly listed on this server yet.
@@ -503,6 +502,7 @@
             :suppress-wizard="suppressWizard"
             :folder-access-tier="folderAccessTier"
             :passkey-without-folder="passkeyWithoutFolder"
+            :welcome-setup-files="welcomeSetupFiles"
             @sign-out="handleSignOut"
             @add-passkey="startPasskeyRegistration"
             @restore-applied="restoredChatState = null"
@@ -1087,7 +1087,7 @@ import { saveUserSnapshot, getUserSnapshot, clearUserSnapshot } from './utils/lo
 import {
   writeStateFile, clearDirectoryHandle, scanWeblocOwner,
   getActiveUserId, setActiveUserId, discoverUsers,
-  readStateFileByUserId,
+  readStateFileByUserId, storeDirectoryHandle,
   setRestoreActive, clearRestoreActive, getRestoreActive,
   type MaiaState, type DiscoveredUser
 } from './utils/localFolder';
@@ -1261,6 +1261,123 @@ const showAdminPage = ref(false);
 // ── Organizer-first welcome (Refinement 8) ─────────────────────────
 /** Publicly-listed groups on this deployment (admin opt-in per group). */
 const publicGroups = ref<Array<{ groupId: string; name: string; description: string; postingPolicy: string; activeMemberCount: number; mentors?: Array<{ alias: string; tag: string }>; joinLink: string | null; joinMode?: string; origin?: string | null; originHost?: string | null }>>([]);
+
+// ── Modal-free welcome setup form (New_User_Flows.md §5 step 4) ────────
+// The form front-loads every decision the arrival dialogs used to ask.
+const justLooking = ref(false);
+const wf = ref({ privateComputer: false, emailOptIn: false, email: '', joinTrustee: false, haveFile: false, haveFolder: false });
+const wfSuggestedId = ref<string | null>(null);
+const wfFile = ref<File | null>(null);
+const wfFileInput = ref<HTMLInputElement | null>(null);
+const wfFolderHandle = ref<FileSystemDirectoryHandle | null>(null);
+const wfFolderName = ref<string | null>(null);
+const wfFolderPdfCount = ref(0);
+const wfFolderPdfBytes = ref(0);
+const wfFolderFiles: File[] = []; // File objects don't need reactivity
+/** Files handed to ChatInterface for upload after provisioning. */
+const welcomeSetupFiles = ref<File[]>([]);
+
+const trusteeGroup = computed(() =>
+  (publicGroups.value || []).find((g) => /trustee/i.test(g.name || '') && g.joinLink) || null);
+
+// Fetch the MAIA ID the account WILL get, so the form can show it.
+watch(() => wf.value.joinTrustee, async (on) => {
+  if (!on || wfSuggestedId.value) return;
+  try {
+    const r = await fetch('/api/temporary/suggested-id');
+    const j = await r.json().catch(() => null);
+    if (j?.userId) wfSuggestedId.value = j.userId;
+  } catch { /* shown as … until it loads */ }
+});
+
+const wfOnFilePicked = (e: Event) => {
+  wfFile.value = (e.target as HTMLInputElement).files?.[0] || null;
+};
+
+const wfPickFolder = async () => {
+  try {
+    const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
+    wfFolderHandle.value = handle;
+    wfFolderName.value = handle.name;
+    wfFolderFiles.length = 0;
+    let bytes = 0;
+    for await (const entry of handle.values()) {
+      if (entry.kind === 'file' && /\.pdf$/i.test(entry.name)) {
+        const f = await (entry as FileSystemFileHandle).getFile();
+        wfFolderFiles.push(f);
+        bytes += f.size;
+      }
+    }
+    wfFolderPdfCount.value = wfFolderFiles.length;
+    wfFolderPdfBytes.value = bytes;
+  } catch { /* picker cancelled */ }
+};
+
+// 10 minutes per MB of PDFs, rounded up to the next minute; 30s floor.
+const wfEstimate = computed(() => {
+  const bytes = (wfFile.value?.size || 0) + wfFolderPdfBytes.value;
+  if (!bytes) return 'about 30 seconds';
+  const minutes = Math.max(1, Math.ceil((bytes / 1e6) * 10));
+  return `about ${minutes} minute${minutes === 1 ? '' : 's'}`;
+});
+
+/** GET STARTED: the entire setup with zero dialogs. Checkbox 1 IS the
+ *  device-privacy answer; the account is created with the shown MAIA ID
+ *  and email; join/upload/indexing run after arrival (ChatInterface
+ *  reads maiaWelcomeSetup + welcomeSetupFiles); the user lands in the
+ *  chat with the Workbook sidebar open. */
+const welcomeFormStart = async () => {
+  if (!wf.value.privateComputer || tempStartLoading.value) return;
+  sharedComputerMode.value = false;
+  deviceChoiceResolved.value = true;
+  tempStartLoading.value = true;
+  tempStartError.value = '';
+  try {
+    let join: { groupId: string; token: string; registryUrl: string } | null = null;
+    if (wf.value.joinTrustee && trusteeGroup.value?.joinLink) {
+      try {
+        const u = new URL(trusteeGroup.value.joinLink, window.location.origin);
+        const token = u.searchParams.get('groupJoin');
+        const groupId = u.searchParams.get('groupId') || trusteeGroup.value.groupId;
+        const registryUrl = u.searchParams.get('registry') || window.location.origin;
+        if (token) join = { groupId, token, registryUrl };
+      } catch { /* no join */ }
+    }
+    // Payload + files must exist BEFORE the account does: Vue mounts
+    // ChatInterface in the reactive flush triggered inside
+    // createTemporarySession (setAuthenticatedUser), which runs before
+    // this function's continuation — writing the flag afterwards is
+    // exactly too late (the runner's mount-time check would miss it).
+    const files: File[] = [];
+    if (wf.value.haveFile && wfFile.value) files.push(wfFile.value);
+    if (wf.value.haveFolder) files.push(...wfFolderFiles);
+    welcomeSetupFiles.value = files;
+    try {
+      sessionStorage.setItem('maiaWelcomeSetup', JSON.stringify({
+        join, // alias defaults to the final userId in the runner
+        fileCount: files.length
+      }));
+    } catch { /* best-effort */ }
+    const user = await createTemporarySession({
+      desiredUserId: wf.value.joinTrustee ? (wfSuggestedId.value || undefined) : undefined,
+      email: wf.value.emailOptIn ? (wf.value.email.trim() || undefined) : undefined
+    });
+    if (!user) {
+      try { sessionStorage.removeItem('maiaWelcomeSetup'); } catch { /* cleanup */ }
+      welcomeSetupFiles.value = [];
+      return;
+    }
+    if (wfFolderHandle.value) {
+      // The picked folder becomes the account's auto-backup home.
+      try { await storeDirectoryHandle(user.userId, wfFolderHandle.value); } catch { /* optional */ }
+    }
+  } catch (error) {
+    try { sessionStorage.removeItem('maiaWelcomeSetup'); } catch { /* cleanup */ }
+    tempStartError.value = error instanceof Error ? error.message : 'Unable to start';
+  } finally {
+    tempStartLoading.value = false;
+  }
+};
 const expandedPublicGroup = ref<string | null>(null);
 
 // ── Outside request (W3): the welcome page's "ask the group" form ───
@@ -3374,7 +3491,7 @@ const handleDestroyedStartFresh = async () => {
   }
 };
 
-const createTemporarySession = async () => {
+const createTemporarySession = async (opts?: { desiredUserId?: string; email?: string }) => {
   // Clear stale wizard flags from any previous session (e.g. destroyed user)
   try {
     sessionStorage.removeItem('autoProcessInitialFile');
@@ -3383,7 +3500,12 @@ const createTemporarySession = async () => {
 
   const response = await fetch('/api/temporary/start', {
     method: 'POST',
-    credentials: 'include'
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({
+      ...(opts?.desiredUserId ? { desiredUserId: opts.desiredUserId } : {}),
+      ...(opts?.email ? { email: opts.email } : {})
+    })
   });
   const data = await response.json();
   if (!response.ok) {

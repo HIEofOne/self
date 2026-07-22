@@ -85,7 +85,7 @@ export async function waitForStageDone(
   while (Date.now() - t0 < timeoutMs) {
     const r = await fetchPipeline(userId);
     const st = r?.pipeline.stages[stage]?.status;
-    if (st === 'done') return 'done';
+    if (st === 'done' || st === 'skipped') return 'done';
     if (st === 'error') return 'error';
     await new Promise((res) => setTimeout(res, intervalMs));
   }

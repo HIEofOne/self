@@ -1210,6 +1210,9 @@ interface Props {
   rehydrationActive?: boolean;
   restoreActive?: boolean;
   suppressWizard?: boolean;
+  /** Welcome-form setup: records picked BEFORE the account existed
+   *  (App.vue), uploaded here right after arrival. */
+  welcomeSetupFiles?: File[];
   folderAccessTier?: 'chrome' | 'safari' | 'basic';
   passkeyWithoutFolder?: boolean;
 }
@@ -1679,6 +1682,99 @@ watch(
     } catch { /* ignore */ }
   }
 );
+// ── Welcome-form arrival (modal diet, step 4) ──────────────────────────
+// The ENTIRE setup runs with no dialogs: App.vue put the form's
+// decisions in sessionStorage (+ picked Files in the welcomeSetupFiles
+// prop). Here we quick-start HEADLESS — the wizard dialog never opens;
+// the rail's wizard ring is the progress indicator — join the chosen
+// group, upload the chosen records, and hand indexing to the pipeline.
+const welcomeSetupPayload = ref<{ join?: { groupId: string; token: string; registryUrl: string; alias?: string } | null; fileCount?: number } | null>(null);
+const welcomeSetupActive = ref(false);
+// ChatInterface can be MOUNTED before the account exists (pre-auth), and
+// App.vue writes the flag at GET-STARTED time — so detection must be
+// re-checkable, not a one-shot read at setup. The flag is only REMOVED
+// when the runner consumes it.
+const detectWelcomeSetup = () => {
+  if (welcomeSetupActive.value) return;
+  try {
+    const raw = sessionStorage.getItem('maiaWelcomeSetup');
+    if (raw) {
+      welcomeSetupPayload.value = JSON.parse(raw);
+      welcomeSetupActive.value = true; // stays true for the session: no wizard auto-open, no nudges
+    }
+  } catch { /* no welcome setup */ }
+};
+detectWelcomeSetup();
+
+const runWelcomeSetup = async () => {
+  try {
+  detectWelcomeSetup();
+  const p = welcomeSetupPayload.value;
+  if (!p || !props.user?.userId) return;
+  welcomeSetupPayload.value = null;
+  try { sessionStorage.removeItem('maiaWelcomeSetup'); } catch { /* consumed */ }
+  logProvisioningEvent({
+    event: 'setup-started',
+    method: 'welcome-form',
+    client: {
+      browser: parseUserAgent(),
+      appUrl: window.location.origin,
+      folder: localFolderName.value || 'unknown',
+      version: packageJson.version
+    }
+  });
+  handleQuickStartClick(); // quick-start tier, dialog stays closed
+  if (p.join) {
+    try {
+      // request-join handles JOIN-LINK tokens (open mode admits
+      // instantly); /api/user-groups/join is for personal invites.
+      const res = await fetch('/api/user-groups/request-join', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          userId: props.user.userId,
+          groupId: p.join.groupId,
+          token: p.join.token,
+          alias: p.join.alias || props.user.userId,
+          registryUrl: p.join.registryUrl
+        })
+      });
+      const j = await res.json().catch(() => ({}));
+      logProvisioningEvent({ event: 'welcome-form-join', groupId: p.join.groupId, ok: !!j.success, error: j.success ? undefined : (j.error || res.status) });
+    } catch { /* best-effort — the Groups tab remains the manual path */ }
+  }
+  const files = Array.isArray(props.welcomeSetupFiles) ? props.welcomeSetupFiles : [];
+  for (const f of files) {
+    try {
+      isUploadingFile.value = true;
+      const t = detectFileType(f.name, f.type);
+      if (t === 'pdf') await uploadPDFFile(f);
+      else if (t === 'text' || t === 'markdown') await uploadTextFile(f);
+      else console.warn('[welcome-setup] skipping unsupported file:', f.name);
+    } catch (e) {
+      console.warn('[welcome-setup] upload failed:', f.name, e);
+    } finally {
+      isUploadingFile.value = false;
+    }
+  }
+  if (files.length && props.user?.userId) {
+    // Let the lists build land, then index — server-run (step 3c).
+    await waitForStageDone(props.user.userId, 'listsBuilt', 120000).catch(() => null);
+    void advancePipeline(props.user.userId, 'index-records');
+  }
+  } catch (e) {
+    console.error('[welcome-setup] runner failed:', e);
+    logProvisioningEvent({ event: 'welcome-setup-error', reason: e instanceof Error ? e.message : String(e) });
+  }
+};
+// Fire when the account ARRIVES. Deliberately NOT immediate: an
+// immediate watch fires during setup(), before the functions the runner
+// calls are initialized (TDZ), and the rejection would be swallowed.
+// onMounted covers mounted-after-auth; the watch covers auth-after-mount.
+watch(() => props.user?.userId, (uid) => { if (uid) void runWelcomeSetup(); });
+onMounted(() => { void runWelcomeSetup(); });
+
 const wizardRestoreActive = computed(() => !!props.rehydrationActive && (Array.isArray(props.rehydrationFiles) ? props.rehydrationFiles.length > 0 : false));
 const showRestoreCompleteDialog = ref(false);
 const restoreIndexingActive = ref(false);
@@ -3027,7 +3123,10 @@ const loadProviders = async () => {
         }
         showPrivateUnavailableDialog.value = false; // clear in case it was shown before refetch
       } else {
-        if (initialLoadComplete.value && !showAgentSetupDialog.value && !props.restoreActive) {
+        if (initialLoadComplete.value && !showAgentSetupDialog.value && !props.restoreActive
+            && !welcomeSetupActive.value && !agentSetupPollingActive.value) {
+          // Not shown while the agent is actively DEPLOYING (welcome-form
+          // setup keeps the wizard closed; "unavailable" would be a lie).
           showPrivateUnavailableDialog.value = true;
         }
         selectFirstNonPrivateProvider();
@@ -3084,7 +3183,8 @@ watch(
       return;
     }
     if (getProviderKey(selectedProvider.value) === 'digitalocean') {
-      if (initialLoadComplete.value && !showAgentSetupDialog.value && !props.restoreActive) {
+      if (initialLoadComplete.value && !showAgentSetupDialog.value && !props.restoreActive
+          && !welcomeSetupActive.value && !agentSetupPollingActive.value) {
         showPrivateUnavailableDialog.value = true;
       }
       selectFirstNonPrivateProvider();
@@ -5857,6 +5957,7 @@ const handleFileSelect = async (event: Event) => {
     // The pipeline is the authority on "indexed": no nudge when the KB
     // already has this user's records.
     if (!wizardUploadIntent.value &&
+        !welcomeSetupActive.value &&
         !wizardPatientSummary.value &&
         userResourceStatus.value?.hasPatientSummary !== true &&
         !showAgentSetupDialog.value) {
@@ -8157,7 +8258,8 @@ const startSetupWizardPolling = () => {
         !wizardCurrentMedications.value &&
         wizardFlowPhase.value === 'done' &&
         (!stageNow || !WIZARD_DONE_STAGES.has(stageNow));
-      if (neverEngagedWizard && !shouldHideSetupWizard.value && !showAgentSetupDialog.value && !wizardDismissed.value && !showMyStuffDialog.value) {
+      detectWelcomeSetup(); // the flag may have landed after this component mounted
+      if (neverEngagedWizard && !welcomeSetupActive.value && !shouldHideSetupWizard.value && !showAgentSetupDialog.value && !wizardDismissed.value && !showMyStuffDialog.value) {
         showAgentSetupDialog.value = true;
         stopAgentSetupTimer();
         agentSetupTimer = setInterval(() => {

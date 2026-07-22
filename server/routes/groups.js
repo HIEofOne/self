@@ -1953,6 +1953,24 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
   // POST /api/user-groups/request-join — redeem a shareable join LINK
   // (PR-9): generate pairwise keys, submit a join request to the registry,
   // and remember it on the userDoc until the admin decides.
+  // 409-safe userDoc write: joins race the setup-time writers (lists
+  // build, quick start, indexing status) — a conflict must re-apply the
+  // membership on a FRESH doc, not fail the join (the registry side has
+  // already admitted the member by then).
+  const saveUserDocWithRetry = async (userId, mutate) => {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const doc = await cloudant.getDocument(USERS_DB, userId);
+      if (!doc) throw new Error('User not found');
+      mutate(doc);
+      try {
+        await cloudant.saveDocument(USERS_DB, doc);
+        return doc;
+      } catch (e) {
+        if (e?.statusCode !== 409 || attempt === 3) throw e;
+      }
+    }
+  };
+
   app.post('/api/user-groups/request-join', async (req, res) => {
     const userId = requireMatchingUser(req, res);
     if (!userId) return;
@@ -2033,10 +2051,11 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
               invitedBy: null,
               acceptedSenders: []
             };
-            userDoc.groupMemberships = [...(userDoc.groupMemberships || []), membership];
-            importSuggestedPolicies(userDoc, m.groupId, m.suggestedPolicies);
-            userDoc.updatedAt = membership.joinedAt;
-            await cloudant.saveDocument(USERS_DB, userDoc);
+            await saveUserDocWithRetry(userId, (doc) => {
+              doc.groupMemberships = [...(doc.groupMemberships || []), membership];
+              importSuggestedPolicies(doc, m.groupId, m.suggestedPolicies);
+              doc.updatedAt = membership.joinedAt;
+            });
             auditLog.logEvent({
               type: 'user_group_joined',
               userId,
@@ -2048,9 +2067,10 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         } catch { /* fall through to the pending path — the poll will finish it */ }
       }
 
-      userDoc.pendingGroupJoins = [...(userDoc.pendingGroupJoins || []), pending];
-      userDoc.updatedAt = pending.requestedAt;
-      await cloudant.saveDocument(USERS_DB, userDoc);
+      await saveUserDocWithRetry(userId, (doc) => {
+        doc.pendingGroupJoins = [...(doc.pendingGroupJoins || []), pending];
+        doc.updatedAt = pending.requestedAt;
+      });
       auditLog.logEvent({
         type: 'user_group_join_requested',
         userId,

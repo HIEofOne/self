@@ -9887,6 +9887,20 @@ app.post('/api/pipeline/advance', async (req, res) => {
         .catch((e) => console.error(`[pipeline] lists build for ${userId} failed:`, e.message));
       next = { kind: 'wait', action: 'lists-build-running', started: true };
     }
+    // Welcome-form intent (step 4): index the just-uploaded records NOW,
+    // wizard-style — before meds verification. The canonical stage order
+    // gates meds before indexing for SUMMARY requests, but indexing
+    // itself never needed verified meds (the wizard always indexed
+    // first); the estimate the form showed covers this run.
+    if (intent === 'index-records'
+        && pipeline.stages.imported.status === 'done'
+        && pipeline.stages.indexed.status === 'pending') {
+      await persistKbIndexingStatus(userId, { phase: 'starting', startedAt: new Date().toISOString(), backendCompleted: false, error: null });
+      void runStartIndexing(userId)
+        .then(() => console.log(`[pipeline] indexing kick (welcome) for ${userId} finished`))
+        .catch((e) => console.error(`[pipeline] indexing kick (welcome) for ${userId} failed:`, e.message));
+      next = { kind: 'wait', action: 'indexing-running', started: true };
+    }
     // Step 3c: indexing. The worker replays the wizard's client flow
     // (toggle files into the KB folder → update-knowledge-base) entirely
     // server-side; kbIndexingStatus is the visible job state.
