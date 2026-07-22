@@ -5774,7 +5774,17 @@ const handleStage3Index = async (overrideNames?: string[], fromRestore = false) 
   } catch (error) {
     console.warn('Failed to start indexing from wizard:', error);
     const message = error instanceof Error ? error.message : 'Failed to start indexing';
-    alert(message);
+    // If the SERVER is already indexing (pipeline step 3c), this client
+    // failure is just the two paths colliding — the server run is the
+    // real one, so show progress instead of an error. A native alert()
+    // here blocked the whole page (and misled the user) when the old
+    // auto-archiver had moved the files.
+    const p = props.user?.userId ? await fetchPipeline(props.user.userId) : null;
+    if (p?.pipeline.stages.indexed?.status === 'running' || p?.pipeline.stages.indexed?.status === 'done') {
+      logWizardEvent('stage3-client-skip-server-indexing', { reason: message });
+    } else {
+      $q.notify({ type: 'negative', message, timeout: 8000 });
+    }
     restoreIndexingActive.value = false;
     stage3IndexingPending.value = false;
   }
