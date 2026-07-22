@@ -1217,9 +1217,32 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
   });
 
   // Temporary user start (cookie-backed)
+  // Welcome-form support (modal-free setup): suggest an available MAIA ID
+  // so the form can SHOW the ID the user will get before GET STARTED.
+  app.get('/api/temporary/suggested-id', async (req, res) => {
+    try {
+      for (let i = 0; i < 10; i++) {
+        const name = pickRandomTempName();
+        const suffix = String(Math.floor(Math.random() * 100)).padStart(2, '0');
+        const candidate = formatTempUserId(name, suffix);
+        const existing = await cloudant.getDocument('maia_users', candidate).catch(() => null);
+        if (!existing) return res.json({ success: true, userId: candidate });
+      }
+      res.status(503).json({ success: false, error: 'NO_ID_AVAILABLE' });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
   app.post('/api/temporary/start', async (req, res) => {
     try {
       const forceNew = req.body?.forceNew === true;
+      // Welcome-form extras: the pre-shown MAIA ID (best-effort — falls
+      // back to generation on conflict) and an optional notification email.
+      const desiredUserId = (typeof req.body?.desiredUserId === 'string'
+        && /^[a-z]{2,24}[0-9]{2}$/.test(req.body.desiredUserId)) ? req.body.desiredUserId : null;
+      const notifyEmail = (typeof req.body?.email === 'string'
+        && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(req.body.email.trim())) ? req.body.email.trim() : null;
       const cookieUserId = req.cookies?.[TEMP_USER_COOKIE];
       if (cookieUserId && !forceNew) {
         try {
@@ -1274,19 +1297,21 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       let displayName = null;
       let userDoc = null;
       let attempts = 0;
+      let useDesired = !!desiredUserId;
       while (!userId && attempts < 30) {
         attempts += 1;
         const name = pickRandomTempName();
         const suffix = String(Math.floor(Math.random() * 100)).padStart(2, '0');
-        const candidateId = formatTempUserId(name, suffix);
-        const candidateDisplayName = `${name}${suffix}`;
+        const candidateId = useDesired ? desiredUserId : formatTempUserId(name, suffix);
+        const candidateDisplayName = useDesired ? desiredUserId : `${name}${suffix}`;
+        useDesired = false; // one shot; conflicts fall back to generation
         const dateStr = new Date().toISOString().replace(/[-:]/g, '').split('T')[0];
         const candidateKbName = `${candidateId}-kb-${dateStr}${Date.now().toString().slice(-6)}`;
         const candidateDoc = {
           _id: candidateId,
           userId: candidateId,
           displayName: candidateDisplayName,
-          email: null,
+          email: notifyEmail,
           domain: passkeyService.rpID,
           type: 'user',
           workflowStage: 'active',
