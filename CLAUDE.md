@@ -77,4 +77,4 @@ If the DO token is rotated, the derived CouchDB password changes but the CouchDB
 
 ## Testing
 - No automated test suite currently; test manually via the running app
-- Build check: `npx vite build`
+- Build check: `npm run build` — the DO deploy runs `vue-tsc && vite build`, and `vue-tsc` fails on things vite tolerates (e.g. TS6133 unused declarations). `npx vite build` alone is NOT sufficient.
