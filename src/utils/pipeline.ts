@@ -52,14 +52,16 @@ export async function fetchPipeline(userId: string): Promise<PipelineAdvance | n
 }
 
 /** The one trigger — advances the pipeline (may start server-side work).
+ *  `intent: 'draft-summary'` asks for a draft explicitly (covers
+ *  regeneration); gates still win server-side.
  *  Best-effort: returns null on any failure (gates fall open, as before). */
-export async function advancePipeline(userId: string): Promise<PipelineAdvance | null> {
+export async function advancePipeline(userId: string, intent?: string): Promise<PipelineAdvance | null> {
   try {
     const res = await fetch('/api/pipeline/advance', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify({ userId })
+      body: JSON.stringify(intent ? { userId, intent } : { userId })
     });
     const j = await res.json().catch(() => null);
     if (res.ok && j?.success && j.pipeline && j.next) {
@@ -69,4 +71,23 @@ export async function advancePipeline(userId: string): Promise<PipelineAdvance |
   } catch {
     return null;
   }
+}
+
+/** Poll (pure reads) until a stage reaches a terminal status.
+ *  Resolves 'done' | 'error' | 'timeout'. */
+export async function waitForStageDone(
+  userId: string,
+  stage: string,
+  timeoutMs = 10 * 60 * 1000,
+  intervalMs = 5000
+): Promise<'done' | 'error' | 'timeout'> {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
+    const r = await fetchPipeline(userId);
+    const st = r?.pipeline.stages[stage]?.status;
+    if (st === 'done') return 'done';
+    if (st === 'error') return 'error';
+    await new Promise((res) => setTimeout(res, intervalMs));
+  }
+  return 'timeout';
 }

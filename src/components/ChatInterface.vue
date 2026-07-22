@@ -1136,7 +1136,7 @@ import ConversationRail from './ConversationRail.vue';
 import { jsPDF } from 'jspdf';
 import MarkdownIt from 'markdown-it';
 import { processFileNCitations } from '../utils/fileNCitations';
-import { advancePipeline, fetchPipeline } from '../utils/pipeline';
+import { advancePipeline, fetchPipeline, waitForStageDone } from '../utils/pipeline';
 import SummaryProgress from './SummaryProgress.vue';
 import {
   isFileSystemAccessSupported,
@@ -1678,45 +1678,91 @@ const showRestoreCompleteDialog = ref(false);
 const restoreIndexingActive = ref(false);
 const restoreIndexingQueued = ref(false);
 
-// ── The summary gates, pipeline edition (New_User_Flows.md §5 step 2) ──
-// One call to /api/pipeline/advance replaces the per-surface fragment
-// checks (meds gate, index gate). The SERVER decides what stands between
-// this user and a Patient Summary; this surface only acts on the
-// decision. Returns true when generation must stop (a gate acted).
-const summaryPipelineGate = async (): Promise<boolean> => {
-  if (!props.user?.userId) return false;
-  const adv = await advancePipeline(props.user.userId);
-  if (!adv) return false; // best-effort, as the old gates were
+// ── Summary requests, pipeline edition (New_User_Flows.md §5 step 3b) ──
+// ONE call to /api/pipeline/advance with intent 'draft-summary'. The
+// server either returns a gate decision (this surface acts on it) or
+// starts the draft job itself; we poll the pipeline and push the result
+// into the chat. Returns:
+//   'gated'       — a gate acted (Lists/wizard opened); stop.
+//   'handled'     — draft flow ran (pushed to chat, or error notified); stop.
+//   'fallthrough' — pipeline unreachable/unexpected; regular chat proceeds.
+const requestSummaryViaPipeline = async (): Promise<'gated' | 'handled' | 'fallthrough'> => {
+  if (!props.user?.userId) return 'fallthrough';
+  const adv = await advancePipeline(props.user.userId, 'draft-summary');
+  if (!adv) return 'fallthrough'; // best-effort, as the old gates were
+  if (adv.next.action === 'draft-running') {
+    chatSummaryProgress.value = true;
+    try {
+      const status = await waitForStageDone(props.user.userId, 'summaryDrafted');
+      if (status !== 'done') {
+        $q.notify({ type: 'negative', message: status === 'timeout' ? 'The Patient Summary draft is taking too long — check back in a few minutes.' : 'The Patient Summary draft failed — see the Patient Summary tab to retry.', timeout: 8000 });
+        return 'handled';
+      }
+      const g = await fetch(`/api/patient-summary?userId=${encodeURIComponent(props.user.userId)}`, { credentials: 'include' });
+      const gj = await g.json().catch(() => ({} as any));
+      const draftText = String(gj?.draft?.text || '').trim();
+      if (!draftText) {
+        $q.notify({ type: 'negative', message: 'The draft finished but could not be loaded — see the Patient Summary tab.', timeout: 8000 });
+        return 'handled';
+      }
+      const pk = getProviderKey(selectedProvider.value);
+      const psLabel = assistantLabelForKey(pk);
+      // Same preload the stored-summary path does: without the file list,
+      // processFileNCitations has nothing to resolve against and every
+      // citation renders as dead text.
+      if (availableUserFiles.value.length === 0) {
+        await loadUserFilesForChooser(false);
+      }
+      messages.value.push({
+        role: 'assistant',
+        content: draftText,
+        authorType: 'assistant',
+        providerKey: pk,
+        authorId: pk,
+        authorLabel: psLabel,
+        name: psLabel
+      });
+      chatDraftSummary.value = draftText;
+      // NO auto-save: the summary shows in chat; saving happens in the
+      // Patient Summary tab's review dialog (explicit consent).
+      originalMessages.value = JSON.parse(JSON.stringify(messages.value));
+      trulyOriginalMessages.value = JSON.parse(JSON.stringify(messages.value));
+      showNewSummaryDialog.value = true;
+      return 'handled';
+    } finally {
+      chatSummaryProgress.value = false;
+    }
+  }
   switch (adv.next.action) {
     case 'add-records':
       $q.notify({ type: 'warning', message: 'Add your health records first — the Patient Summary is built from them. Opening the Setup Wizard...', timeout: 8000 });
       wizardDismissed.value = false;
       showAgentSetupDialog.value = true;
-      return true;
+      return 'gated';
     case 'process-initial-file':
     case 'lists-build-running':
       $q.notify({ type: 'warning', message: 'Your Lists are still being built from your records — opening Lists...', timeout: 6000 });
       myStuffInitialTab.value = 'lists';
       showMyStuffDialog.value = true;
-      return true;
+      return 'gated';
     case 'verify-medications':
       $q.notify({ type: 'warning', message: 'Verify your Current Medications first — the Patient Summary is built from the verified list. Opening Lists...', timeout: 6000 });
       myStuffInitialTab.value = 'lists';
       showMyStuffDialog.value = true;
-      return true;
+      return 'gated';
     case 'start-indexing':
       $q.notify({ type: 'warning', message: 'Your records aren\'t indexed yet — the Patient Summary is built from your indexed knowledge base. Opening the Setup Wizard...', timeout: 8000 });
       wizardDismissed.value = false;
       showAgentSetupDialog.value = true;
       void handleIndexUploadsClick(); // the gate ACTS: indexing starts now
-      return true;
+      return 'gated';
     case 'indexing-running':
       $q.notify({ type: 'warning', message: 'Indexing is running — the summary is one click away once it finishes. Opening the Setup Wizard to show progress...', timeout: 8000 });
       wizardDismissed.value = false;
       showAgentSetupDialog.value = true;
-      return true;
+      return 'gated';
     default:
-      return false; // request-draft / review-summary / complete → proceed
+      return 'fallthrough'; // unexpected decision → regular chat proceeds
   }
 };
 
@@ -3148,46 +3194,14 @@ const sendMessage = async () => {
         // first SEND.
         if (getProviderKey(selectedProvider.value) === 'digitalocean') {
           try {
-            if (await summaryPipelineGate()) {
+            const outcome2 = await requestSummaryViaPipeline();
+            if (outcome2 !== 'fallthrough') {
               isStreaming.value = false;
               return;
             }
-            chatSummaryProgress.value = true;
-            try {
-              const draftRes2 = await fetch('/api/patient-summary/draft', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                credentials: 'include',
-                body: JSON.stringify({ userId: props.user.userId })
-              });
-              const draftJson2 = await draftRes2.json().catch(() => ({}));
-              if (draftRes2.ok && draftJson2.success && draftJson2.summary) {
-                const psLabel2 = assistantLabelForKey(getProviderKey(selectedProvider.value));
-                if (availableUserFiles.value.length === 0) {
-                  await loadUserFilesForChooser(false);
-                }
-                messages.value.push({
-                  role: 'assistant',
-                  content: draftJson2.summary,
-                  authorType: 'assistant',
-                  providerKey: getProviderKey(selectedProvider.value),
-                  authorId: getProviderKey(selectedProvider.value),
-                  authorLabel: psLabel2,
-                  name: psLabel2
-                });
-                chatDraftSummary.value = draftJson2.summary;
-                originalMessages.value = JSON.parse(JSON.stringify(messages.value));
-                trulyOriginalMessages.value = JSON.parse(JSON.stringify(messages.value));
-                isStreaming.value = false;
-                showNewSummaryDialog.value = true;
-                return;
-              }
-              // Draft unavailable (agent deploying etc.) → fall through to
-              // regular chat so the user still gets a response.
-            } finally {
-              chatSummaryProgress.value = false;
-            }
-          } catch { /* gates are best-effort; fall through */ }
+            // Pipeline unreachable → regular chat so the user still gets
+            // a response.
+          } catch { /* best-effort; fall through */ }
         }
       } catch (err) {
         // If fetching summary fails, continue with normal chat flow
@@ -3329,63 +3343,19 @@ const sendMessage = async () => {
     {
       const providerKeyForCheck = getProviderKey(selectedProvider.value);
       if (mentionsSummary && !isUntouchedDefault && providerKeyForCheck === 'digitalocean' && props.user?.userId) {
-        // THE GATES, pipeline edition: the server decides what stands
-        // between this user and a summary (records, lists, meds
-        // verification, indexing) and this surface just acts on it.
+        // THE GATES + the draft, pipeline edition: one advance call with
+        // intent 'draft-summary'. The server gates or runs the draft job;
+        // this surface acts on the decision and renders the result.
         try {
-          if (await summaryPipelineGate()) {
+          const outcome = await requestSummaryViaPipeline();
+          if (outcome !== 'fallthrough') {
             isStreaming.value = false;
             return;
           }
-        } catch { /* gate is best-effort; generation proceeds */ }
-        chatSummaryProgress.value = true;
-        try {
-          const draftRes = await fetch('/api/patient-summary/draft', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'include',
-            body: JSON.stringify({ userId: props.user.userId })
-          });
-          const draftJson = await draftRes.json().catch(() => ({}));
-          if (draftRes.ok && draftJson.success && draftJson.summary) {
-            const psLabel = assistantLabelForKey(providerKeyForCheck);
-            const psMessage: Message = {
-              role: 'assistant',
-              content: draftJson.summary,
-              authorType: 'assistant',
-              providerKey: providerKeyForCheck,
-              authorId: providerKeyForCheck,
-              authorLabel: psLabel,
-              name: psLabel
-            };
-            // Same preload the stored-summary path does: without the file
-            // list, processFileNCitations has nothing to resolve against
-            // and every citation renders as dead text (map §3).
-            if (availableUserFiles.value.length === 0) {
-              await loadUserFilesForChooser(false);
-            }
-            messages.value.push(psMessage);
-            chatDraftSummary.value = draftJson.summary;
-            // NO auto-save: the summary shows in chat; saving happens in
-            // the Patient Summary tab's review dialog (explicit consent).
-            originalMessages.value = JSON.parse(JSON.stringify(messages.value));
-            trulyOriginalMessages.value = JSON.parse(JSON.stringify(messages.value));
-            isStreaming.value = false;
-            showNewSummaryDialog.value = true;
-            return;
-          }
-          if (draftRes.status === 202 && draftJson.message) {
-            // Primary agent still deploying — surface a non-fatal note
-            // and fall through to the regular chat path so the user still
-            // gets *some* response (they can retry once the agent is up).
-            console.warn('[chat→patient-summary] draft pending:', draftJson.message);
-          } else if (!draftRes.ok) {
-            console.warn('[chat→patient-summary] draft failed:', draftJson.error || draftRes.status);
-          }
+          // Pipeline unreachable → regular chat so the user still gets
+          // *some* response.
         } catch (err) {
-          console.warn('[chat→patient-summary] draft request failed; falling back to raw chat:', err);
-        } finally {
-          chatSummaryProgress.value = false;
+          console.warn('[chat→patient-summary] pipeline request failed; falling back to raw chat:', err);
         }
       }
     }
