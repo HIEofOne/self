@@ -9848,6 +9848,114 @@ const runStartIndexing = async (userId) => {
   }
 };
 
+// ── Welcome email (New_User_Flows.md §5 step 4) ────────────────────────
+// A new user who gave a notification email gets ONE welcome email when
+// setup completes or after 2 minutes of inactivity (the client decides
+// which and calls here). It carries their group, a same-browser sign-in
+// link, the maia-log.pdf as of send time, and a help/feedback line.
+// Sent once per account (deduped by a provisioning-log event).
+app.post('/api/welcome-email', async (req, res) => {
+  try {
+    const userId = resolveUserId(req, res);
+    if (!userId) return; // 403 already sent on mismatch
+    const { logPdfBase64 } = req.body || {};
+    const userDoc = await cloudant.getDocument('maia_users', userId);
+    if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+    if (!userDoc.email) return res.json({ success: true, skipped: 'no-email' });
+
+    const log = Array.isArray(userDoc.provisioningLog) ? userDoc.provisioningLog : [];
+    if (log.some((e) => e?.event === 'welcome-email-sent')) {
+      return res.json({ success: true, skipped: 'already-sent' });
+    }
+
+    const resend = await initResend();
+    if (!resend) return res.json({ success: true, skipped: 'email-disabled' });
+
+    const fromEmail = process.env.RESEND_FROM_EMAIL || 'noreply@maia.healthurl.com';
+    const appUrl = process.env.PUBLIC_APP_URL || 'http://localhost:5173';
+    const membership = (userDoc.groupMemberships || [])[0] || null;
+    const groupLine = membership
+      ? `You joined the ${membership.groupName} group (as ${membership.alias || userDoc.userId}).`
+      : `You have not joined a group yet — you can from the Groups tab any time.`;
+
+    const bodyLines = [
+      `Welcome to MAIA! Your private AI and health record are ready.`,
+      ``,
+      groupLine,
+      ``,
+      `Sign back in: ${appUrl}`,
+      `IMPORTANT: open that link in THIS SAME BROWSER — your account lives here until you add a passkey.`,
+      ``,
+      `Your setup log is attached (maia-log.pdf). If you need help or have`,
+      `feedback for the developers, reply to help@trustee.ai and include this`,
+      `email and the attached log.`
+    ];
+
+    const attachments = (typeof logPdfBase64 === 'string' && logPdfBase64.length > 0)
+      ? [{ filename: 'maia-log.pdf', content: logPdfBase64 }]
+      : undefined;
+
+    await resend.emails.send({
+      from: fromEmail,
+      to: userDoc.email,
+      reply_to: 'help@trustee.ai',
+      subject: membership ? `Welcome to MAIA — you're in the ${membership.groupName} group` : 'Welcome to MAIA',
+      text: bodyLines.join('\n'),
+      ...(attachments ? { attachments } : {})
+    });
+    console.log(`[NOTIFY] ✅ Welcome email sent for ${userId} to ${userDoc.email}${attachments ? ' (log attached)' : ''}`);
+
+    // Dedup marker in the provisioning log (also visible in maia-log.pdf).
+    await appendUserProvisioningEvent(userId, {
+      event: 'welcome-email-sent', to: userDoc.email, group: membership?.groupName || null, hadLog: !!attachments
+    }).catch(() => {});
+    res.json({ success: true, sent: true });
+  } catch (error) {
+    console.error('[welcome-email] failed:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Notification email — read/set from the Groups tab (and used by the
+// welcome email + future notifications). Empty string clears it.
+app.get('/api/user/notification-email', async (req, res) => {
+  try {
+    const userId = resolveUserId(req, res);
+    if (!userId) return;
+    const userDoc = await cloudant.getDocument('maia_users', userId);
+    if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+    res.json({ success: true, email: userDoc.email || null });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/user/notification-email', async (req, res) => {
+  try {
+    const userId = resolveUserId(req, res);
+    if (!userId) return;
+    const raw = typeof req.body?.email === 'string' ? req.body.email.trim() : '';
+    if (raw && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw)) {
+      return res.status(400).json({ success: false, error: 'INVALID_EMAIL' });
+    }
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const doc = await cloudant.getDocument('maia_users', userId);
+      if (!doc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+      doc.email = raw || null;
+      doc.updatedAt = new Date().toISOString();
+      try {
+        await cloudant.saveDocument('maia_users', doc);
+        return res.json({ success: true, email: doc.email });
+      } catch (e) {
+        if (e?.statusCode === 409 && attempt < 2) continue;
+        throw e;
+      }
+    }
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 app.get('/api/pipeline', async (req, res) => {
   try {
     const { userId } = req.query;
