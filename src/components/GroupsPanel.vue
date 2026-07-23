@@ -18,6 +18,31 @@
         </div>
       </div>
 
+      <!-- Notification email: add or change the address MAIA uses for
+           welcome + group notifications. Account-level, always visible. -->
+      <div class="groups-rail__notify q-px-md q-pb-sm">
+        <div class="text-caption text-grey-7 q-mb-xs">Notification email</div>
+        <div class="row items-center q-gutter-xs no-wrap">
+          <q-input
+            v-model="notifyEmailInput"
+            dense outlined type="email"
+            placeholder="you@example.com"
+            class="col"
+            :loading="notifyEmailLoading"
+            @keydown.enter.prevent="saveNotifyEmail"
+          />
+          <q-btn
+            dense unelevated color="primary" label="Save"
+            :loading="notifyEmailSaving"
+            :disable="notifyEmailInput.trim() === (notifyEmailSaved || '')"
+            @click="saveNotifyEmail"
+          />
+        </div>
+        <div class="text-caption text-grey-6 q-mt-xs">
+          Used for the welcome email and group notifications. Leave blank to turn off.
+        </div>
+      </div>
+
       <!-- Pending invite / join link (shared card — also shown on the
            Sharing Policies tab, where a new member lands after the wizard) -->
       <PendingJoinCard
@@ -835,8 +860,45 @@ const copyInviteLink = async () => {
 // ── Requests (AS, Phase 1 — every request escalates to you) ─────────
 
 
+// ── Notification email ──────────────────────────────────────────────
+const notifyEmailInput = ref('');
+const notifyEmailSaved = ref<string>('');
+const notifyEmailLoading = ref(false);
+const notifyEmailSaving = ref(false);
+const loadNotifyEmail = async () => {
+  notifyEmailLoading.value = true;
+  try {
+    const r = await fetch(`/api/user/notification-email?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
+    const j = r.ok ? await r.json() : null;
+    notifyEmailSaved.value = j?.email || '';
+    notifyEmailInput.value = j?.email || '';
+  } catch { /* leave blank */ } finally {
+    notifyEmailLoading.value = false;
+  }
+};
+const saveNotifyEmail = async () => {
+  const email = notifyEmailInput.value.trim();
+  notifyEmailSaving.value = true;
+  try {
+    const r = await fetch('/api/user/notification-email', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+      body: JSON.stringify({ userId: props.userId, email })
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.success) throw new Error(j.error === 'INVALID_EMAIL' ? 'That does not look like an email address.' : (j.error || `HTTP ${r.status}`));
+    notifyEmailSaved.value = j.email || '';
+    notifyEmailInput.value = j.email || '';
+    $q.notify({ type: 'positive', message: email ? 'Notification email saved.' : 'Notifications turned off.', timeout: 4000 });
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Could not save email', timeout: 6000 });
+  } finally {
+    notifyEmailSaving.value = false;
+  }
+};
+
 onMounted(async () => {
   loadThreadSeen();
+  void loadNotifyEmail();
   await loadMemberships();
   await Promise.all([loadAllMessages(), loadRequests(), loadAllDirectories()]);
   autoPullTimer = setInterval(autoPull, AUTO_PULL_MS);

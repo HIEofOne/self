@@ -242,7 +242,7 @@
                   <div v-if="!justLooking" class="welcome-door wf-form q-mb-md" style="max-width: 680px; margin: 0 auto; height: auto;">
                     <div class="text-subtitle1 text-weight-medium q-mb-sm">Start as:</div>
 
-                    <div><q-checkbox v-model="wf.privateComputer" dense label="New User on a private computer" /></div>
+                    <div><q-checkbox v-model="wf.privateComputer" dense label="New User on a private computer (Required)" /></div>
                     <div class="text-caption text-grey-7 q-mb-sm" style="margin-left: 28px;">
                       New MAIA accounts need a computer. Mobile access is possible later, after passkey creation.
                     </div>
@@ -1294,6 +1294,12 @@ watch(() => wf.value.joinTrustee, async (on) => {
   } catch { /* shown as … until it loads */ }
 });
 
+// File and folder are mutually exclusive: a folder already contains
+// records, so checking it clears any single-file pick (and vice versa).
+// The estimate and the upload set follow the checkboxes exactly.
+watch(() => wf.value.haveFolder, (on) => { if (on) wf.value.haveFile = false; });
+watch(() => wf.value.haveFile, (on) => { if (on) wf.value.haveFolder = false; });
+
 const wfOnFilePicked = (e: Event) => {
   wfFile.value = (e.target as HTMLInputElement).files?.[0] || null;
 };
@@ -1322,7 +1328,10 @@ const wfPickFolder = async () => {
 // overhead (agent deploy + KB creation), rounded up. 30s floor with no
 // files. The original 10 min/MB guess over-estimated 10x.
 const wfEstimate = computed(() => {
-  const bytes = (wfFile.value?.size || 0) + wfFolderPdfBytes.value;
+  // Only count what is CURRENTLY CHECKED — unchecking a box (or picking
+  // then unchecking) must lower the estimate to match the actual plan.
+  const bytes = (wf.value.haveFile ? (wfFile.value?.size || 0) : 0)
+    + (wf.value.haveFolder ? wfFolderPdfBytes.value : 0);
   if (!bytes) return 'about 30 seconds';
   const minutes = Math.max(2, Math.ceil(1 + bytes / 1e6));
   return `about ${minutes} minutes`;
@@ -1362,7 +1371,10 @@ const welcomeFormStart = async () => {
     try {
       sessionStorage.setItem('maiaWelcomeSetup', JSON.stringify({
         join, // alias defaults to the final userId in the runner
-        fileCount: files.length
+        fileCount: files.length,
+        // Tells the runner to schedule the welcome email (server has the
+        // actual address). Only when the box was checked AND filled.
+        hasEmail: !!(wf.value.emailOptIn && wf.value.email.trim())
       }));
     } catch { /* best-effort */ }
     const user = await createTemporarySession({

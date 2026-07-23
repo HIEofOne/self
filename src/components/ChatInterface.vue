@@ -1688,7 +1688,7 @@ watch(
 // prop). Here we quick-start HEADLESS — the wizard dialog never opens;
 // the rail's wizard ring is the progress indicator — join the chosen
 // group, upload the chosen records, and hand indexing to the pipeline.
-const welcomeSetupPayload = ref<{ join?: { groupId: string; token: string; registryUrl: string; alias?: string } | null; fileCount?: number } | null>(null);
+const welcomeSetupPayload = ref<{ join?: { groupId: string; token: string; registryUrl: string; alias?: string } | null; fileCount?: number; hasEmail?: boolean } | null>(null);
 const welcomeSetupActive = ref(false);
 // ChatInterface can be MOUNTED before the account exists (pre-auth), and
 // App.vue writes the flag at GET-STARTED time — so detection must be
@@ -1724,6 +1724,7 @@ const runWelcomeSetup = async () => {
     }
   });
   handleQuickStartClick(); // quick-start tier, dialog stays closed
+  if (p.hasEmail) armWelcomeEmail(); // send once setup finishes or they idle 2 min
   if (p.join) {
     try {
       // request-join handles JOIN-LINK tokens (open mode admits
@@ -1758,6 +1759,12 @@ const runWelcomeSetup = async () => {
       isUploadingFile.value = false;
     }
   }
+  if (!files.length && p.hasEmail) {
+    // No records → "setup complete" is the primary AI being ready.
+    // Send the welcome email then (the 2-min idle fallback still applies
+    // if the agent is slow and they wander off).
+    void waitForPrimaryAgentReady(props.user.userId).then(() => void sendWelcomeEmail());
+  }
   if (files.length && props.user?.userId) {
     // Let the lists build land, then index — server-run (step 3c) —
     // and WATCH IT TO COMPLETION. Nothing else client-side polls for a
@@ -1772,6 +1779,7 @@ const runWelcomeSetup = async () => {
         await refreshWizardState();     // checklist reflects completion
         logProvisioningEvent({ event: 'kb-indexed-background' });
         $q.notify({ type: 'positive', message: 'Your records are indexed — ask your Private AI anything about them.', timeout: 12000 });
+        void sendWelcomeEmail(); // setup complete → welcome email (with the finished log)
       } else if (status === 'error') {
         $q.notify({ type: 'negative', message: 'Indexing hit a problem — open the Setup Wizard from the sidebar to retry.', timeout: 16000 });
       }
@@ -1803,6 +1811,67 @@ watch(() => showAgentSetupDialog.value, (open) => {
   }
 });
 onUnmounted(() => { if (wizardRefreshTimer) { clearInterval(wizardRefreshTimer); wizardRefreshTimer = null; } });
+
+// ── Welcome email scheduler ────────────────────────────────────────────
+// A welcome-form user who gave a notification email gets ONE email when
+// setup completes (indexing done, or the primary agent is ready for a
+// no-records account) OR after 2 minutes of no clicks/keystrokes,
+// whichever comes first. The email carries the maia-log.pdf as of send
+// time; the server dedupes and no-ops if there is no address.
+const welcomeEmailArmed = ref(false);
+let welcomeEmailSent = false;
+let welcomeLastActivity = Date.now();
+let welcomeInactivityTimer: ReturnType<typeof setInterval> | null = null;
+const noteWelcomeActivity = () => { welcomeLastActivity = Date.now(); };
+
+const teardownWelcomeEmail = () => {
+  if (welcomeInactivityTimer) { clearInterval(welcomeInactivityTimer); welcomeInactivityTimer = null; }
+  window.removeEventListener('click', noteWelcomeActivity, true);
+  window.removeEventListener('keydown', noteWelcomeActivity, true);
+};
+
+const sendWelcomeEmail = async () => {
+  if (welcomeEmailSent || !welcomeEmailArmed.value || !props.user?.userId) return;
+  welcomeEmailSent = true; // at most once — set before any await
+  try {
+    const logPdfBase64 = await generateSetupLogPdf({ returnBase64: true }).catch(() => undefined);
+    await fetch('/api/welcome-email', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+      body: JSON.stringify({ userId: props.user.userId, logPdfBase64: logPdfBase64 || undefined })
+    });
+    logProvisioningEvent({ event: 'welcome-email-triggered' });
+  } catch (e) {
+    console.warn('[welcome-email] send failed:', e);
+  } finally {
+    teardownWelcomeEmail();
+  }
+};
+
+const armWelcomeEmail = () => {
+  if (welcomeEmailArmed.value || welcomeEmailSent) return;
+  welcomeEmailArmed.value = true;
+  welcomeLastActivity = Date.now();
+  window.addEventListener('click', noteWelcomeActivity, true);
+  window.addEventListener('keydown', noteWelcomeActivity, true);
+  welcomeInactivityTimer = setInterval(() => {
+    if (Date.now() - welcomeLastActivity >= 120000) void sendWelcomeEmail();
+  }, 15000);
+};
+onUnmounted(() => teardownWelcomeEmail());
+
+/** Resolve once the primary Private AI endpoint is ready (no-records
+ *  "setup complete" signal for the welcome email). Gives up after 10 min. */
+const waitForPrimaryAgentReady = async (userId: string): Promise<void> => {
+  const t0 = Date.now();
+  while (Date.now() - t0 < 10 * 60 * 1000) {
+    try {
+      const r = await fetch(`/api/user-status?userId=${encodeURIComponent(userId)}`, { credentials: 'include' });
+      const j = r.ok ? await r.json() : null;
+      if (j?.agentReady) return;
+    } catch { /* keep polling */ }
+    await new Promise((res) => setTimeout(res, 10000));
+  }
+};
 
 const wizardRestoreActive = computed(() => !!props.rehydrationActive && (Array.isArray(props.rehydrationFiles) ? props.rehydrationFiles.length > 0 : false));
 const showRestoreCompleteDialog = ref(false);
@@ -4873,9 +4942,12 @@ const runAutoWizard = async () => {
   }
 };
 
-/** Generate maia-log.pdf summary and write to local folder. */
-const generateSetupLogPdf = async (opts: { download?: boolean } = {}) => {
-  if (!localFolderHandle.value && !opts.download) return;
+/** Generate maia-log.pdf summary and write to local folder.
+ *  `returnBase64` returns the PDF as a base64 string (for the welcome
+ *  email attachment) instead of writing to the folder — works with no
+ *  folder connected. */
+const generateSetupLogPdf = async (opts: { download?: boolean; returnBase64?: boolean } = {}): Promise<string | void> => {
+  if (!localFolderHandle.value && !opts.download && !opts.returnBase64) return;
   // Refresh providers right before rendering so a freshly deployed agent (e.g. after
   // a long restore) is reflected in the "Chat providers:" header. Without this, the
   // PDF can be generated before the post-restore providers refetch settles.
@@ -5338,6 +5410,10 @@ const generateSetupLogPdf = async (opts: { download?: boolean } = {}) => {
   // only, not reference docs. If you want the explainer, read
   // Documentation/Clinical.md §1 directly.)
 
+  if (opts.returnBase64) {
+    // datauristring → "data:application/pdf;filename=…;base64,XXXX"
+    return doc.output('datauristring').split(',')[1] || '';
+  }
   if (opts.download) {
     doc.save('maia-log.pdf');
     return;
