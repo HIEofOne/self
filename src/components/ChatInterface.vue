@@ -1759,9 +1759,23 @@ const runWelcomeSetup = async () => {
     }
   }
   if (files.length && props.user?.userId) {
-    // Let the lists build land, then index — server-run (step 3c).
-    await waitForStageDone(props.user.userId, 'listsBuilt', 120000).catch(() => null);
-    void advancePipeline(props.user.userId, 'index-records');
+    // Let the lists build land, then index — server-run (step 3c) —
+    // and WATCH IT TO COMPLETION. Nothing else client-side polls for a
+    // server-run indexing job; without this, daniel29 sat 44 minutes on
+    // a stale "Indexing…" while the server had long finished.
+    const uid = props.user.userId;
+    await waitForStageDone(uid, 'listsBuilt', 120000).catch(() => null);
+    void advancePipeline(uid, 'index-records').then(async () => {
+      const status = await waitForStageDone(uid, 'indexed', 30 * 60 * 1000, 15000);
+      if (status === 'done') {
+        wizardFlowPhase.value = 'done'; // stop the rail's setup ring
+        await refreshWizardState();     // checklist reflects completion
+        logProvisioningEvent({ event: 'kb-indexed-background' });
+        $q.notify({ type: 'positive', message: 'Your records are indexed — ask your Private AI anything about them.', timeout: 12000 });
+      } else if (status === 'error') {
+        $q.notify({ type: 'negative', message: 'Indexing hit a problem — open the Setup Wizard from the sidebar to retry.', timeout: 16000 });
+      }
+    });
   }
   } catch (e) {
     console.error('[welcome-setup] runner failed:', e);
@@ -1774,6 +1788,21 @@ const runWelcomeSetup = async () => {
 // onMounted covers mounted-after-auth; the watch covers auth-after-mount.
 watch(() => props.user?.userId, (uid) => { if (uid) void runWelcomeSetup(); });
 onMounted(() => { void runWelcomeSetup(); });
+
+// While the wizard is OPEN, keep its checklist honest: indexing and
+// drafts may be running SERVER-side (pipeline) with no client job loop —
+// refreshWizardState reads the persisted status, so a stale "Indexing…"
+// row self-corrects within 10s of server completion.
+let wizardRefreshTimer: ReturnType<typeof setInterval> | null = null;
+watch(() => showAgentSetupDialog.value, (open) => {
+  if (open && !wizardRefreshTimer) {
+    wizardRefreshTimer = setInterval(() => { void refreshWizardState(); }, 10000);
+  } else if (!open && wizardRefreshTimer) {
+    clearInterval(wizardRefreshTimer);
+    wizardRefreshTimer = null;
+  }
+});
+onUnmounted(() => { if (wizardRefreshTimer) { clearInterval(wizardRefreshTimer); wizardRefreshTimer = null; } });
 
 const wizardRestoreActive = computed(() => !!props.rehydrationActive && (Array.isArray(props.rehydrationFiles) ? props.rehydrationFiles.length > 0 : false));
 const showRestoreCompleteDialog = ref(false);
@@ -1797,14 +1826,14 @@ const requestSummaryViaPipeline = async (): Promise<'gated' | 'handled' | 'fallt
     try {
       const status = await waitForStageDone(props.user.userId, 'summaryDrafted');
       if (status !== 'done') {
-        $q.notify({ type: 'negative', message: status === 'timeout' ? 'The Patient Summary draft is taking too long — check back in a few minutes.' : 'The Patient Summary draft failed — see the Patient Summary tab to retry.', timeout: 8000 });
+        $q.notify({ type: 'negative', message: status === 'timeout' ? 'The Patient Summary draft is taking too long — check back in a few minutes.' : 'The Patient Summary draft failed — see the Patient Summary tab to retry.', timeout: 16000 });
         return 'handled';
       }
       const g = await fetch(`/api/patient-summary?userId=${encodeURIComponent(props.user.userId)}`, { credentials: 'include' });
       const gj = await g.json().catch(() => ({} as any));
       const draftText = String(gj?.draft?.text || '').trim();
       if (!draftText) {
-        $q.notify({ type: 'negative', message: 'The draft finished but could not be loaded — see the Patient Summary tab.', timeout: 8000 });
+        $q.notify({ type: 'negative', message: 'The draft finished but could not be loaded — see the Patient Summary tab.', timeout: 16000 });
         return 'handled';
       }
       const pk = getProviderKey(selectedProvider.value);
@@ -1837,29 +1866,29 @@ const requestSummaryViaPipeline = async (): Promise<'gated' | 'handled' | 'fallt
   }
   switch (adv.next.action) {
     case 'add-records':
-      $q.notify({ type: 'warning', message: 'Add your health records first — the Patient Summary is built from them. Opening the Setup Wizard...', timeout: 8000 });
+      $q.notify({ type: 'warning', message: 'Add your health records first — the Patient Summary is built from them. Opening the Setup Wizard...', timeout: 16000 });
       wizardDismissed.value = false;
       showAgentSetupDialog.value = true;
       return 'gated';
     case 'process-initial-file':
     case 'lists-build-running':
-      $q.notify({ type: 'warning', message: 'Your Lists are still being built from your records — opening Lists...', timeout: 6000 });
+      $q.notify({ type: 'warning', message: 'Your Lists are still being built from your records — opening Lists...', timeout: 12000 });
       myStuffInitialTab.value = 'lists';
       showMyStuffDialog.value = true;
       return 'gated';
     case 'verify-medications':
-      $q.notify({ type: 'warning', message: 'Verify your Current Medications first — the Patient Summary is built from the verified list. Opening Lists...', timeout: 6000 });
+      $q.notify({ type: 'warning', message: 'Verify your Current Medications first — the Patient Summary is built from the verified list. Opening Lists...', timeout: 12000 });
       myStuffInitialTab.value = 'lists';
       showMyStuffDialog.value = true;
       return 'gated';
     case 'start-indexing':
-      $q.notify({ type: 'warning', message: 'Your records aren\'t indexed yet — the Patient Summary is built from your indexed knowledge base. Opening the Setup Wizard...', timeout: 8000 });
+      $q.notify({ type: 'warning', message: 'Your records aren\'t indexed yet — the Patient Summary is built from your indexed knowledge base. Opening the Setup Wizard...', timeout: 16000 });
       wizardDismissed.value = false;
       showAgentSetupDialog.value = true;
       void handleIndexUploadsClick(); // the gate ACTS: indexing starts now
       return 'gated';
     case 'indexing-running':
-      $q.notify({ type: 'warning', message: 'Indexing is running — the summary is one click away once it finishes. Opening the Setup Wizard to show progress...', timeout: 8000 });
+      $q.notify({ type: 'warning', message: 'Indexing is running — the summary is one click away once it finishes. Opening the Setup Wizard to show progress...', timeout: 16000 });
       wizardDismissed.value = false;
       showAgentSetupDialog.value = true;
       return 'gated';
@@ -4249,6 +4278,10 @@ const toggleWizardKbCheckbox = async (file: { bucketKey?: string | null; inKnowl
 const dismissWizard = () => {
   wizardDismissed.value = true;
   showAgentSetupDialog.value = false;
+  // Closing the wizard means "let me chat" — close the Workbook panel
+  // too. Long operations (indexing, drafts) keep running server-side;
+  // the chat works throughout.
+  showMyStuffDialog.value = false;
   stopAgentSetupTimer();
   if (initialLoadComplete.value && providers.value.length > 0 && !providers.value.includes('digitalocean')) {
     showPrivateUnavailableDialog.value = true;
@@ -4499,7 +4532,7 @@ const startRecordsUpgrade = async () => {
       $q.notify({
         type: 'info',
         message: 'No health records found in your MAIA folder yet. Copy your record PDFs into the folder, then click ADD RECORDS again.',
-        timeout: 8000
+        timeout: 16000
       });
       return;
     }
@@ -5883,7 +5916,7 @@ const handleStage3Index = async (overrideNames?: string[], fromRestore = false) 
     if (p?.pipeline.stages.indexed?.status === 'running' || p?.pipeline.stages.indexed?.status === 'done') {
       logWizardEvent('stage3-client-skip-server-indexing', { reason: message });
     } else {
-      $q.notify({ type: 'negative', message, timeout: 8000 });
+      $q.notify({ type: 'negative', message, timeout: 16000 });
     }
     restoreIndexingActive.value = false;
     stage3IndexingPending.value = false;
@@ -8609,7 +8642,7 @@ watch(
       message: hasPendingJoin
         ? 'Your private AI is ready. One more step — review the group\'s policies and join.'
         : 'Your private AI is ready. You can join groups and chat now — add health records anytime later.',
-      timeout: 8000
+      timeout: 16000
     });
     void refreshWizardState(); // pick up workflowStage 'chat_ready'
   }

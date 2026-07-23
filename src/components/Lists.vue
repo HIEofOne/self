@@ -1603,6 +1603,9 @@ const clearVerifyRequirement = () => {
 const handleVerifyCurrentMedications = async () => {
   const medsToSave = currentMedications.value || 'None';
   await saveCurrentMedicationsValue(medsToSave, true, true, true);
+  // Verification is the errand — take the user back to the chat (long
+  // operations like indexing keep running server-side; chatting works).
+  emit('back-to-chat');
 };
 
 // Step 4 (modal diet): L1 is the meds gate's destination — log open + choice.

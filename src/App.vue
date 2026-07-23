@@ -235,7 +235,11 @@
                        checkbox HERE, answered before GET STARTED. Setup
                        then runs with zero dialogs and lands in the chat
                        with the Workbook sidebar open. -->
-                  <div v-if="!justLooking" class="welcome-door q-mb-md" style="max-width: 680px; margin: 0 auto;">
+                  <!-- height:auto overrides .welcome-door's height:100%
+                       (meant for equal-height door grids) which stretched
+                       this card to ~2x its content and pushed the footer
+                       below the fold. -->
+                  <div v-if="!justLooking" class="welcome-door wf-form q-mb-md" style="max-width: 680px; margin: 0 auto; height: auto;">
                     <div class="text-subtitle1 text-weight-medium q-mb-sm">Start as:</div>
 
                     <div><q-checkbox v-model="wf.privateComputer" dense label="New User on a private computer" /></div>
@@ -251,7 +255,7 @@
                     <template v-if="trusteeGroup">
                       <div><q-checkbox v-model="wf.joinTrustee" dense :label="`Willing to join the ${trusteeGroup.name} user group (recommended)`" /></div>
                       <div v-if="wf.joinTrustee" class="text-caption q-mb-sm" style="margin-left: 28px;">
-                        MAIA ID&nbsp;<strong>&lt;&nbsp;{{ wfSuggestedId || '…' }}&nbsp;&gt;</strong>
+                        MAIA ID&nbsp;<strong>{{ wfSuggestedId || '…' }}</strong>
                         <span class="text-grey-7">&nbsp;You can add a display name later.</span>
                       </div>
                     </template>
@@ -1313,12 +1317,15 @@ const wfPickFolder = async () => {
   } catch { /* picker cancelled */ }
 };
 
-// 10 minutes per MB of PDFs, rounded up to the next minute; 30s floor.
+// Calibrated against real runs (0.5 MB → ~2 min; 12.8 MB → ~10 min on
+// test.agropper.xyz): ~1 minute per MB of PDFs plus a minute of fixed
+// overhead (agent deploy + KB creation), rounded up. 30s floor with no
+// files. The original 10 min/MB guess over-estimated 10x.
 const wfEstimate = computed(() => {
   const bytes = (wfFile.value?.size || 0) + wfFolderPdfBytes.value;
   if (!bytes) return 'about 30 seconds';
-  const minutes = Math.max(1, Math.ceil((bytes / 1e6) * 10));
-  return `about ${minutes} minute${minutes === 1 ? '' : 's'}`;
+  const minutes = Math.max(2, Math.ceil(1 + bytes / 1e6));
+  return `about ${minutes} minutes`;
 });
 
 /** GET STARTED: the entire setup with zero dialogs. Checkbox 1 IS the
@@ -1368,8 +1375,17 @@ const welcomeFormStart = async () => {
       return;
     }
     if (wfFolderHandle.value) {
-      // The picked folder becomes the account's auto-backup home.
+      // The picked folder becomes the account's auto-backup home — the
+      // SAME treatment every other folder-connect path gives it: store
+      // the handle, make it the live folder, and write the .webloc
+      // shortcut so the folder points back to this MAIA.
       try { await storeDirectoryHandle(user.userId, wfFolderHandle.value); } catch { /* optional */ }
+      try {
+        localFolderHandle.value = wfFolderHandle.value;
+        localFolderName.value = wfFolderHandle.value.name;
+        const { writeWeblocFile } = await import('./utils/localFolder');
+        await writeWeblocFile(wfFolderHandle.value, window.location.origin, { userId: user.userId });
+      } catch { /* shortcut is best-effort */ }
     }
   } catch (error) {
     try { sessionStorage.removeItem('maiaWelcomeSetup'); } catch { /* cleanup */ }
@@ -4128,6 +4144,12 @@ onMounted(async () => {
   height: 100%;
   background: #fff;
 }
+/* The setup form reads 20% larger than the default door text —
+   checkbox labels, notes, and the estimate line. */
+.wf-form .q-checkbox__label { font-size: 16.8px; }
+.wf-form .text-caption { font-size: 14.4px; }
+.wf-form .text-body2 { font-size: 16.8px; }
+.wf-form .text-subtitle1 { font-size: 19px; }
 .welcome-door--accent {
   border: 2px solid #1976d2;
 }
