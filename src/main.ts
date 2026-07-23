@@ -16,6 +16,14 @@ app.use(Quasar, {
   plugins: {
     Dialog,
     Notify
+  },
+  config: {
+    // Toasts linger long enough to read (default was 5s) and every one
+    // carries an X so nobody has to wait a notification out.
+    notify: {
+      timeout: 10000,
+      actions: [{ icon: 'close', color: 'white', round: true, dense: true }]
+    }
   }
 });
 

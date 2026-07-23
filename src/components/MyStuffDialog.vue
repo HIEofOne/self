@@ -4497,11 +4497,13 @@ const handleReplaceSummary = async (replaceStrategy: 'keep' | 'oldest' | 'newest
       $q.notify({
         type: 'positive',
         message: replaceStrategy === 'keep' ? 'Current summary kept' : 'Patient summary saved successfully!',
-        timeout: 3000
+        timeout: 12000
       });
     }
-    
+
     newSummaryToReplace.value = '';
+    // Saving the summary completes the workbook errand — back to chat.
+    closeDialog();
   } catch (error) {
     console.error('Error saving summary:', error);
     if ($q && typeof $q.notify === 'function') {
@@ -6704,14 +6706,14 @@ const requestNewSummary = async () => {
     switch (adv.next.action) {
       case 'process-initial-file':
       case 'lists-build-running':
-        $q.notify({ type: 'warning', message: 'Your Lists are still being built from your records — opening Lists...', timeout: 6000 });
+        $q.notify({ type: 'warning', message: 'Your Lists are still being built from your records — opening Lists...', timeout: 12000 });
         currentTab.value = 'lists';
         return;
       case 'verify-medications':
         $q.notify({
           type: 'warning',
           message: 'Verify your Current Medications first — the Patient Summary is built from the verified list. Opening Lists...',
-          timeout: 6000
+          timeout: 12000
         });
         currentTab.value = 'lists';
         return;
@@ -6721,7 +6723,7 @@ const requestNewSummary = async () => {
         $q.notify({
           type: 'warning',
           message: 'Your records aren\'t indexed yet — starting the Setup Wizard indexing now. The summary is one click away once it finishes.',
-          timeout: 8000
+          timeout: 16000
         });
         emit('index-now-triggered');
         return;
