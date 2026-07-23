@@ -1803,9 +1803,19 @@ onMounted(() => { void runWelcomeSetup(); });
 // row self-corrects within 10s of server completion.
 let wizardRefreshTimer: ReturnType<typeof setInterval> | null = null;
 watch(() => showAgentSetupDialog.value, (open) => {
-  if (open && !wizardRefreshTimer) {
-    wizardRefreshTimer = setInterval(() => { void refreshWizardState(); }, 10000);
-  } else if (!open && wizardRefreshTimer) {
+  if (open) {
+    if (!wizardRefreshTimer) {
+      wizardRefreshTimer = setInterval(() => { void refreshWizardState(); }, 10000);
+    }
+    // The elapsed counters ("Index Knowledge Base (Xm Ys)", draft, etc.)
+    // only advance while stage3ElapsedTimer ticks stage3ElapsedTick. In
+    // server-run paths (welcome form) that tick was never started, so a
+    // freshly-opened wizard showed frozen timers. Starting it on open
+    // (idempotent) makes every open show live counters; refreshWizardState
+    // is also kicked immediately so a stale row corrects at once.
+    startStage3ElapsedTimer();
+    void refreshWizardState();
+  } else if (wizardRefreshTimer) {
     clearInterval(wizardRefreshTimer);
     wizardRefreshTimer = null;
   }
@@ -3853,6 +3863,10 @@ const refreshWizardState = async () => {
   let indexedCountFromFiles: number | null = null;
   let indexingJobIdFromFiles: string | null = null;
   let tokensFromFiles: string | null = null;
+  // Server-run indexing status (welcome form / pipeline) — hoisted so the
+  // completion branch (a sibling of the files block) can honor it.
+  let serverIndexPhase: string | null = null;
+  let serverIndexStartedAt: string | null = null;
   let resumeSnapshot: { hasSummary: boolean; hasDraft: boolean } | null = null;
   try {
     const [statusResponse, filesResponse, summaryResponse] = await Promise.all([
@@ -3979,6 +3993,8 @@ const refreshWizardState = async () => {
         wizardStage3Files.value = fileEntries;
       }
       const storedStatus = filesResult?.kbIndexingStatus || null;
+      serverIndexPhase = storedStatus?.phase || null;
+      serverIndexStartedAt = storedStatus?.startedAt || null;
       wizardKbIndexedKeys.value = Array.isArray(filesResult?.kbIndexedBucketKeys) ? filesResult.kbIndexedBucketKeys : [];
       if (fileEntries.length > 0) {
         const pendingName = stage3PendingUploadName.value;
@@ -4187,7 +4203,31 @@ const refreshWizardState = async () => {
             progress: 1
           };
         }
-        if (indexingStatus.value?.phase !== 'indexing' && !wizardPreparingRecords.value) {
+        // Server-run indexing (welcome form / pipeline, step 3c) sets
+        // kbIndexingStatus but not always the kbIndexingActive flag the
+        // branch above keys on — so we'd land here and stop the timer,
+        // leaving the wizard's "Indexing…" row frozen with no elapsed.
+        // Honor an in-progress SERVER phase: set the start time from the
+        // server, mark indexing, and keep the tick running.
+        const serverIndexing = (serverIndexPhase === 'indexing' || serverIndexPhase === 'starting')
+          && !stage3CompleteFromFiles;
+        if (serverIndexing) {
+          if (!stage3IndexingStartedAt.value) {
+            const s = serverIndexStartedAt ? Date.parse(serverIndexStartedAt) : NaN;
+            stage3IndexingStartedAt.value = !isNaN(s) ? s : Date.now();
+          }
+          stage3IndexingCompletedAt.value = null;
+          if (indexingStatus.value?.phase !== 'indexing') {
+            indexingStatus.value = {
+              active: true,
+              phase: 'indexing',
+              tokens: indexingStatus.value?.tokens || tokensFromFiles || '0',
+              filesIndexed: indexingStatus.value?.filesIndexed || 0,
+              progress: 0
+            };
+          }
+          startStage3ElapsedTimer();
+        } else if (indexingStatus.value?.phase !== 'indexing' && !wizardPreparingRecords.value) {
           stopStage3ElapsedTimer();
         }
       }
@@ -8718,7 +8758,15 @@ watch(
       message: hasPendingJoin
         ? 'Your private AI is ready. One more step — review the group\'s policies and join.'
         : 'Your private AI is ready. You can join groups and chat now — add health records anytime later.',
-      timeout: 16000
+      timeout: 16000,
+      // When the toast times out or the user dismisses it, open the Setup
+      // Wizard so they can watch the rest of setup (e.g. records still
+      // indexing) and close it to chat when they're ready.
+      onDismiss: () => {
+        showMyStuffDialog.value = false;
+        wizardDismissed.value = false;
+        showAgentSetupDialog.value = true;
+      }
     });
     void refreshWizardState(); // pick up workflowStage 'chat_ready'
   }

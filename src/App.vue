@@ -242,7 +242,7 @@
                   <div v-if="!justLooking" class="welcome-door wf-form q-mb-md" style="max-width: 680px; margin: 0 auto; height: auto;">
                     <div class="text-subtitle1 text-weight-medium q-mb-sm">Start as:</div>
 
-                    <div><q-checkbox v-model="wf.privateComputer" dense label="New User on a private computer (Required)" /></div>
+                    <div><q-checkbox v-model="wf.privateComputer" dense label="New User on a private computer (required)" /></div>
                     <div class="text-caption text-grey-7 q-mb-sm" style="margin-left: 28px;">
                       New MAIA accounts need a computer. Mobile access is possible later, after passkey creation.
                     </div>
