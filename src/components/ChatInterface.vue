@@ -676,8 +676,11 @@
               </q-item-section>
             </q-item>
 
-            <!-- Quick-start: records/KB/summary intentionally skipped -->
-            <q-item v-if="wizardQuickStart" dense class="q-py-xs">
+            <!-- Quick-start with NO records: the skipped line. When the
+                 welcome form supplied records (quick-start tier still, but
+                 files ARE present and indexing), the Index row above owns
+                 the story — this line would contradict it. -->
+            <q-item v-if="wizardQuickStart && !(setupChecklistFiles.length > 0 || stage3HasFiles)" dense class="q-py-xs">
               <q-item-section avatar style="min-width: 28px">
                 <q-icon name="bolt" color="primary" size="sm" />
               </q-item-section>
