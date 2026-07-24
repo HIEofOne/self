@@ -309,6 +309,16 @@
                     </div>
                   </div>
 
+                  <!-- Sharing-policy demo: build a rule, see MAIA decide -->
+                  <div v-if="justLooking" class="q-mb-lg" style="border-top: 1px solid #eee; padding-top: 16px; max-width: 940px; margin: 0 auto;">
+                    <div class="text-subtitle1 text-weight-medium q-mb-xs" style="text-align:center">How your sharing rules work</div>
+                    <div class="text-caption text-grey-7 q-mb-md" style="text-align:center; max-width: 640px; margin: 0 auto;">
+                      In MAIA you don’t hand your record to a company — you write rules for it. Build one here and
+                      send it a pretend request to see exactly what MAIA would do. Nothing is saved; this is just a demo.
+                    </div>
+                    <PolicyCardBuilder mode="demo" />
+                  </div>
+
                   <!-- How MAIA is different (generic; named comparisons live on Substack) -->
                   <div v-if="justLooking" class="q-mb-md" style="border-top: 1px solid #eee; padding-top: 12px;">
                     <table class="welcome-compare-table">
@@ -1084,6 +1094,7 @@ onUnmounted(() => {
 import PasskeyAuth from './components/PasskeyAuth.vue';
 import RestoreWizard from './components/RestoreWizard.vue';
 import ChatInterface from './components/ChatInterface.vue';
+import PolicyCardBuilder from './components/PolicyCardBuilder.vue';
 import DeepLinkAccess from './components/DeepLinkAccess.vue';
 import AdminUsers from './components/AdminUsers.vue';
 import { useQuasar } from 'quasar';

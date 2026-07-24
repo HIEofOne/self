@@ -19,8 +19,8 @@ const USERS_DB = 'maia_users';
 const MAX_POLICIES = 200;
 
 const PURPOSES = ['any', 'peer-support', 'clinical', 'research', 'public-health', 'marketing'];
-const SCOPES = ['meds-allergies', 'patient-summary', 'not-sensitive', 'everything'];
-const SIGNATURES = ['unverified', 'verified-email', 'group-member', 'npi', 'doximity'];
+const SCOPES = ['notification-only', 'meds-allergies', 'patient-summary', 'not-sensitive', 'everything', 'ah-category'];
+const SIGNATURES = ['unverified', 'verified-email', 'group-member', 'npi', 'doximity', 'verified-by-me'];
 const PAYMENTS = ['none', 'spam-deposit', 'notification-deposit', 'ai-prepay', 'sharing-payment'];
 const PARTY_TYPES = ['anyone', 'group', 'peer'];
 const OUTCOMES = ['allow', 'deny'];
@@ -40,6 +40,9 @@ export const normalizeCard = (raw) => {
   if (!PAYMENTS.includes(e.payment)) return null;
   const card = {
     outcome: raw.outcome,
+    // For deny cards: 'respond' sends a reason for the decline; anything
+    // else (incl. absent, for legacy cards) is a silent drop.
+    ...(raw.outcome === 'deny' ? { denyMode: raw.denyMode === 'respond' ? 'respond' : 'silent' } : {}),
     enabled: raw.enabled !== false,
     provenance: typeof raw.provenance === 'string' && raw.provenance.startsWith('group:')
       ? raw.provenance.slice(0, 80)
@@ -58,6 +61,7 @@ export const normalizeCard = (raw) => {
       },
       purpose: e.purpose,
       scope: e.scope,
+      ...(e.scope === 'ah-category' && e.ahCategory ? { ahCategory: String(e.ahCategory).slice(0, 60) } : {}),
       filtered: e.filtered !== false, // privacy-filtered response is the safe default
       signature: e.signature,
       payment: e.payment
@@ -78,8 +82,9 @@ export const normalizeCard = (raw) => {
 export const POLICY_SCOPES = SCOPES;
 export const POLICY_PURPOSES = PURPOSES;
 
-const SIGNATURE_RANK = { unverified: 0, 'verified-email': 1, 'group-member': 2, npi: 3, doximity: 3 };
+const SIGNATURE_RANK = { unverified: 0, 'verified-email': 1, 'group-member': 2, npi: 3, doximity: 3, 'verified-by-me': 4 };
 const SCOPE_LABELS = {
+  'notification-only': 'a notification (no record data)',
   everything: 'everything in my record',
   'not-sensitive': 'my record except sensitive categories',
   'meds-allergies': 'Current Medications and Allergies',
@@ -97,12 +102,14 @@ export const policySentence = (card) => {
   const who = e.party.type === 'group' ? `Anyone in ${e.party.groupName || 'the group'}`
     : e.party.type === 'peer' ? (e.party.alias || 'This member') : 'Anyone';
   const sig = e.signature === 'unverified' ? '(no identity check)' : `with ${e.signature} identity or stronger`;
-  const verb = card.outcome === 'allow' ? 'may receive' : 'may NOT receive';
-  const what = SCOPE_LABELS[e.scope] || e.scope;
+  const verb = card.outcome === 'allow'
+    ? 'may receive'
+    : (card.denyMode === 'respond' ? 'is declined, with a reason, for' : 'is silently denied');
+  const what = e.scope === 'ah-category' ? `my ${e.ahCategory || 'Apple Health'} data` : (SCOPE_LABELS[e.scope] || e.scope);
   const why = e.purpose === 'any' ? 'for any purpose' : `for ${e.purpose} use`;
-  const filt = e.filtered !== false ? 'privacy-filtered' : 'unfiltered';
+  const filt = card.outcome === 'allow' ? (e.filtered !== false ? ', privacy-filtered' : ', unfiltered') : '';
   const pay = e.payment === 'none' ? '' : `, if they provide ${PAYMENT_LABELS[e.payment] || e.payment}`;
-  return `${who} ${sig} ${verb} ${what} ${why}, ${filt}${pay}.`;
+  return `${who} ${sig} ${verb} ${what} ${why}${filt}${pay}.`;
 };
 
 const cardMatches = (card, req) => {
@@ -111,6 +118,7 @@ const cardMatches = (card, req) => {
   if (e.party.type === 'peer' && req.party.pairwiseId !== e.party.pairwiseId) return false;
   if (e.purpose !== 'any' && e.purpose !== req.purpose) return false;
   if (e.scope !== req.scope) return false;
+  if (e.scope === 'ah-category' && e.ahCategory && req.ahCategory && e.ahCategory !== req.ahCategory) return false;
   if ((SIGNATURE_RANK[req.signature] ?? 0) < (SIGNATURE_RANK[e.signature] ?? 0)) return false;
   if (e.payment !== 'none' && req.payment !== e.payment) return false;
   return true;

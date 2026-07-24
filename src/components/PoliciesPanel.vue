@@ -175,30 +175,24 @@
 
     <!-- Editor: the sentence IS the policy; chips fill the slots -->
     <q-dialog v-model="showEditor">
-      <q-card style="min-width: 520px; max-width: 680px">
-        <q-card-section>
+      <q-card style="min-width: 720px; max-width: 940px">
+        <q-card-section class="row items-center q-pb-none">
           <div class="text-h6">{{ editingId ? 'Edit policy' : 'New policy' }}</div>
-          <div class="q-mt-sm q-pa-sm" style="background: #f5f5f5; border-radius: 8px">
-            <span class="text-body2">{{ previewSentence }}</span>
-          </div>
+          <q-space />
+          <q-btn flat round dense icon="close" v-close-popup :disable="saving" />
         </q-card-section>
-        <q-card-section class="q-pt-none">
-          <div class="row q-col-gutter-sm">
-            <q-select v-model="form.outcome" :options="[{value:'allow',label:'Allow automatically'},{value:'deny',label:'Deny silently'}]" emit-value map-options dense outlined label="Decision" class="col-6" />
-            <q-select v-model="form.partyKind" :options="editorPartyOptions" emit-value map-options dense outlined label="Requesting party" class="col-6" />
-            <q-select v-model="form.signature" :options="SIGNATURE_OPTIONS" emit-value map-options dense outlined label="Minimum identity" class="col-6" />
-            <q-select v-model="form.purpose" :options="PURPOSE_OPTIONS" emit-value map-options dense outlined label="Purpose" class="col-6" />
-            <q-select v-model="form.scope" :options="SCOPE_OPTIONS" emit-value map-options dense outlined label="Scope" class="col-6" />
-            <q-select v-model="form.payment" :options="PAYMENT_OPTIONS" emit-value map-options dense outlined label="Required payment" class="col-6" />
-            <div class="col-6 row items-center">
-              <q-toggle v-model="form.filtered" dense label="Privacy-filtered response" />
-            </div>
+        <q-card-section>
+          <div class="text-caption text-grey-7 q-mb-md">
+            Pick one cell in each column. MAIA writes the rule below — then try it against a pretend request before you save.
           </div>
+          <PolicyCardBuilder
+            :key="editorKey"
+            mode="edit"
+            :existing="editingCard"
+            :saving="saving"
+            @save="onBuilderSave"
+          />
         </q-card-section>
-        <q-card-actions align="right">
-          <q-btn flat label="Cancel" v-close-popup :disable="saving" />
-          <q-btn unelevated color="primary" :label="editingId ? 'Save' : 'Create'" :loading="saving" @click="saveCard" />
-        </q-card-actions>
       </q-card>
     </q-dialog>
   </div>
@@ -207,6 +201,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
 import PendingJoinCard from './PendingJoinCard.vue';
+import PolicyCardBuilder from './PolicyCardBuilder.vue';
 import { useQuasar } from 'quasar';
 import {
   sentenceFor, evaluate,
@@ -217,6 +212,12 @@ import {
 const $q = useQuasar();
 const props = defineProps<{ userId: string }>();
 const emit = defineEmits<{ 'group-joined': [] }>();
+
+// The card being edited, handed to the builder to prefill its matrix.
+const editingCard = ref<PolicyCard | null>(null);
+// Bumped on each open so the builder remounts with fresh state.
+const editorKey = ref(0);
+const onBuilderSave = (card: PolicyCard) => { saveBuiltCard(card); };
 
 /** The group a pending invite/join link points at (from PendingJoinCard).
  *  Its per-group switches render DISABLED before the join, so the user
@@ -357,10 +358,6 @@ const simPartyOptions = computed(() => [
   { value: 'anyone', label: 'A stranger (not in your groups)' },
   ...memberships.value.map((m) => ({ value: `group:${m.groupId}`, label: `A member of ${m.groupName}` }))
 ]);
-const editorPartyOptions = computed(() => [
-  { value: 'anyone', label: 'Anyone' },
-  ...memberships.value.map((m) => ({ value: `group:${m.groupId}`, label: `Anyone in ${m.groupName}` }))
-]);
 const toRequest = (partyKind: string, purpose: Purpose, scope: Scope, signature: Signature, payment: Payment): PolicyRequest => ({
   party: partyKind.startsWith('group:') ? { type: 'group', groupId: partyKind.slice(6) } : { type: 'anyone' },
   purpose, scope, signature, payment
@@ -373,53 +370,11 @@ const simResult = computed(() =>
 const showEditor = ref(false);
 const editingId = ref<string | null>(null);
 const saving = ref(false);
-const form = ref({
-  outcome: 'allow' as 'allow' | 'deny',
-  partyKind: 'anyone',
-  purpose: 'clinical' as Purpose,
-  scope: 'patient-summary' as Scope,
-  filtered: true,
-  signature: 'group-member' as Signature,
-  payment: 'none' as Payment
-});
-
-const formToCard = (): PolicyCard => {
-  const gid = form.value.partyKind.startsWith('group:') ? form.value.partyKind.slice(6) : null;
-  return {
-    id: editingId.value || 'preview',
-    outcome: form.value.outcome,
-    enabled: true,
-    provenance: 'user',
-    elements: {
-      party: gid
-        ? { type: 'group', groupId: gid, groupName: memberships.value.find((m) => m.groupId === gid)?.groupName || gid }
-        : { type: 'anyone' },
-      purpose: form.value.purpose,
-      scope: form.value.scope,
-      filtered: form.value.filtered,
-      signature: form.value.signature,
-      payment: form.value.payment
-    }
-  };
-};
-const previewSentence = computed(() => sentenceFor(formToCard()));
 
 const openEditor = (card: PolicyCard | null) => {
-  if (card) {
-    editingId.value = card.id;
-    const e = card.elements;
-    form.value = {
-      outcome: card.outcome,
-      partyKind: e.party.type === 'group' ? `group:${e.party.groupId}` : 'anyone',
-      purpose: e.purpose,
-      scope: e.scope,
-      filtered: e.filtered !== false,
-      signature: e.signature,
-      payment: e.payment
-    };
-  } else {
-    editingId.value = null;
-  }
+  editingId.value = card ? card.id : null;
+  editingCard.value = card;       // prefill the builder matrix (null = fresh)
+  editorKey.value += 1;           // remount the builder with clean state
   showEditor.value = true;
 };
 
@@ -453,10 +408,10 @@ const loadAll = async () => {
   }
 };
 
-const saveCard = async () => {
+// Save a card composed by PolicyCardBuilder (its @save payload).
+const saveBuiltCard = async (card: PolicyCard) => {
   saving.value = true;
   try {
-    const card = formToCard();
     const url = editingId.value ? `/api/user-policies/${encodeURIComponent(editingId.value)}` : '/api/user-policies';
     const res = await fetch(url, {
       method: editingId.value ? 'PUT' : 'POST',

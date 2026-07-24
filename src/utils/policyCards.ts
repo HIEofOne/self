@@ -14,14 +14,15 @@
 
 export type PartyType = 'anyone' | 'group' | 'peer';
 export type Purpose = 'any' | 'peer-support' | 'clinical' | 'research' | 'public-health' | 'marketing';
-export type Scope = 'meds-allergies' | 'patient-summary' | 'not-sensitive' | 'everything';
-export type Signature = 'unverified' | 'verified-email' | 'group-member' | 'npi' | 'doximity';
+export type Scope = 'notification-only' | 'meds-allergies' | 'patient-summary' | 'not-sensitive' | 'everything' | 'ah-category';
+export type Signature = 'unverified' | 'verified-email' | 'group-member' | 'npi' | 'doximity' | 'verified-by-me';
 export type Payment = 'none' | 'spam-deposit' | 'notification-deposit' | 'ai-prepay' | 'sharing-payment';
 
 export interface PolicyElements {
   party: { type: PartyType; groupId?: string; groupName?: string; pairwiseId?: string; alias?: string };
   purpose: Purpose;
   scope: Scope;
+  ahCategory?: string; // which Apple Health category, when scope === 'ah-category'
   filtered: boolean;
   signature: Signature; // MINIMUM identity level the requester must present
   payment: Payment;
@@ -30,6 +31,9 @@ export interface PolicyElements {
 export interface PolicyCard {
   id: string;
   outcome: 'allow' | 'deny';
+  /** For a DENY card: 'silent' drops the request (default), 'respond'
+   *  sends the requester a reason for the decline. Ignored for allow. */
+  denyMode?: 'silent' | 'respond';
   enabled: boolean;
   provenance: string; // 'user' | 'group:<groupId>'
   elements: PolicyElements;
@@ -44,6 +48,7 @@ export interface PolicyRequest {
   party: { type: PartyType; groupId?: string; pairwiseId?: string };
   purpose: Purpose;
   scope: Scope;
+  ahCategory?: string;  // which Apple Health category, when scope === 'ah-category'
   signature: Signature; // level the requester actually presents
   payment: Payment;     // what the requester actually offers
 }
@@ -58,19 +63,24 @@ export const PURPOSE_OPTIONS: Array<{ value: Purpose; label: string }> = [
 ];
 
 export const SCOPE_OPTIONS: Array<{ value: Scope; label: string }> = [
+  { value: 'notification-only', label: 'Patient notification only' },
   { value: 'meds-allergies', label: 'Current Medications and Allergies' },
   { value: 'patient-summary', label: 'Patient Summary' },
   { value: 'not-sensitive', label: 'My record except sensitive categories' },
-  { value: 'everything', label: 'Everything in my record' }
+  { value: 'everything', label: 'Everything in my record' },
+  { value: 'ah-category', label: 'An Apple Health category' }
 ];
 
 /** Sentence-friendly scope phrases (select labels are Title-case;
- *  sentences need "my Patient Summary", "everything in my record"). */
+ *  sentences need "my Patient Summary", "everything in my record").
+ *  'ah-category' is filled with the chosen category by scopeSentence(). */
 const SCOPE_SENTENCES: Record<Scope, string> = {
+  'notification-only': 'a notification only (no record data)',
   'meds-allergies': 'Current Medications and Allergies',
   'patient-summary': 'my Patient Summary',
   'not-sensitive': 'my record except sensitive categories',
-  everything: 'everything in my record'
+  everything: 'everything in my record',
+  'ah-category': 'a category of my Apple Health data'
 };
 
 export const SIGNATURE_OPTIONS: Array<{ value: Signature; label: string }> = [
@@ -78,7 +88,8 @@ export const SIGNATURE_OPTIONS: Array<{ value: Signature; label: string }> = [
   { value: 'verified-email', label: 'verified-email' },
   { value: 'group-member', label: 'group-member' },
   { value: 'npi', label: 'NPI-verified' },
-  { value: 'doximity', label: 'Doximity-verified' }
+  { value: 'doximity', label: 'Doximity-verified' },
+  { value: 'verified-by-me', label: 'verified by me' }
 ];
 
 export const PAYMENT_OPTIONS: Array<{ value: Payment; label: string }> = [
@@ -96,7 +107,8 @@ const SIGNATURE_RANK: Record<Signature, number> = {
   'verified-email': 1,
   'group-member': 2,
   npi: 3,
-  doximity: 3
+  doximity: 3,
+  'verified-by-me': 4 // strongest: the patient personally vouched for them
 };
 
 const partyPhrase = (e: PolicyElements): string => {
@@ -106,7 +118,9 @@ const partyPhrase = (e: PolicyElements): string => {
 };
 
 const scopePhrase = (e: PolicyElements): string =>
-  SCOPE_SENTENCES[e.scope] || e.scope;
+  e.scope === 'ah-category'
+    ? `my ${e.ahCategory || 'Apple Health'} data`
+    : (SCOPE_SENTENCES[e.scope] || e.scope);
 
 const paymentPhrase = (p: Payment): string =>
   PAYMENT_OPTIONS.find((o) => o.value === p)?.label || p;
@@ -118,12 +132,14 @@ export const sentenceFor = (card: PolicyCard): string => {
   const sig = e.signature === 'unverified'
     ? '(no identity check)'
     : `with ${SIGNATURE_OPTIONS.find((o) => o.value === e.signature)?.label} identity or stronger`;
-  const verb = card.outcome === 'allow' ? 'may receive' : 'may NOT receive';
-  const what = scopePhrase(e);
+  const verb = card.outcome === 'allow'
+    ? 'may receive'
+    : (card.denyMode === 'respond' ? 'is declined, with a reason, for' : 'is silently denied');
+  const what = e.scope === 'notification-only' ? 'a notification (no record data)' : scopePhrase(e);
   const why = e.purpose === 'any' ? 'for any purpose' : `for ${PURPOSE_OPTIONS.find((o) => o.value === e.purpose)?.label} use`;
-  const filt = e.filtered ? 'privacy-filtered' : 'unfiltered';
+  const filt = card.outcome === 'allow' ? (e.filtered ? ', privacy-filtered' : ', unfiltered') : '';
   const pay = e.payment === 'none' ? '' : `, if they provide ${paymentPhrase(e.payment)}`;
-  return `${who} ${sig} ${verb} ${what} ${why}, ${filt}${pay}.`;
+  return `${who} ${sig} ${verb} ${what} ${why}${filt}${pay}.`;
 };
 
 /** Does this card's constraints cover the request? (Card as pattern.) */
@@ -136,6 +152,9 @@ const matches = (card: PolicyCard, req: PolicyRequest): boolean => {
   // (Scope-subsumption — "everything covers patient-summary" — is a Cedar-
   // phase refinement; exact match keeps v1 predictable.)
   if (e.scope !== req.scope) return false;
+  // Apple Health category: a category-specific card only covers a request
+  // for that same category (when both name one).
+  if (e.scope === 'ah-category' && e.ahCategory && req.ahCategory && e.ahCategory !== req.ahCategory) return false;
   if (SIGNATURE_RANK[req.signature] < SIGNATURE_RANK[e.signature]) return false;
   if (e.payment !== 'none' && req.payment !== e.payment) return false;
   return true;
