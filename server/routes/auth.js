@@ -1311,9 +1311,9 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
         const dateStr = new Date().toISOString().replace(/[-:]/g, '').split('T')[0];
         const candidateKbName = `${candidateId}-kb-${dateStr}${Date.now().toString().slice(-6)}`;
         // Promote a token-verified email (welcome onboarding): if the visitor
-        // verified THIS address before signing up, stamp it verified. The
-        // daily sweep purges verified emails 72h later unless the user is a
-        // Trustee member (see groups.js sweepExpired).
+        // verified THIS address before signing up, stamp it verified. A
+        // verified notification email is the account holder's to keep,
+        // regardless of group membership.
         const emailIsVerified = !!(notifyEmail && isEmailVerified(emailVerifyToken, notifyEmail));
         const candidateDoc = {
           _id: candidateId,

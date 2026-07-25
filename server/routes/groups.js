@@ -1624,7 +1624,6 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     const nowIso = new Date().toISOString();
     let relayDeleted = 0;
     let invitesExpired = 0;
-    let emailsPurged = 0;
     try {
       const all = await cloudant.getAllDocuments(RELAY_DB);
       for (const m of all || []) {
@@ -1646,27 +1645,14 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         }
       }
     } catch { /* ignore */ }
-    // Verified onboarding emails are kept only for Trustee members. A verified
-    // email older than 72h on a non-Trustee user is purged (welcome flow rule).
-    // Scoped to docs carrying emailVerifiedAt, so emails set through other
-    // channels (e.g. the Groups-tab notification email) are never touched.
-    try {
-      const cutoff = Date.now() - 72 * 60 * 60 * 1000;
-      const users = await cloudant.getAllDocuments(USERS_DB);
-      for (const u of users || []) {
-        if (!u || u.type !== 'user' || !u.email || !u.emailVerifiedAt) continue;
-        if (new Date(u.emailVerifiedAt).getTime() > cutoff) continue; // younger than 72h
-        const inTrustee = Array.isArray(u.groupMemberships)
-          && u.groupMemberships.some((m) => /trustee/i.test(m.groupName || ''));
-        if (inTrustee) continue; // kept — Trustee member
-        u.email = null;
-        u.emailVerified = false;
-        delete u.emailVerifiedAt;
-        u.updatedAt = nowIso;
-        try { await cloudant.saveDocument(USERS_DB, u); emailsPurged++; } catch { /* ignore */ }
-      }
-    } catch { /* users db issues — skip */ }
-    return { relayDeleted, invitesExpired, emailsPurged };
+    // NOTE: notification emails are NOT swept here. A verified email only ever
+    // reaches a userDoc once the visitor has an actual MAIA (they clicked GET
+    // STARTED) and deliberately provided it — that address is theirs to keep,
+    // group membership or not. A pre-account "tire-kicker" email never
+    // persists past the 10-min in-memory code (server/emailVerification.js);
+    // abandoned temporary accounts are cleaned up whole (email included) by
+    // the account-cleanup path, so no per-email 72h purge is needed.
+    return { relayDeleted, invitesExpired };
   };
 
   // ── PR-2: patient-side membership endpoints ────────────────────────
@@ -3096,7 +3082,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     } catch (e) {
       console.warn('[groups-cron] user iteration failed:', e?.message || e);
     }
-    console.log(`[groups-cron] maintenance: swept ${swept.relayDeleted} msgs / ${swept.invitesExpired} invites / ${swept.emailsPurged} emails; ` +
+    console.log(`[groups-cron] maintenance: swept ${swept.relayDeleted} msgs / ${swept.invitesExpired} invites; ` +
       `refreshed ${usersProcessed} users, ${totalRevoked} revoked, ${totalMessages} new messages`);
   };
 
