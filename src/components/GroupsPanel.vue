@@ -38,6 +38,27 @@
             @click="saveNotifyEmail"
           />
         </div>
+        <!-- Verification is offered, not required (a saved email works either way) -->
+        <div v-if="notifyEmailSaved && notifyEmailSaved === notifyEmailInput.trim()" class="q-mt-xs">
+          <div v-if="notifyVerified" class="row items-center text-caption text-positive">
+            <q-icon name="verified" size="16px" class="q-mr-xs" /> Verified
+          </div>
+          <template v-else>
+            <div v-if="!verifyCodeSent" class="row items-center q-gutter-xs">
+              <span class="text-caption text-grey-7">Not verified</span>
+              <q-btn dense flat no-caps color="primary" size="sm" label="Verify email" :loading="verifySending" @click="startVerify" />
+            </div>
+            <div v-else class="row items-center q-gutter-xs no-wrap q-mt-xs">
+              <q-input v-model="verifyCodeInput" dense outlined placeholder="6-digit code" style="max-width: 140px" inputmode="numeric" maxlength="6" @keydown.enter.prevent="submitVerifyCode" />
+              <q-btn dense unelevated color="primary" size="sm" label="Confirm" :loading="verifyingCode" :disable="!verifyCodeInput.trim()" @click="submitVerifyCode" />
+              <q-btn dense flat color="grey-7" size="sm" label="Resend" :loading="verifySending" @click="startVerify" />
+            </div>
+            <div v-if="verifyCodeSent && !verifyError" class="text-caption text-grey-6 q-mt-xs">
+              Code sent to {{ notifyEmailSaved }}.<span v-if="verifyDevCode" class="text-orange-9"> (dev: {{ verifyDevCode }})</span>
+            </div>
+            <div v-if="verifyError" class="text-caption text-negative q-mt-xs">{{ verifyError }}</div>
+          </template>
+        </div>
         <div class="text-caption text-grey-6 q-mt-xs">
           Used for the welcome email and group notifications. Leave blank to turn off.
         </div>
@@ -865,6 +886,20 @@ const notifyEmailInput = ref('');
 const notifyEmailSaved = ref<string>('');
 const notifyEmailLoading = ref(false);
 const notifyEmailSaving = ref(false);
+const notifyVerified = ref(false);
+// Offered verification (reuses the pre-auth /api/email endpoints).
+const verifyToken = ref<string | null>(null);
+const verifyCodeInput = ref('');
+const verifySending = ref(false);
+const verifyCodeSent = ref(false);
+const verifyingCode = ref(false);
+const verifyError = ref('');
+const verifyDevCode = ref<string | null>(null);
+const resetVerifyFlow = () => {
+  verifyToken.value = null; verifyCodeInput.value = ''; verifyCodeSent.value = false;
+  verifyError.value = ''; verifyDevCode.value = null;
+};
+
 const loadNotifyEmail = async () => {
   notifyEmailLoading.value = true;
   try {
@@ -872,6 +907,7 @@ const loadNotifyEmail = async () => {
     const j = r.ok ? await r.json() : null;
     notifyEmailSaved.value = j?.email || '';
     notifyEmailInput.value = j?.email || '';
+    notifyVerified.value = !!j?.verified;
   } catch { /* leave blank */ } finally {
     notifyEmailLoading.value = false;
   }
@@ -888,12 +924,64 @@ const saveNotifyEmail = async () => {
     if (!r.ok || !j.success) throw new Error(j.error === 'INVALID_EMAIL' ? 'That does not look like an email address.' : (j.error || `HTTP ${r.status}`));
     notifyEmailSaved.value = j.email || '';
     notifyEmailInput.value = j.email || '';
+    notifyVerified.value = !!j.verified; // a plain save is unverified
+    resetVerifyFlow();
     $q.notify({ type: 'positive', message: email ? 'Notification email saved.' : 'Notifications turned off.', timeout: 4000 });
   } catch (err) {
     $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Could not save email', timeout: 6000 });
   } finally {
     notifyEmailSaving.value = false;
   }
+};
+
+// Send a code to the saved notification address.
+const startVerify = async () => {
+  const email = notifyEmailSaved.value.trim();
+  if (!email) return;
+  verifySending.value = true; verifyError.value = '';
+  try {
+    const r = await fetch('/api/email/send-code', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+      body: JSON.stringify({ email, token: verifyToken.value })
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.success) {
+      verifyError.value = j.error === 'RATE_LIMITED' ? 'Please wait a moment before requesting another code.' : 'Could not send the code.';
+      return;
+    }
+    verifyToken.value = j.token || verifyToken.value;
+    verifyCodeSent.value = true;
+    verifyDevCode.value = j.devCode || null;
+  } catch { verifyError.value = 'Network error sending the code.'; }
+  finally { verifySending.value = false; }
+};
+
+// Confirm the code, then persist the verified flag on the userDoc.
+const submitVerifyCode = async () => {
+  const code = verifyCodeInput.value.trim();
+  if (!code || !verifyToken.value) return;
+  verifyingCode.value = true; verifyError.value = '';
+  try {
+    const r = await fetch('/api/email/verify-code', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+      body: JSON.stringify({ token: verifyToken.value, code })
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.success) {
+      verifyError.value = j.error === 'CODE_EXPIRED' ? 'That code expired — send a new one.'
+        : (j.error === 'TOO_MANY_ATTEMPTS' ? 'Too many tries — send a new code.' : 'Incorrect code.');
+      return;
+    }
+    const sr = await fetch('/api/user/notification-email', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+      body: JSON.stringify({ userId: props.userId, email: notifyEmailSaved.value, emailVerifyToken: verifyToken.value })
+    });
+    const sj = await sr.json().catch(() => ({}));
+    notifyVerified.value = !!sj.verified;
+    resetVerifyFlow();
+    $q.notify({ type: 'positive', message: 'Email verified.', timeout: 4000 });
+  } catch { verifyError.value = 'Network error verifying the code.'; }
+  finally { verifyingCode.value = false; }
 };
 
 onMounted(async () => {
