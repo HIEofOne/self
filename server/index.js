@@ -13,6 +13,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { readFileSync, existsSync, readdirSync } from 'fs';
 import { createHmac, createPrivateKey, sign as edSign } from 'crypto';
+import * as emailVerification from './emailVerification.js';
 
 import { CloudantClient, CloudantSessionStore, AuditLogService } from '../lib/cloudant/index.js';
 import { DigitalOceanClient } from '../lib/do-client/index.js';
@@ -9954,6 +9955,52 @@ app.post('/api/user/notification-email', async (req, res) => {
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
+});
+
+// ── Email verification (welcome onboarding) ────────────────────────────
+// Pre-auth: a visitor verifies an email before creating an account. The
+// short-lived code lives in an in-memory token store (server/emailVerification
+// .js) because CloudantSessionStore won't persist an anonymous session. The
+// client holds the opaque token and echoes it back. On account creation the
+// verified address is promoted to the userDoc (emailVerified + emailVerifiedAt,
+// see routes/auth.js); it's then purged 72h later unless the user is a Trustee
+// member (daily sweep in routes/groups.js).
+app.post('/api/email/send-code', async (req, res) => {
+  try {
+    const result = emailVerification.issueCode(req.body?.email, req.body?.token);
+    if (result.error) {
+      const status = result.error === 'RATE_LIMITED' ? 429 : 400;
+      return res.status(status).json({ success: false, error: result.error });
+    }
+    const subject = 'Your MAIA verification code';
+    const text = `Your MAIA email verification code is ${result.code}. It expires in 10 minutes.\n\nIf you didn't request this, you can ignore this message.`;
+    const resend = await initResend();
+    if (resend) {
+      const from = process.env.RESEND_FROM_EMAIL || 'noreply@maia.healthurl.com';
+      await resend.emails.send({ from, to: result.email, subject, text });
+      return res.json({ success: true, token: result.token, sent: true });
+    }
+    // Email delivery disabled (local dev / no RESEND key): return the code so
+    // the flow stays testable. A properly-configured production always sends.
+    console.log(`[EMAIL-VERIFY] (delivery disabled) code for ${result.email}: ${result.code}`);
+    return res.json({ success: true, token: result.token, sent: false, devCode: result.code });
+  } catch (error) {
+    console.error('[email/send-code]', error.message);
+    res.status(500).json({ success: false, error: 'SEND_FAILED' });
+  }
+});
+
+app.post('/api/email/verify-code', (req, res) => {
+  const result = emailVerification.checkCode(req.body?.token, req.body?.code);
+  if (result.error) {
+    const status = result.error === 'TOO_MANY_ATTEMPTS' ? 429 : 400;
+    return res.status(status).json({ success: false, error: result.error });
+  }
+  return res.json({ success: true, email: result.email });
+});
+
+app.post('/api/email/verification-status', (req, res) => {
+  res.json({ success: true, ...emailVerification.statusOf(req.body?.token) });
 });
 
 app.get('/api/pipeline', async (req, res) => {

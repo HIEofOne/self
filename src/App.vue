@@ -234,8 +234,8 @@
                     </div>
 
                     <div><q-checkbox v-model="wf.emailOptIn" dense label="Willing to share an email address for notifications (optional)" /></div>
-                    <div v-if="wf.emailOptIn" class="q-mb-sm" style="margin-left: 28px; max-width: 380px;">
-                      <q-input v-model="wf.email" dense outlined type="email" label="Email address" />
+                    <div v-if="wf.emailOptIn" class="q-mb-sm" style="margin-left: 28px; max-width: 460px;">
+                      <EmailVerifyBox label="Email address" />
                     </div>
 
                     <template v-if="trusteeGroup">
@@ -968,6 +968,8 @@ import ChatInterface from './components/ChatInterface.vue';
 import PolicyCardBuilder from './components/PolicyCardBuilder.vue';
 import RequestBuilder from './components/RequestBuilder.vue';
 import WelcomeContent from './components/WelcomeContent.vue';
+import EmailVerifyBox from './components/EmailVerifyBox.vue';
+import { useVerifiedEmail } from './composables/verifiedEmail';
 import DeepLinkAccess from './components/DeepLinkAccess.vue';
 import AdminUsers from './components/AdminUsers.vue';
 import { useQuasar } from 'quasar';
@@ -1163,6 +1165,14 @@ const wfFolderFiles: File[] = []; // File objects don't need reactivity
 /** Files handed to ChatInterface for upload after provisioning. */
 const welcomeSetupFiles = ref<File[]>([]);
 
+// Verified-email cross-fill: the setup form and the policy table's "Verified
+// email" cell share ONE address (composable state). Mirror it into wf.email so
+// GET STARTED sends it; if it gets verified anywhere, surface it in the setup
+// block (auto-open the notification-email row).
+const { state: verifiedEmail, hydrate: hydrateVerifiedEmail } = useVerifiedEmail();
+watch(() => verifiedEmail.email, (v) => { wf.value.email = v; });
+watch(() => verifiedEmail.verified, (ok) => { if (ok) wf.value.emailOptIn = true; });
+
 const trusteeGroup = computed(() =>
   (publicGroups.value || []).find((g) => /trustee/i.test(g.name || '') && g.joinLink) || null);
 
@@ -1261,7 +1271,8 @@ const welcomeFormStart = async () => {
     } catch { /* best-effort */ }
     const user = await createTemporarySession({
       desiredUserId: wf.value.joinTrustee ? (wfSuggestedId.value || undefined) : undefined,
-      email: wf.value.emailOptIn ? (wf.value.email.trim() || undefined) : undefined
+      email: wf.value.emailOptIn ? (wf.value.email.trim() || undefined) : undefined,
+      emailVerifyToken: (wf.value.emailOptIn && verifiedEmail.verified) ? (verifiedEmail.token || undefined) : undefined
     });
     if (!user) {
       try { sessionStorage.removeItem('maiaWelcomeSetup'); } catch { /* cleanup */ }
@@ -3335,7 +3346,7 @@ const handleDestroyedStartFresh = async () => {
   }
 };
 
-const createTemporarySession = async (opts?: { desiredUserId?: string; email?: string }) => {
+const createTemporarySession = async (opts?: { desiredUserId?: string; email?: string; emailVerifyToken?: string }) => {
   // Clear stale wizard flags from any previous session (e.g. destroyed user)
   try {
     sessionStorage.removeItem('autoProcessInitialFile');
@@ -3348,7 +3359,8 @@ const createTemporarySession = async (opts?: { desiredUserId?: string; email?: s
     credentials: 'include',
     body: JSON.stringify({
       ...(opts?.desiredUserId ? { desiredUserId: opts.desiredUserId } : {}),
-      ...(opts?.email ? { email: opts.email } : {})
+      ...(opts?.email ? { email: opts.email } : {}),
+      ...(opts?.emailVerifyToken ? { emailVerifyToken: opts.emailVerifyToken } : {})
     })
   });
   const data = await response.json();
@@ -3687,7 +3699,9 @@ onMounted(async () => {
 
   // Load welcome introduction from welcome.md
   void loadPublicGroups();
-  
+  // Cross-fill any email already verified earlier in this session.
+  void hydrateVerifiedEmail();
+
   // Check for admin page route
   const isAdminPage = window.location.pathname === '/admin';
   const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
