@@ -9925,7 +9925,7 @@ app.get('/api/user/notification-email', async (req, res) => {
     if (!userId) return;
     const userDoc = await cloudant.getDocument('maia_users', userId);
     if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
-    res.json({ success: true, email: userDoc.email || null });
+    res.json({ success: true, email: userDoc.email || null, verified: !!userDoc.emailVerified });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -9939,14 +9939,27 @@ app.post('/api/user/notification-email', async (req, res) => {
     if (raw && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw)) {
       return res.status(400).json({ success: false, error: 'INVALID_EMAIL' });
     }
+    // Verification is OFFERED, not required: an unverified email still saves.
+    // If a matching verify token is supplied, stamp the address verified.
+    const emailVerifyToken = typeof req.body?.emailVerifyToken === 'string' ? req.body.emailVerifyToken : null;
+    const verified = !!(raw && emailVerifyToken && emailVerification.isVerified(emailVerifyToken, raw));
     for (let attempt = 0; attempt < 3; attempt++) {
       const doc = await cloudant.getDocument('maia_users', userId);
       if (!doc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
       doc.email = raw || null;
+      if (verified) {
+        doc.emailVerified = true;
+        doc.emailVerifiedAt = new Date().toISOString();
+      } else {
+        // Clearing the email, or changing/saving an unverified one, drops any
+        // prior verified status — the new address hasn't been confirmed.
+        doc.emailVerified = false;
+        delete doc.emailVerifiedAt;
+      }
       doc.updatedAt = new Date().toISOString();
       try {
         await cloudant.saveDocument('maia_users', doc);
-        return res.json({ success: true, email: doc.email });
+        return res.json({ success: true, email: doc.email, verified: !!doc.emailVerified });
       } catch (e) {
         if (e?.statusCode === 409 && attempt < 2) continue;
         throw e;
@@ -9957,14 +9970,14 @@ app.post('/api/user/notification-email', async (req, res) => {
   }
 });
 
-// ── Email verification (welcome onboarding) ────────────────────────────
-// Pre-auth: a visitor verifies an email before creating an account. The
-// short-lived code lives in an in-memory token store (server/emailVerification
-// .js) because CloudantSessionStore won't persist an anonymous session. The
-// client holds the opaque token and echoes it back. On account creation the
-// verified address is promoted to the userDoc (emailVerified + emailVerifiedAt,
-// see routes/auth.js); it's then purged 72h later unless the user is a Trustee
-// member (daily sweep in routes/groups.js).
+// ── Email verification (welcome onboarding + Groups tab) ───────────────
+// A short-lived code lives in an in-memory token store (server/emailVerification
+// .js) because CloudantSessionStore won't persist an anonymous pre-auth
+// session. The client holds the opaque token and echoes it back. The verified
+// address is then stamped onto the userDoc (emailVerified + emailVerifiedAt) —
+// at account creation (routes/auth.js) or when saving the Groups-tab
+// notification email with the token. A verified address is the user's to keep;
+// a pre-account "tire-kicker" email never leaves this 10-min token store.
 app.post('/api/email/send-code', async (req, res) => {
   try {
     const result = emailVerification.issueCode(req.body?.email, req.body?.token);
