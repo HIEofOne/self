@@ -215,31 +215,17 @@
                 </div>
 
                 <div v-if="!showAuth && !inviteLandingActive">
-                  <!-- Organizer-first welcome (Refinement 8). The page
-                       recruits GROUP ORGANIZERS: invitations arrive three
-                       steps downstream via the groups themselves. Video and
-                       numbered steps removed (wizard teaches by doing). -->
-                  <div class="text-center q-mb-lg">
-                    <div class="text-h4 q-mb-sm" style="font-weight: 600;">Health AI that answers to you</div>
-                    <div class="text-body2 text-grey-8" style="max-width: 640px; margin: 0 auto; line-height: 1.6;">
-                      Patient groups that help each other with each patient having a private AI —
-                      records stay with each patient, sharing rules are written by the group and can
-                      be modified by each patient. Free and open source, built by volunteer patient
-                      advocates. No company behind it.
-                    </div>
-                  </div>
-
-                  <!-- Modal-free setup form (New_User_Flows.md §5 step 4):
-                       every decision the arrival dialogs used to ask —
-                       device privacy, group join, records, folder — is a
-                       checkbox HERE, answered before GET STARTED. Setup
-                       then runs with zero dialogs and lands in the chat
-                       with the Workbook sidebar open. -->
-                  <!-- height:auto overrides .welcome-door's height:100%
-                       (meant for equal-height door grids) which stretched
-                       this card to ~2x its content and pushed the footer
-                       below the fold. -->
-                  <div v-if="!justLooking" class="welcome-door wf-form q-mb-md" style="max-width: 680px; margin: 0 auto; height: auto;">
+                  <!-- Content-driven welcome (redesign): all prose + the FAQ
+                       come from src/content/welcome_A.md so the copy is
+                       editable without touching Vue. The three live pieces —
+                       Get Started checkboxes, the policy editor, and the
+                       footer — slot into their marked positions. -->
+                  <WelcomeContent @sign-in="handlePasskeySignInLink">
+                    <!-- Get Started setup form (New_User_Flows.md §5 step 4):
+                         every decision the arrival dialogs used to ask is a
+                         checkbox HERE, so setup runs with zero dialogs. -->
+                    <template #checkboxes>
+                  <div class="welcome-door wf-form q-mb-md" style="max-width: 680px; margin: 0 auto; height: auto;">
                     <div class="text-subtitle1 text-weight-medium q-mb-sm">Start as:</div>
 
                     <div><q-checkbox v-model="wf.privateComputer" dense label="New User on a private computer (required)" /></div>
@@ -281,16 +267,11 @@
 
                     <div class="q-mt-sm text-body2">Estimated setup time: <strong>{{ wfEstimate }}</strong></div>
 
-                    <div class="row q-col-gutter-sm q-mt-md">
-                      <div class="col">
-                        <q-btn
-                          unelevated color="primary" class="full-width" size="lg" label="GET STARTED"
-                          :disable="!wf.privateComputer" :loading="tempStartLoading" @click="welcomeFormStart"
-                        />
-                      </div>
-                      <div class="col-auto">
-                        <q-btn outline color="primary" size="lg" label="JUST LOOKING" @click="justLooking = true" />
-                      </div>
+                    <div class="q-mt-md">
+                      <q-btn
+                        unelevated color="primary" class="full-width" size="lg" label="GET STARTED"
+                        :disable="!wf.privateComputer" :loading="tempStartLoading" @click="welcomeFormStart"
+                      />
                     </div>
                     <div class="text-caption text-grey-7 q-mt-sm">
                       Have an invitation? <a href="#" class="welcome-footer-link" @click.prevent="showWelcomePasteDialog = true">Use my invitation or link</a>.
@@ -298,139 +279,38 @@
                     <div v-if="tempStartError" class="text-negative q-mt-sm">{{ tempStartError }}</div>
                   </div>
 
-                  <!-- JUST LOOKING: the exploration content (groups, comparison, links) -->
-                  <div v-if="justLooking" class="text-center q-mb-md">
-                    <q-btn flat dense color="primary" icon="arrow_back" label="Back to setup" @click="justLooking = false" />
-                    <div class="text-caption text-grey-7 q-mt-xs">
-                      See the <a href="/MAIA-overview.pdf" target="_blank" class="welcome-footer-link">slide show</a>,
-                      the older <a href="/welcome-video.mp4" target="_blank" class="welcome-footer-link">get records video</a>,
-                      read on <a href="https://trustee.substack.com" target="_blank" class="welcome-footer-link">Substack</a>,
-                      or <a href="https://github.com/HIEofOne/self#readme" target="_blank" class="welcome-footer-link">set up a group of your own</a>.
-                    </div>
-                  </div>
+                    </template>
 
-                  <!-- Sharing-policy demo: build a rule, see MAIA decide -->
-                  <div v-if="justLooking" class="q-mb-lg" style="border-top: 1px solid #eee; padding-top: 16px; max-width: 940px; margin: 0 auto;">
-                    <div class="text-subtitle1 text-weight-medium q-mb-xs" style="text-align:center">How your sharing rules work</div>
-                    <div class="text-caption text-grey-7 q-mb-md" style="text-align:center; max-width: 640px; margin: 0 auto;">
-                      In MAIA you don’t hand your record to a company — you write rules for it. Build one here and
-                      send it a pretend request to see exactly what MAIA would do. Nothing is saved; this is just a demo.
-                    </div>
-                    <PolicyCardBuilder mode="demo" />
-                  </div>
-
-                  <!-- How MAIA is different (generic; named comparisons live on Substack) -->
-                  <div v-if="justLooking" class="q-mb-md" style="border-top: 1px solid #eee; padding-top: 12px;">
-                    <table class="welcome-compare-table">
-                      <thead>
-                        <tr><th class="welcome-compare-title">How MAIA is different</th><th>MAIA</th><th>Typical health-AI apps</th></tr>
-                      </thead>
-                      <tbody>
-                        <tr><td>Who holds your record</td><td>You, on your own computer</td><td>The company's cloud</td></tr>
-                        <tr><td>Who sets sharing rules</td><td>You and your group, as written policies</td><td>Their terms of service</td></tr>
-                        <tr><td>Who the AI works for</td><td>You</td><td>The platform and its funders</td></tr>
-                      </tbody>
-                    </table>
-                  </div>
-
-                  <!-- Groups hosted on this deployment (publicly listed only) -->
-                  <div v-if="justLooking" id="hosted-groups" class="q-mb-md" style="border-top: 1px solid #eee; padding-top: 12px;">
-                    <div class="text-caption text-weight-medium text-grey-7 q-mb-xs">Groups hosted here</div>
-                    <div v-if="!publicGroups.length" class="text-caption text-grey-6">
-                      No groups are publicly listed on this server yet.
-                    </div>
-                    <div v-for="g in publicGroups" :key="g.groupId" class="welcome-door q-mb-sm">
-                      <div class="row items-center q-col-gutter-sm">
-                        <div class="col">
-                          <div class="text-subtitle2">
-                            {{ g.name }}
-                            <q-badge v-if="g.originHost" outline color="teal" :label="`hosted at ${g.originHost}`" class="q-ml-xs" />
-                          </div>
-                          <div class="text-caption text-grey-8">{{ g.description }}</div>
-                          <div class="text-caption text-grey-6">{{ g.activeMemberCount }} member(s)</div>
-                          <div v-if="g.mentors?.length" class="q-mt-xs row items-center q-gutter-xs">
-                            <span class="text-caption text-grey-7">Mentors:</span>
-                            <q-chip v-for="mt in g.mentors" :key="mt.alias" dense size="sm" color="teal-1" text-color="teal-9" icon="star">
-                              {{ mt.alias }}<template v-if="mt.tag"> — {{ mt.tag }}</template>
-                            </q-chip>
-                          </div>
+                    <!-- Policies editor + Trustee suggested policy + Try-it -->
+                    <template #policies>
+                      <div style="max-width: 940px; margin: 0 auto;">
+                        <div v-if="trusteeGroup?.postingPolicy" class="q-mb-md q-pa-sm" style="border-left: 3px solid #90caf9; background: #f7fbff; border-radius: 6px; max-width: 720px; margin: 0 auto 16px;">
+                          <div class="text-caption text-weight-medium text-grey-8 q-mb-xs">{{ trusteeGroup.name }} group — suggested sharing policy</div>
+                          <div class="text-caption text-grey-8" style="white-space: pre-wrap;">{{ trusteeGroup.postingPolicy }}</div>
                         </div>
-                        <div class="col-auto">
-                          <q-btn flat dense size="sm" color="primary" :label="expandedPublicGroup === g.groupId ? 'Hide details' : 'Look around'" @click="expandedPublicGroup = expandedPublicGroup === g.groupId ? null : g.groupId" />
-                          <q-btn
-                            v-if="g.joinLink && pendingGroupJoinLink?.groupId !== g.groupId"
-                            flat dense size="sm" color="primary"
-                            :label="g.joinMode === 'open' ? 'Join now' : 'Ask to join'"
-                            @click="askToJoinPublic(g)"
-                          />
-                          <q-btn
-                            flat dense size="sm" color="deep-orange-8"
-                            label="Make a request to the group"
-                            @click="openOutsideRequest(g)"
-                          />
-                        </div>
+                        <PolicyCardBuilder mode="demo" />
                       </div>
-                      <div v-if="expandedPublicGroup === g.groupId && g.postingPolicy" class="q-mt-sm q-pa-sm" style="border-left: 3px solid #90caf9; background: #fafafa;">
-                        <div class="text-caption text-weight-medium">Group policy — joining means you accept it:</div>
-                        <div class="text-caption" style="white-space: pre-wrap;">{{ g.postingPolicy }}</div>
-                      </div>
-                      <div v-if="pendingGroupJoinLink?.groupId === g.groupId" class="q-mt-sm q-pa-sm" style="border-left: 3px solid #1976d2; background: #e3f2fd;">
-                        <div class="text-caption q-mb-xs">
-                          <template v-if="g.joinMode === 'open'">
-                            Create your MAIA (about a minute) and you're in — no approval wait.
-                          </template>
-                          <template v-else>
-                            To send your request, create your MAIA (about a minute) — the group's
-                            administrator approves requests, not a company.
-                          </template>
-                        </div>
-                        <q-btn unelevated dense color="primary" size="sm"
-                          :label="g.joinMode === 'open' ? `CREATE MY MAIA & JOIN ${g.name.toUpperCase()}` : `CREATE MY MAIA & REQUEST TO JOIN ${g.name.toUpperCase()}`"
-                          :loading="tempStartLoading"
-                          @click="handleGetStartedNoPassword" />
-                      </div>
-                    </div>
-                  </div>
+                    </template>
 
-                  <!-- Outside request (W3): anyone may ASK a group's members
-                       for something — each member's own policies decide. -->
-                  <q-dialog v-model="showOutsideRequestDialog">
-                    <q-card style="min-width: 460px; max-width: 620px">
-                      <q-card-section>
-                        <div class="text-h6">Make a request to {{ outsideReqGroup?.name || 'the group' }}</div>
-                        <div class="text-caption text-grey-7">
-                          Your request goes to every member's MAIA. Each member's own
-                          sharing policies decide — some may answer automatically, some
-                          will be asked, and some policies drop requests silently.
-                          Anyone who chooses to respond will contact you by email.
+                    <!-- Footer: doc links, explore links, version -->
+                    <template #footer>
+                      <div class="text-center q-mb-md">
+                        <a href="/page.html?doc=Privacy" target="_blank" class="welcome-footer-link">Privacy</a>
+                        <span class="text-grey-5 q-mx-sm">|</span>
+                        <a href="/page.html?doc=user-guide" target="_blank" class="welcome-footer-link">User Guide</a>
+                        <span class="text-grey-5 q-mx-sm">|</span>
+                        <a href="/page.html?doc=faq" target="_blank" class="welcome-footer-link">FAQ</a>
+                        <span class="text-grey-5 q-mx-sm">|</span>
+                        <a href="/page.html?doc=about" target="_blank" class="welcome-footer-link">About</a>
+                        <div class="text-caption text-grey-6 q-mt-sm">
+                          See the <a href="/MAIA-overview.pdf" target="_blank" class="welcome-footer-link">slide show</a>
+                          · <a href="https://trustee.substack.com" target="_blank" class="welcome-footer-link">Substack</a>
+                          · <a href="https://github.com/HIEofOne/self#readme" target="_blank" class="welcome-footer-link">GitHub</a>
                         </div>
-                      </q-card-section>
-                      <q-card-section class="q-pt-none">
-                        <div v-if="outsideReqResult" class="q-pa-sm" style="background: #e8f5e9; border-radius: 8px">
-                          <div class="text-body2">{{ outsideReqResult }}</div>
-                        </div>
-                        <div v-else class="row q-col-gutter-sm">
-                          <q-input v-model="outsideReq.name" dense outlined label="Your name" class="col-6" />
-                          <q-input v-model="outsideReq.email" dense outlined type="email" label="Contact email (for replies)" class="col-6" />
-                          <q-input v-model="outsideReq.organization" dense outlined label="Organization (optional)" class="col-12" />
-                          <q-select v-model="outsideReq.scope" :options="SCOPE_OPTIONS" emit-value map-options dense outlined label="What you're asking for" class="col-6" />
-                          <q-select v-model="outsideReq.purpose" :options="PURPOSE_OPTIONS" emit-value map-options dense outlined label="Purpose" class="col-6" />
-                          <q-input v-model="outsideReq.message" dense outlined autogrow type="textarea" label="Your request — who you are and why" class="col-12" />
-                        </div>
-                        <div v-if="outsideReqError" class="text-negative text-caption q-mt-sm">{{ outsideReqError }}</div>
-                      </q-card-section>
-                      <q-card-actions align="right">
-                        <q-btn flat :label="outsideReqResult ? 'Close' : 'Cancel'" v-close-popup :disable="outsideReqSending" />
-                        <q-btn
-                          v-if="!outsideReqResult"
-                          unelevated color="primary" label="Send request"
-                          :loading="outsideReqSending"
-                          :disable="!outsideReq.name.trim() || !outsideReq.email.trim()"
-                          @click="submitOutsideRequest"
-                        />
-                      </q-card-actions>
-                    </q-card>
-                  </q-dialog>
+                        <div class="text-caption text-grey-6 q-mt-sm">CC-BY MAIA v{{ appVersion }} by Adrian Gropper, MD</div>
+                      </div>
+                    </template>
+                  </WelcomeContent>
 
                   <!-- Paste an invite / join link (pre-auth capture) -->
                   <q-dialog v-model="showWelcomePasteDialog">
@@ -448,18 +328,6 @@
                       </q-card-actions>
                     </q-card>
                   </q-dialog>
-
-                  <!-- Footer: Privacy | User Guide | FAQ | About + copyright -->
-                  <div class="text-center q-mt-lg q-mb-md">
-                    <a href="/page.html?doc=Privacy" target="_blank" class="welcome-footer-link">Privacy</a>
-                    <span class="text-grey-5 q-mx-sm">|</span>
-                    <a href="/page.html?doc=user-guide" target="_blank" class="welcome-footer-link">User Guide</a>
-                    <span class="text-grey-5 q-mx-sm">|</span>
-                    <a href="/page.html?doc=faq" target="_blank" class="welcome-footer-link">FAQ</a>
-                    <span class="text-grey-5 q-mx-sm">|</span>
-                    <a href="/page.html?doc=about" target="_blank" class="welcome-footer-link">About</a>
-                    <div class="text-caption text-grey-6 q-mt-sm">CC-BY MAIA v{{ appVersion }} by Adrian Gropper, MD</div>
-                  </div>
                 </div>
 
                 <p v-if="showAuth && welcomeBackPasskeyUserId" class="text-body2 text-center text-primary q-mb-md">
@@ -1095,6 +963,7 @@ import PasskeyAuth from './components/PasskeyAuth.vue';
 import RestoreWizard from './components/RestoreWizard.vue';
 import ChatInterface from './components/ChatInterface.vue';
 import PolicyCardBuilder from './components/PolicyCardBuilder.vue';
+import WelcomeContent from './components/WelcomeContent.vue';
 import DeepLinkAccess from './components/DeepLinkAccess.vue';
 import AdminUsers from './components/AdminUsers.vue';
 import { useQuasar } from 'quasar';
@@ -1106,7 +975,6 @@ import {
   setRestoreActive, clearRestoreActive, getRestoreActive,
   type MaiaState, type DiscoveredUser
 } from './utils/localFolder';
-import { SCOPE_OPTIONS, PURPOSE_OPTIONS } from './utils/policyCards';
 import packageJson from '../package.json';
 
 const appVersion = packageJson.version;
@@ -1279,7 +1147,6 @@ const publicGroups = ref<Array<{ groupId: string; name: string; description: str
 
 // ── Modal-free welcome setup form (New_User_Flows.md §5 step 4) ────────
 // The form front-loads every decision the arrival dialogs used to ask.
-const justLooking = ref(false);
 const wf = ref({ privateComputer: false, emailOptIn: false, email: '', joinTrustee: false, haveFile: false, haveFolder: false });
 const wfSuggestedId = ref<string | null>(null);
 const wfFile = ref<File | null>(null);
@@ -1417,76 +1284,13 @@ const welcomeFormStart = async () => {
     tempStartLoading.value = false;
   }
 };
-const expandedPublicGroup = ref<string | null>(null);
-
-// ── Outside request (W3): the welcome page's "ask the group" form ───
-const showOutsideRequestDialog = ref(false);
-const outsideReqGroup = ref<{ groupId: string; name: string; origin?: string | null } | null>(null);
-const outsideReq = ref({ name: '', email: '', organization: '', scope: 'patient-summary', purpose: 'clinical', message: '' });
-const outsideReqSending = ref(false);
-const outsideReqResult = ref('');
-const outsideReqError = ref('');
-const openOutsideRequest = (g: { groupId: string; name: string; origin?: string | null }) => {
-  outsideReqGroup.value = g;
-  outsideReqResult.value = '';
-  outsideReqError.value = '';
-  showOutsideRequestDialog.value = true;
-};
-const submitOutsideRequest = async () => {
-  const g = outsideReqGroup.value;
-  if (!g) return;
-  outsideReqSending.value = true;
-  outsideReqError.value = '';
-  try {
-    // Featured (remote) groups go through our server-side proxy: the
-    // browser can't POST cross-origin (CORS stays closed).
-    const url = g.origin
-      ? '/api/groups/outside-request-proxy'
-      : `/api/groups/${encodeURIComponent(g.groupId)}/outside-request`;
-    const body = g.origin
-      ? { origin: g.origin, groupId: g.groupId, ...outsideReq.value }
-      : outsideReq.value;
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
-    outsideReqResult.value =
-      `Your request went to ${data.delivered} member(s) of ${g.name}. ` +
-      `Each member's own MAIA applies their sharing policies; anyone who ` +
-      `chooses to respond will reach you at ${outsideReq.value.email}.`;
-  } catch (err) {
-    outsideReqError.value = err instanceof Error ? err.message : 'Failed to send the request';
-  } finally {
-    outsideReqSending.value = false;
-  }
-};
-
+// publicGroups is populated for the Trustee join checkbox (trusteeGroup).
 const loadPublicGroups = async () => {
   try {
     const res = await fetch('/api/groups/public');
     const data = await res.json();
     if (res.ok && data.success) publicGroups.value = data.groups || [];
-  } catch { /* section shows empty state */ }
-};
-/** "Ask to join" on a public group card: capture the join link in place
- *  (no page reload) and surface the next step ON the card itself — the
- *  far-away GET STARTED button changing was disorienting. */
-const askToJoinPublic = async (g: { groupId: string; joinLink: string | null }) => {
-  if (!g.joinLink) return;
-  try {
-    const url = new URL(g.joinLink);
-    const params = url.searchParams;
-    localStorage.setItem('maiaGroupJoin', JSON.stringify({
-      token: params.get('groupJoin'),
-      groupId: params.get('groupId') || g.groupId,
-      registry: params.get('registry') || url.origin,
-      capturedAt: new Date().toISOString()
-    }));
-  } catch { /* malformed link — nothing captured */ }
-  await loadPendingGroupJoinLink();
+  } catch { /* trusteeGroup falls back to null */ }
 };
 
 /** Pre-auth paste capture: same localStorage hand-off a clicked link uses,
