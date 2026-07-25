@@ -52,7 +52,15 @@ Patient groups that help each other with each patient having a private AI — re
 - Your private AI helps explain and manage your specific access rules.
 - Your private AI can charge requesting parties to offset the cost of spam filtering or recoup the cost of hosting your own records.
 
-<<< Policies editor, request, and response examples goes here >>>
+<<< Policies editor goes here >>>
+
+### Trustee Group Exhample
+
+- The Trustee group offers peer support for your own MAIA from the developers and other users. Join the Trustee group below whether you have health records or not.
+- Some members of the Trustee group have added health records that you can try and access by making a request. Depending on the member's settings you can view a de-identified patient summary or other components. You can send private messages.
+- You request may be ignored as spam, forwarded to the patient as a message, or you might get a suggestion for how to improve your request from the patient's private AI.
+
+<<< Policies editor, request, and response blocks go here >>>
 
 ### MAIA is the future of health-records management
 
