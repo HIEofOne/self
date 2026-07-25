@@ -56,7 +56,7 @@
     </div>
 
     <!-- ── Try it ───────────────────────────────────────── -->
-    <div class="pcb-tryit" :class="{ locked: !complete }">
+    <div v-if="showTryIt" class="pcb-tryit" :class="{ locked: !complete }">
       <div class="pcb-try-head">
         Try it <span>— see the decision this card would make</span>
       </div>
@@ -120,7 +120,8 @@ const props = withDefaults(defineProps<{
   existing?: PolicyCard | null;
   ahCategories?: string[];
   saving?: boolean;
-}>(), { mode: 'demo', existing: null, saving: false });
+  showTryIt?: boolean;
+}>(), { mode: 'demo', existing: null, saving: false, showTryIt: true });
 
 const emit = defineEmits<{ save: [card: PolicyCard]; cancel: [] }>();
 

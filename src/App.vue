@@ -281,14 +281,17 @@
 
                     </template>
 
-                    <!-- Policies editor + Trustee suggested policy + Try-it -->
+                    <!-- Policy editor (embedded in the "How is MAIA different" FAQ) -->
                     <template #policies>
                       <div style="max-width: 940px; margin: 0 auto;">
-                        <div v-if="trusteeGroup?.postingPolicy" class="q-mb-md q-pa-sm" style="border-left: 3px solid #90caf9; background: #f7fbff; border-radius: 6px; max-width: 720px; margin: 0 auto 16px;">
-                          <div class="text-caption text-weight-medium text-grey-8 q-mb-xs">{{ trusteeGroup.name }} group — suggested sharing policy</div>
-                          <div class="text-caption text-grey-8" style="white-space: pre-wrap;">{{ trusteeGroup.postingPolicy }}</div>
-                        </div>
-                        <PolicyCardBuilder mode="demo" />
+                        <PolicyCardBuilder mode="demo" :show-try-it="false" />
+                      </div>
+                    </template>
+
+                    <!-- Request editor (embedded in the "Trustee Group Example" FAQ) -->
+                    <template #request>
+                      <div style="max-width: 940px; margin: 0 auto;">
+                        <RequestBuilder />
                       </div>
                     </template>
 
@@ -963,6 +966,7 @@ import PasskeyAuth from './components/PasskeyAuth.vue';
 import RestoreWizard from './components/RestoreWizard.vue';
 import ChatInterface from './components/ChatInterface.vue';
 import PolicyCardBuilder from './components/PolicyCardBuilder.vue';
+import RequestBuilder from './components/RequestBuilder.vue';
 import WelcomeContent from './components/WelcomeContent.vue';
 import DeepLinkAccess from './components/DeepLinkAccess.vue';
 import AdminUsers from './components/AdminUsers.vue';
