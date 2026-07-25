@@ -71,16 +71,10 @@ type ColKey = 'signature' | 'scope' | 'purpose' | 'payment';
 interface CellOpt { v: string; label: string; sub?: string }
 interface Column { key: ColKey; head: string; options: CellOpt[] }
 
-// The request the visitor composes. Labels mirror PolicyCardBuilder's matrix
+// The request the visitor composes. Labels + column order mirror
+// PolicyCardBuilder's matrix (Scope · Purpose · Signature Strength · Deposit)
 // so "what you present" here reads the same as "what they present" there.
 const columns: Column[] = [
-  { key: 'signature', head: 'ID Strength', options: [
-    { v: 'unverified', label: 'Unverified', sub: 'no identity check' },
-    { v: 'verified-email', label: 'Verified email' },
-    { v: 'group-member', label: 'Group member' },
-    { v: 'npi', label: 'NPI verified', sub: 'licensed provider' },
-    { v: 'doximity', label: 'Doximity verified', sub: 'verified clinician' }
-  ]},
   { key: 'scope', head: 'Scope of Request', options: [
     { v: 'notification-only', label: 'Patient notification only', sub: 'reach them, no record data' },
     { v: 'meds-allergies', label: 'Current medications' },
@@ -94,6 +88,13 @@ const columns: Column[] = [
     { v: 'research', label: 'Research' },
     { v: 'public-health', label: 'Public health' },
     { v: 'marketing', label: 'Marketing' }
+  ]},
+  { key: 'signature', head: 'Signature Strength', options: [
+    { v: 'unverified', label: 'Unverified', sub: 'no identity check' },
+    { v: 'verified-email', label: 'Verified email' },
+    { v: 'group-member', label: 'Group member' },
+    { v: 'npi', label: 'NPI verified', sub: 'licensed provider' },
+    { v: 'doximity', label: 'Doximity verified', sub: 'verified clinician' }
   ]},
   { key: 'payment', head: 'Deposit or Payment', options: [
     { v: 'none', label: 'None' },

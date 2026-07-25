@@ -8,6 +8,7 @@ import { fileURLToPath } from 'url';
 import { findUserAgent } from '../utils/agent-helper.js';
 import { getProjectIdForGenAI } from '../utils/project-config.js';
 import { getDoRegion } from '../utils/new-agent-config.js';
+import { isVerified as isEmailVerified } from '../emailVerification.js';
 
 // Wizard-done workflow stages (mirrors WIZARD_DONE_STAGES in
 // ChatInterface.vue): agent-status writers must never downgrade these.
@@ -1243,6 +1244,8 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
         && /^[a-z]{2,24}[0-9]{2}$/.test(req.body.desiredUserId)) ? req.body.desiredUserId : null;
       const notifyEmail = (typeof req.body?.email === 'string'
         && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(req.body.email.trim())) ? req.body.email.trim() : null;
+      const emailVerifyToken = (typeof req.body?.emailVerifyToken === 'string'
+        && /^[a-f0-9]{32}$/.test(req.body.emailVerifyToken)) ? req.body.emailVerifyToken : null;
       const cookieUserId = req.cookies?.[TEMP_USER_COOKIE];
       if (cookieUserId && !forceNew) {
         try {
@@ -1307,11 +1310,17 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
         useDesired = false; // one shot; conflicts fall back to generation
         const dateStr = new Date().toISOString().replace(/[-:]/g, '').split('T')[0];
         const candidateKbName = `${candidateId}-kb-${dateStr}${Date.now().toString().slice(-6)}`;
+        // Promote a token-verified email (welcome onboarding): if the visitor
+        // verified THIS address before signing up, stamp it verified. The
+        // daily sweep purges verified emails 72h later unless the user is a
+        // Trustee member (see groups.js sweepExpired).
+        const emailIsVerified = !!(notifyEmail && isEmailVerified(emailVerifyToken, notifyEmail));
         const candidateDoc = {
           _id: candidateId,
           userId: candidateId,
           displayName: candidateDisplayName,
           email: notifyEmail,
+          ...(emailIsVerified ? { emailVerified: true, emailVerifiedAt: new Date().toISOString() } : {}),
           domain: passkeyService.rpID,
           type: 'user',
           workflowStage: 'active',

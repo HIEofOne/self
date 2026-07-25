@@ -1624,6 +1624,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     const nowIso = new Date().toISOString();
     let relayDeleted = 0;
     let invitesExpired = 0;
+    let emailsPurged = 0;
     try {
       const all = await cloudant.getAllDocuments(RELAY_DB);
       for (const m of all || []) {
@@ -1645,7 +1646,27 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         }
       }
     } catch { /* ignore */ }
-    return { relayDeleted, invitesExpired };
+    // Verified onboarding emails are kept only for Trustee members. A verified
+    // email older than 72h on a non-Trustee user is purged (welcome flow rule).
+    // Scoped to docs carrying emailVerifiedAt, so emails set through other
+    // channels (e.g. the Groups-tab notification email) are never touched.
+    try {
+      const cutoff = Date.now() - 72 * 60 * 60 * 1000;
+      const users = await cloudant.getAllDocuments(USERS_DB);
+      for (const u of users || []) {
+        if (!u || u.type !== 'user' || !u.email || !u.emailVerifiedAt) continue;
+        if (new Date(u.emailVerifiedAt).getTime() > cutoff) continue; // younger than 72h
+        const inTrustee = Array.isArray(u.groupMemberships)
+          && u.groupMemberships.some((m) => /trustee/i.test(m.groupName || ''));
+        if (inTrustee) continue; // kept — Trustee member
+        u.email = null;
+        u.emailVerified = false;
+        delete u.emailVerifiedAt;
+        u.updatedAt = nowIso;
+        try { await cloudant.saveDocument(USERS_DB, u); emailsPurged++; } catch { /* ignore */ }
+      }
+    } catch { /* users db issues — skip */ }
+    return { relayDeleted, invitesExpired, emailsPurged };
   };
 
   // ── PR-2: patient-side membership endpoints ────────────────────────
@@ -3075,7 +3096,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     } catch (e) {
       console.warn('[groups-cron] user iteration failed:', e?.message || e);
     }
-    console.log(`[groups-cron] maintenance: swept ${swept.relayDeleted} msgs / ${swept.invitesExpired} invites; ` +
+    console.log(`[groups-cron] maintenance: swept ${swept.relayDeleted} msgs / ${swept.invitesExpired} invites / ${swept.emailsPurged} emails; ` +
       `refreshed ${usersProcessed} users, ${totalRevoked} revoked, ${totalMessages} new messages`);
   };
 

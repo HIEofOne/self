@@ -28,6 +28,16 @@
       </div>
     </div>
 
+    <!-- ── Verify your own email ────────────────────────── -->
+    <!-- Welcome onboarding only: choosing "Verified email" as the signature
+         lets the visitor verify their own address here; it cross-fills the
+         setup form's notification email (and vice versa). -->
+    <div v-if="mode === 'demo' && sel.signature === 'verified-email'" class="pcb-verify">
+      <div class="pcb-verify-head">Verify your email</div>
+      <div class="pcb-verify-sub">A verified email lets group members trust a request from you — and lets responses reach you.</div>
+      <EmailVerifyBox />
+    </div>
+
     <!-- ── Live card ────────────────────────────────────── -->
     <div class="pcb-card-stage">
       <div v-if="!complete" class="pcb-card-empty">
@@ -114,6 +124,7 @@ import {
   sentenceFor, evaluate,
   type PolicyCard, type PolicyRequest, type Scope, type Signature, type Purpose, type Payment
 } from '../utils/policyCards';
+import EmailVerifyBox from './EmailVerifyBox.vue';
 
 const props = withDefaults(defineProps<{
   mode?: 'demo' | 'edit';
@@ -134,15 +145,8 @@ interface CellOpt { v: string; label: string; sub?: string; cls?: string; ah?: b
 interface Column { key: ColKey; head: string; options: CellOpt[] }
 
 // Payment labels here follow the proposed table; the stored enum is MAIA's.
+// Column order (left→right): Scope · Purpose · Signature Strength · Deposit · Action.
 const columns: Column[] = [
-  { key: 'signature', head: 'ID Strength', options: [
-    { v: 'unverified', label: 'Unverified', sub: 'no identity check' },
-    { v: 'verified-email', label: 'Verified email' },
-    { v: 'group-member', label: 'Group member' },
-    { v: 'npi', label: 'NPI verified', sub: 'licensed provider' },
-    { v: 'doximity', label: 'Doximity verified', sub: 'verified clinician' },
-    { v: 'verified-by-me', label: 'Verified by me', sub: 'someone you vouched for' }
-  ]},
   { key: 'scope', head: 'Scope of Request', options: [
     { v: 'notification-only', label: 'Patient notification only', sub: 'reach you, no record data' },
     { v: 'meds-allergies', label: 'Current medications' },
@@ -157,6 +161,14 @@ const columns: Column[] = [
     { v: 'research', label: 'Research' },
     { v: 'public-health', label: 'Public health' },
     { v: 'marketing', label: 'Marketing' }
+  ]},
+  { key: 'signature', head: 'Signature Strength', options: [
+    { v: 'unverified', label: 'Unverified', sub: 'no identity check' },
+    { v: 'verified-email', label: 'Verified email' },
+    { v: 'group-member', label: 'Group member' },
+    { v: 'npi', label: 'NPI verified', sub: 'licensed provider' },
+    { v: 'doximity', label: 'Doximity verified', sub: 'verified clinician' },
+    { v: 'verified-by-me', label: 'Verified by me', sub: 'someone you vouched for' }
   ]},
   { key: 'payment', head: 'Deposit or Payment', options: [
     { v: 'none', label: 'None' },
@@ -333,6 +345,11 @@ defineExpose({ complete, builtCard });
 .pcb-cell.is-sel .pcb-sub { color: rgba(255,255,255,.85); }
 .pcb-ah { display: block; margin-top: 6px; }
 .pcb-ah select { width: 100%; font: inherit; font-size: 12px; padding: 4px 5px; border-radius: 6px; border: 1px solid #c4d0da; background: #fff; color: var(--pcb-ink); }
+
+/* Verify-email box (welcome onboarding) */
+.pcb-verify { margin-top: 16px; background: #fff; border: 1px solid var(--pcb-line); border-radius: 10px; padding: 14px 16px; }
+.pcb-verify-head { font-weight: 650; font-size: 14.5px; }
+.pcb-verify-sub { font-size: 12.5px; color: var(--pcb-muted); margin: 2px 0 10px; }
 
 /* Card */
 .pcb-card-stage { margin-top: 16px; }
