@@ -22,7 +22,13 @@
         </button>
         <transition name="wc-expand" @enter="onEnter" @afterEnter="onAfterEnter" @leave="onLeave">
           <div v-show="openFaq === node.idx" class="wc-faq-body-wrap">
-            <div class="wc-faq-body wc-prose" v-html="node.html"></div>
+            <div class="wc-faq-body wc-prose">
+              <div v-html="node.html"></div>
+              <!-- Live editor / request table embedded in this FAQ item -->
+              <div v-if="node.slot" class="wc-faq-slot" :class="'wc-slot--' + node.slot">
+                <slot :name="node.slot" />
+              </div>
+            </div>
           </div>
         </transition>
       </div>
@@ -54,18 +60,21 @@ md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
 
 type Node =
   | { type: 'slot'; name: string }
-  | { type: 'faq'; idx: number; title: string; html: string }
+  | { type: 'faq'; idx: number; title: string; html: string; slot?: string }
   | { type: 'prose'; html: string; lede: boolean };
 
 // Map the natural-language marker text to a section kind by keyword, so
 // the editable file can describe each marker in prose ("Policies editor,
 // request, and response examples goes here") rather than a code token.
-const markerKind = (text: string): 'header' | 'faq' | 'policies' | 'checkboxes' | 'footer' | 'prose' => {
+const markerKind = (text: string): 'header' | 'faq' | 'policies' | 'request' | 'checkboxes' | 'footer' | 'prose' => {
   const t = text.toLowerCase();
   // Order matters: the checkboxes marker text mentions "...after the
   // welcome FAQ", so the specific slots are matched BEFORE the /faq/
   // fallback, which then only catches the actual "Welcome FAQ" marker.
+  // "request" is checked before "polic": the request/response marker text
+  // ("Policies editor, request, and response blocks go here") contains both.
   if (/badge|header/.test(t)) return 'header';
+  if (/request|response/.test(t)) return 'request';
   if (/polic/.test(t)) return 'policies';
   if (/checkbox|setup/.test(t)) return 'checkboxes';
   if (/footer/.test(t)) return 'footer';
@@ -109,9 +118,20 @@ const nodes = computed<Node[]>(() => {
   for (const line of lines) {
     const marker = line.match(/^<<<\s*(.+?)\s*>>>\s*$/);
     if (marker) {
+      const kind = markerKind(marker[1]);
+      // A policies/request marker that immediately follows a FAQ item is
+      // embedded INSIDE that item's collapsible body (so the editor +
+      // request table expand and collapse together with the question),
+      // rather than rendered as a standalone section.
+      if ((kind === 'policies' || kind === 'request') && blockMode === 'faq') {
+        out.push({ type: 'faq', idx: faqIdx++, title: faqTitle, html: md.render(buf.join('\n').trim()), slot: kind });
+        buf = [];
+        blockMode = 'prose';
+        inHeader = false;
+        continue;
+      }
       flush();
       blockMode = 'prose';
-      const kind = markerKind(marker[1]);
       if (kind === 'header') {
         // The live sign-in + badges render just ABOVE this component; the
         // header marker here only carries the editable headline/tagline.
@@ -191,6 +211,7 @@ const onLeave = (el: Element) => {
 .wc-faq-head.open .wc-faq-chevron { transform: rotate(180deg); color: #0e7490; }
 .wc-faq-body-wrap { overflow: hidden; }
 .wc-faq-body { padding: 0 4px 16px; font-size: 14.5px; }
+.wc-faq-slot { margin-top: 14px; }
 
 .wc-expand-enter-active, .wc-expand-leave-active { transition: height .22s ease; }
 @media (prefers-reduced-motion: reduce) {
