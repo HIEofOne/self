@@ -54,7 +54,7 @@ Patient groups that help each other with each patient having a private AI — re
 
 <<< Policies editor goes here >>>
 
-### Trustee Group Exhample
+### Trustee Group Example
 
 - The Trustee group offers peer support for your own MAIA from the developers and other users. Join the Trustee group below whether you have health records or not.
 - Some members of the Trustee group have added health records that you can try and access by making a request. Depending on the member's settings you can view a de-identified patient summary or other components. You can send private messages.
