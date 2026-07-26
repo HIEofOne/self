@@ -52,14 +52,17 @@ is updated deliberately). It supersedes the setup portion of
 
 Each phase is a small, independently reviewed PR that references this doc.
 
-- [ ] **A — Pipeline backbone** (`server/records-pipeline.js`): reorder
+- [x] **A — Pipeline backbone** (`server/records-pipeline.js`): reorder
   `PIPELINE_STAGES`; `decideNextAction` returns a human `label` per stage/flavor.
 - [ ] **B — Wizard single button** (`ChatInterface.vue`): one CTA bound to the
   next-action label; X → chat + keep the ring spinning; reopen recomputes from
   `fetchPipeline`.
-- [ ] **C — Feedback** (`ChatInterface.vue`): index tokens + elapsed on
-  complete; auto-run the draft after indexing with the step-list + elapsed in
-  the wizard.
+- [x] **C — Records flow runs whenever files exist** (`ChatInterface.vue`): the
+  records watcher fires on `stage3HasFiles` (not folder flags); the draft/meds/
+  summary rows gate on `stage3HasFiles` (not `!wizardQuickStart`); and the
+  quick-start "AI-ready → Groups" completion **defers** when files are present,
+  so it no longer jumps to Groups before indexing finishes. This removes the
+  Groups→Lists churn. (Index/draft timing rows already render.)
 - [ ] **D — Patch on meds-verify** (`MyStuffDialog.vue`): patch-only
   (`replaceMedicationsInSummary`), no regenerate; auto-open PS, drop Lists
   highlight. Supersedes the #232 no-draft regenerate band-aid.

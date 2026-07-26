@@ -691,8 +691,8 @@
               </q-item-section>
             </q-item>
 
-            <!-- Draft Patient Summary (hidden for quick start) -->
-            <q-item v-if="!wizardQuickStart" dense class="q-py-xs">
+            <!-- Draft Patient Summary (shown whenever records were indexed) -->
+            <q-item v-if="stage3HasFiles" dense class="q-py-xs">
               <q-item-section avatar style="min-width: 28px">
                 <q-icon v-if="wizardDraftPsStatus === 'done' || preGeneratedSummary" name="check_circle" color="green" size="sm" />
                 <q-spinner v-else-if="wizardDraftPsStatus === 'running'" size="sm" color="primary" />
@@ -715,8 +715,8 @@
               </q-item-section>
             </q-item>
 
-            <!-- Medication Worksheets (hidden for quick start) -->
-            <q-item v-if="!wizardQuickStart" dense class="q-py-xs">
+            <!-- Medication Worksheets (shown whenever records were indexed) -->
+            <q-item v-if="stage3HasFiles" dense class="q-py-xs">
               <q-item-section avatar style="min-width: 28px">
                 <q-icon v-if="wizardCurrentMedications" name="check_circle" color="green" size="sm" />
                 <q-spinner v-else-if="wizardPreparingRecords && wizardDraftPsStatus !== 'running'" size="sm" color="primary" />
@@ -731,8 +731,8 @@
               </q-item-section>
             </q-item>
 
-            <!-- Verify Patient Summary (hidden for quick start) -->
-            <q-item v-if="!wizardQuickStart" dense class="q-py-xs">
+            <!-- Verify Patient Summary (shown whenever records were indexed) -->
+            <q-item v-if="stage3HasFiles" dense class="q-py-xs">
               <q-item-section avatar style="min-width: 28px">
                 <q-icon v-if="wizardPatientSummary" name="check_circle" color="green" size="sm" />
                 <q-spinner v-else-if="wizardFlowPhase === 'summary'" size="sm" color="primary" />
@@ -8716,7 +8716,12 @@ const quickStartCompleting = ref(false);
 watch(
   [() => wizardStage1Complete.value, () => wizardQuickStart.value],
   async ([agentReady, quickStart]) => {
-    if (!quickStart || !agentReady || quickStartCompleting.value) return;
+    // When records were supplied, the records flow (index → draft → meds →
+    // summary) owns completion and its landing. The quick-start "AI-ready →
+    // Groups" shortcut is ONLY for the genuinely no-records case; firing it
+    // here would set flowPhase='done' and jump to Groups before indexing
+    // finishes, which then blocks the records watcher (Setup_Sequence.md).
+    if (!quickStart || !agentReady || quickStartCompleting.value || stage3HasFiles.value) return;
     let flagPresent = false;
     try {
       const k = wizardQuickStartKey(props.user?.userId);
@@ -8795,7 +8800,11 @@ watch(
     if (
       phase === 'complete' &&
       agentReady &&
-      (localFolderHandle.value || safariFolderName.value || wizardFolderlessRun.value) &&
+      // Records flow runs whenever files were indexed — not only for folder
+      // runs. A welcome-form quick-start WITH a file indexes the file but sets
+      // none of the folder flags, which previously skipped the draft→meds→
+      // summary flow and stranded the user (Setup_Sequence.md, Phase C).
+      (stage3HasFiles.value || localFolderHandle.value || safariFolderName.value || wizardFolderlessRun.value) &&
       flowPhase === 'running' &&
       !wizardPreparingRecords.value
     ) {
