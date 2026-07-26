@@ -68,9 +68,15 @@ Each phase is a small, independently reviewed PR that references this doc.
   quick-start "AI-ready → Groups" completion **defers** when files are present,
   so it no longer jumps to Groups before indexing finishes. This removes the
   Groups→Lists churn. (Index/draft timing rows already render.)
-- [ ] **D — Patch on meds-verify** (`MyStuffDialog.vue`): patch-only
-  (`replaceMedicationsInSummary`), no regenerate; auto-open PS, drop Lists
-  highlight. Supersedes the #232 no-draft regenerate band-aid.
+- [x] **D — Patch on meds-verify** (`MyStuffDialog.vue`): **decided: no change.**
+  With Phase C the draft reliably exists after indexing, so
+  `updateSummaryWithVerifiedMeds` takes the **patch** path
+  (`replaceMedicationsInSummary`) in the normal flow — no recalc, as intended.
+  The #232 regenerate now only fires if the draft is genuinely missing (a draft
+  *failure*), which is a sensible safety net, not a band-aid. Reverting it would
+  reintroduce the stall on failure, so it's kept. (The auto-open-PS + drop-Lists-
+  highlight that Phase D also mentioned is already handled by the records
+  watcher / patch path.)
 - [ ] **E — Clean exit** (`ChatInterface.vue` / `MyStuffDialog.vue`): PS verify →
   save + close Workbook + clear chat files + blank slate.
 - [ ] **F — Flavor branching + tests**: finalize per-flavor CTA/skip; CDP
