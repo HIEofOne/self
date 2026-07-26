@@ -139,3 +139,41 @@ exported setup log + screenshots at each CTA. A correct run's log is a clean
 linear sequence (index → draft (timed) → Show Current Medications → verify → PS
 shown → verify → chat blank slate) with **no** Workbook open/dismiss churn.
 `npm run build` (vue-tsc) green per PR.
+
+## Restore-after-deletion — BROKEN (to fix later)
+
+**Status:** the wizard rework broke the restore flavor, and **DELETE CLOUD
+ACCOUNT is temporarily disabled** in the UI (`src/App.vue`, both the primary
+button and the "more choices" option) until this is fixed.
+
+**Diagnosis (v1.5.109, zachary08 log):**
+- `deleteUserAndResources` (`server/index.js:8934`) *does* delete Spaces (§1),
+  both KBs (§2: `kbId` + `kb2.kbId`), and all agents (§3: stored + GPT + orphan
+  scan for `${userId}-agent-*`), tracking results in `deletionDetails`. But it
+  only `console.log`s — **no `appendUserProvisioningEvent`** — so nothing reaches
+  `maia-log.pdf`; the log shows `Account deleted: No` and no delete events.
+- The maia-log is built from `userDoc.provisioningLog`, and this function
+  **deletes the userDoc** — so delete events written there vanish with it. They
+  must be captured **client-side** (the endpoint already returns
+  `deletionDetails`) and written to the **folder-backed** log before deletion.
+- Restore infra exists (`/api/temporary/restore` `auth.js:1383`;
+  `restore-started`/`restore-complete` events; App.vue's Files/Agent/KB/
+  Medications verification `~3101`) but the wizard never surfaces it — a
+  re-entry logs as a normal setup, so restore runs blind.
+
+**Fix plan (two parts):**
+1. **Log what's deleted (verified).** In `deleteUserAndResources`, emit
+   `account-delete-started`, `spaces-deleted {files}`, `kb-deleted {kbIds}`,
+   `agent-deleted {count}`, `account-deleted {details}`. Because the userDoc is
+   destroyed, the **client** writes the returned `deletionDetails` into the
+   folder log + regenerates the PDF right after the endpoint returns. Add render
+   cases for these events in `ChatInterface.vue`'s log renderer.
+2. **Track restore.** When sign-in detects a destroyed account, run the restore
+   path emitting `restore-started` → re-provision agent → re-index →
+   `restore-complete`, shown as **live wizard rows** (reuse the setup rows +
+   timing), driven by the existing restore verification — not just logged at the
+   end.
+
+**Verification requires a real delete→restore cycle against DigitalOcean**
+(agents, KB, Spaces) — cannot be type-checked alone. Re-enable DELETE CLOUD
+ACCOUNT only once this passes.
