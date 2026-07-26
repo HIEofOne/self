@@ -2229,13 +2229,30 @@ const safariFolderName = ref<string | null>(null);
  *  Shows a prompt asking the user to re-select the folder to continue. */
 const safariNeedsReselect = ref(false);
 
+// Live agent-deploy elapsed: start the clock when polling begins, clear it when
+// polling ends. The status line derives seconds from this so it counts up even
+// when the older agentSetupElapsed timer isn't running in a given flow.
+const agentSetupStartedAt = ref<number | null>(null);
+watch(() => agentSetupPollingActive.value, (active) => {
+  if (active && !agentSetupStartedAt.value) {
+    agentSetupStartedAt.value = Date.now();
+  } else if (!active) {
+    // Deploy finished — capture the elapsed so the Primary row reads "Ready (Xs)".
+    if (agentSetupStartedAt.value && wizardAgentDeployElapsed.value == null) {
+      wizardAgentDeployElapsed.value = Math.max(0, Math.floor((Date.now() - agentSetupStartedAt.value) / 1000));
+    }
+    agentSetupStartedAt.value = null;
+  }
+});
 const wizardStage1StatusLine = computed(() => {
   if (wizardStage1Complete.value) return 'Ready to chat';
-  const statusSuffix = agentSetupStatus.value ? ` • ${agentSetupStatus.value}` : '';
-  if (agentSetupElapsed.value) {
-    return `${Math.floor(agentSetupElapsed.value / 60)}m ${agentSetupElapsed.value % 60}s${statusSuffix}`;
-  }
-  return `<elapsed time>${statusSuffix}`;
+  void stage3ElapsedTick.value; // re-render each tick so the counter advances
+  // Friendlify the DigitalOcean status enum (STATUS_DEPLOYING → "deploying").
+  const raw = agentSetupStatus.value || '';
+  const friendly = raw ? raw.replace(/^STATUS_/i, '').replace(/_/g, ' ').toLowerCase() : 'deploying';
+  const secs = agentSetupElapsed.value
+    || (agentSetupStartedAt.value ? Math.max(0, Math.floor((Date.now() - agentSetupStartedAt.value) / 1000)) : 0);
+  return `${Math.floor(secs / 60)}m ${String(secs % 60).padStart(2, '0')}s • ${friendly}`;
 });
 const wizardStage2FileName = ref<string | null>(null);
 const wizardStage3Files = ref<Array<{ name: string; isAppleHealth?: boolean; inKnowledgeBase?: boolean; bucketKey?: string; pendingKbAdd?: boolean }>>([]);
