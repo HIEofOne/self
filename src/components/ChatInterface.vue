@@ -670,7 +670,7 @@
                     <span class="text-grey-6">(30 min max)</span>
                   </span>
                   <span v-else-if="indexingStatus?.phase === 'complete'" class="text-green text-caption q-ml-sm">
-                    {{ stage2StatusDisplay.files }} files, {{ stage2StatusDisplay.tokens }} tokens{{ (stage3IndexingStartedAt && stage3IndexingCompletedAt) ? ` (${formatElapsed(stage3IndexingStartedAt, stage3IndexingCompletedAt)})` : '' }}
+                    {{ stage2StatusDisplay.files }} files, {{ stage2StatusDisplay.tokens }} tokens{{ wizardIndexDurationText || ((stage3IndexingStartedAt && stage3IndexingCompletedAt) ? ` (${formatElapsed(stage3IndexingStartedAt, stage3IndexingCompletedAt)})` : '') }}
                   </span>
                 </q-item-label>
               </q-item-section>
@@ -5830,6 +5830,25 @@ const stage3IndexingPoll = ref<ReturnType<typeof setInterval> | null>(null);
 const stage3IndexingPending = ref(false);
 const stage3IndexingStartedAt = ref<number | null>(null);
 const stage3IndexingCompletedAt = ref<number | null>(null);
+// Server-reported KB index duration (the kb-indexed event's elapsedMs). The
+// wizard row's client start/complete timestamps aren't always both set, so
+// prefer this for the "Index Knowledge Base — … (Xm Ys)" line.
+const wizardIndexElapsedMs = ref<number | null>(null);
+const wizardIndexDurationText = computed(() => {
+  const ms = wizardIndexElapsedMs.value;
+  if (!ms || ms <= 0) return '';
+  const m = Math.floor(ms / 60000);
+  const s = String(Math.floor((ms % 60000) / 1000)).padStart(2, '0');
+  return ` (${m}m ${s}s)`;
+});
+// The running wizard should be visible (not the chat behind it) unless the
+// user closed it with X. The records watcher hands off to the Workbook during
+// meds/summary and 'done' returns to chat — here we only keep 'running' shown.
+watch(() => wizardFlowPhase.value, (phase) => {
+  if (phase === 'running' && !wizardDismissed.value) {
+    showAgentSetupDialog.value = true;
+  }
+});
 // Number of files we expect to be indexed in the current job. Used to gate the
 // 7-minute tokenTimeout safety net so it doesn't fire while DO is still working
 // through the remaining files (DO's `indexed_file_count` increments as each
@@ -6074,6 +6093,7 @@ const handleStage3Index = async (overrideNames?: string[], fromRestore = false) 
               fileCount: parseInt(String(kbStatus.filesIndexed)) || 0,
               elapsedMs: elapsedPollMs || null
             });
+            wizardIndexElapsedMs.value = elapsedPollMs || null;
             if (stage3IndexingPoll.value) {
               clearInterval(stage3IndexingPoll.value);
               stage3IndexingPoll.value = null;
@@ -8753,6 +8773,7 @@ watch(
         fileCount: parseInt(String(filesIndexed)) || 0,
         elapsedMs: elapsed ? elapsed * 1000 : null
       });
+      wizardIndexElapsedMs.value = elapsed ? elapsed * 1000 : null;
       void generateSetupLogPdf();
     }
   }
