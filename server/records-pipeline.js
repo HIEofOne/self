@@ -15,12 +15,16 @@
  * surface-specific triggers.
  */
 
+// Order matters: `current` is the first non-done/non-skipped stage below.
+// summaryDrafted precedes medsVerified — the summary is drafted right after
+// indexing (hidden), then verifying meds PATCHES that draft. See
+// Documentation/Setup_Sequence.md.
 export const PIPELINE_STAGES = [
   'imported',
   'listsBuilt',
-  'medsVerified',
   'indexed',
   'summaryDrafted',
+  'medsVerified',
   'summaryVerified'
 ];
 
@@ -140,26 +144,32 @@ export function decideNextAction(pipeline) {
   const st = pipeline.stages;
   switch (pipeline.current) {
     case 'imported':
-      return { kind: 'user', action: 'add-records', description: 'Add a health record file (chat "+" or wizard ADD FILES)' };
+      // No records yet. For a group-only new user this is not a blocker —
+      // the wizard treats records as optional and offers "Go to chat"
+      // (flavor handling lives in the wizard, Setup_Sequence.md Phase F).
+      return { kind: 'user', action: 'add-records', label: 'Add a health record', description: 'Add a health record file (chat "+" or wizard ADD FILES)' };
     case 'listsBuilt':
-      if (st.listsBuilt.status === 'running') return { kind: 'wait', action: 'lists-build-running' };
+      if (st.listsBuilt.status === 'running') return { kind: 'wait', action: 'lists-build-running', label: 'Building your lists…' };
       return {
         kind: 'client',
         action: 'process-initial-file',
+        label: 'Build lists',
         params: { fileName: pipeline.appleFileName, force: st.listsBuilt.status === 'error' },
         description: 'Build the deterministic Lists from the Apple Health file'
       };
-    case 'medsVerified':
-      return { kind: 'user', action: 'verify-medications', target: 'lists', description: 'Review and VERIFY Current Medications on the Lists tab' };
     case 'indexed':
-      if (st.indexed.status === 'running') return { kind: 'wait', action: 'indexing-running', phase: st.indexed.phase || null };
-      return { kind: 'client', action: 'start-indexing', description: 'Index the records into the knowledge base (wizard INDEX MY RECORDS)' };
+      if (st.indexed.status === 'running') return { kind: 'wait', action: 'indexing-running', label: 'Indexing…', phase: st.indexed.phase || null };
+      return { kind: 'client', action: 'start-indexing', label: 'Index my records', description: 'Index the records into the knowledge base (wizard INDEX MY RECORDS)' };
     case 'summaryDrafted':
-      if (st.summaryDrafted.status === 'running') return { kind: 'wait', action: 'draft-running' };
-      return { kind: 'client', action: 'request-draft', endpoint: '/api/patient-summary/draft', description: 'Generate the governed Patient Summary draft' };
+      if (st.summaryDrafted.status === 'running') return { kind: 'wait', action: 'draft-running', label: 'Drafting summary…' };
+      // Auto-fired by the wizard once indexing completes — the draft is
+      // generated in the background and kept hidden until meds are verified.
+      return { kind: 'client', action: 'request-draft', label: 'Drafting summary…', endpoint: '/api/patient-summary/draft', description: 'Generate the governed Patient Summary draft' };
+    case 'medsVerified':
+      return { kind: 'user', action: 'verify-medications', label: 'Show Current Medications', target: 'lists', description: 'Review and VERIFY Current Medications on the Lists tab; verifying patches the draft summary' };
     case 'summaryVerified':
-      return { kind: 'user', action: 'review-summary', target: 'patient-summary', description: 'Review the draft and save it (the review dialog is the only save path)' };
+      return { kind: 'user', action: 'review-summary', label: 'Show Patient Summary', target: 'patient-summary', description: 'Review the patched draft and save it (the review dialog is the only save path)' };
     default:
-      return { kind: 'done', action: 'complete' };
+      return { kind: 'done', action: 'complete', label: 'Go to chat' };
   }
 }
