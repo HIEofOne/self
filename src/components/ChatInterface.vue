@@ -788,11 +788,18 @@
           </div>
         </q-card-section>
 
+        <!-- Single next-step CTA: one button labeled with the pipeline's next
+             suggested step. Disabled with a spinner while a stage advances on
+             its own (indexing, drafting); clickable at the user's moments
+             (Show Current Medications / Show Patient Summary / Go to chat). -->
         <q-card-actions align="right">
           <q-btn
-            v-if="wizardStage1Complete && (indexingStatus?.phase === 'complete' || !stage3HasFiles) && !wizardPreparingRecords && !wizardQuickStart"
-            unelevated label="Continue" color="primary"
-            @click="dismissWizard"
+            v-if="wizardStage1Complete && wizardNextStep"
+            unelevated color="primary"
+            :label="wizardCtaLabel"
+            :disable="wizardCtaBusy"
+            :loading="wizardCtaBusy"
+            @click="handleWizardCta"
           />
         </q-card-actions>
       </q-card>
@@ -1139,7 +1146,7 @@ import ConversationRail from './ConversationRail.vue';
 import { jsPDF } from 'jspdf';
 import MarkdownIt from 'markdown-it';
 import { processFileNCitations } from '../utils/fileNCitations';
-import { advancePipeline, fetchPipeline, waitForStageDone } from '../utils/pipeline';
+import { advancePipeline, fetchPipeline, waitForStageDone, type PipelineNext } from '../utils/pipeline';
 import { logModalEvent } from '../utils/modalLog';
 import SummaryProgress from './SummaryProgress.vue';
 import {
@@ -4619,6 +4626,54 @@ const handleWizardRequested = () => {
   }
   showAgentSetupDialog.value = true;
 };
+
+// ── Phase B: the wizard's single next-step CTA, driven by the pipeline ──
+// One button whose label IS the next suggested step (decideNextAction.label,
+// server-side). Refreshed whenever the wizard is open and a relevant signal
+// changes; disabled with status text while a stage is auto-advancing.
+const wizardNextStep = ref<PipelineNext | null>(null);
+const refreshWizardNextStep = async () => {
+  if (!props.user?.userId) { wizardNextStep.value = null; return; }
+  const p = await fetchPipeline(props.user.userId);
+  wizardNextStep.value = p?.next || null;
+};
+const wizardCtaLabel = computed(() => wizardNextStep.value?.label || 'Go to chat');
+// 'wait'/'client' stages advance on their own — show the label as status,
+// disabled. 'user'/'done' are the moments the user actually clicks.
+const wizardCtaBusy = computed(() => {
+  const k = wizardNextStep.value?.kind;
+  return k === 'wait' || k === 'client';
+});
+const handleWizardCta = () => {
+  switch (wizardNextStep.value?.action) {
+    case 'verify-medications':
+      try {
+        sessionStorage.setItem('autoProcessInitialFile', 'true');
+        sessionStorage.setItem('wizardMyListsAuto', 'true');
+      } catch { /* ignore */ }
+      myStuffInitialTab.value = 'lists';
+      showMyStuffDialog.value = true;
+      showAgentSetupDialog.value = false;
+      return;
+    case 'review-summary':
+      myStuffInitialTab.value = 'summary';
+      showMyStuffDialog.value = true;
+      showAgentSetupDialog.value = false;
+      return;
+    default:
+      // 'complete'/done (Go to chat) and any unmapped step → drop into chat.
+      dismissWizard();
+  }
+};
+// Recompute the next step when the wizard opens (incl. after reload) and on the
+// signals that move the flow forward.
+watch(
+  [() => showAgentSetupDialog.value, () => indexingStatus.value?.phase,
+   () => wizardDraftPsStatus.value, () => wizardCurrentMedications.value,
+   () => wizardPatientSummary.value, () => wizardFlowPhase.value],
+  () => { if (showAgentSetupDialog.value) void refreshWizardNextStep(); },
+  { immediate: true }
+);
 
 /** Upgrade a quick-start ('chat_ready') account to the full tier: re-run
  *  the standard wizard over the connected folder. Agents are already

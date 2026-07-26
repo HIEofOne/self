@@ -54,9 +54,14 @@ Each phase is a small, independently reviewed PR that references this doc.
 
 - [x] **A — Pipeline backbone** (`server/records-pipeline.js`): reorder
   `PIPELINE_STAGES`; `decideNextAction` returns a human `label` per stage/flavor.
-- [ ] **B — Wizard single button** (`ChatInterface.vue`): one CTA bound to the
-  next-action label; X → chat + keep the ring spinning; reopen recomputes from
-  `fetchPipeline`.
+- [x] **B — Wizard single button** (`ChatInterface.vue`): the footer is now one
+  CTA whose label is `wizardNextStep.label` (from `fetchPipeline` →
+  `decideNextAction`), refreshed on wizard-open and on flow signals. Disabled +
+  spinner while `kind` is `wait`/`client` (auto-advancing); clickable for the
+  user's moments — dispatch: `verify-medications`→Lists, `review-summary`→PS,
+  else→chat (`dismissWizard`, which already keeps the rail ring spinning while
+  `flowPhase !== 'done'`). Flavor-aware labels (group-only "Go to chat" instead
+  of "Add a health record") remain Phase F.
 - [x] **C — Records flow runs whenever files exist** (`ChatInterface.vue`): the
   records watcher fires on `stage3HasFiles` (not folder flags); the draft/meds/
   summary rows gate on `stage3HasFiles` (not `!wizardQuickStart`); and the
