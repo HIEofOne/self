@@ -5303,6 +5303,17 @@ const generateSetupLogPdf = async (opts: { download?: boolean; returnBase64?: bo
           case 'medications-phase-opened': return `[${t}] Medications ready for verification`;
           case 'medications-verified': return `[${t}] Current Medications verified by user`;
           case 'no-draft-ps-available': return `[${t}] No provisional Patient Summary available to patch with verified medications`;
+          case 'draft-ps-after-meds': return `[${t}] Drafting Patient Summary with verified medications...`;
+          case 'kb-source-breakdown': {
+            const srcs = Array.isArray(evt.sources) ? evt.sources : [];
+            if (!srcs.length) return null as any;
+            const lines = srcs.map((s: any) => {
+              const kb = Math.round((s.bytes || 0) / 1024);
+              const label = /\/Lists\/?$/.test(String(s.path || '')) ? 'Lists sidecars' : 'raw records';
+              return `      ${label}: ${s.objects} file(s), ${kb} KB → ~${Number(s.estIndexedTokens || 0).toLocaleString()} indexed tokens (${s.chunking})`;
+            });
+            return `[${t}] KB source breakdown:\n${lines.join('\n')}`;
+          }
           case 'workbook-opened': return `[${t}] Workbook opened`;
           case 'workbook-dismissed': return `[${t}] Workbook dismissed`;
           case 'workbook-tab': return `[${t}]   Tab: ${evt.tab || 'unknown'}`;
