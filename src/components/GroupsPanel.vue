@@ -137,6 +137,26 @@
           </div>
         </div>
       </div>
+      <!-- Open-invitation groups the host offers (e.g. Trustee) you can join -->
+      <div v-if="joinableGroups.length" class="groups-rail__discover q-px-md q-py-sm">
+        <div class="text-caption text-grey-7 q-mb-xs">Groups you can join</div>
+        <div v-for="g in joinableGroups" :key="`open:${g.groupId}`" class="row items-center no-wrap q-py-xs">
+          <q-icon name="groups" size="18px" color="primary" class="q-mr-sm" style="flex: 0 0 auto" />
+          <div class="col" style="min-width: 0">
+            <div class="text-body2 text-weight-medium ellipsis">{{ g.name }}</div>
+            <div class="text-caption text-grey-6 ellipsis">
+              {{ g.activeMemberCount || 0 }} member<template v-if="(g.activeMemberCount || 0) !== 1">s</template><template v-if="g.originHost"> · {{ g.originHost }}</template>
+            </div>
+          </div>
+          <q-btn
+            dense unelevated color="primary" no-caps class="q-ml-sm"
+            :label="g.joinMode === 'open' ? 'Join' : 'Request'"
+            :loading="joiningGroupId === g.groupId"
+            @click="joinOpenGroup(g)"
+          />
+        </div>
+      </div>
+
       <!-- Join requests awaiting admin approval (PR-9) -->
       <div
         v-for="p in pendingJoins"
@@ -675,7 +695,7 @@ const pullMail = async (notify: boolean) => {
   const data = await res.json();
   if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
   await loadMemberships(); // a revoked membership would drop off here
-  await Promise.all([loadAllMessages(), loadRequests()]);
+  await Promise.all([loadAllMessages(), loadRequests(), loadOpenGroups()]);
   if (notify) {
     const bits = [];
     if (data.newMessages) bits.push(`${data.newMessages} message(s)`);
@@ -802,6 +822,65 @@ const applyPastedLink = async () => {
 // ── Shareable join link (PR-9): request → admin approval ───────────
 interface PendingJoin { groupId: string; groupName: string; alias: string; requestedAt: string }
 const pendingJoins = ref<PendingJoin[]>([]);
+
+// ── Host-offered open-invitation groups (e.g. Trustee) ──────────────
+// Publicly-listed groups with a live join link, shown in the rail with a
+// Join button when you're not already in (or requesting) them.
+interface OpenGroup {
+  groupId: string; name: string; description?: string;
+  activeMemberCount?: number; joinLink: string | null;
+  joinMode?: 'open' | 'link-approval' | 'invite-only'; originHost?: string | null;
+}
+const openGroups = ref<OpenGroup[]>([]);
+const joiningGroupId = ref<string | null>(null);
+const loadOpenGroups = async () => {
+  try {
+    const r = await fetch('/api/groups/public', { credentials: 'include' });
+    const j = r.ok ? await r.json() : null;
+    openGroups.value = ((j?.groups || []) as OpenGroup[]).filter((g) => !!g.joinLink);
+  } catch { openGroups.value = []; }
+};
+const joinableGroups = computed(() =>
+  openGroups.value.filter((g) =>
+    !memberships.value.some((m) => m.groupId === g.groupId) &&
+    !pendingJoins.value.some((p) => p.groupId === g.groupId)));
+
+const joinOpenGroup = async (g: OpenGroup) => {
+  if (!g.joinLink || joiningGroupId.value) return;
+  joiningGroupId.value = g.groupId;
+  try {
+    // Join links carry the token (and, for cross-host groups, their own
+    // registry) — same parsing the welcome page uses.
+    const u = new URL(g.joinLink, window.location.origin);
+    const token = u.searchParams.get('groupJoin');
+    const groupId = u.searchParams.get('groupId') || g.groupId;
+    const registryUrl = u.searchParams.get('registry') || window.location.origin;
+    if (!token) throw new Error('This group has no active join link.');
+    // request-join admits open-mode groups instantly and files an approval
+    // request for link-approval groups — one path for both.
+    const res = await fetch('/api/user-groups/request-join', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+      body: JSON.stringify({ userId: props.userId, groupId, token, alias: props.userId, registryUrl })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    await loadOpenGroups();
+    if (data.joined && data.membership) {
+      emit('group-joined');
+      await Promise.all([loadMemberships(), loadAllDirectories()]);
+      const joined = memberships.value.find((m) => m.groupId === groupId);
+      if (joined) await selectGroup(joined);
+      $q.notify({ type: 'positive', message: `Joined ${g.name}.`, timeout: 4000 });
+    } else {
+      await loadMemberships(); // refreshes pendingJoins
+      $q.notify({ type: 'positive', message: `Request sent to ${g.name}. You'll be connected when an admin approves.`, timeout: 5000 });
+    }
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Could not join', timeout: 6000 });
+  } finally {
+    joiningGroupId.value = null;
+  }
+};
 /** Poll pending join requests; an approval becomes a membership. */
 const pollJoins = async () => {
   try {
@@ -987,6 +1066,7 @@ const submitVerifyCode = async () => {
 onMounted(async () => {
   loadThreadSeen();
   void loadNotifyEmail();
+  void loadOpenGroups();
   await loadMemberships();
   await Promise.all([loadAllMessages(), loadRequests(), loadAllDirectories()]);
   autoPullTimer = setInterval(autoPull, AUTO_PULL_MS);
@@ -1026,6 +1106,9 @@ onUnmounted(() => {
 }
 .groups-rail__section {
   padding-bottom: 4px;
+}
+.groups-rail__discover {
+  border-top: 1px solid #eef1f4;
 }
 .groups-rail__group {
   display: flex;
