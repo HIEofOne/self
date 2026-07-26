@@ -3271,10 +3271,13 @@ const loadProviders = async () => {
 };
 
 watch(
-  [isPrivateAISelected, () => messages.value.length, () => userResourceStatus.value?.hasAgent],
+  [isPrivateAISelected, () => messages.value.length, () => userResourceStatus.value?.hasAgent, () => wizardFlowPhase.value],
   ([isPrivate, messageCount, hasAgentRaw]) => {
     const hasAgent = Boolean(hasAgentRaw);
-    const shouldPrefill = isPrivate && messageCount === 0 && hasAgent;
+    // Don't prime the chat with the "get the patient summary" prompt while the
+    // guided setup flow is running — it showed behind the wizard and read as if
+    // setup had dumped the user into chat mid-flow.
+    const shouldPrefill = isPrivate && messageCount === 0 && hasAgent && wizardFlowPhase.value === 'done';
 
     if (shouldPrefill && !inputMessage.value) {
       inputMessage.value = PRIVATE_AI_DEFAULT_PROMPT;
@@ -4637,7 +4640,12 @@ const refreshWizardNextStep = async () => {
   const p = await fetchPipeline(props.user.userId);
   wizardNextStep.value = p?.next || null;
 };
-const wizardCtaLabel = computed(() => wizardNextStep.value?.label || 'Go to chat');
+const wizardCtaLabel = computed(() => {
+  // Group-only / no-records flavor: there's nothing to index, draft or verify —
+  // the next step is simply to start chatting, not "Add a health record".
+  if (!stage3HasFiles.value) return 'Go to chat';
+  return wizardNextStep.value?.label || 'Go to chat';
+});
 // 'wait'/'client' stages advance on their own — show the label as status,
 // disabled. 'user'/'done' are the moments the user actually clicks.
 const wizardCtaBusy = computed(() => {
@@ -4645,6 +4653,8 @@ const wizardCtaBusy = computed(() => {
   return k === 'wait' || k === 'client';
 });
 const handleWizardCta = () => {
+  // Group-only / no-records: the button says "Go to chat" → drop into chat.
+  if (!stage3HasFiles.value) { dismissWizard(); return; }
   switch (wizardNextStep.value?.action) {
     case 'verify-medications':
       try {
@@ -9507,6 +9517,11 @@ const handlePatientSummaryVerified = async (payload?: { userId?: string; summary
     setTimeout(() => void generateSetupLogPdf(), 15000);
     emit('wizard-complete');
     showMyStuffDialog.value = false;
+    // Phase E: the imported records were setup context only. Clear them from
+    // the chat so the user lands on a blank New conversation, not a chat
+    // pre-loaded with their health-record file(s). The records live in the KB.
+    uploadedFiles.value = [];
+    try { sessionStorage.removeItem('autoProcessInitialFile'); } catch { /* ignore */ }
   }
 };
 

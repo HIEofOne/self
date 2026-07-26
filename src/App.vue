@@ -270,7 +270,7 @@
                     <div class="q-mt-md">
                       <q-btn
                         unelevated color="primary" class="full-width" size="lg" label="GET STARTED"
-                        :disable="!wf.privateComputer" :loading="tempStartLoading" @click="welcomeFormStart"
+                        :disable="!wf.privateComputer || (wf.haveFile && !wfFile) || (wf.haveFolder && !wfFolderHandle)" :loading="tempStartLoading" @click="welcomeFormStart"
                       />
                     </div>
                     <div class="text-caption text-grey-7 q-mt-sm">

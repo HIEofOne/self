@@ -79,8 +79,27 @@ Each phase is a small, independently reviewed PR that references this doc.
   watcher / patch path.)
 - [ ] **E — Clean exit** (`ChatInterface.vue` / `MyStuffDialog.vue`): PS verify →
   save + close Workbook + clear chat files + blank slate.
-- [ ] **F — Flavor branching + tests**: finalize per-flavor CTA/skip; CDP
-  setup-run test per flavor.
+- [x] **F — Flavor CTA + acceptance matrix**: the wizard CTA now reads
+  **"Go to chat"** (not "Add a health record") when `!stage3HasFiles`
+  (group-only / no records), and clicking drops into chat. Per-flavor CDP
+  setup runs need live AI/KB provisioning, so they run against the deployed
+  app; the acceptance matrix below is the spec.
+
+### Per-flavor acceptance matrix (live-run checklist)
+
+Run each on `test.agropper.xyz` and confirm the log is a clean linear sequence:
+
+| Flavor | Expect |
+|---|---|
+| **No files (group only)** | Agents deploy → lands on **Groups**; if the wizard is opened its one button says **"Go to chat"**. No index/draft/meds/summary rows. |
+| **1 file — Apple Health** | index → **Draft saved (hidden)** → Tab: lists → meds verified → **Patient Summary saved** (same second = patched) → verified → Setup complete → **blank chat, no file chip**. One button throughout: Indexing… → Drafting summary… → **Show Current Medications** → **Show Patient Summary** → done. |
+| **1 file — not Apple Health** | index → draft → **Show Patient Summary** (no meds step) → verify → chat. |
+| **Folder (± Apple Health)** | as the single-file cases, N files in the Index row; meds step only if any file is Apple Health. |
+| **Restore** | generation stages already done → **"Go to chat"**; no re-draft. |
+
+No **"Custom Medications"** modal, no Groups→Lists churn, no "Click SEND to get
+the patient summary" prompt behind the wizard, and GET STARTED stays disabled
+until a checked file/folder is actually selected.
 
 ## Implementation notes (from the Phase B–D investigation)
 

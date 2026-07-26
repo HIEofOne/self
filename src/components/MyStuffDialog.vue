@@ -7000,6 +7000,12 @@ const handleMedsMismatchUpdate = async () => {
   }
 };
 
+// True after the wizard auto-patches the PS with the verified meds. Used to
+// suppress the "Custom Medications" diff modal on the setup verify — any
+// remaining diff is a formatting artifact of the patch, not a manual edit, so
+// the modal was confusing and unexpected during new-user setup.
+const psPatchedFromVerifiedMeds = ref(false);
+
 /**
  * Update the pre-generated Patient Summary with the verified Current Medications.
  * Called from the wizard when a summary was generated in the background and the user
@@ -7083,6 +7089,7 @@ const updateSummaryWithVerifiedMeds = async () => {
       throw new Error(err.message || 'Failed to save updated summary');
     }
     summaryNeedsVerify.value = true; // Set before load so UI doesn't flash without verify prompt
+    psPatchedFromVerifiedMeds.value = true; // this PS came from the wizard patch, not a manual edit
     await loadPatientSummary();
     emit('patient-summary-saved', { userId: props.userId, summary: updated });
     if ($q && typeof $q.notify === 'function') {
@@ -7229,6 +7236,15 @@ const extractMedsFromPS = (psText: string): string[] => {
 
 const handleVerifySummaryTab = async () => {
   if (!props.userId || !patientSummary.value) return;
+
+  // Setup: this PS was just auto-patched from the verified meds list, so any
+  // apparent diff is a formatting artifact, not a manual edit. Skip the
+  // "Custom Medications" modal — it doesn't belong in new-user setup.
+  if (psPatchedFromVerifiedMeds.value) {
+    psPatchedFromVerifiedMeds.value = false;
+    finishVerifySummary();
+    return;
+  }
 
   // Compare the PS's Current Medications against the SERVER's verified list
   // (userDoc.currentMedications — the source of truth). We do NOT read the
