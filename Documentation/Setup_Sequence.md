@@ -68,6 +68,36 @@ Each phase is a small, independently reviewed PR that references this doc.
 - [ ] **F — Flavor branching + tests**: finalize per-flavor CTA/skip; CDP
   setup-run test per flavor.
 
+## Implementation notes (from the Phase B–D investigation)
+
+The machinery mostly exists but is gated wrong:
+
+- **The records flow already exists.** A watcher in `ChatInterface.vue` (~8793 →
+  the block at ~8820) already: generates the draft (`POST /api/patient-summary/
+  draft`, sets `wizardDraftPsStatus`/`preGeneratedSummary`/`draftPsMeds`), then
+  opens Lists ▸ Current Medications (`wizardFlowPhase='medications'`). Index and
+  draft **timing rows already render** (`~658–676`, `~694–716`).
+- **Root cause of the confusion:** that flow is gated by `wizardQuickStart`
+  (the Draft/Meds/Summary rows are `v-if="!wizardQuickStart"`) and by folder
+  conditions (`localFolderHandle || safariFolderName || wizardFolderlessRun`).
+  **Quick-start WITH a file** — the logged case — indexes the file but skips the
+  draft flow, so there's no draft to patch and the user is stranded. Fix: run
+  the records flow whenever `files.length > 0`, independent of the quick-start
+  tier and folder presence.
+- **CTA today** is just `Continue → dismissWizard` (`~791`). Phase B adds a
+  reactive `wizardNextStep` (from `fetchPipeline`/`decideNextAction`, now
+  carrying `label`) bound to one button, with a dispatch by `action`
+  (`start-indexing` / `verify-medications`→open Lists / `review-summary`→open PS
+  / `complete`→chat). Disabled with status text while `kind==='wait'`.
+- **Phase D:** `MyStuffDialog.updateSummaryWithVerifiedMeds` currently
+  regenerates when no draft exists (the #232 band-aid). Once the draft reliably
+  exists (above), revert to **patch-only** (`replaceMedicationsInSummary`).
+
+Because these are interlocking changes to `ChatInterface.vue` (~10k lines) and
+`MyStuffDialog.vue` (~8k lines) on the core onboarding path, B–D land together
+and must be verified with a **live setup run** (real AI/KB calls), not just a
+type-check.
+
 ## Verification
 
 Drive each flavor end-to-end through the live app with the CDP harness
