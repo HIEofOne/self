@@ -7031,20 +7031,22 @@ const updateSummaryWithVerifiedMeds = async () => {
     // Reload the latest summary (the provisional generated after KB indexing)
     await loadPatientSummary();
 
-    // No provisional summary to patch — nothing to do. The user will see whatever
-    // exists (or the empty state) and can act accordingly. We never make a second
-    // AI call for summary generation — the wizard budget is exactly 2 AI calls.
+    // No provisional summary to patch. The records pipeline drafts the summary
+    // AFTER meds are verified (order: medsVerified → summaryDrafted), so at this
+    // point there is normally no background draft yet. Rather than stop silently
+    // — which left the user to open Patient Summary and request one by hand —
+    // draft it now via the pipeline (the draft job injects the just-verified
+    // meds) and propose it in the review dialog for editing/verification.
     if (!patientSummary.value) {
-      console.warn('[MyStuff] No provisional Patient Summary available to patch');
       try {
         await fetch('/api/provisioning-log', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
-          body: JSON.stringify({ userId: props.userId, event: 'no-draft-ps-available', source: 'MyStuffDialog' })
+          body: JSON.stringify({ userId: props.userId, event: 'draft-ps-after-meds', source: 'MyStuffDialog' })
         });
       } catch { /* non-fatal */ }
-      loadingSummary.value = false;
+      await requestNewSummary(); // advances draft-summary; opens the review dialog
       return;
     }
 
