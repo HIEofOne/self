@@ -4640,7 +4640,12 @@ const refreshWizardNextStep = async () => {
   const p = await fetchPipeline(props.user.userId);
   wizardNextStep.value = p?.next || null;
 };
-const wizardCtaLabel = computed(() => wizardNextStep.value?.label || 'Go to chat');
+const wizardCtaLabel = computed(() => {
+  // Group-only / no-records flavor: there's nothing to index, draft or verify —
+  // the next step is simply to start chatting, not "Add a health record".
+  if (!stage3HasFiles.value) return 'Go to chat';
+  return wizardNextStep.value?.label || 'Go to chat';
+});
 // 'wait'/'client' stages advance on their own — show the label as status,
 // disabled. 'user'/'done' are the moments the user actually clicks.
 const wizardCtaBusy = computed(() => {
@@ -4648,6 +4653,8 @@ const wizardCtaBusy = computed(() => {
   return k === 'wait' || k === 'client';
 });
 const handleWizardCta = () => {
+  // Group-only / no-records: the button says "Go to chat" → drop into chat.
+  if (!stage3HasFiles.value) { dismissWizard(); return; }
   switch (wizardNextStep.value?.action) {
     case 'verify-medications':
       try {
