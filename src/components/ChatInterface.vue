@@ -3271,10 +3271,13 @@ const loadProviders = async () => {
 };
 
 watch(
-  [isPrivateAISelected, () => messages.value.length, () => userResourceStatus.value?.hasAgent],
+  [isPrivateAISelected, () => messages.value.length, () => userResourceStatus.value?.hasAgent, () => wizardFlowPhase.value],
   ([isPrivate, messageCount, hasAgentRaw]) => {
     const hasAgent = Boolean(hasAgentRaw);
-    const shouldPrefill = isPrivate && messageCount === 0 && hasAgent;
+    // Don't prime the chat with the "get the patient summary" prompt while the
+    // guided setup flow is running — it showed behind the wizard and read as if
+    // setup had dumped the user into chat mid-flow.
+    const shouldPrefill = isPrivate && messageCount === 0 && hasAgent && wizardFlowPhase.value === 'done';
 
     if (shouldPrefill && !inputMessage.value) {
       inputMessage.value = PRIVATE_AI_DEFAULT_PROMPT;
@@ -9507,6 +9510,11 @@ const handlePatientSummaryVerified = async (payload?: { userId?: string; summary
     setTimeout(() => void generateSetupLogPdf(), 15000);
     emit('wizard-complete');
     showMyStuffDialog.value = false;
+    // Phase E: the imported records were setup context only. Clear them from
+    // the chat so the user lands on a blank New conversation, not a chat
+    // pre-loaded with their health-record file(s). The records live in the KB.
+    uploadedFiles.value = [];
+    try { sessionStorage.removeItem('autoProcessInitialFile'); } catch { /* ignore */ }
   }
 };
 
