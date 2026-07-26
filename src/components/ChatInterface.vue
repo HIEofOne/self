@@ -788,6 +788,15 @@
           </div>
         </q-card-section>
 
+        <!-- During the auto-draft, echo the current PS-drafting stage at the
+             bottom of the wizard (mirrors the Patient Summary tab's rundown). -->
+        <q-card-section v-if="wizardDraftStageLine" class="q-pt-none">
+          <div class="row items-center text-caption text-primary" style="border-top: 1px solid #ececec; padding-top: 8px">
+            <q-spinner size="14px" color="primary" class="q-mr-sm" />
+            <span>{{ wizardDraftStageLine }}</span>
+          </div>
+        </q-card-section>
+
         <!-- Single next-step CTA: one button labeled with the pipeline's next
              suggested step. Disabled with a spinner while a stage advances on
              its own (indexing, drafting); clickable at the user's moments
@@ -1588,6 +1597,30 @@ const wizardSecondaryFailed = ref(false);
 let wizardSecondaryTimer: ReturnType<typeof setInterval> | null = null;
 const wizardDraftPsStatus = ref<'idle' | 'running' | 'done' | 'failed'>('idle');
 const wizardDraftPsStartedAt = ref<number | null>(null);
+// PS-drafting stages, mirroring SummaryProgress.vue (timed "pacing theater"),
+// so the wizard can echo the current stage at its bottom during the auto-draft
+// — the same rundown the Patient Summary tab shows on a manual request.
+const PS_DRAFT_STAGES = [
+  { label: 'Parsing patient identity from PDF headers', delay: 2 },
+  { label: 'Extracting verified medications', delay: 3 },
+  { label: 'Scanning Apple Health for out-of-range labs', delay: 6 },
+  { label: 'Extracting allergies', delay: 8 },
+  { label: 'Extracting encounters (past 12 months)', delay: 11 },
+  { label: 'Extracting medical & social history', delay: 14 },
+  { label: 'Extracting radiology / imaging', delay: 17 },
+  { label: 'Building stopped medications list', delay: 20 },
+  { label: 'Querying AI agent with knowledge base...', delay: 23 }
+];
+const wizardDraftStageLine = computed(() => {
+  if (wizardDraftPsStatus.value !== 'running' || !wizardDraftPsStartedAt.value) return '';
+  void stage3ElapsedTick.value; // re-render each tick so the stage advances live
+  const secs = Math.floor((Date.now() - wizardDraftPsStartedAt.value) / 1000);
+  const next = PS_DRAFT_STAGES.findIndex((s) => s.delay > secs);
+  const idx = next < 0 ? PS_DRAFT_STAGES.length : next;
+  return idx >= PS_DRAFT_STAGES.length
+    ? 'AI is drafting your summary — the long step (typically 1–3 minutes, up to 20 for large records)...'
+    : PS_DRAFT_STAGES[idx].label;
+});
 const wizardDraftPsCompletedAt = ref<number | null>(null);
 const wizardDraftPsModel = ref<string | null>(null);        // which model is generating
 const wizardAgentDeployElapsed = ref<number | null>(null);
