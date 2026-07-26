@@ -6951,6 +6951,48 @@ async function setupKnowledgeBase(userId, kbName, filesInKB, bucketName, existin
       }
     }
 
+      // ── Diagnostic: per-data-source size breakdown (KB total_tokens probe) ──
+      // Logs objects + bytes for each indexed source so the raw records source
+      // can be compared with the typed Lists/ sidecars. Hierarchical sources
+      // store parent AND child chunks (indexed tokens ~2x their text); the AH
+      // Lists source uses small single-level chunks (~1x). Best-effort only.
+      try {
+        const { S3Client: DiagS3Client, ListObjectsV2Command: DiagList } = await import('@aws-sdk/client-s3');
+        const diagS3 = new DiagS3Client({
+          endpoint: getSpacesEndpoint(), region: 'us-east-1',
+          forcePathStyle: process.env.S3_FORCE_PATH_STYLE === 'true',
+          credentials: {
+            accessKeyId: process.env.DIGITALOCEAN_AWS_ACCESS_KEY_ID || process.env.SPACES_AWS_ACCESS_KEY_ID || '',
+            secretAccessKey: process.env.DIGITALOCEAN_AWS_SECRET_ACCESS_KEY || process.env.SPACES_AWS_SECRET_ACCESS_KEY || ''
+          }
+        });
+        const sources = [];
+        for (const ds of datasources) {
+          const prefix = ds?.spaces_data_source?.item_path;
+          if (!prefix) continue;
+          let objects = 0, bytes = 0, ContinuationToken;
+          try {
+            do {
+              const out = await diagS3.send(new DiagList({ Bucket: bucketName, Prefix: prefix, ContinuationToken }));
+              for (const o of out.Contents || []) { objects += 1; bytes += o.Size || 0; }
+              ContinuationToken = out.IsTruncated ? out.NextContinuationToken : undefined;
+            } while (ContinuationToken);
+          } catch { /* prefix may be empty */ }
+          const algo = ds.chunking_algorithm || 'unknown';
+          const chunkSize = ds?.chunking_options?.max_chunk_size ?? ds?.chunking_options?.max_child_chunk_size ?? null;
+          sources.push({
+            path: prefix, objects, bytes,
+            chunking: algo, chunkSize,
+            estIndexedTokens: Math.round((bytes / 4) * (algo === 'hierarchical' ? 2 : 1))
+          });
+        }
+        console.log('[KB Diag] source breakdown for ' + kbName + ': ' +
+          sources.map((s) => `${s.path}=${s.objects}obj/${(s.bytes / 1024).toFixed(0)}KB/~${s.estIndexedTokens}idx-tok(${s.chunking})`).join('  |  '));
+        await appendUserProvisioningEvent(userId, { event: 'kb-source-breakdown', kbName, sources });
+      } catch (e) {
+        console.warn('[KB Diag] source breakdown skipped (non-fatal):', e?.message || e);
+      }
+
       let rerankingConfig = null;
       try {
         const rerankModel = await getRerankingModelName(doClient);
