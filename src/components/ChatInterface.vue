@@ -1785,11 +1785,14 @@ const runWelcomeSetup = async () => {
     void advancePipeline(uid, 'index-records').then(async () => {
       const status = await waitForStageDone(uid, 'indexed', 30 * 60 * 1000, 15000);
       if (status === 'done') {
-        wizardFlowPhase.value = 'done'; // stop the rail's setup ring
-        await refreshWizardState();     // checklist reflects completion
+        await refreshWizardState();     // checklist reflects indexing done
         logProvisioningEvent({ event: 'kb-indexed-background' });
-        $q.notify({ type: 'positive', message: 'Your records are indexed — ask your Private AI anything about them.', timeout: 12000 });
-        void sendWelcomeEmail(); // setup complete → welcome email (with the finished log)
+        // Hand off to the records flow (draft → meds → summary). The records
+        // watcher requires flowPhase 'running'; this used to set 'done', which
+        // stranded a single-file welcome setup right after indexing — the draft
+        // never fired and the wizard sat on a dead spinner (Setup_Sequence.md).
+        // Set it LAST so refreshWizardState can't stomp the hand-off.
+        wizardFlowPhase.value = 'running';
       } else if (status === 'error') {
         $q.notify({ type: 'negative', message: 'Indexing hit a problem — open the Setup Wizard from the sidebar to retry.', timeout: 16000 });
       }
