@@ -23,6 +23,8 @@ export interface RecordsPipeline {
 export interface PipelineNext {
   kind: 'user' | 'client' | 'wait' | 'done';
   action: string;
+  /** Human next-step label for the wizard's single CTA button (Phase A/B). */
+  label?: string;
   target?: string;
   endpoint?: string;
   params?: { fileName?: string | null; force?: boolean };
