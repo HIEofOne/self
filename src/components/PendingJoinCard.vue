@@ -293,7 +293,7 @@ const joinPendingGroup = async () => {
     });
     const data = await res.json();
     if (!res.ok || !data.success) {
-      throw new Error(data.error || `HTTP ${res.status}`);
+      throw new Error(data.message || data.error || `HTTP ${res.status}`);
     }
     localStorage.removeItem(INVITE_LS_KEY);
     const groupId = pendingInvite.value.groupId;
@@ -333,7 +333,7 @@ const submitJoinRequest = async () => {
       })
     });
     const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    if (!res.ok || !data.success) throw new Error(data.message || data.error || `HTTP ${res.status}`);
     localStorage.removeItem(JOIN_LINK_LS_KEY);
     const groupId = pendingJoinLink.value.groupId;
     pendingJoinLink.value = null;

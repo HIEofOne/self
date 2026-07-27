@@ -38,14 +38,14 @@
             @click="saveNotifyEmail"
           />
         </div>
-        <!-- Verification is offered, not required (a saved email works either way) -->
+        <!-- A verified email is required to join a group (gated below + on the server). -->
         <div v-if="notifyEmailSaved && notifyEmailSaved === notifyEmailInput.trim()" class="q-mt-xs">
           <div v-if="notifyVerified" class="row items-center text-caption text-positive">
             <q-icon name="verified" size="16px" class="q-mr-xs" /> Verified
           </div>
           <template v-else>
             <div v-if="!verifyCodeSent" class="row items-center q-gutter-xs">
-              <span class="text-caption text-grey-7">Not verified</span>
+              <span class="text-caption text-orange-9">Not verified — required to join a group</span>
               <q-btn dense flat no-caps color="primary" size="sm" label="Verify email" :loading="verifySending" @click="startVerify" />
             </div>
             <div v-else class="row items-center q-gutter-xs no-wrap q-mt-xs">
@@ -60,7 +60,8 @@
           </template>
         </div>
         <div class="text-caption text-grey-6 q-mt-xs">
-          Used for the welcome email and group notifications. Leave blank to turn off.
+          A verified email is required to join a group — MAIA notifies you of new
+          messages and requests here, so it never has to poll.
         </div>
       </div>
 
@@ -140,6 +141,9 @@
       <!-- Open-invitation groups the host offers (e.g. Trustee) you can join -->
       <div v-if="joinableGroups.length" class="groups-rail__discover q-px-md q-py-sm">
         <div class="text-caption text-grey-7 q-mb-xs">Groups you can join</div>
+        <div v-if="!notifyVerified" class="text-caption text-orange-9 q-mb-xs">
+          Verify your notification email above to join a group.
+        </div>
         <div v-for="g in joinableGroups" :key="`open:${g.groupId}`" class="row items-center no-wrap q-py-xs">
           <q-icon name="groups" size="18px" color="primary" class="q-mr-sm" style="flex: 0 0 auto" />
           <div class="col" style="min-width: 0">
@@ -152,6 +156,7 @@
             dense unelevated color="primary" no-caps class="q-ml-sm"
             :label="g.joinMode === 'open' ? 'Join' : 'Request'"
             :loading="joiningGroupId === g.groupId"
+            :disable="!notifyVerified"
             @click="joinOpenGroup(g)"
           />
         </div>
@@ -847,6 +852,10 @@ const joinableGroups = computed(() =>
 
 const joinOpenGroup = async (g: OpenGroup) => {
   if (!g.joinLink || joiningGroupId.value) return;
+  if (!notifyVerified.value) {
+    $q.notify({ type: 'warning', message: 'Verify your notification email above before joining a group.', timeout: 5000 });
+    return;
+  }
   joiningGroupId.value = g.groupId;
   try {
     // Join links carry the token (and, for cross-host groups, their own
@@ -863,7 +872,7 @@ const joinOpenGroup = async (g: OpenGroup) => {
       body: JSON.stringify({ userId: props.userId, groupId, token, alias: props.userId, registryUrl })
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    if (!res.ok || !data.success) throw new Error(data.message || data.error || `HTTP ${res.status}`);
     await loadOpenGroups();
     if (data.joined && data.membership) {
       emit('group-joined');
