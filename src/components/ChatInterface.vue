@@ -238,7 +238,8 @@
           <!-- Deep-link visitor Save: their turns are NOT stored until they
                save. This persists their additions to the shared chat and the
                server emails the patient a link. Unsaved additions are lost on
-               reload/close (by design). -->
+               reload/close (by design). A verified email is NOT required — but
+               without one the visitor won't be notified of the reply. -->
           <q-banner
             v-if="deepLinkHasUnsavedChanges"
             dense
@@ -250,6 +251,10 @@
             </template>
             You've added to this conversation. Save to send it to the patient —
             unsaved changes are lost if you reload or close this page.
+            <div class="text-caption text-deep-purple-8 q-mt-xs">
+              You won't be notified when the patient replies unless you provide a
+              verified email.
+            </div>
             <template #action>
               <q-btn
                 unelevated
@@ -2798,7 +2803,11 @@ const saveDeepLinkChat = async () => {
       throw new Error(err.message || `Save failed (${res.status})`);
     }
     lastDeepLinkSaveSnapshot.value = currentChatSnapshot.value;
-    $q.notify({ type: 'positive', message: 'Saved. The patient has been alerted by email.' });
+    $q.notify({
+      type: 'positive',
+      message: 'Saved. The patient has been alerted by email. You will not be notified of their reply unless you provide a verified email.',
+      timeout: 7000
+    });
   } catch (e) {
     $q.notify({ type: 'negative', message: e instanceof Error ? e.message : 'Could not save' });
   } finally {
