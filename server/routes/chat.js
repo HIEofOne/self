@@ -236,11 +236,14 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient, app
             baseURL: profileEndpoint
           });
 
-          if (profileModelName) {
-            options.model = profileModelName;
-          } else {
-            options.model = profileAgentName;
-          }
+          // Send a real MODEL name, never the agent NAME. The DO agent's
+          // OpenAI-compatible endpoint 500s on an invalid model (the agent
+          // name is not a model). When the profile has no modelName, fall back
+          // exactly like the draft-summary path (which works) — the account's
+          // agentModelName, then the primary default — rather than the agent
+          // name, which was the cause of the "500 Internal server error" on
+          // Private AI chat while the draft Patient Summary succeeded.
+          options.model = profileModelName || userDoc.agentModelName || 'openai-gpt-oss-120b';
 
           retryCtx = { endpoint: profileEndpoint, profileKey: profileKeyToUse };
 
