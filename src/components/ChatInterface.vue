@@ -124,13 +124,6 @@
                     @click="startEditing(idx)"
                     title="Edit message"
                   />
-                  <q-btn
-                    v-if="msg.role === 'assistant'"
-                    flat dense size="xs" icon="ios_share" color="primary" label="Share to peer"
-                    class="q-ml-xs"
-                    @click="openShareToPeer(msg.content)"
-                    title="Share this to a group member — privacy-filtered"
-                  />
                 </div>
               </div>
             </div>
@@ -242,6 +235,32 @@
              width beneath the rail + content; hidden while a peer
              thread (which has its own composer) is active. -->
         <div class="composer-bar q-pa-md" style="flex-shrink: 0; border-top: 1px solid #eee;">
+          <!-- Deep-link visitor Save: their turns are NOT stored until they
+               save. This persists their additions to the shared chat and the
+               server emails the patient a link. Unsaved additions are lost on
+               reload/close (by design). -->
+          <q-banner
+            v-if="deepLinkHasUnsavedChanges"
+            dense
+            rounded
+            class="bg-deep-purple-1 text-deep-purple-10 q-mb-sm"
+          >
+            <template #avatar>
+              <q-icon name="save" color="deep-purple" />
+            </template>
+            You've added to this conversation. Save to send it to the patient —
+            unsaved changes are lost if you reload or close this page.
+            <template #action>
+              <q-btn
+                unelevated
+                color="deep-purple"
+                icon="save"
+                label="Save & alert the patient"
+                :loading="savingDeepLinkChat"
+                @click="saveDeepLinkChat"
+              />
+            </template>
+          </q-banner>
           <!-- Passkey nudge (quick-start tier): a temporary account's only
                credential is this browser's local storage — a group member
                who wants to return from another device (or survive a
@@ -896,39 +915,6 @@
     />
 
     <!-- My Stuff Dialog -->
-    <!-- Unified share action (Refinement 6): send an AI answer to a group
-         member. Mandatory privacy filter; the human reviews before Send.
-         The AI is the assistant, never a participant in the E2E channel. -->
-    <q-dialog v-model="showShareToPeer">
-      <q-card style="min-width: 480px; max-width: 640px">
-        <q-card-section>
-          <div class="text-h6">Share to a group member</div>
-          <div class="text-caption text-grey-7">
-            Your private AI is not part of the conversation — you are sharing
-            this text yourself, privacy-filtered, over the end-to-end channel.
-          </div>
-        </q-card-section>
-        <q-card-section class="q-pt-none q-gutter-y-sm">
-          <q-select
-            v-model="sharePeer"
-            :options="sharePeerOptions"
-            emit-value map-options dense outlined
-            label="Send to"
-            :loading="loadingSharePeers"
-            hint="Only people you already have a conversation with are listed."
-          />
-          <div class="text-caption text-grey-7">
-            {{ shareMappingCount > 0 ? `Privacy filter applied (${shareMappingCount} name(s)).` : 'No privacy-filter names configured (Workbook → Privacy Filter) — review carefully.' }}
-          </div>
-          <q-input v-model="shareText" type="textarea" outlined autogrow label="Message (edit before sending)" :disable="sendingShare" />
-        </q-card-section>
-        <q-card-actions align="right">
-          <q-btn flat label="Cancel" v-close-popup :disable="sendingShare" />
-          <q-btn unelevated color="primary" label="Send" :loading="sendingShare" :disable="!sharePeer || !shareText.trim()" @click="sendShareToPeer" />
-        </q-card-actions>
-      </q-card>
-    </q-dialog>
-
     <MyStuffDialog
       @open-peer-thread="handleOpenPeerThread"
       ref="myStuffDialogRef"
@@ -1429,75 +1415,6 @@ const assistantChipColor = (msg: Message): string => {
   return key === 'digitalocean' ? 'deep-purple' : 'blue-grey';
 };
 
-// ── Unified share action (Refinement 6): AI answer → group peer ──────
-const showShareToPeer = ref(false);
-const shareText = ref('');
-const shareRaw = ref('');
-const shareMappingCount = ref(0);
-const sharePeer = ref<string | null>(null); // "groupId|peerId"
-const sharePeerOptions = ref<Array<{ label: string; value: string }>>([]);
-const loadingSharePeers = ref(false);
-const sendingShare = ref(false);
-
-const openShareToPeer = async (content: string) => {
-  shareRaw.value = content;
-  shareText.value = content;
-  shareMappingCount.value = 0;
-  sharePeer.value = null;
-  showShareToPeer.value = true;
-  // Build the peer list from memberships × their known conversations.
-  loadingSharePeers.value = true;
-  try {
-    const uid = props.user?.userId || '';
-    const gRes = await fetch(`/api/user-groups?userId=${encodeURIComponent(uid)}`, { credentials: 'include' });
-    const gData = await gRes.json();
-    const opts: Array<{ label: string; value: string }> = [];
-    for (const m of (gData.memberships || [])) {
-      const mRes = await fetch(`/api/user-groups/messages?userId=${encodeURIComponent(uid)}&groupId=${encodeURIComponent(m.groupId)}`, { credentials: 'include' });
-      const mData = await mRes.json();
-      const peers = new Map<string, string>();
-      for (const msg of (mData.messages || [])) if (msg.fromPairwiseId) peers.set(msg.fromPairwiseId, msg.fromAlias || 'Group member');
-      for (const sent of (mData.sent || [])) if (sent.toPairwiseId) peers.set(sent.toPairwiseId, sent.toAlias || peers.get(sent.toPairwiseId) || 'Group member');
-      for (const [pid, alias] of peers) opts.push({ label: `${alias} · ${m.groupName}`, value: `${m.groupId}|${pid}` });
-    }
-    sharePeerOptions.value = opts;
-    if (opts.length === 1) sharePeer.value = opts[0].value;
-  } catch { /* empty list */ } finally {
-    loadingSharePeers.value = false;
-  }
-  // Apply the mandatory privacy filter to the initial text.
-  try {
-    const fRes = await fetch('/api/user-groups/filter-text', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
-      body: JSON.stringify({ userId: props.user?.userId, text: content })
-    });
-    const fData = await fRes.json();
-    if (fRes.ok && fData.success) {
-      shareText.value = fData.filtered;
-      shareMappingCount.value = fData.mappingCount || 0;
-    }
-  } catch { /* leave unfiltered text; count 0 warns the user */ }
-};
-
-const sendShareToPeer = async () => {
-  if (!sharePeer.value || !shareText.value.trim() || sendingShare.value) return;
-  const [groupId, peerId] = sharePeer.value.split('|');
-  sendingShare.value = true;
-  try {
-    const res = await fetch('/api/user-groups/send', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
-      body: JSON.stringify({ userId: props.user?.userId, groupId, toPairwiseId: peerId, text: shareText.value.trim() })
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
-    showShareToPeer.value = false;
-    $q.notify({ type: 'positive', message: 'Shared to your group member.' });
-  } catch (err) {
-    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to share' });
-  } finally {
-    sendingShare.value = false;
-  }
-};
 const showWorkbookClosePrompt = ref(false);
 /** Joining a group ends setup for this session: the wizard's attention
  *  markers go quiet (quick-start setup IS complete — records are a
@@ -2842,61 +2759,52 @@ watch(
   { immediate: true }
 );
 
-// A shared chat is loaded once and would otherwise look frozen — neither side
-// sees messages the other appends. This covers BOTH directions: a deep-link
-// peer (carries deepLinkShareId) and the owner viewing that same shared chat
-// from the rail / Saved Chats (carries currentSavedChatShareId). Poll while the
-// shared chat is the active view and re-apply ONLY when the message count
-// actually grows, so a tick never resets scroll, the selected provider, an
-// in-place message edit, or a half-typed reply. Skipped while a response is
-// streaming or a draft reply is sitting in the composer.
-let sharedChatPollTimer: ReturnType<typeof setInterval> | null = null;
-async function pollSharedChat() {
-  const shareId = deepLinkShareId.value || currentSavedChatShareId.value;
-  if (!shareId) return;
-  if (railActiveKind.value !== 'stored') return;
-  if (isStreaming.value) return;
-  if (inputMessage.value && inputMessage.value.trim()) return;
-  if (editingMessageIdx.value.length > 0) return;
+// A shared conversation updates on an explicit SAVE, not by polling: the saver's
+// turns are persisted and the server emails the other party a link to reopen it.
+// A deep-link visitor has no Workbook/Save, so we surface a "Save & alert the
+// patient" button in the composer whenever they've added to the conversation
+// they loaded. This snapshot is the baseline that "added to" is measured against;
+// it is (re)set on load and after each successful save. Unsaved additions are
+// intentionally lost on reload/close.
+const lastDeepLinkSaveSnapshot = ref<string | null>(null);
+const savingDeepLinkChat = ref(false);
+const deepLinkHasUnsavedChanges = computed(() =>
+  isDeepLink.value
+  && !!currentSavedChatId.value
+  && messages.value.length > 0
+  && currentChatSnapshot.value !== lastDeepLinkSaveSnapshot.value
+);
+
+// Persist a deep-link visitor's additions to the shared chat, then let the
+// server email the patient. The PUT endpoint already authorizes deep-link
+// sessions to update the one shared chat they hold.
+const saveDeepLinkChat = async () => {
+  if (!currentSavedChatId.value || savingDeepLinkChat.value) return;
+  savingDeepLinkChat.value = true;
   try {
-    const response = await fetch(`/api/load-chat-by-share/${encodeURIComponent(shareId)}`, {
-      credentials: 'include'
+    const payload = {
+      chatHistory: messages.value,
+      uploadedFiles: uploadedFiles.value,
+      shareId: currentSavedChatShareId.value || deepLinkShareId.value || undefined
+    };
+    const res = await fetch(`/api/save-group-chat/${encodeURIComponent(currentSavedChatId.value)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(payload)
     });
-    if (!response.ok) return;
-    const result = await response.json();
-    const incoming = Array.isArray(result?.chat?.chatHistory) ? result.chat.chatHistory.length : 0;
-    if (incoming > messages.value.length) {
-      handleChatSelected(result.chat);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.message || `Save failed (${res.status})`);
     }
-  } catch {
-    // Transient network error — the next tick retries.
+    lastDeepLinkSaveSnapshot.value = currentChatSnapshot.value;
+    $q.notify({ type: 'positive', message: 'Saved. The patient has been alerted by email.' });
+  } catch (e) {
+    $q.notify({ type: 'negative', message: e instanceof Error ? e.message : 'Could not save' });
+  } finally {
+    savingDeepLinkChat.value = false;
   }
-}
-const shouldPollSharedChat = computed(
-  () => railActiveKind.value === 'stored'
-    && !!(deepLinkShareId.value || currentSavedChatShareId.value)
-);
-watch(
-  shouldPollSharedChat,
-  (active) => {
-    if (sharedChatPollTimer) {
-      clearInterval(sharedChatPollTimer);
-      sharedChatPollTimer = null;
-    }
-    if (active) {
-      sharedChatPollTimer = setInterval(() => {
-        void pollSharedChat();
-      }, 5000);
-    }
-  },
-  { immediate: true }
-);
-onUnmounted(() => {
-  if (sharedChatPollTimer) {
-    clearInterval(sharedChatPollTimer);
-    sharedChatPollTimer = null;
-  }
-});
+};
 
 watch(
   () => [messages.value.length, uploadedFiles.value.length],
@@ -8371,6 +8279,9 @@ const handleChatSelected = async (chat: any) => {
     const snapshot = currentChatSnapshot.value;
     lastLocalSaveSnapshot.value = snapshot;
     lastGroupSaveSnapshot.value = snapshot;
+    // Baseline for the deep-link "Save & alert" button: it only appears once
+    // the visitor adds to this freshly-loaded conversation.
+    lastDeepLinkSaveSnapshot.value = snapshot;
   });
 
   if (deepLinkShareId.value) {
