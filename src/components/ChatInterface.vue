@@ -2842,6 +2842,54 @@ watch(
   { immediate: true }
 );
 
+// Deep-link conversations are loaded once when the link is opened. Without a
+// background pull, the peer never sees messages the owner (or the AS agent)
+// appends after they arrived — the conversation looks frozen. Poll the shared
+// chat and re-apply ONLY when the message count actually grows, so a poll never
+// resets scroll, the selected provider, or a half-typed reply. Skipped while a
+// response is streaming or a draft reply is sitting in the composer.
+let deepLinkPollTimer: ReturnType<typeof setInterval> | null = null;
+async function pollDeepLinkChat() {
+  const shareId = deepLinkShareId.value;
+  if (!shareId) return;
+  if (isStreaming.value) return;
+  if (inputMessage.value && inputMessage.value.trim()) return;
+  try {
+    const response = await fetch(`/api/load-chat-by-share/${encodeURIComponent(shareId)}`, {
+      credentials: 'include'
+    });
+    if (!response.ok) return;
+    const result = await response.json();
+    const incoming = Array.isArray(result?.chat?.chatHistory) ? result.chat.chatHistory.length : 0;
+    if (incoming > messages.value.length) {
+      handleChatSelected(result.chat);
+    }
+  } catch {
+    // Transient network error — the next tick retries.
+  }
+}
+watch(
+  isDeepLink,
+  (deepLink) => {
+    if (deepLinkPollTimer) {
+      clearInterval(deepLinkPollTimer);
+      deepLinkPollTimer = null;
+    }
+    if (deepLink) {
+      deepLinkPollTimer = setInterval(() => {
+        void pollDeepLinkChat();
+      }, 5000);
+    }
+  },
+  { immediate: true }
+);
+onUnmounted(() => {
+  if (deepLinkPollTimer) {
+    clearInterval(deepLinkPollTimer);
+    deepLinkPollTimer = null;
+  }
+});
+
 watch(
   () => [messages.value.length, uploadedFiles.value.length],
   ([messageCount, fileCount]) => {
