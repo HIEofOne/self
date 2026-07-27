@@ -33,6 +33,17 @@
       ></textarea>
     </div>
 
+    <!-- ── Requester identity (required to really send) ──── -->
+    <div v-if="props.group" class="rqb-identity">
+      <div class="rqb-identity-row">
+        <input v-model="requesterName" class="rqb-text" type="text" placeholder="Your name (required)" maxlength="80" />
+        <input v-model="requesterOrg" class="rqb-text" type="text" placeholder="Organization (optional)" maxlength="120" />
+      </div>
+      <div class="rqb-verify">
+        <EmailVerifyBox label="Your email — verify it to receive responses" />
+      </div>
+    </div>
+
     <!-- ── Live request line ────────────────────────────── -->
     <div class="rqb-card-stage">
       <div v-if="!ready" class="rqb-card-empty">
@@ -46,9 +57,28 @@
 
     <!-- ── Try it ───────────────────────────────────────── -->
     <div class="rqb-actions">
-      <q-btn unelevated color="primary" label="Try It — send to the group" :disable="!ready" @click="runTry" />
+      <q-btn unelevated color="primary" :label="props.group ? 'Preview the outcome' : 'Try It — send to the group'" :disable="!ready" @click="runTry" />
+      <q-btn
+        v-if="props.group"
+        unelevated color="green-8"
+        label="Send request to the group"
+        :loading="sending"
+        :disable="!canSend"
+        @click="sendRequest"
+      />
       <span v-if="!ready" class="rqb-hint">Pick an identity, a scope, and a purpose to send.</span>
-      <q-btn v-if="response" flat color="grey-8" label="Clear" @click="clearAll" />
+      <span v-else-if="props.group && !canSend" class="rqb-hint">Add your name and a verified email to send for real.</span>
+      <q-btn v-if="response || sentResult" flat color="grey-8" label="Clear" @click="clearAll" />
+    </div>
+
+    <!-- ── Real send result ─────────────────────────────── -->
+    <div v-if="sentResult" class="rqb-response forward">
+      <div class="rqb-response-head">✓ Request sent</div>
+      <div class="rqb-response-body">
+        Delivered to <b>{{ sentResult.delivered }}</b> member<span v-if="sentResult.delivered !== 1">s</span> of the group.
+        Each member’s MAIA decides per their sharing policy; as members respond,
+        replies arrive at <b>{{ sentEmail }}</b>.
+      </div>
     </div>
 
     <!-- ── Response block ───────────────────────────────── -->
@@ -66,6 +96,24 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, nextTick } from 'vue';
+import { useQuasar } from 'quasar';
+import { useVerifiedEmail } from '../composables/verifiedEmail';
+import EmailVerifyBox from './EmailVerifyBox.vue';
+
+// The group the request is really sent to (the welcome page passes the Trustee
+// group + its registry origin). Without it, the builder stays a preview.
+const props = defineProps<{ group?: { groupId: string; name: string; origin?: string } | null }>();
+const $q = useQuasar();
+// Shared welcome-page verified-email state — the SAME address the setup form and
+// policy table use. A verified email is required to really send, so responses
+// can come back to the requester.
+const { state: verifiedEmail } = useVerifiedEmail();
+
+const requesterName = ref('');
+const requesterOrg = ref('');
+const sending = ref(false);
+const sentResult = ref<{ delivered: number } | null>(null);
+const sentEmail = ref('');
 
 type ColKey = 'signature' | 'scope' | 'purpose' | 'payment';
 interface CellOpt { v: string; label: string; sub?: string }
@@ -158,10 +206,52 @@ const emailNote = computed(() =>
     ? 'Because your request carries a verified identity, each member’s response comes back to you as it arrives.'
     : (response.value ? 'Add a verified email to receive responses as they come in.' : ''));
 
+// Real send needs a target group, a full request, a name, and a VERIFIED email
+// (so members' responses have somewhere to go).
+const canSend = computed(() => !!(
+  ready.value && props.group && requesterName.value.trim() &&
+  verifiedEmail.verified && verifiedEmail.email
+));
+
+// Really submit the request to the group (W3 outside-request). The registry
+// seals it to each member's inbox; members' MAIAs decide per policy and any
+// response comes back to the requester's email — the registry never brokers it.
+const sendRequest = async () => {
+  if (!canSend.value || sending.value || !props.group) return;
+  sending.value = true;
+  try {
+    const res = await fetch('/api/groups/outside-request-proxy', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+      body: JSON.stringify({
+        origin: props.group.origin || window.location.origin,
+        groupId: props.group.groupId,
+        name: requesterName.value.trim(),
+        email: verifiedEmail.email,
+        organization: requesterOrg.value.trim() || undefined,
+        message: message.value.trim(),
+        scope: sel.scope,
+        purpose: sel.purpose
+      })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    sentEmail.value = verifiedEmail.email;
+    sentResult.value = { delivered: data.delivered || 0 };
+    response.value = null; // the real result replaces the preview
+  } catch (e) {
+    $q.notify({ type: 'negative', message: e instanceof Error ? e.message : 'Could not send request' });
+  } finally {
+    sending.value = false;
+  }
+};
+
 const clearAll = () => {
   (Object.keys(sel) as ColKey[]).forEach((k) => { sel[k] = null; });
   message.value = '';
   response.value = null;
+  sentResult.value = null;
+  requesterName.value = '';
+  requesterOrg.value = '';
   nextTick(autoGrow);
 };
 
@@ -258,6 +348,17 @@ const runTry = () => {
 }
 .rqb-msg-input:focus { outline: none; border-color: var(--rqb-accent); box-shadow: 0 0 0 3px var(--rqb-accent-soft); }
 .rqb-msg-input::placeholder { color: #9aa8b4; }
+
+/* Requester identity (real send) */
+.rqb-identity { margin-top: 14px; }
+.rqb-identity-row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.rqb-text {
+  flex: 1 1 180px; font: inherit; font-size: 13.5px; padding: 9px 12px; border-radius: 9px;
+  border: 1px solid #c4d0da; background: #fbfcfd; color: var(--rqb-ink);
+}
+.rqb-text:focus { outline: none; border-color: var(--rqb-accent); box-shadow: 0 0 0 3px var(--rqb-accent-soft); }
+.rqb-text::placeholder { color: #9aa8b4; }
+.rqb-verify { max-width: 460px; }
 
 /* Live request line */
 .rqb-card-stage { margin-top: 16px; }

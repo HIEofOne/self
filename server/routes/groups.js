@@ -2914,6 +2914,42 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
           await cloudant.saveDocument(USERS_DB, userDoc);
         }
       }
+
+      // Close the AS loop (backlog #3): when the patient ACCEPTS or DECLINES an
+      // OUTSIDE requester's request, email them the outcome (plus any note the
+      // patient added) and LOG the response. 'block' stays silent — a spam drop
+      // gets no reply. A policy-level silent deny never reaches here at all.
+      const responseMessage = String(req.body?.responseMessage || '').trim().slice(0, 2000);
+      if (reqDoc.fromOutsider && reqDoc.requester?.email && decision !== 'block') {
+        const outcome = decision === 'accept' ? 'accepted' : 'declined';
+        if (typeof sendEmail === 'function') {
+          try {
+            const appUrl = (process.env.PUBLIC_APP_URL || '').replace(/\/$/, '');
+            await sendEmail(
+              reqDoc.requester.email,
+              `Your MAIA request was ${outcome}`,
+              [
+                `A member of the "${reqDoc.groupName}" group ${outcome} your request.`,
+                responseMessage ? `\nTheir message:\n${responseMessage}` : '',
+                '',
+                outcome === 'accepted'
+                  ? 'They may follow up with the information directly.'
+                  : 'You can refine your request and try again.',
+                appUrl ? `\n${appUrl}` : ''
+              ].filter(Boolean).join('\n')
+            );
+          } catch (e) {
+            console.warn('[as-requests] requester notify failed:', e?.message || e);
+          }
+        }
+        auditLog.logEvent({
+          type: 'as_request_responded',
+          userId,
+          ip: req.ip,
+          details: { requestId: reqDoc._id, groupId: reqDoc.groupId, outcome, hadMessage: !!responseMessage }
+        });
+      }
+
       res.json({ success: true, status: reqDoc.status });
     } catch (error) {
       console.error('[user-groups] decision failed:', error);
