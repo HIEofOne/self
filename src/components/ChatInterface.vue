@@ -2806,15 +2806,6 @@ const saveDeepLinkChat = async () => {
   }
 };
 
-// Baseline the deep-link save snapshot once the shared chat has loaded, so the
-// "Save & alert" button only appears after the visitor adds to it. Re-fires if
-// they open a different shared chat (hasLoadedDeepLinkChat resets on shareId change).
-watch(hasLoadedDeepLinkChat, (loaded) => {
-  if (loaded && isDeepLink.value) {
-    nextTick(() => { lastDeepLinkSaveSnapshot.value = currentChatSnapshot.value; });
-  }
-});
-
 watch(
   () => [messages.value.length, uploadedFiles.value.length],
   ([messageCount, fileCount]) => {
@@ -8288,6 +8279,9 @@ const handleChatSelected = async (chat: any) => {
     const snapshot = currentChatSnapshot.value;
     lastLocalSaveSnapshot.value = snapshot;
     lastGroupSaveSnapshot.value = snapshot;
+    // Baseline for the deep-link "Save & alert" button: it only appears once
+    // the visitor adds to this freshly-loaded conversation.
+    lastDeepLinkSaveSnapshot.value = snapshot;
   });
 
   if (deepLinkShareId.value) {
