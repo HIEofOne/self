@@ -33,9 +33,21 @@
       :class="{ 'is-active': props.activeKind === 'stored' && activeStoredId === c._id }"
       @click="emit('open-stored', c.raw)"
     >
-      <q-icon :name="c.isDeepLink ? 'link' : 'history'" size="16px" />
+      <q-icon
+        :name="c.isDeepLink ? 'link' : 'history'" size="16px"
+        :style="c.isDeepLink ? 'cursor: pointer' : ''"
+        @click.stop="c.isDeepLink && copyStoredLink(c.raw)"
+      >
+        <q-tooltip v-if="c.isDeepLink">Copy deep link</q-tooltip>
+      </q-icon>
       <span class="conv-rail__label">{{ c.title }}</span>
-      <q-badge v-if="c.isDeepLink" color="brown-4" text-color="white" label="link" class="conv-rail__tag" />
+      <q-badge
+        v-if="c.isDeepLink" color="brown-4" text-color="white" label="link"
+        class="conv-rail__tag" style="cursor: pointer"
+        @click.stop="copyStoredLink(c.raw)"
+      >
+        <q-tooltip>Copy deep link</q-tooltip>
+      </q-badge>
     </button>
     <div v-if="!storedChats.length" class="conv-rail__empty">No saved chats yet</div>
 
@@ -74,6 +86,9 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue';
+import { useQuasar } from 'quasar';
+
+const $q = useQuasar();
 
 const props = defineProps<{
   userId: string;
@@ -93,6 +108,21 @@ const emit = defineEmits<{
   'open-stored': [chat: any];
   'open-groups': [];
 }>();
+
+// Copy a stored deep-link chat's share link straight from the sidebar — same
+// link the Saved Chats tab produces (${origin}/chat/${shareId}), so users no
+// longer have to open the Workbook to get it.
+const copyStoredLink = (chat: any) => {
+  const shareId = chat?.shareId;
+  if (!shareId) {
+    $q.notify({ type: 'warning', message: 'This chat has no deep link yet.', position: 'top', timeout: 2000 });
+    return;
+  }
+  const link = `${window.location.origin}/chat/${shareId}`;
+  navigator.clipboard.writeText(link)
+    .then(() => $q.notify({ type: 'positive', message: 'Deep link copied to clipboard', position: 'top', timeout: 3000, color: 'primary', textColor: 'white' }))
+    .catch(() => $q.notify({ type: 'negative', message: 'Failed to copy link', position: 'top', timeout: 3000 }));
+};
 
 const avatarColor = (peerId: string): string => {
   let h = 0;
