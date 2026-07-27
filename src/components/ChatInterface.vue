@@ -5120,8 +5120,20 @@ const generateSetupLogPdf = async (opts: { download?: boolean; returnBase64?: bo
   const hasIndexing = indexingStatus.value?.phase === 'complete';
   const indexTokens = indexingStatus.value?.tokens || '0';
   const hasSummary = wizardPatientSummary.value;
+  // Notification email + verification status (required for all accounts).
+  let emailLine = 'Notification email: not on file';
+  try {
+    const emRes = await fetch('/api/user/notification-email', { credentials: 'include' });
+    if (emRes.ok) {
+      const em = await emRes.json();
+      emailLine = em.email
+        ? `Notification email: ${em.email} (${em.verified ? 'verified' : 'NOT verified'})`
+        : 'Notification email: not on file';
+    }
+  } catch { /* leave default */ }
   const summaryItems = [
     `Files uploaded: ${totalFiles}`,
+    emailLine,
     `${labelForProfileKey('default')} ready: ${wizardStage1Complete.value ? 'Yes' : 'No'}`,
     `${labelForProfileKey('gpt')} ready: ${gptAgentReady.value ? 'Yes' : 'Pending'}`,
     `KB indexed: ${hasIndexing ? 'Yes' : 'Pending'} (${indexTokens} tokens)`,
@@ -5230,6 +5242,7 @@ const generateSetupLogPdf = async (opts: { download?: boolean; returnBase64?: bo
           case 'setup-complete': return `[${t}] Setup complete`;
           case 'restore-complete': return `[${t}] Restore complete`;
           case 'account-deleted': return `[${t}] Cloud account deleted`;
+          case 'email-verified': return `[${t}] Email verified: ${evt.email || ''}`;
           case 'files-uploaded': {
             const parts = [`${evt.count || 0} files`];
             if (evt.totalKB) parts.push(`(${Number(evt.totalKB).toLocaleString()} KB)`);

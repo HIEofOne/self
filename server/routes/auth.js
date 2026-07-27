@@ -1321,6 +1321,10 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
           displayName: candidateDisplayName,
           email: notifyEmail,
           ...(emailIsVerified ? { emailVerified: true, emailVerifiedAt: new Date().toISOString() } : {}),
+          // Record the verification in the persistent log (surfaces in maia-log).
+          provisioningLog: emailIsVerified
+            ? [{ id: 1, time: new Date().toISOString(), event: 'email-verified', email: notifyEmail }]
+            : [],
           domain: passkeyService.rpID,
           type: 'user',
           workflowStage: 'active',

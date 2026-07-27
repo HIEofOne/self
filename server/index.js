@@ -10060,6 +10060,10 @@ app.post('/api/user/notification-email', async (req, res) => {
       doc.updatedAt = new Date().toISOString();
       try {
         await cloudant.saveDocument('maia_users', doc);
+        // Record a fresh verification in the persistent log (surfaces in maia-log).
+        if (verified) {
+          appendUserProvisioningEvent(userId, { event: 'email-verified', email: doc.email }).catch(() => {});
+        }
         return res.json({ success: true, email: doc.email, verified: !!doc.emailVerified });
       } catch (e) {
         if (e?.statusCode === 409 && attempt < 2) continue;
