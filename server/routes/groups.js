@@ -1729,6 +1729,11 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       if (!userDoc) {
         return res.status(404).json({ success: false, error: 'User not found' });
       }
+      // A verified notification email is required to join a group: the group
+      // needs a reachable address to notify the member (so it never polls).
+      if (!userDoc.emailVerified) {
+        return res.status(403).json({ success: false, error: 'EMAIL_NOT_VERIFIED', message: 'Verify your notification email before joining a group.' });
+      }
       if ((userDoc.groupMemberships || []).some((m) => m.groupId === groupId)) {
         return res.status(400).json({ success: false, error: 'Already a member of this group' });
       }
@@ -1988,6 +1993,10 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       }
       const userDoc = await cloudant.getDocument(USERS_DB, userId);
       if (!userDoc) return res.status(404).json({ success: false, error: 'User not found' });
+      // A verified notification email is required to join / request a group.
+      if (!userDoc.emailVerified) {
+        return res.status(403).json({ success: false, error: 'EMAIL_NOT_VERIFIED', message: 'Verify your notification email before joining a group.' });
+      }
       if ((userDoc.groupMemberships || []).some((m) => m.groupId === groupId)) {
         return res.status(400).json({ success: false, error: 'Already a member of this group' });
       }
