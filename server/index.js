@@ -1685,6 +1685,58 @@ const addDeepLinkUserToChat = async (chat, deepLinkUserId) => {
   return chat;
 };
 
+// When a SHARED chat is saved, email the OTHER party a link so they know to
+// reopen it (this replaces the old 5-second deep-link poll — updates now
+// propagate on an explicit Save, not by polling). Recipients are everyone on
+// the thread (the patient owner + any deep-link visitors) EXCEPT whoever just
+// saved. Best-effort: never throws, silently skips anyone without an email.
+const notifyChatCounterpartyOnSave = async (chat, { savedByUserId } = {}) => {
+  try {
+    if (!chat || !chat.shareId) return;
+    const resend = await initResend();
+    if (!resend) return;
+
+    const recipientIds = new Set();
+    if (chat.patientOwner) recipientIds.add(chat.patientOwner);
+    for (const id of (Array.isArray(chat.deepLinkUserIds) ? chat.deepLinkUserIds : [])) {
+      recipientIds.add(id);
+    }
+    if (savedByUserId) recipientIds.delete(savedByUserId);
+    if (recipientIds.size === 0) return;
+
+    const fromEmail = process.env.RESEND_FROM_EMAIL || 'noreply@maia.healthurl.com';
+    const appUrl = process.env.PUBLIC_APP_URL || 'http://localhost:5173';
+    const link = `${appUrl}/chat/${chat.shareId}`;
+
+    for (const rid of recipientIds) {
+      try {
+        const doc = await cloudant.getDocument('maia_users', rid);
+        if (!doc || !doc.email) continue; // no address on file → skip ("if possible")
+        const toOwner = chat.patientOwner && rid === chat.patientOwner;
+        await resend.emails.send({
+          from: fromEmail,
+          to: doc.email,
+          reply_to: 'help@trustee.ai',
+          subject: 'New message in your shared MAIA conversation',
+          text: [
+            toOwner
+              ? 'Someone you shared a MAIA conversation with just added to it.'
+              : 'The patient updated a MAIA conversation shared with you.',
+            '',
+            `Open it here: ${link}`,
+            '(Open it in the same browser where you use MAIA.)'
+          ].join('\n')
+        });
+        console.log(`[NOTIFY] ✅ Shared-chat save notice sent to ${doc.email} (chat ${chat._id})`);
+      } catch (recipientErr) {
+        console.warn(`[NOTIFY] Could not notify ${rid} of chat save:`, recipientErr.message);
+      }
+    }
+  } catch (err) {
+    console.warn('[NOTIFY] notifyChatCounterpartyOnSave failed (non-fatal):', err.message);
+  }
+};
+
 const attachShareToUserDoc = (userDoc, shareId) => {
   const shares = ensureArray(userDoc.deepLinkShareIds);
   if (shareId && !shares.includes(shareId)) {
@@ -4840,6 +4892,13 @@ app.put('/api/save-group-chat/:chatId', async (req, res) => {
     }
 
     await cloudant.saveDocument('maia_chats', existingChat);
+
+    // Email the OTHER party that the shared conversation changed (replaces the
+    // deep-link poll). Fire-and-forget so it never delays or fails the save.
+    const savedByUserId = deepLinkSession
+      ? (req.session?.deepLinkUserId || req.session?.userId || null)
+      : effectiveUserId;
+    notifyChatCounterpartyOnSave(existingChat, { savedByUserId }).catch(() => {});
 
     // Keep workflowStage in sync when chats are updated
     try {
