@@ -296,8 +296,9 @@
 
                     <!-- Request editor (embedded in the "Trustee Group Example" FAQ) -->
                     <template #request>
+                      <!-- pass the Trustee group so the builder can really submit -->
                       <div style="max-width: 940px; margin: 0 auto;">
-                        <RequestBuilder />
+                        <RequestBuilder :group="requestGroup" />
                       </div>
                     </template>
 
@@ -1185,6 +1186,21 @@ watch(() => verifiedEmail.verified, (ok) => { if (ok) wf.value.emailOptIn = true
 
 const trusteeGroup = computed(() =>
   (publicGroups.value || []).find((g) => /trustee/i.test(g.name || '') && g.joinLink) || null);
+
+// The RequestBuilder's real-submit target: the Trustee group + its registry
+// origin (derived from the join link, falling back to this host).
+const requestGroup = computed(() => {
+  const g = trusteeGroup.value;
+  if (!g?.groupId) return null;
+  let origin = window.location.origin;
+  try {
+    if (g.joinLink) {
+      const u = new URL(g.joinLink, window.location.origin);
+      origin = u.searchParams.get('registry') || origin;
+    }
+  } catch { /* keep default origin */ }
+  return { groupId: g.groupId, name: g.name, origin };
+});
 
 // Fetch the MAIA ID the account WILL get, so the form can show it.
 watch(() => wf.value.joinTrustee, async (on) => {

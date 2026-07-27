@@ -96,9 +96,18 @@
           {{ typeof pendingRequest.payload === 'string' ? pendingRequest.payload : JSON.stringify(pendingRequest.payload) }}
         </div>
         <div v-if="pendingRequest.fromOutsider" class="text-caption text-grey-6 q-mt-xs">
-          Accepting only records your choice — nothing is sent automatically.
-          If you want to respond, use the reply address above.
+          Accept or Decline emails the requester your choice (no record data is
+          sent automatically). Block silently drops them and future requests.
         </div>
+        <q-input
+          v-if="pendingRequest.fromOutsider"
+          v-model="responseNote"
+          dense outlined autogrow
+          class="q-mt-xs"
+          type="textarea"
+          label="Optional message to the requester"
+          :disable="deciding"
+        />
         <div class="q-mt-sm q-gutter-sm">
           <q-btn dense unelevated size="sm" color="primary" label="Accept" :loading="deciding" @click="decide('accept')" />
           <q-btn dense flat size="sm" color="grey-8" label="Decline" :loading="deciding" @click="decide('decline')" />
@@ -324,6 +333,7 @@ const shareConsult = async (c: Consult) => {
   } finally { c.sharing = false; }
 };
 
+const responseNote = ref('');
 const decide = async (decision: 'accept' | 'decline' | 'block') => {
   const r = pendingRequest.value;
   if (!r || deciding.value) return;
@@ -333,10 +343,12 @@ const decide = async (decision: 'accept' | 'decline' | 'block') => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify({ userId: props.userId, decision })
+      // The note only matters for an outside requester (emailed the outcome).
+      body: JSON.stringify({ userId: props.userId, decision, responseMessage: responseNote.value.trim() || undefined })
     });
     const data = await res.json();
     if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    responseNote.value = '';
     await loadThread();
     $q.notify({ type: 'positive', message: `Request ${data.status}.` });
     if (decision === 'block') emit('close');
