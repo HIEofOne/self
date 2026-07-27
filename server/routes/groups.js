@@ -1247,6 +1247,52 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     }
   });
 
+  // Best-effort message-arrival notification (backlog #2). When a sealed item
+  // lands for a member, email them a nudge to open MAIA — the message itself
+  // stays E2E and is fetched on their next poll; this replaces polling for
+  // *awareness*. Gated on a VERIFIED notification email; de-bounced so only the
+  // FIRST unread since their last poll sends an email (a burst never floods).
+  // Single-deployment: the recipient's account is in this USERS_DB; a
+  // cross-host member simply isn't found here and is skipped. Never throws.
+  const notifyGroupMessageRecipient = async (groupDoc, toPairwiseId, appUrl) => {
+    try {
+      if (typeof sendEmail !== 'function' || !groupDoc || !toPairwiseId) return;
+      // De-bounce: if the member already has unread relay items they've been
+      // nudged already — only the first-since-poll triggers an email. (The new
+      // message is already stored, so its own presence is the "1".)
+      const pending = await cloudant.findDocuments(RELAY_DB, {
+        selector: {
+          type: { $eq: 'relay_message' },
+          groupId: { $eq: groupDoc._id },
+          toPairwiseId: { $eq: toPairwiseId }
+        }
+      });
+      if ((pending?.docs?.length || 0) > 1) return;
+      // Resolve the recipient's local account via their pairwise membership.
+      const users = await cloudant.findDocuments(USERS_DB, {
+        selector: {
+          groupMemberships: { $elemMatch: { groupId: { $eq: groupDoc._id }, pairwiseId: { $eq: toPairwiseId } } }
+        },
+        limit: 1
+      });
+      const recip = users?.docs?.[0];
+      if (!recip || !recip.email || !recip.emailVerified) return;
+      await sendEmail(
+        recip.email,
+        `New message in "${groupDoc.name}" on MAIA`,
+        [
+          `You have a new message in the group "${groupDoc.name}".`,
+          '',
+          `Open MAIA to read it: ${appUrl}`,
+          '(Open it in the same browser where you use MAIA.)'
+        ]
+      );
+      console.log(`[NOTIFY] ✅ Group-message email sent to ${recip.email} (group ${groupDoc._id})`);
+    } catch (err) {
+      console.warn('[NOTIFY] group-message notify failed (non-fatal):', err?.message || err);
+    }
+  };
+
   // POST /api/groups/:groupId/relay — store a sealed message for another
   // member. Both sender and recipient must be ACTIVE (instant revocation
   // for relayed traffic, Groups.md §6.1). The relay stores only the opaque
@@ -1286,6 +1332,10 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         expiresAt: new Date(now + RELAY_TTL_MS).toISOString()
       };
       await cloudant.saveDocument(RELAY_DB, msg);
+      // Nudge the recipient by email (best-effort, fire-and-forget so the relay
+      // response isn't delayed). Replaces polling for message awareness.
+      const appUrl = (process.env.PUBLIC_APP_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+      notifyGroupMessageRecipient(doc, toPairwiseId, appUrl).catch(() => {});
       res.json({ success: true, messageId: msg._id });
     } catch (error) {
       console.error('[groups] relay failed:', error);
