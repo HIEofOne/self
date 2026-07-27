@@ -2842,18 +2842,22 @@ watch(
   { immediate: true }
 );
 
-// Deep-link conversations are loaded once when the link is opened. Without a
-// background pull, the peer never sees messages the owner (or the AS agent)
-// appends after they arrived — the conversation looks frozen. Poll the shared
-// chat and re-apply ONLY when the message count actually grows, so a poll never
-// resets scroll, the selected provider, or a half-typed reply. Skipped while a
-// response is streaming or a draft reply is sitting in the composer.
-let deepLinkPollTimer: ReturnType<typeof setInterval> | null = null;
-async function pollDeepLinkChat() {
-  const shareId = deepLinkShareId.value;
+// A shared chat is loaded once and would otherwise look frozen — neither side
+// sees messages the other appends. This covers BOTH directions: a deep-link
+// peer (carries deepLinkShareId) and the owner viewing that same shared chat
+// from the rail / Saved Chats (carries currentSavedChatShareId). Poll while the
+// shared chat is the active view and re-apply ONLY when the message count
+// actually grows, so a tick never resets scroll, the selected provider, an
+// in-place message edit, or a half-typed reply. Skipped while a response is
+// streaming or a draft reply is sitting in the composer.
+let sharedChatPollTimer: ReturnType<typeof setInterval> | null = null;
+async function pollSharedChat() {
+  const shareId = deepLinkShareId.value || currentSavedChatShareId.value;
   if (!shareId) return;
+  if (railActiveKind.value !== 'stored') return;
   if (isStreaming.value) return;
   if (inputMessage.value && inputMessage.value.trim()) return;
+  if (editingMessageIdx.value.length > 0) return;
   try {
     const response = await fetch(`/api/load-chat-by-share/${encodeURIComponent(shareId)}`, {
       credentials: 'include'
@@ -2868,25 +2872,29 @@ async function pollDeepLinkChat() {
     // Transient network error — the next tick retries.
   }
 }
+const shouldPollSharedChat = computed(
+  () => railActiveKind.value === 'stored'
+    && !!(deepLinkShareId.value || currentSavedChatShareId.value)
+);
 watch(
-  isDeepLink,
-  (deepLink) => {
-    if (deepLinkPollTimer) {
-      clearInterval(deepLinkPollTimer);
-      deepLinkPollTimer = null;
+  shouldPollSharedChat,
+  (active) => {
+    if (sharedChatPollTimer) {
+      clearInterval(sharedChatPollTimer);
+      sharedChatPollTimer = null;
     }
-    if (deepLink) {
-      deepLinkPollTimer = setInterval(() => {
-        void pollDeepLinkChat();
+    if (active) {
+      sharedChatPollTimer = setInterval(() => {
+        void pollSharedChat();
       }, 5000);
     }
   },
   { immediate: true }
 );
 onUnmounted(() => {
-  if (deepLinkPollTimer) {
-    clearInterval(deepLinkPollTimer);
-    deepLinkPollTimer = null;
+  if (sharedChatPollTimer) {
+    clearInterval(sharedChatPollTimer);
+    sharedChatPollTimer = null;
   }
 });
 
