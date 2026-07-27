@@ -233,8 +233,14 @@
                       New MAIA accounts need a computer. Mobile access is possible later, after passkey creation.
                     </div>
 
-                    <div><q-checkbox v-model="wf.emailOptIn" dense label="Willing to share an email address for notifications (optional)" /></div>
-                    <div v-if="wf.emailOptIn" class="q-mb-sm" style="margin-left: 28px; max-width: 460px;">
+                    <div class="row items-center">
+                      <q-icon name="mark_email_read" size="20px" :color="verifiedEmail.verified ? 'green-7' : 'grey-6'" class="q-mr-xs" />
+                      <span class="text-body2">Verified email address&nbsp;<span class="text-grey-7">(required)</span></span>
+                    </div>
+                    <div class="text-caption text-grey-7 q-mb-sm" style="margin-left: 28px; max-width: 460px;">
+                      MAIA uses this to notify you of new messages and to record account activity in your log — so it never has to poll. Verify it below to continue.
+                    </div>
+                    <div class="q-mb-sm" style="margin-left: 28px; max-width: 460px;">
                       <EmailVerifyBox label="Email address" />
                     </div>
 
@@ -270,7 +276,7 @@
                     <div class="q-mt-md">
                       <q-btn
                         unelevated color="primary" class="full-width" size="lg" label="GET STARTED"
-                        :disable="!wf.privateComputer || (wf.haveFile && !wfFile) || (wf.haveFolder && !wfFolderHandle)" :loading="tempStartLoading" @click="welcomeFormStart"
+                        :disable="!wf.privateComputer || !verifiedEmail.verified || (wf.haveFile && !wfFile) || (wf.haveFolder && !wfFolderHandle)" :loading="tempStartLoading" @click="welcomeFormStart"
                       />
                     </div>
                     <div class="text-caption text-grey-7 q-mt-sm">
@@ -1157,7 +1163,7 @@ const publicGroups = ref<Array<{ groupId: string; name: string; description: str
 
 // ── Modal-free welcome setup form (New_User_Flows.md §5 step 4) ────────
 // The form front-loads every decision the arrival dialogs used to ask.
-const wf = ref({ privateComputer: false, emailOptIn: false, email: '', joinTrustee: false, haveFile: false, haveFolder: false });
+const wf = ref({ privateComputer: false, emailOptIn: true, email: '', joinTrustee: false, haveFile: false, haveFolder: false });
 const wfSuggestedId = ref<string | null>(null);
 const wfFile = ref<File | null>(null);
 const wfFileInput = ref<HTMLInputElement | null>(null);
