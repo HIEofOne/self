@@ -3662,6 +3662,12 @@ const destroyTemporaryAccount = async () => {
   }
   destroyLoading.value = true;
   const userIdToDelete = user.value.userId;
+  // Durable deletion logging: the userDoc (and its provisioningLog) is about to
+  // be destroyed, so a server-side log write won't survive. bufferLogEvent
+  // persists in localStorage — its designed purpose — so maia-log always shows
+  // the deletion. (The old pre-delete server POST here logged 'account-deleted'
+  // BEFORE the delete and vanished with the userDoc; replaced by this.)
+  bufferLogEvent({ event: 'account-delete-started', userId: userIdToDelete });
   try {
     // Save local state snapshot BEFORE deleting cloud data (preserves chats, meds, summary)
     try {
@@ -3670,25 +3676,13 @@ const destroyTemporaryAccount = async () => {
       console.warn(`[DESTROY] Local state save failed (non-fatal):`, snapErr);
     }
 
-    // Regenerate maia-log.pdf
+    // Regenerate maia-log.pdf with pre-delete state
     try {
       if (chatInterfaceRef.value) {
         await chatInterfaceRef.value.generateSetupLogPdf();
       }
     } catch (logErr) {
       console.warn(`[DESTROY] Setup log update failed (non-fatal):`, logErr);
-    }
-
-    // Log account-deleted to provisioning log BEFORE deleting the account
-    try {
-      await fetch('/api/provisioning-log', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ userId: userIdToDelete, event: 'account-deleted' })
-      });
-    } catch (err) {
-      console.warn('[DESTROY] Provisioning log account-deleted failed (non-fatal):', err);
     }
 
     const response = await fetch('/api/self/delete', {
@@ -3701,8 +3695,31 @@ const destroyTemporaryAccount = async () => {
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
+      bufferLogEvent({ event: 'account-delete-failed', userId: userIdToDelete, error: data.error || `HTTP ${response.status}` });
       console.error(`[DESTROY] Server returned ${response.status}:`, data);
       throw new Error(data.error || 'Failed to delete temporary account');
+    }
+    // Record WHAT was actually deleted (Spaces/KB/Agent + counts) from the
+    // endpoint's returned details, durably, so maia-log answers "was it deleted?".
+    const d = data.details || {};
+    bufferLogEvent({
+      event: 'account-deleted',
+      userId: userIdToDelete,
+      spacesDeleted: !!d.spacesDeleted,
+      filesDeleted: d.filesDeleted || 0,
+      kbDeleted: !!d.kbDeleted,
+      agentDeleted: !!d.agentDeleted,
+      chatsDeleted: d.chatsDeleted || 0,
+      deepLinkUsersDeleted: d.deepLinkUsersDeleted || 0,
+      groupsLeft: d.groupsLeft || 0,
+      errors: Array.isArray(d.errors) ? d.errors.length : 0
+    });
+    // Regenerate the log so it now shows the deletion (buffered events survive
+    // the destroyed account; the server fetch just returns nothing).
+    try {
+      if (chatInterfaceRef.value) await chatInterfaceRef.value.generateSetupLogPdf();
+    } catch (e) {
+      console.warn('[DESTROY] post-delete log regen failed (non-fatal):', e);
     }
     // Keep the folder handle so the Welcome page can offer RESTORE from local data.
     // Only clear the PouchDB snapshot (cloud state is gone, but folder-based state remains).
