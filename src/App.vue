@@ -438,12 +438,11 @@
               unelevated
               :color="welcomeDisplayUserId ? 'grey-8' : undefined"
               :flat="!welcomeDisplayUserId"
-              :disable="true"
-              label="Delete Cloud Account (temporarily unavailable)"
+              label="Delete Cloud Account"
               class="full-width"
               @click="onMoreChoicesDeleteCloud"
             >
-              <q-tooltip>Temporarily disabled while the restore-after-deletion flow is being fixed (see Documentation/Setup_Sequence.md).</q-tooltip>
+              <q-tooltip>Permanently deletes your cloud account and all cloud data. You can restore from your local backup afterward.</q-tooltip>
             </q-btn>
             <q-btn
               unelevated
@@ -689,8 +688,8 @@
           </div>
         </q-card-section>
         <q-card-actions align="between" class="full-width">
-          <q-btn flat :disable="true" label="DELETE CLOUD ACCOUNT (temporarily unavailable)" color="negative" @click="openDestroyDialog">
-            <q-tooltip>Temporarily disabled while the restore-after-deletion flow is being fixed (see Documentation/Setup_Sequence.md).</q-tooltip>
+          <q-btn flat label="DELETE CLOUD ACCOUNT" color="negative" @click="openDestroyDialog">
+            <q-tooltip>Permanently deletes your cloud account and all cloud data. You can restore from your local backup afterward.</q-tooltip>
           </q-btn>
           <div class="row items-center">
             <q-btn flat label="CANCEL" color="primary" @click="showTempSignOutDialog = false" />
