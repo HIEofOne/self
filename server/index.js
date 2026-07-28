@@ -8990,6 +8990,16 @@ app.post('/api/admin/users/:userId/recover', async (req, res) => {
   }
 });
 
+// Bound a promise so a hung external call can't hang account deletion forever.
+// The DO client already caps requests at 25s, but the S3/Spaces client (AWS SDK)
+// has NO timeout — a slow/unreachable Spaces endpoint made a delete spin for
+// minutes. On timeout the underlying op is abandoned (best-effort) and deletion
+// proceeds to the next resource; the caller's try/catch records it as an error.
+const withDeleteTimeout = (promise, ms, label) => Promise.race([
+  promise,
+  new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms))
+]);
+
 async function deleteUserAndResources(userId, options = {}) {
   const { deleteAgent = true } = options;
   console.log(`[DESTROY] Starting deletion for ${userId}`);
@@ -9094,18 +9104,18 @@ async function deleteUserAndResources(userId, options = {}) {
           ContinuationToken: continuationToken || undefined
         });
 
-        const listResult = await s3Client.send(listCommand);
-        
+        const listResult = await withDeleteTimeout(s3Client.send(listCommand), 20000, 'Spaces list');
+
         if (listResult.Contents && listResult.Contents.length > 0) {
           // Delete all files
           for (const file of listResult.Contents) {
             if (file.Key) {
               try {
-                await deleteObjectWithLog({
+                await withDeleteTimeout(deleteObjectWithLog({
                   s3Client,
                   bucketName,
                   key: file.Key
-                });
+                }), 15000, `Spaces delete ${file.Key}`);
                 deletionDetails.filesDeleted++;
               } catch (err) {
                 deletionDetails.errors.push(`Failed to delete file ${file.Key}: ${err.message}`);
@@ -9381,11 +9391,11 @@ async function deleteUserAndResources(userId, options = {}) {
           secretAccessKey: process.env.DIGITALOCEAN_AWS_SECRET_ACCESS_KEY || ''
         }
       });
-      const listResp = await s3Verify.send(new ListObjectsV2Command({
+      const listResp = await withDeleteTimeout(s3Verify.send(new ListObjectsV2Command({
         Bucket: bucketName,
         Prefix: `${userId}/`,
         MaxKeys: 5
-      }));
+      })), 15000, 'Spaces verify list');
       const remaining = listResp.KeyCount || 0;
       if (remaining > 0) {
         console.error(`[DESTROY-VERIFY] ❌ ${remaining} files STILL in Spaces under ${userId}/`);
