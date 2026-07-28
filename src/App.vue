@@ -990,6 +990,7 @@ import {
   getActiveUserId, setActiveUserId, discoverUsers,
   readStateFileByUserId, storeDirectoryHandle,
   setRestoreActive, clearRestoreActive, getRestoreActive,
+  bufferLogEvent,
   type MaiaState, type DiscoveredUser
 } from './utils/localFolder';
 import packageJson from '../package.json';
@@ -2096,16 +2097,33 @@ const runPendingAccountClosure = async () => {
       // Save local snapshot before destroying cloud resources
       await saveLocalSnapshot(null);
       const userIdToDelete = user.value.userId;
+      bufferLogEvent({ event: 'account-delete-started', userId: userIdToDelete });
       const response = await fetch('/api/self/delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify({ userId: userIdToDelete })
       });
+      const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        const data = await response.json().catch(() => ({}));
+        bufferLogEvent({ event: 'account-delete-failed', userId: userIdToDelete, error: data.error || `HTTP ${response.status}` });
         throw new Error(data.error || 'Failed to delete account');
       }
+      // The userDoc (and its provisioningLog) is now gone; buffer what was
+      // deleted so maia-log can still show it (bufferLogEvent survives destroy).
+      const d = data.details || {};
+      bufferLogEvent({
+        event: 'account-deleted',
+        userId: userIdToDelete,
+        spacesDeleted: !!d.spacesDeleted,
+        filesDeleted: d.filesDeleted || 0,
+        kbDeleted: !!d.kbDeleted,
+        agentDeleted: !!d.agentDeleted,
+        chatsDeleted: d.chatsDeleted || 0,
+        deepLinkUsersDeleted: d.deepLinkUsersDeleted || 0,
+        groupsLeft: d.groupsLeft || 0,
+        errors: Array.isArray(d.errors) ? d.errors.length : 0
+      });
       await clearUserSnapshot(userIdToDelete);
       await performSignOut();
     }

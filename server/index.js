@@ -9016,6 +9016,16 @@ async function deleteUserAndResources(userId, options = {}) {
     errors: []
   };
 
+  // Durable deletion record (survives the userDoc): the maia_audit_log is the
+  // one place a deletion can be verified after the fact, since the account's own
+  // provisioningLog is destroyed below. Client buffers the same facts into
+  // maia-log via bufferLogEvent.
+  auditLog.logEvent({
+    type: 'account_delete_started',
+    userId,
+    details: { agentId: userDoc?.assignedAgentId || null, kbName: userDoc?.kbName || null }
+  });
+
   // 0. Leave every group (and withdraw pending join requests) BEFORE the
   // userDoc — and with it the pairwise signing keys — is destroyed.
   // Skipping this leaves a permanently unreachable "active" ghost at the
@@ -9388,6 +9398,7 @@ async function deleteUserAndResources(userId, options = {}) {
   }
 
   console.log(`[DESTROY-VERIFY] Verification complete for ${userId}`);
+  auditLog.logEvent({ type: 'account_deleted', userId, details: deletionDetails });
   return deletionDetails;
 }
 
