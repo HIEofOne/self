@@ -140,11 +140,13 @@ linear sequence (index → draft (timed) → Show Current Medications → verify
 shown → verify → chat blank slate) with **no** Workbook open/dismiss churn.
 `npm run build` (vue-tsc) green per PR.
 
-## Restore-after-deletion — BROKEN (to fix later)
+## Restore-after-deletion — code in place, pending live verification
 
-**Status:** the wizard rework broke the restore flavor, and **DELETE CLOUD
-ACCOUNT is temporarily disabled** in the UI (`src/App.vue`, both the primary
-button and the "more choices" option) until this is fixed.
+**Status (v1.5.124):** both parts of the fix are now in the code, and **DELETE
+CLOUD ACCOUNT is RE-ENABLED** (`src/App.vue`, both the primary button and the
+"more choices" option) so the delete→restore cycle can be verified live. If that
+live run surfaces a problem, disable the two controls again (`:disable="true"`)
+until it's fixed.
 
 **Diagnosis (v1.5.109, zachary08 log):**
 - `deleteUserAndResources` (`server/index.js:8934`) *does* delete Spaces (§1),
@@ -171,13 +173,18 @@ button and the "more choices" option) until this is fixed.
    localStorage independent of the destroyed account, so **maia-log renders them**
    (no folder-state/`clearUserSnapshot` interaction). `ChatInterface`'s renderer
    has cases for all three (Spaces/KB/Agent + counts + error count), colored.
-2. **Track restore. — TODO.** When sign-in detects a destroyed account, run the
-   restore path emitting `restore-started` → re-provision agent → re-index →
-   `restore-complete`, shown as **live wizard rows** (reuse the setup rows +
-   timing), driven by the existing restore verification — not just logged at the
-   end.
+2. **Track restore. — DONE (already implemented).** `src/components/RestoreWizard.vue`
+   is a full live-progress wizard: a destroyed account is detected
+   (`showDestroyedRestoreDialog`), `handleDestroyedRestore` recreates the userDoc
+   and launches the wizard, and `watch(modelValue)` → `executeRestore` drives a
+   **live checklist** (per-step spinner/check/error + timing + running-status
+   footer). It logs `restore-started` → per-step (`agent-deployed`, `kb-indexed`,
+   `lists/chats/instructions-restored`, `gpt-agent-ready`) → `restore-complete`,
+   with a `bufferLogEvent` fallback so events survive a session destroyed mid-
+   restore. (The v1.5.109 "restore runs blind" diagnosis predated this component.)
 
 **Verification requires a real delete→restore cycle against DigitalOcean**
-(agents, KB, Spaces) — cannot be type-checked alone. Part 1's deletion logging
-should be confirmed on that same live run. Re-enable DELETE CLOUD ACCOUNT only
-once BOTH parts pass.
+(agents, KB, Spaces) — cannot be type-checked alone. Confirm on that run: (a) the
+maia-log shows the deletion (Part 1), and (b) the RestoreWizard shows live rows
+and restores cleanly (Part 2). If it passes, **#8 is closed**; if not, re-disable
+the two DELETE CLOUD ACCOUNT controls and fix.
