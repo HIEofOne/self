@@ -5219,7 +5219,8 @@ const generateSetupLogPdf = async (opts: { download?: boolean; returnBase64?: bo
       // Color helper for provisioning events
       const getEventColor = (evt: Record<string, any>): [number, number, number] => {
         if (evt.event === 'error') return [200, 0, 0];
-        if (evt.event === 'account-deleted') return [200, 0, 0];
+        if (evt.event === 'account-deleted' || evt.event === 'account-delete-failed') return [200, 0, 0];
+        if (evt.event === 'account-delete-started') return [180, 100, 0];
         if (evt.event === 'patient-consistency-mismatch') return [200, 0, 0];
         if (evt.event === 'patient-identity-extraction-failed') return [200, 0, 0];
         if (evt.event?.startsWith('test-')) return [200, 100, 0];
@@ -5250,7 +5251,18 @@ const generateSetupLogPdf = async (opts: { download?: boolean; returnBase64?: bo
           case 'restore-started': return `[${t}] Restore started`;
           case 'setup-complete': return `[${t}] Setup complete`;
           case 'restore-complete': return `[${t}] Restore complete`;
-          case 'account-deleted': return `[${t}] Cloud account deleted`;
+          case 'account-delete-started': return `[${t}] Cloud account deletion started`;
+          case 'account-delete-failed': return `[${t}] Cloud account deletion FAILED: ${evt.error || ''}`;
+          case 'account-deleted': {
+            const parts: string[] = [];
+            parts.push(`Spaces ${evt.spacesDeleted ? `deleted (${evt.filesDeleted || 0} files)` : 'not deleted'}`);
+            parts.push(`KB ${evt.kbDeleted ? 'deleted' : 'not deleted'}`);
+            parts.push(`Agent ${evt.agentDeleted ? 'deleted' : 'not deleted'}`);
+            if (evt.chatsDeleted) parts.push(`${evt.chatsDeleted} chats`);
+            if (evt.groupsLeft) parts.push(`${evt.groupsLeft} groups left`);
+            if (evt.errors) parts.push(`${evt.errors} error(s)`);
+            return `[${t}] Cloud account deleted — ${parts.join(', ')}`;
+          }
           case 'email-verified': return `[${t}] Email verified: ${evt.email || ''}`;
           case 'files-uploaded': {
             const parts = [`${evt.count || 0} files`];

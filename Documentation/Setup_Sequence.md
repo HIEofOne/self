@@ -162,18 +162,22 @@ button and the "more choices" option) until this is fixed.
   re-entry logs as a normal setup, so restore runs blind.
 
 **Fix plan (two parts):**
-1. **Log what's deleted (verified).** In `deleteUserAndResources`, emit
-   `account-delete-started`, `spaces-deleted {files}`, `kb-deleted {kbIds}`,
-   `agent-deleted {count}`, `account-deleted {details}`. Because the userDoc is
-   destroyed, the **client** writes the returned `deletionDetails` into the
-   folder log + regenerates the PDF right after the endpoint returns. Add render
-   cases for these events in `ChatInterface.vue`'s log renderer.
-2. **Track restore.** When sign-in detects a destroyed account, run the restore
-   path emitting `restore-started` → re-provision agent → re-index →
+1. **Log what's deleted (verified). — DONE (v1.5.123).** `deleteUserAndResources`
+   now emits durable `account_delete_started` + `account_deleted {deletionDetails}`
+   to the **audit log** (`maia_audit_log`) — the one record that survives the
+   userDoc. Client-side, the `delete-only` handler (`App.vue`) captures the
+   endpoint's returned `details` and `bufferLogEvent`s `account-delete-started` /
+   `account-deleted` / `account-delete-failed` — `bufferLogEvent` persists in
+   localStorage independent of the destroyed account, so **maia-log renders them**
+   (no folder-state/`clearUserSnapshot` interaction). `ChatInterface`'s renderer
+   has cases for all three (Spaces/KB/Agent + counts + error count), colored.
+2. **Track restore. — TODO.** When sign-in detects a destroyed account, run the
+   restore path emitting `restore-started` → re-provision agent → re-index →
    `restore-complete`, shown as **live wizard rows** (reuse the setup rows +
    timing), driven by the existing restore verification — not just logged at the
    end.
 
 **Verification requires a real delete→restore cycle against DigitalOcean**
-(agents, KB, Spaces) — cannot be type-checked alone. Re-enable DELETE CLOUD
-ACCOUNT only once this passes.
+(agents, KB, Spaces) — cannot be type-checked alone. Part 1's deletion logging
+should be confirmed on that same live run. Re-enable DELETE CLOUD ACCOUNT only
+once BOTH parts pass.
