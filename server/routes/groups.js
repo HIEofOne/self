@@ -490,6 +490,24 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
           console.warn('[groups] outside-request seal/store failed:', e?.message || e);
         }
       }
+      // Public tally (counts only — no identities, no content) so the requester
+      // can watch reach + responses. Swept with the relay TTL.
+      try {
+        await cloudant.saveDocument(RELAY_DB, {
+          _id: `outreq_${reqId}`,
+          type: 'outside_request_tally',
+          groupId: doc._id,
+          requestId: reqId,
+          delivered,
+          responded: 0,
+          accepted: 0,
+          declined: 0,
+          createdAt: new Date(now).toISOString(),
+          expiresAt: new Date(now + RELAY_TTL_MS).toISOString()
+        });
+      } catch (e) {
+        console.warn('[groups] outside-request tally create failed:', e?.message || e);
+      }
       auditLog.logEvent({
         type: 'group_outside_request',
         userId: 'public',
@@ -500,6 +518,28 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     } catch (error) {
       console.error('[groups] outside-request failed:', error);
       res.status(500).json({ success: false, error: 'Failed to send request' });
+    }
+  });
+
+  // GET /api/groups/:groupId/outside-request/:reqId/status — public tally so a
+  // requester's page can show reach + how many members responded (counts only;
+  // no identities, no content). The registry still never brokers the reply.
+  app.get('/api/groups/:groupId/outside-request/:reqId/status', async (req, res) => {
+    try {
+      const tally = await cloudant.getDocument(RELAY_DB, `outreq_${req.params.reqId}`);
+      if (!tally || tally.type !== 'outside_request_tally' || tally.groupId !== req.params.groupId) {
+        return res.status(404).json({ success: false, error: 'Unknown request' });
+      }
+      res.json({
+        success: true,
+        delivered: tally.delivered || 0,
+        responded: tally.responded || 0,
+        accepted: tally.accepted || 0,
+        declined: tally.declined || 0
+      });
+    } catch (error) {
+      console.error('[groups] outside-request status failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to load request status' });
     }
   });
 
@@ -1677,7 +1717,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     try {
       const all = await cloudant.getAllDocuments(RELAY_DB);
       for (const m of all || []) {
-        if (m && m.type === 'relay_message' && m.expiresAt && m.expiresAt < nowIso) {
+        if (m && (m.type === 'relay_message' || m.type === 'outside_request_tally') && m.expiresAt && m.expiresAt < nowIso) {
           try { await cloudant.deleteDocument(RELAY_DB, m._id); relayDeleted++; } catch { /* ignore */ }
         }
       }
@@ -2948,6 +2988,26 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
           ip: req.ip,
           details: { requestId: reqDoc._id, groupId: reqDoc.groupId, outcome, hadMessage: !!responseMessage }
         });
+        // Bump the public response tally (counts only) so the requester's page
+        // can show how many members responded. Same-host in Phase 1; a
+        // cross-host tally simply isn't found and is skipped. Conflict-tolerant.
+        if (reqDoc.nonce) {
+          for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+              const tally = await cloudant.getDocument(RELAY_DB, `outreq_${reqDoc.nonce}`);
+              if (!tally || tally.type !== 'outside_request_tally') break;
+              tally.responded = (tally.responded || 0) + 1;
+              if (outcome === 'accepted') tally.accepted = (tally.accepted || 0) + 1;
+              else tally.declined = (tally.declined || 0) + 1;
+              await cloudant.saveDocument(RELAY_DB, tally);
+              break;
+            } catch (e) {
+              if (e?.statusCode === 409 && attempt < 2) continue;
+              console.warn('[as-requests] tally bump failed:', e?.message || e);
+              break;
+            }
+          }
+        }
       }
 
       res.json({ success: true, status: reqDoc.status });
