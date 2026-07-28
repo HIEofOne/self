@@ -9485,6 +9485,36 @@ app.post('/api/self/delete', async (req, res) => {
     const deletionDetails = await deleteUserAndResources(sessionUserId);
     console.log(`[SELF-DELETE] Deletion completed for ${sessionUserId}:`, JSON.stringify(deletionDetails.errors?.length ? { errors: deletionDetails.errors } : { ok: true }));
     await appendAdminUsageEntry(sessionUserId);
+
+    // Recovery email to the user (best-effort): restore requires the SAME
+    // BROWSER (the local backup lives there), so bring them back to the app and
+    // the Welcome page's RESTORE button. Sent once deletion actually completes.
+    if (preDeleteUserDoc?.email) {
+      try {
+        const resend = await initResend();
+        if (resend) {
+          const fromEmail = process.env.RESEND_FROM_EMAIL || 'noreply@maia.healthurl.com';
+          const appUrl = (process.env.PUBLIC_APP_URL || '').replace(/\/$/, '');
+          await resend.emails.send({
+            from: fromEmail,
+            to: preDeleteUserDoc.email,
+            reply_to: 'help@trustee.ai',
+            subject: `Your MAIA cloud account "${sessionUserId}" was deleted — how to restore it`,
+            text: [
+              `Your MAIA cloud account "${sessionUserId}" has been deleted to free up cloud resources. Your local backup is kept, so you can restore the cloud account whenever you like.`,
+              '',
+              `To restore, open this link IN THE SAME BROWSER you use for MAIA — that's where your local backup lives:`,
+              appUrl || 'your MAIA app',
+              '',
+              `On the Welcome page you'll see "${sessionUserId}" with a RESTORE button.`
+            ].join('\n')
+          });
+          console.log(`[SELF-DELETE] Recovery email sent to ${preDeleteUserDoc.email}`);
+        }
+      } catch (e) {
+        console.warn('[SELF-DELETE] Recovery email failed (non-fatal):', e.message);
+      }
+    }
     // Notify admin (fire-and-forget) — only if no setup-complete was logged (otherwise already notified)
     if (preDeleteUserDoc) {
       const log = Array.isArray(preDeleteUserDoc.provisioningLog) ? preDeleteUserDoc.provisioningLog : [];
