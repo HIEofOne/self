@@ -118,7 +118,18 @@
                       background: welcomeUserCloudStatus[du.userId] === 'ready' ? '#f1f8e9' : welcomeUserCloudStatus[du.userId] === 'loading' ? '#fafafa' : '#fff8e1'
                     }"
                   >
-                    <div class="row items-center no-wrap">
+                    <!-- Deletion in progress (async): shown until the background delete resolves -->
+                    <div v-if="deletingUsers[du.userId]" class="row items-center no-wrap">
+                      <q-spinner color="negative" size="sm" class="q-mr-sm" />
+                      <div class="col text-body2">
+                        <strong>{{ du.displayName }}</strong>
+                        <span v-if="du.displayName.toLowerCase() !== du.userId.toLowerCase()" class="text-grey-7"> ({{ du.userId }})</span>
+                        <div class="text-caption text-negative">
+                          Deletion in progress… ({{ deletingElapsedText(du.userId) }})
+                        </div>
+                      </div>
+                    </div>
+                    <div v-else class="row items-center no-wrap">
                       <q-icon
                         :name="welcomeUserCloudStatus[du.userId] === 'ready' ? 'check_circle' : welcomeUserCloudStatus[du.userId] === 'loading' ? 'hourglass_empty' : 'warning'"
                         :color="welcomeUserCloudStatus[du.userId] === 'ready' ? 'green' : welcomeUserCloudStatus[du.userId] === 'loading' ? 'grey' : 'orange'"
@@ -936,42 +947,26 @@
         <q-card-section>
           <div class="text-h6">Delete Cloud Account</div>
         </q-card-section>
-        <!-- Confirmation copy (before deletion starts) -->
-        <q-card-section v-if="!destroyLoading" class="text-body2">
+        <q-card-section class="text-body2">
           <p>
             This frees up cloud resources for <strong>{{ user?.userId }}</strong>
             (agent, knowledge base, files). Deep links and passkey access will not work until you restore.
           </p>
           <p class="q-mt-sm">
-            Your local folder and user data are kept so you can restore the account later.
+            Deletion runs in the background and takes a few minutes — you'll be signed
+            out to the Welcome page, where <strong>{{ user?.userId }}</strong> shows
+            <em>“Deletion in progress”</em> until it finishes.
+          </p>
+          <p class="q-mt-sm">
+            Your local folder and data are kept. When deletion completes we'll email you
+            a recovery link — open it in <strong>this same browser</strong> (that's where
+            your local backup lives) to RESTORE.
           </p>
         </q-card-section>
-        <!-- Live progress (while deleting): the server op takes minutes and has
-             no progress stream, so show elapsed time + status so it never looks hung. -->
-        <q-card-section v-else class="text-body2">
-          <div class="row items-center no-wrap q-gutter-sm">
-            <q-spinner color="negative" size="22px" />
-            <div>
-              Deleting <strong>{{ user?.userId }}</strong>'s cloud resources — agent,
-              knowledge base, and files. This can take a few minutes.
-              <span v-if="destroyElapsedText" class="text-grey-7">({{ destroyElapsedText }})</span>
-            </div>
-          </div>
-          <div class="text-caption text-grey-7 q-mt-sm" style="margin-left: 30px;">
-            Keep this tab open until it finishes — your local folder and data are kept for restore.
-          </div>
-        </q-card-section>
         <q-card-actions align="right">
-          <!-- No CANCEL once deletion has started: a running delete can't be stopped. -->
+          <q-btn flat label="CANCEL" color="primary" v-close-popup />
           <q-btn
-            v-if="!destroyLoading"
-            flat
-            label="CANCEL"
-            color="primary"
-            v-close-popup
-          />
-          <q-btn
-            :label="destroyLoading ? 'DELETING…' : 'DELETE'"
+            label="DELETE"
             color="negative"
             :loading="destroyLoading"
             :disable="destroyLoading"
@@ -1414,17 +1409,30 @@ const tempStartError = ref('');
 const showTempSignOutDialog = ref(false);
 const showDestroyDialog = ref(false);
 const destroyLoading = ref(false);
-// Delete is a multi-minute server op (agents, KBs, Spaces files, verification)
-// with no progress stream — so show an elapsed timer + status text instead of a
-// bare spinner, and hide CANCEL once it starts (a running delete can't be cancelled).
-const destroyStartedAt = ref<number | null>(null);
-const destroyNow = ref(0);
-let destroyTimer: ReturnType<typeof setInterval> | null = null;
-const destroyElapsedText = computed(() => {
-  if (!destroyStartedAt.value) return '';
-  const s = Math.max(0, Math.floor((destroyNow.value - destroyStartedAt.value) / 1000));
+// Async delete: clicking DELETE kicks off the (multi-minute) server delete, then
+// signs the user out to the Welcome page immediately — no blocking spinner. The
+// discovered-user badge shows "Deletion in progress" + a timer until the server
+// finishes (then it flips to RESTORE). A recovery email is sent on completion.
+const deletingUsers = ref<Record<string, number>>({}); // userId -> start ms
+const deleteBadgeNow = ref(0);
+let deleteBadgeTimer: ReturnType<typeof setInterval> | null = null;
+const startDeleteBadgeTicker = () => {
+  deleteBadgeNow.value = Date.now();
+  if (deleteBadgeTimer) return;
+  deleteBadgeTimer = setInterval(() => {
+    deleteBadgeNow.value = Date.now();
+    if (Object.keys(deletingUsers.value).length === 0 && deleteBadgeTimer) {
+      clearInterval(deleteBadgeTimer);
+      deleteBadgeTimer = null;
+    }
+  }, 1000);
+};
+const deletingElapsedText = (userId: string) => {
+  const start = deletingUsers.value[userId];
+  if (!start) return '';
+  const s = Math.max(0, Math.floor((deleteBadgeNow.value - start) / 1000));
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
-});
+};
 const passkeyPrefillUserId = ref<string | null>(null);
 const passkeyPrefillAction = ref<'signin' | 'register' | null>(null);
 /** When set, we showed PasskeyAuth for a returning passkey user (from Get Started + local snapshot). */
@@ -3687,87 +3695,65 @@ const startPasskeyRegistration = async () => {
 };
 
 const destroyTemporaryAccount = async () => {
-  if (!user.value?.userId) {
-    return;
-  }
-  destroyLoading.value = true;
-  destroyStartedAt.value = Date.now();
-  destroyNow.value = Date.now();
-  if (destroyTimer) clearInterval(destroyTimer);
-  destroyTimer = setInterval(() => { destroyNow.value = Date.now(); }, 1000);
+  if (!user.value?.userId || destroyLoading.value) return;
   const userIdToDelete = user.value.userId;
-  // Durable deletion logging: the userDoc (and its provisioningLog) is about to
-  // be destroyed, so a server-side log write won't survive. bufferLogEvent
-  // persists in localStorage — its designed purpose — so maia-log always shows
-  // the deletion. (The old pre-delete server POST here logged 'account-deleted'
-  // BEFORE the delete and vanished with the userDoc; replaced by this.)
+  destroyLoading.value = true;
+  // Durable deletion logging (localStorage; survives the destroyed account).
   bufferLogEvent({ event: 'account-delete-started', userId: userIdToDelete });
-  try {
-    // Save local state snapshot BEFORE deleting cloud data (preserves chats, meds, summary)
-    try {
-      await saveLocalSnapshot(null);
-    } catch (snapErr) {
-      console.warn(`[DESTROY] Local state save failed (non-fatal):`, snapErr);
-    }
 
-    // Regenerate maia-log.pdf with pre-delete state
-    try {
-      if (chatInterfaceRef.value) {
-        await chatInterfaceRef.value.generateSetupLogPdf();
+  // Snapshot + pre-delete log regen while the session is still valid, so RESTORE
+  // has a backup and the log captures the pre-delete state.
+  try { await saveLocalSnapshot(null); } catch (e) { console.warn('[DESTROY] Local state save failed (non-fatal):', e); }
+  try { if (chatInterfaceRef.value) await chatInterfaceRef.value.generateSetupLogPdf(); } catch (e) { console.warn('[DESTROY] Setup log update failed (non-fatal):', e); }
+
+  // Fire the delete WHILE the session is valid, but DON'T block the UI — the
+  // server op takes minutes. resetAuthState is client-only, so the session
+  // cookie survives and the request runs to completion server-side (which also
+  // emails the recovery link and then destroys the session).
+  const deletePromise = fetch('/api/self/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ userId: userIdToDelete })
+  });
+
+  // Sign out to the Welcome page immediately; the badge shows "Deletion in
+  // progress" + a timer until the delete resolves.
+  deletingUsers.value = { ...deletingUsers.value, [userIdToDelete]: Date.now() };
+  startDeleteBadgeTicker();
+  showDestroyDialog.value = false;
+  destroyLoading.value = false;
+  try { await clearUserSnapshot(userIdToDelete, { keepDirectoryHandle: true }); } catch { /* keep going */ }
+  await refreshDiscoveredUsers();
+  resetAuthState();
+
+  // When the background delete resolves, log the outcome and flip the badge to RESTORE.
+  deletePromise
+    .then(async (response) => {
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        bufferLogEvent({ event: 'account-delete-failed', userId: userIdToDelete, error: data.error || `HTTP ${response.status}` });
+        return;
       }
-    } catch (logErr) {
-      console.warn(`[DESTROY] Setup log update failed (non-fatal):`, logErr);
-    }
-
-    const response = await fetch('/api/self/delete', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      credentials: 'include',
-      body: JSON.stringify({ userId: userIdToDelete })
+      const d = data.details || {};
+      bufferLogEvent({
+        event: 'account-deleted', userId: userIdToDelete,
+        spacesDeleted: !!d.spacesDeleted, filesDeleted: d.filesDeleted || 0,
+        kbDeleted: !!d.kbDeleted, agentDeleted: !!d.agentDeleted,
+        chatsDeleted: d.chatsDeleted || 0, deepLinkUsersDeleted: d.deepLinkUsersDeleted || 0,
+        groupsLeft: d.groupsLeft || 0, errors: Array.isArray(d.errors) ? d.errors.length : 0
+      });
+      try { if (chatInterfaceRef.value) await chatInterfaceRef.value.generateSetupLogPdf(); } catch { /* best-effort */ }
+    })
+    .catch((err) => {
+      bufferLogEvent({ event: 'account-delete-failed', userId: userIdToDelete, error: err instanceof Error ? err.message : String(err) });
+    })
+    .finally(() => {
+      const next = { ...deletingUsers.value };
+      delete next[userIdToDelete];
+      deletingUsers.value = next;
+      void checkAllUserCloudStatus(); // badge → RESTORE (resources are gone)
     });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      bufferLogEvent({ event: 'account-delete-failed', userId: userIdToDelete, error: data.error || `HTTP ${response.status}` });
-      console.error(`[DESTROY] Server returned ${response.status}:`, data);
-      throw new Error(data.error || 'Failed to delete temporary account');
-    }
-    // Record WHAT was actually deleted (Spaces/KB/Agent + counts) from the
-    // endpoint's returned details, durably, so maia-log answers "was it deleted?".
-    const d = data.details || {};
-    bufferLogEvent({
-      event: 'account-deleted',
-      userId: userIdToDelete,
-      spacesDeleted: !!d.spacesDeleted,
-      filesDeleted: d.filesDeleted || 0,
-      kbDeleted: !!d.kbDeleted,
-      agentDeleted: !!d.agentDeleted,
-      chatsDeleted: d.chatsDeleted || 0,
-      deepLinkUsersDeleted: d.deepLinkUsersDeleted || 0,
-      groupsLeft: d.groupsLeft || 0,
-      errors: Array.isArray(d.errors) ? d.errors.length : 0
-    });
-    // Regenerate the log so it now shows the deletion (buffered events survive
-    // the destroyed account; the server fetch just returns nothing).
-    try {
-      if (chatInterfaceRef.value) await chatInterfaceRef.value.generateSetupLogPdf();
-    } catch (e) {
-      console.warn('[DESTROY] post-delete log regen failed (non-fatal):', e);
-    }
-    // Keep the folder handle so the Welcome page can offer RESTORE from local data.
-    // Only clear the PouchDB snapshot (cloud state is gone, but folder-based state remains).
-    await clearUserSnapshot(userIdToDelete, { keepDirectoryHandle: true });
-    await refreshDiscoveredUsers();
-    resetAuthState();
-    showDestroyDialog.value = false;
-  } catch (error) {
-    console.error('[DESTROY] Temporary account deletion error:', error);
-  } finally {
-    destroyLoading.value = false;
-    if (destroyTimer) { clearInterval(destroyTimer); destroyTimer = null; }
-    destroyStartedAt.value = null;
-  }
 };
 
 const handleDeepLinkInfoUpdate = (info: DeepLinkInfo | null) => {
