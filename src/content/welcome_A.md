@@ -25,7 +25,7 @@ Start a new account or [sign-in with a passkey](#).
 
 ## Health AI that answers to you
 
-Patient groups that help each other with each patient having a private AI — records stay with each patient, sharing rules are written by the group and can be modified by each patient. Free and open source, built by volunteer patient advocates. No company behind it.
+Join a patient group organized around a condition or cause. Fellow patients, your doctors, and researchers can ask for what you choose to share; your private AI screens everything else — even spam. The group suggests sensible sharing rules and you adopt or change them. Your records and AI always stay with you, never the group.
 
 <<< Welcome FAQ — five headings, large bold, expand one at a time >>>
 
