@@ -936,7 +936,8 @@
         <q-card-section>
           <div class="text-h6">Delete Cloud Account</div>
         </q-card-section>
-        <q-card-section class="text-body2">
+        <!-- Confirmation copy (before deletion starts) -->
+        <q-card-section v-if="!destroyLoading" class="text-body2">
           <p>
             This frees up cloud resources for <strong>{{ user?.userId }}</strong>
             (agent, knowledge base, files). Deep links and passkey access will not work until you restore.
@@ -945,17 +946,35 @@
             Your local folder and user data are kept so you can restore the account later.
           </p>
         </q-card-section>
+        <!-- Live progress (while deleting): the server op takes minutes and has
+             no progress stream, so show elapsed time + status so it never looks hung. -->
+        <q-card-section v-else class="text-body2">
+          <div class="row items-center no-wrap q-gutter-sm">
+            <q-spinner color="negative" size="22px" />
+            <div>
+              Deleting <strong>{{ user?.userId }}</strong>'s cloud resources — agent,
+              knowledge base, and files. This can take a few minutes.
+              <span v-if="destroyElapsedText" class="text-grey-7">({{ destroyElapsedText }})</span>
+            </div>
+          </div>
+          <div class="text-caption text-grey-7 q-mt-sm" style="margin-left: 30px;">
+            Keep this tab open until it finishes — your local folder and data are kept for restore.
+          </div>
+        </q-card-section>
         <q-card-actions align="right">
+          <!-- No CANCEL once deletion has started: a running delete can't be stopped. -->
           <q-btn
+            v-if="!destroyLoading"
             flat
             label="CANCEL"
             color="primary"
             v-close-popup
           />
           <q-btn
-            label="DELETE"
+            :label="destroyLoading ? 'DELETING…' : 'DELETE'"
             color="negative"
             :loading="destroyLoading"
+            :disable="destroyLoading"
             @click="destroyTemporaryAccount"
           />
         </q-card-actions>
@@ -1395,6 +1414,17 @@ const tempStartError = ref('');
 const showTempSignOutDialog = ref(false);
 const showDestroyDialog = ref(false);
 const destroyLoading = ref(false);
+// Delete is a multi-minute server op (agents, KBs, Spaces files, verification)
+// with no progress stream — so show an elapsed timer + status text instead of a
+// bare spinner, and hide CANCEL once it starts (a running delete can't be cancelled).
+const destroyStartedAt = ref<number | null>(null);
+const destroyNow = ref(0);
+let destroyTimer: ReturnType<typeof setInterval> | null = null;
+const destroyElapsedText = computed(() => {
+  if (!destroyStartedAt.value) return '';
+  const s = Math.max(0, Math.floor((destroyNow.value - destroyStartedAt.value) / 1000));
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
+});
 const passkeyPrefillUserId = ref<string | null>(null);
 const passkeyPrefillAction = ref<'signin' | 'register' | null>(null);
 /** When set, we showed PasskeyAuth for a returning passkey user (from Get Started + local snapshot). */
@@ -3661,6 +3691,10 @@ const destroyTemporaryAccount = async () => {
     return;
   }
   destroyLoading.value = true;
+  destroyStartedAt.value = Date.now();
+  destroyNow.value = Date.now();
+  if (destroyTimer) clearInterval(destroyTimer);
+  destroyTimer = setInterval(() => { destroyNow.value = Date.now(); }, 1000);
   const userIdToDelete = user.value.userId;
   // Durable deletion logging: the userDoc (and its provisioningLog) is about to
   // be destroyed, so a server-side log write won't survive. bufferLogEvent
@@ -3731,6 +3765,8 @@ const destroyTemporaryAccount = async () => {
     console.error('[DESTROY] Temporary account deletion error:', error);
   } finally {
     destroyLoading.value = false;
+    if (destroyTimer) { clearInterval(destroyTimer); destroyTimer = null; }
+    destroyStartedAt.value = null;
   }
 };
 
