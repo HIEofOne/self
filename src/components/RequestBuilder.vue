@@ -75,9 +75,10 @@
     <div v-if="sentResult" class="rqb-response forward">
       <div class="rqb-response-head">✓ Request sent</div>
       <div class="rqb-response-body">
-        Delivered to <b>{{ sentResult.delivered }}</b> member<span v-if="sentResult.delivered !== 1">s</span> of the group.
-        Each member’s MAIA decides per their sharing policy; as members respond,
-        replies arrive at <b>{{ sentEmail }}</b>.
+        Delivered to <b>{{ sentResult.delivered }}</b> member<span v-if="sentResult.delivered !== 1">s</span>.
+        <b>{{ sentResult.responded }}</b> of <b>{{ sentResult.delivered }}</b> responded so far<span v-if="sentResult.responded > 0"> ({{ sentResult.accepted }} accepted · {{ sentResult.declined }} declined)</span>.
+        Each member’s MAIA decides per their sharing policy; responses also arrive
+        at <b>{{ sentEmail }}</b> as they come in.
       </div>
     </div>
 
@@ -95,7 +96,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, nextTick } from 'vue';
+import { ref, reactive, computed, nextTick, onUnmounted } from 'vue';
 import { useQuasar } from 'quasar';
 import { useVerifiedEmail } from '../composables/verifiedEmail';
 import EmailVerifyBox from './EmailVerifyBox.vue';
@@ -112,8 +113,11 @@ const { state: verifiedEmail } = useVerifiedEmail();
 const requesterName = ref('');
 const requesterOrg = ref('');
 const sending = ref(false);
-const sentResult = ref<{ delivered: number } | null>(null);
+const sentResult = ref<{ delivered: number; responded: number; accepted: number; declined: number } | null>(null);
 const sentEmail = ref('');
+let statusTimer: ReturnType<typeof setInterval> | null = null;
+const stopPolling = () => { if (statusTimer) { clearInterval(statusTimer); statusTimer = null; } };
+onUnmounted(stopPolling);
 
 type ColKey = 'signature' | 'scope' | 'purpose' | 'payment';
 interface CellOpt { v: string; label: string; sub?: string }
@@ -236,13 +240,42 @@ const sendRequest = async () => {
     const data = await res.json().catch(() => ({}));
     if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
     sentEmail.value = verifiedEmail.email;
-    sentResult.value = { delivered: data.delivered || 0 };
+    sentResult.value = { delivered: data.delivered || 0, responded: 0, accepted: 0, declined: 0 };
     response.value = null; // the real result replaces the preview
+    if (data.requestId) startStatusPoll(String(data.requestId));
   } catch (e) {
     $q.notify({ type: 'negative', message: e instanceof Error ? e.message : 'Could not send request' });
   } finally {
     sending.value = false;
   }
+};
+
+// Poll the public tally (counts only) so the requester sees responses arrive
+// while this page stays open. Responses also come by email — so we poll for a
+// bounded window, then stop (the visitor has likely moved on by then).
+const startStatusPoll = (requestId: string) => {
+  stopPolling();
+  const origin = props.group?.origin || window.location.origin;
+  const groupId = props.group?.groupId;
+  if (!groupId) return;
+  const url = `${origin}/api/groups/${encodeURIComponent(groupId)}/outside-request/${encodeURIComponent(requestId)}/status`;
+  const started = Date.now();
+  const tick = async () => {
+    try {
+      const r = await fetch(url, { credentials: 'include' });
+      if (r.ok) {
+        const d = await r.json();
+        if (d?.success && sentResult.value) {
+          sentResult.value.responded = d.responded || 0;
+          sentResult.value.accepted = d.accepted || 0;
+          sentResult.value.declined = d.declined || 0;
+        }
+      }
+    } catch { /* transient; next tick retries */ }
+    if (Date.now() - started > 10 * 60 * 1000) stopPolling(); // give up after 10 min
+  };
+  void tick();
+  statusTimer = setInterval(() => { void tick(); }, 5000);
 };
 
 const clearAll = () => {
@@ -252,6 +285,7 @@ const clearAll = () => {
   sentResult.value = null;
   requesterName.value = '';
   requesterOrg.value = '';
+  stopPolling();
   nextTick(autoGrow);
 };
 
