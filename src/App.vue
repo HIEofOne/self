@@ -38,7 +38,18 @@
 
           <template v-else>
             <q-card style="width: 95vw; max-width: 95vw; height: 95vh; max-height: 95vh; display: flex; flex-direction: column; overflow: hidden;">
-              <q-card-section style="flex: 1; overflow-y: auto; display: flex; flex-direction: column;">
+              <!-- The welcome content scrolls in THIS nested container (not the
+                   document), so arrow keys / space / PageUp-Down / Home-End only
+                   scroll it when it's focused. tabindex + autofocus (below) make
+                   keyboard scrolling work; role/aria-label name the region. -->
+              <q-card-section
+                ref="welcomeScrollRef"
+                class="welcome-scroll"
+                tabindex="0"
+                role="region"
+                aria-label="Welcome to MAIA"
+                style="flex: 1; overflow-y: auto; display: flex; flex-direction: column;"
+              >
                 <div class="text-h6 text-center q-mb-sm">
                   Welcome to MAIA
                 </div>
@@ -954,7 +965,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
 
 // Store route check interval and event listener for cleanup (must be at top level)
 const routeCheckInterval = ref<ReturnType<typeof setInterval> | null>(null);
@@ -1027,6 +1038,20 @@ interface SignOutSnapshot {
 const DEFAULT_TITLE = 'MAIA User App';
 
 const authenticated = ref(false);
+
+// Welcome-page keyboard scrolling: its content scrolls inside a nested
+// overflow container (see the `welcome-scroll` q-card-section), so arrow keys /
+// space / PageUp-Down / Home-End only scroll it when it holds focus. Focus it
+// whenever the welcome view is showing so those keys work without a click first.
+const welcomeScrollRef = ref<any>(null);
+const focusWelcomeScroll = () => {
+  nextTick(() => {
+    const inst = welcomeScrollRef.value;
+    const el = (inst && (inst.$el || inst)) as HTMLElement | undefined;
+    el?.focus?.({ preventScroll: true });
+  });
+};
+watch(authenticated, (isAuth) => { if (!isAuth) focusWelcomeScroll(); }, { immediate: true });
 const showAuth = ref(false);
 const user = ref<User | null>(null);
 
@@ -3988,6 +4013,12 @@ onMounted(async () => {
 </script>
 
 <style>
+/* Welcome page scroll region: focusable so arrow keys / space / PageUp-Down /
+   Home-End scroll it. Show a focus ring only for keyboard navigation (not for
+   the programmatic autofocus or a mouse click). */
+.welcome-scroll:focus { outline: none; }
+.welcome-scroll:focus-visible { outline: 2px solid var(--q-primary); outline-offset: -2px; }
+
 .q-layout {
   padding: 0 !important;
   /* Reserve room for the MyStuff rail on the left. The rail sets
