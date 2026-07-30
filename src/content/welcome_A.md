@@ -76,6 +76,14 @@ Join a patient group organized around a condition or cause. Fellow patients, you
 - At $50/month for 24 users, MAIA hosting costs about **$2 per user per month** — less than a cup of coffee.
 - These costs can be offset by access payments for unsolicited requests — for example, from a pharmaceutical company interested in specific data that patients or groups are willing to share.
 
+### MAIA by Trustee Privacy Configuration
+
+- Trustee is the name of the group associated with this example of the MAIA methodology. It is intended to demonstrate privacy features while also driving adoption by patients, physicians, researchers, and group administrators who need to understand that MAIA can be configured very differently to reflect different interests.
+- Once the patient has a MAIA they can easily join other groups without needing a different MAIA. 
+- Trustee requires a verified email address to notify you of long task completions and incoming messages. If you want to remain anonymous, use Apple Hide My Email or equivalent service. Your email will not be revealed to group participants. Only the group administrator, me, has access to it.
+- Messages in the Trustee group are end-to-end encrypted based on a key saved on your computer. Even the administrator cannot see content. Patient Summary, Lists, Stored Chats and your health records are accessible to the MAIA administrator. They are not accessible to administrators of other groups you might join along with Trustee. External access is controlled by your settings with assistance from your private AI.
+- There are dozens of other privacy choices that can be made when configuring your MAIA, your participation in groups, a different MAIA hosting service, and various open weight and frontier AIs. Use a frontier AI like Claude to review the MAIA repository for security practices and how to address your specific privacy concerns.
+
 <<< Setup checkboxes follow after the welcome FAQ >>>
 
 <<< Footer links and version number >>>
