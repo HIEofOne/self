@@ -8303,7 +8303,10 @@ app.post('/api/cancel-kb-indexing', async (req, res) => {
         if (!fileName) continue;
         const archivedKey = `${userId}/archived/${fileName}`;
         try {
-          await s3Client.send(new CopyObjectCommand({ Bucket: bucketName, CopySource: `${bucketName}/${file.Key}`, Key: archivedKey }));
+          // CopySource must be URL-encoded per segment (same fix as
+          // spaces-move.js) — unencoded spaces in Apple Health filenames
+          // make the SDK throw "UnknownError".
+          await s3Client.send(new CopyObjectCommand({ Bucket: bucketName, CopySource: `${bucketName}/${file.Key.split('/').map(encodeURIComponent).join('/')}`, Key: archivedKey }));
           await s3Client.send(new DeleteObjectCommand({ Bucket: bucketName, Key: file.Key }));
           // Update userDoc.files bucketKey
           const idx = userDoc.files?.findIndex(f => f.bucketKey === file.Key);

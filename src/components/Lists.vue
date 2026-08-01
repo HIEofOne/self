@@ -1092,7 +1092,7 @@ const refreshListsBuild = async () => {
       clearInterval(listsBuildTimer);
       listsBuildTimer = null;
       if (prev === 'running' && now === 'done') {
-        void loadCurrentMedications(true);
+        void loadCurrentMedications(true, { auto: true });
       }
     }
   } catch { /* next poll */ }
@@ -1122,7 +1122,7 @@ const ensureListsArtifacts = async () => {
     if (!adv) return;
     if (adv.next.started || adv.next.action === 'lists-build-running') {
       await refreshListsBuild();
-      void loadCurrentMedications(true);
+      void loadCurrentMedications(true, { auto: true });
       fireCompanionWorksheets();
     }
   } catch { /* the banner + RETRY remain the manual path */ }
@@ -1139,7 +1139,7 @@ const retryListsBuild = async () => {
       throw new Error(`Nothing to rebuild (pipeline says: ${adv.next.action})`);
     }
     await refreshListsBuild();
-    void loadCurrentMedications(true);
+    void loadCurrentMedications(true, { auto: true });
     fireCompanionWorksheets();
   } catch (err) {
     $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Retry failed' });
@@ -2871,7 +2871,14 @@ let loadCurrentMedicationsRunning = false;
 let mountInitializing = true;
 
 // Load current medications from user document, Patient Summary, or Medication Records
-const loadCurrentMedications = async (forceRefresh = false) => {
+// `opts.auto` marks AUTOMATED force-refreshes (lists-build done edge, pipeline
+// advance) as opposed to the user's explicit REFRESH click. An automated
+// refresh must never clobber a previously saved list — that was the "flash of
+// 5 AH candidates replaced by the verified list" race: the build-done edge
+// force-loaded candidates over a list the user had already verified. Auto
+// callers now take the saved list when one exists; only the user's own
+// REFRESH pulls fresh candidates over it.
+const loadCurrentMedications = async (forceRefresh = false, opts: { auto?: boolean } = {}) => {
   // Guard: already edited — never recalculate
   if (isCurrentMedicationsEdited.value && !forceRefresh) {
     isInitialMedsLoading.value = false;
@@ -2881,11 +2888,13 @@ const loadCurrentMedications = async (forceRefresh = false) => {
   if (loadCurrentMedicationsRunning) return;
   loadCurrentMedicationsRunning = true;
 
-  logWizardEvent('current_meds_load_start', { forceRefresh });
+  logWizardEvent('current_meds_load_start', { forceRefresh, auto: !!opts.auto });
 
   try {
-    // Path 1: Check user document for previously saved medications
-    if (!forceRefresh) {
+    // Path 1: Check user document for previously saved medications.
+    // Automated refreshes honor it too (see the note above); when no saved
+    // list exists they fall through to the candidate extraction as before.
+    if (!forceRefresh || opts.auto) {
       try {
         const statusResponse = await fetch(`/api/user-status?userId=${encodeURIComponent(props.userId)}`, {
           credentials: 'include'
