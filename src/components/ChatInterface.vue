@@ -2659,14 +2659,16 @@ const userResourceStatus = ref<{
   // them — otherwise the spinner flickers between refreshes.
   kbIndexingActive?: boolean;
   hasPatientSummary?: boolean;
-  // True when the server has a saved currentMedications text. The
-  // only way that field becomes non-empty is via the Lists tab's
-  // "Verify" or "Save edit" buttons — both POST through
-  // /api/user-current-medications with the user-confirmed value.
-  // So `hasCurrentMedications === true` ≡ "user has verified
-  // current medications". Drives the My Lists rail icon outline
-  // and the "must verify meds first" gate on Patient Summary.
+  // True when the server has a saved currentMedications text.
+  // NOTE (Phase 2): existence no longer implies verification —
+  // automated extractions can populate the field. The verified
+  // stamp below is the real signal.
   hasCurrentMedications?: boolean;
+  // Phase 2 (PS/CM redesign): persistent verified stamps from
+  // /api/user-status. Null/absent = not verified. Drive the amber
+  // Lists / Patient Summary rail outlines across reloads.
+  currentMedicationsVerifiedAt?: string | null;
+  patientSummaryVerifiedAt?: string | null;
 } | null>(null);
 
 // "Wizard is incomplete" indicator for the rail spinner. Reflects
@@ -2722,7 +2724,12 @@ const medsNeedsVerify = computed<boolean>(() => {
   // Quick-start tier has no records — there are no medications to
   // verify, so don't paint the Lists attention outline.
   if (status.workflowStage === 'chat_ready') return false;
-  return status.hasCurrentMedications === false;
+  // No meds at all → the verify step is still ahead (existing behavior).
+  if (status.hasCurrentMedications === false) return true;
+  // Phase 2: meds text exists, but existence ≠ verification (automated
+  // extractions populate it too). Amber until the persistent stamp is set
+  // by the user's Verify / Save-edit in the Lists tab.
+  return !status.currentMedicationsVerifiedAt;
 });
 const isRequestSent = computed(() => userResourceStatus.value?.workflowStage === 'request_sent');
 const statusPollInterval = ref<ReturnType<typeof setInterval> | null>(null);
@@ -4001,7 +4008,9 @@ const refreshWizardState = async () => {
         workflowStage: statusResult?.workflowStage || null,
         kbIndexingActive: !!indexingActiveFromFiles,
         hasPatientSummary: priorHasPatientSummary,
-        hasCurrentMedications: !!statusResult?.currentMedications
+        hasCurrentMedications: !!statusResult?.currentMedications,
+        currentMedicationsVerifiedAt: statusResult?.currentMedicationsVerifiedAt || null,
+        patientSummaryVerifiedAt: statusResult?.patientSummaryVerifiedAt || null
       };
       // Whenever server says agent is ready, ensure providers list includes Private AI (no reliance on one-time transitions)
       const agentReady = !!(statusResult?.hasAgent || statusResult?.agentReady);
@@ -9138,7 +9147,9 @@ watch(
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
-            body: JSON.stringify({ userId: props.user!.userId, currentMedications: medsText })
+            // TEST autopilot: this path logs "auto-verified" and stands in for
+            // the user's Verify click, so it carries the verified stamp.
+            body: JSON.stringify({ userId: props.user!.userId, currentMedications: medsText, verified: true })
           });
         } catch { /* non-fatal */ }
         addTestLog(`Medications extracted from summary (${medsText.split('\n').filter(l => l.trim()).length} lines) — auto-verified`);
@@ -9523,7 +9534,13 @@ const handleCurrentMedicationsSaved = async (payload?: { value?: string; edited?
     const valueTrimmed = (payload?.value || '').trim();
     userResourceStatus.value = {
       ...userResourceStatus.value,
-      hasCurrentMedications: valueTrimmed.length > 0
+      hasCurrentMedications: valueTrimmed.length > 0,
+      // Phase 2: a verified save stamps immediately (server does the same);
+      // an unverified change clears — the amber outline reacts without
+      // waiting for the next /api/user-status poll.
+      currentMedicationsVerifiedAt: payload?.verified && valueTrimmed.length > 0
+        ? new Date().toISOString()
+        : null
     };
   }
   // Guided flow: advance from medications → summary IMMEDIATELY (before network calls)
@@ -9701,7 +9718,9 @@ const updateContextualTip = async () => {
       workflowStage: workflowStage,
       kbIndexingActive: prior?.kbIndexingActive,
       hasPatientSummary: prior?.hasPatientSummary,
-      hasCurrentMedications: !!userData.currentMedications
+      hasCurrentMedications: !!userData.currentMedications,
+      currentMedicationsVerifiedAt: userData.currentMedicationsVerifiedAt || null,
+      patientSummaryVerifiedAt: userData.patientSummaryVerifiedAt || null
     };
     
     // Check if workflowStage is 'indexing' (even if frontend polling isn't active)

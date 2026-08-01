@@ -6477,10 +6477,7 @@ const loadPatientSummary = async () => {
     }
 
     const result = await response.json();
-    // Server-side splice guarantees `result.summary` always has
-    // the verified Current Medications in place (no AI call, no
-    // client-side regen dance). See serverReplaceMedicationsIn
-    // Summary in the GET /api/patient-summary handler.
+    // (Phase 1: the GET returns the stored text verbatim — no splice.)
     // Prefer a committed summary. If none is committed yet, fall back to the
     // wizard's hidden draft (userDoc.draftPatientSummary) so updateSummary-
     // WithVerifiedMeds has text to splice the verified meds into.
@@ -6490,9 +6487,12 @@ const loadPatientSummary = async () => {
     patientSummary.value = loadedSummary;
     summaryEditText.value = loadedSummary;
     patientSummaries.value = result.summaries || [];
-    // When we're showing the draft (no commit yet), require the user to verify
-    // it before it appears as the "saved" summary.
-    if (!committedSummary && draftSummary) {
+    // Phase 2: the amber state comes from the SERVER's persistent stamp, so it
+    // survives reload. A committed summary is amber until verifiedAt is set; a
+    // draft (no commit) always needs verification.
+    if (committedSummary) {
+      summaryNeedsVerify.value = !result.verifiedAt;
+    } else if (draftSummary) {
       summaryNeedsVerify.value = true;
     }
     if (!loadedSummary) {
@@ -7153,7 +7153,10 @@ const saveSummaryFromTab = async () => {
       credentials: 'include',
       body: JSON.stringify({
         userId: props.userId,
-        summary: summaryToSave
+        summary: summaryToSave,
+        // Phase 2: an in-tab Edit + Save is the patient's own review — it
+        // counts as verification ("Verified or Edited"), so stamp it.
+        verified: true
       })
     });
 
@@ -7167,6 +7170,7 @@ const saveSummaryFromTab = async () => {
     summaryViewText.value = summaryToSave;
     summaryEditText.value = summaryToSave;
     isEditingSummaryTab.value = false;
+    summaryNeedsVerify.value = false; // edited = reviewed (stamped server-side)
     emit('patient-summary-saved', { userId: props.userId, summary: patientSummary.value || '' });
 
     // Extract Current Medications from Patient Summary and save — but only if
@@ -7295,6 +7299,16 @@ const handleVerifySummaryTab = async () => {
 
 const finishVerifySummary = () => {
   summaryNeedsVerify.value = false;
+  // Phase 2: persist the verification so the amber tab state survives reload
+  // (best-effort; the local state is already updated).
+  if (props.userId) {
+    void fetch('/api/patient-summary/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ userId: props.userId })
+    }).catch(() => { /* next load re-derives from the server */ });
+  }
   emit('patient-summary-verified', { userId: props.userId! });
   if ($q && typeof $q.notify === 'function') {
     $q.notify({
