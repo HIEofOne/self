@@ -13995,32 +13995,15 @@ app.get('/api/patient-summary', async (req, res) => {
         }
       : null;
 
-    // Splice the verified Current Medications directly into the
-    // returned summary text (no AI call, no client-side regen
-    // dance). If the section is already in sync, this is a no-op.
-    // When it DOES rewrite, we save the patched text back so it
-    // sticks, and mark the meds section "(Patient Verified)".
-    // This makes the "PS shows Not documented when meds are
-    // actually verified" problem impossible.
-    const hasVerifiedMeds = !!(userDoc.currentMedications && String(userDoc.currentMedications).trim());
-    let returnedSummary = currentSummary ? currentSummary.text : '';
-    if (hasVerifiedMeds && returnedSummary) {
-      const patched = serverReplaceMedicationsInSummary(returnedSummary, String(userDoc.currentMedications).trim(), true);
-      if (patched && patched !== returnedSummary) {
-        returnedSummary = patched;
-        // Persist the patch so subsequent loads don't have to
-        // recompute. Best-effort: if the save fails (e.g.,
-        // 409 conflict), we still return the patched text to the
-        // client — worst case, the next load re-patches.
-        try {
-          currentSummary.text = patched;
-          currentSummary.updatedAt = new Date().toISOString();
-          await cloudant.saveDocument('maia_users', userDoc);
-        } catch (e) {
-          console.warn(`[patient-summary GET] Could not persist meds-patched summary for ${userId}: ${e?.message || e}`);
-        }
-      }
-    }
+    // Phase 1 of the PS/CM redesign: a GET must NEVER rewrite the stored
+    // summary. The old behavior spliced userDoc.currentMedications into the
+    // saved text AND PERSISTED it on every read — silently overwriting a
+    // summary the patient had verified (the "Keep custom & verify" choice
+    // never stuck). The stored text is now returned verbatim; reconciling a
+    // meds difference is a CONSENTED action (the update/consent dialogs),
+    // never a side effect of loading the tab.
+    // (serverReplaceMedicationsInSummary is kept for the consented paths.)
+    const returnedSummary = currentSummary ? currentSummary.text : '';
 
     res.json({
       success: true,
