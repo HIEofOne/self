@@ -1838,11 +1838,14 @@
         <q-card-section style="max-height: 60vh; overflow-y: auto;">
           <div class="text-body1 q-mb-md">
             A new patient summary has been generated — review it below.
-            <template v-if="patientSummaries.length < 3">Save it as a new
-            summary, replace an existing one, or close without saving.</template>
-            <template v-else>All three slots are full — choose which to
-            replace, or close without saving.</template>
-            Nothing is saved until you choose.
+            Verifying it here saves it and
+            <template v-if="patientSummaries.length > 0">advances your saved
+            summary history (the stored summary is kept as a prior
+            version<template v-if="patientSummaries.length >= 3"> — all three
+            slots are full, so choose which one it replaces</template>).</template>
+            <template v-else>makes it your Patient Summary.</template>
+            You can also edit it first — saving the edit counts as your
+            verification. Nothing is saved until you choose.
           </div>
           <div
             class="text-body2 q-pa-md bg-grey-1 rounded-borders"
@@ -1852,19 +1855,26 @@
         </q-card-section>
 
         <q-card-actions align="right" class="q-pa-md">
-          <!-- Buttons for each existing summary (oldest to newest) -->
+          <!-- Phase 3: every save from this dialog is the user's verification
+               (they just reviewed the draft). Replace choices advance history. -->
+          <q-btn
+            flat
+            label="Edit first"
+            color="primary"
+            @click="editDraftFirst"
+          />
           <template v-for="(summary, index) in patientSummaries" :key="index">
-            <q-btn 
-              flat 
-              :label="`Replace ${getTimeAgo(summary.updatedAt || summary.createdAt)} ago summary`"
-              color="primary" 
+            <q-btn
+              flat
+              :label="`Verify & replace ${getTimeAgo(summary.updatedAt || summary.createdAt)} ago summary`"
+              color="primary"
               @click="handleReplaceSummaryByIndex(index)"
             />
           </template>
           <q-btn
             v-if="patientSummaries.length < 3"
             unelevated
-            label="Save as new summary"
+            :label="patientSummaries.length > 0 ? 'Verify & save as new summary' : 'Verify & save'"
             color="primary"
             @click="handleReplaceSummary('newest', newSummaryToReplace); showReplaceSummaryDialog = false"
           />
@@ -2078,7 +2088,9 @@ const handleAcceptUpdateSummary = () => {
   currentTab.value = 'summary';
   loadingSummary.value = true;
   pendingSummaryRegeneration.value = true;
-  requestNewSummary();
+  // The user just chose "Update Summary" after a meds change — that IS the
+  // CM-difference consent, so don't ask again (Phase 3).
+  requestNewSummary({ skipCmGate: true });
 };
 
 const handleMedicationsOffered = (payload: {
@@ -2766,6 +2778,10 @@ const kbNeedsUpdate = ref(false); // Track if KB needs to be updated (files move
 const kbSummaryTokens = ref<string | number | null>(null);
 const kbSummaryFiles = ref<number | null>(null);
 const summaryNeedsVerify = ref(false);
+// Phase 3: the CURRENT committed summary's persistent verify stamp (from
+// GET /api/patient-summary). Gates the "meds differ" consent dialog — it only
+// fires when a VERIFIED summary is about to be superseded.
+const psVerifiedAt = ref<string | null>(null);
 const showUpdateSummaryDialog = ref(false);
 /** Once the user dismisses the summary tab without verifying this session, don't auto-reopen. */
 const summaryDismissedThisSession = ref(false);
@@ -4414,7 +4430,7 @@ const handleConfirmReplaceSummary = async () => {
 // Handle replace summary by index (when all slots are full)
 const handleReplaceSummaryByIndex = async (indexToReplace: number) => {
   showReplaceSummaryDialog.value = false;
-  
+
   try {
     const response = await fetch('/api/patient-summary', {
       method: 'POST',
@@ -4425,7 +4441,9 @@ const handleReplaceSummaryByIndex = async (indexToReplace: number) => {
       body: JSON.stringify({
         userId: props.userId,
         summary: newSummaryToReplace.value,
-        replaceIndex: indexToReplace
+        replaceIndex: indexToReplace,
+        // Phase 3: saving from the review dialog IS the user's verification.
+        verified: true
       })
     });
 
@@ -4435,11 +4453,12 @@ const handleReplaceSummaryByIndex = async (indexToReplace: number) => {
     }
 
     await response.json(); // Response processed, but result not needed
-    
+
     // Reload summaries to get updated list
     await loadPatientSummary();
-    summaryNeedsVerify.value = true;
+    summaryNeedsVerify.value = false; // verified save (stamped server-side)
     emit('patient-summary-saved', { userId: props.userId, summary: patientSummary.value || '' });
+    emit('patient-summary-verified', { userId: props.userId! });
     
     if ($q && typeof $q.notify === 'function') {
       $q.notify({
@@ -4463,12 +4482,24 @@ const handleReplaceSummaryByIndex = async (indexToReplace: number) => {
 };
 
 // Handle replace summary dialog choice (for empty slots or keep strategy)
+/** Phase 3: "Edit first" — move the generated draft into the tab editor. The
+ *  Save there is a verified save (Phase 2), which also advances the history. */
+const editDraftFirst = () => {
+  logModalEvent(props.userId, 'review-summary', 'edit-first');
+  const draft = newSummaryToReplace.value;
+  showReplaceSummaryDialog.value = false;
+  newSummaryToReplace.value = '';
+  currentTab.value = 'summary';
+  summaryEditText.value = draft;
+  isEditingSummaryTab.value = true;
+};
+
 const handleReplaceSummary = async (replaceStrategy: 'keep' | 'oldest' | 'newest', summaryText?: string) => {
   logModalEvent(props.userId, 'review-summary', `save-${replaceStrategy}`);
   showReplaceSummaryDialog.value = false;
-  
+
   const summaryToSave = summaryText || newSummaryToReplace.value;
-  
+
   try {
     const response = await fetch('/api/patient-summary', {
       method: 'POST',
@@ -4479,7 +4510,10 @@ const handleReplaceSummary = async (replaceStrategy: 'keep' | 'oldest' | 'newest
       body: JSON.stringify({
         userId: props.userId,
         summary: summaryToSave,
-        replaceStrategy: replaceStrategy
+        replaceStrategy: replaceStrategy,
+        // Phase 3: saving from the review dialog IS the user's verification —
+        // they just reviewed the draft and consented to the replacement.
+        verified: true
       })
     });
 
@@ -4489,11 +4523,12 @@ const handleReplaceSummary = async (replaceStrategy: 'keep' | 'oldest' | 'newest
     }
 
     await response.json(); // Response processed, but result not needed
-    
+
     // Reload summaries to get updated list
     await loadPatientSummary();
-    summaryNeedsVerify.value = true;
+    summaryNeedsVerify.value = false; // verified save (stamped server-side)
     emit('patient-summary-saved', { userId: props.userId, summary: patientSummary.value || '' });
+    emit('patient-summary-verified', { userId: props.userId! });
     
     if ($q && typeof $q.notify === 'function') {
       $q.notify({
@@ -6490,6 +6525,7 @@ const loadPatientSummary = async () => {
     // Phase 2: the amber state comes from the SERVER's persistent stamp, so it
     // survives reload. A committed summary is amber until verifiedAt is set; a
     // draft (no commit) always needs verification.
+    psVerifiedAt.value = committedSummary ? (result.verifiedAt || null) : null;
     if (committedSummary) {
       summaryNeedsVerify.value = !result.verifiedAt;
     } else if (draftSummary) {
@@ -6658,8 +6694,55 @@ watch([currentTab, () => props.pendingSummary], ([tab, pending]) => {
   }
 }, { immediate: true });
 
-const requestNewSummary = async () => {
+/** Phase 3: does the current PS's Current Medications section differ from the
+ *  verified list on the server? (Same comparison handleVerifySummaryTab uses.) */
+const psMedsDifferFromVerified = async (): Promise<boolean> => {
+  if (!props.userId || !patientSummary.value) return false;
+  const psMeds = extractMedsFromPS(patientSummary.value);
+  let verifiedMeds = '';
+  try {
+    const res = await fetch(`/api/user-status?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
+    if (res.ok) verifiedMeds = String((await res.json()).currentMedications || '').trim();
+  } catch { /* treat as no verified list */ }
+  const verifiedLines = verifiedMeds.split('\n').map(l => l.replace(/^[-*•]\s*/, '').trim()).filter(Boolean);
+  const verifiedIsNone = !verifiedMeds || verifiedMeds.toLowerCase() === 'none' || verifiedLines.length === 0;
+  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim();
+  const medsMatch = [...psMeds].map(norm).sort().join('|') === [...verifiedLines].map(norm).sort().join('|');
+  return !medsMatch && (psMeds.length > 0 || !verifiedIsNone);
+};
+
+const requestNewSummary = async (opts?: { skipCmGate?: boolean }) => {
   if (!props.userId) return;
+  // Phase 3 consent gate: a new PS always reflects the VERIFIED Current
+  // Medications (the draft endpoint injects them). When a VERIFIED summary
+  // already exists and its meds differ from the verified list, stop and ask
+  // before generating — the user either reviews the list first or explicitly
+  // keeps the difference. Skipped when the caller already carries that consent
+  // (e.g. the "Update Patient Summary?" dialog) and self-skips when no
+  // verified summary exists (first-run wizard stays smooth).
+  if (!opts?.skipCmGate && psVerifiedAt.value && patientSummary.value) {
+    const differ = await psMedsDifferFromVerified();
+    if (differ && $q && typeof $q.dialog === 'function') {
+      logModalEvent(props.userId, 'cm-differ-before-new-ps', 'shown');
+      $q.dialog({
+        title: 'Current Medications differ',
+        message: 'Your verified Patient Summary lists different Current Medications than your verified medication list. ' +
+          'A new summary will use the verified list. Review the list first, or keep the difference and continue.',
+        ok: { label: 'Review the Current Medications', color: 'primary' },
+        cancel: { label: 'Keep different Current Medications', flat: true },
+        persistent: true
+      }).onOk(() => {
+        logModalEvent(props.userId, 'cm-differ-before-new-ps', 'review-meds');
+        loadingSummary.value = false;
+        pendingSummaryRegeneration.value = false;
+        currentTab.value = 'lists'; // review/verify meds, then request again
+      }).onCancel(() => {
+        logModalEvent(props.userId, 'cm-differ-before-new-ps', 'keep-different');
+        void requestNewSummary({ skipCmGate: true });
+      });
+      return;
+    }
+  }
   try {
     // THE GATES, pipeline edition (New_User_Flows.md §5 step 2): the
     // server decides what stands between this user and a summary; this
@@ -6957,8 +7040,9 @@ const handleMedsMismatchUpdate = async () => {
 
   const updated = replaceMedicationsInSummary(patientSummary.value, meds);
   if (!updated) {
-    // Couldn't find the section — fall back to full regeneration
-    await requestNewSummary();
+    // Couldn't find the section — fall back to full regeneration. The user
+    // JUST verified these meds, so the CM-difference question is resolved.
+    await requestNewSummary({ skipCmGate: true });
     return;
   }
 
