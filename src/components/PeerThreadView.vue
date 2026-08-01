@@ -96,8 +96,16 @@
           {{ typeof pendingRequest.payload === 'string' ? pendingRequest.payload : JSON.stringify(pendingRequest.payload) }}
         </div>
         <div v-if="pendingRequest.fromOutsider" class="text-caption text-grey-6 q-mt-xs">
-          Accept or Decline emails the requester your choice (no record data is
-          sent automatically). Block silently drops them and future requests.
+          <template v-if="pendingRequest.resource === 'patient-summary'">
+            Accept emails the requester your <strong>privacy-filtered Patient
+            Summary</strong> (see Workbook → Patient Summary → Privacy
+            Filtered). Decline emails your choice only. Block silently drops
+            them and future requests.
+          </template>
+          <template v-else>
+            Accept or Decline emails the requester your choice (no record data is
+            sent automatically). Block silently drops them and future requests.
+          </template>
         </div>
         <q-input
           v-if="pendingRequest.fromOutsider"

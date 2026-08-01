@@ -14,6 +14,7 @@
  * PR-3 (relay/heartbeat), PR-4 (requests inbox), PR-5 (directory) follow.
  */
 import { evaluatePolicies, policySentence, normalizeCard, POLICY_SCOPES, POLICY_PURPOSES } from './policies.js';
+import { applyPseudonymMapping } from '../privacyFilter.js';
 import {
   generateKeyPairSync, createHash, createPrivateKey, createPublicKey,
   randomBytes, sign as edSign, verify as edVerify,
@@ -2049,18 +2050,9 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       if (!text.trim()) return res.status(400).json({ success: false, error: 'text is required' });
       const userDoc = await cloudant.getDocument(USERS_DB, userId);
       const mapping = userDoc?.privacyFilter?.pseudonymMapping || [];
-      let out = text;
-      for (const { original, pseudonym } of mapping) {
-        const parts = String(original || '').split(/\s+/).filter(Boolean);
-        if (parts.length < 2) continue;
-        const firstName = parts[0];
-        const lastName = parts[parts.length - 1];
-        const pseudoParts = String(pseudonym || '').split(/\s+/).filter(Boolean);
-        const pseudoFirst = pseudoParts[0] || pseudonym;
-        const pseudoLast = pseudoParts.length >= 2 ? pseudoParts[pseudoParts.length - 1] : pseudoFirst;
-        out = out.replace(new RegExp(`${lastName}[_\\s]${firstName}`, 'gi'), `${pseudoLast}_${pseudoFirst}`);
-        out = out.replace(new RegExp(`${firstName}[_\\s]${lastName}`, 'gi'), `${pseudoFirst}_${pseudoLast}`);
-      }
+      // Single shared implementation (server/privacyFilter.js) — the same
+      // transform generates the privacy-filtered Patient Summary.
+      const out = applyPseudonymMapping(mapping, text);
       res.json({ success: true, filtered: out, mappingCount: mapping.length });
     } catch (error) {
       console.error('[user-groups] filter-text failed:', error);
@@ -2978,6 +2970,18 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       const responseMessage = String(req.body?.responseMessage || '').trim().slice(0, 2000);
       if (reqDoc.fromOutsider && reqDoc.requester?.email && decision !== 'block') {
         const outcome = decision === 'accept' ? 'accepted' : 'declined';
+        // Phase 4 (PS/CM redesign): accepting a patient-summary request sends
+        // the PRIVACY-FILTERED Patient Summary by default — the artifact that
+        // is auto-refreshed at every Verify/Edit. Only the filtered copy ever
+        // leaves; if none exists (summary never verified), nothing is attached
+        // and the email says the member may follow up directly.
+        let filteredSummaryText = '';
+        if (outcome === 'accepted' && reqDoc.resource === 'patient-summary') {
+          try {
+            const ownerDoc = await cloudant.getDocument(USERS_DB, userId);
+            filteredSummaryText = String(ownerDoc?.privacyFilteredSummary?.text || '').trim();
+          } catch { /* no filtered summary — fall back to plain accept email */ }
+        }
         if (typeof sendEmail === 'function') {
           try {
             const appUrl = (process.env.PUBLIC_APP_URL || '').replace(/\/$/, '');
@@ -2989,8 +2993,11 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
                 responseMessage ? `\nTheir message:\n${responseMessage}` : '',
                 '',
                 outcome === 'accepted'
-                  ? 'They may follow up with the information directly.'
+                  ? (filteredSummaryText
+                      ? 'Their privacy-filtered Patient Summary is below.'
+                      : 'They may follow up with the information directly.')
                   : 'You can refine your request and try again.',
+                filteredSummaryText ? `\n--- Privacy-filtered Patient Summary ---\n${filteredSummaryText}` : '',
                 appUrl ? `\n${appUrl}` : ''
               ].filter(Boolean).join('\n')
             );
@@ -3002,7 +3009,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
           type: 'as_request_responded',
           userId,
           ip: req.ip,
-          details: { requestId: reqDoc._id, groupId: reqDoc.groupId, outcome, hadMessage: !!responseMessage }
+          details: { requestId: reqDoc._id, groupId: reqDoc.groupId, outcome, hadMessage: !!responseMessage, sharedFilteredSummary: !!filteredSummaryText }
         });
         // Bump the public response tally (counts only) so the requester's page
         // can show how many members responded. Same-host in Phase 1; a
