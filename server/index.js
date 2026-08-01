@@ -6066,9 +6066,70 @@ app.post('/api/toggle-file-knowledge-base', async (req, res) => {
     });
 
     // Determine source and destination paths
-    const fileName = bucketKey.split('/').pop();
+    let fileName = bucketKey.split('/').pop();
     let sourceKey = bucketKey;
-    
+
+    // SELF-HEAL a stale pointer (the justin00 "UnknownError" bug): a previous
+    // move can half-complete — the OBJECT moved but the userDoc save failed —
+    // leaving files[].bucketKey pointing at a key that no longer exists.
+    // Copying from that ghost fails as NoSuchKey, which DO Spaces surfaces as
+    // the useless literal "UnknownError" (its 404 body carries no Message),
+    // and the state never heals because the UI keeps offering the same
+    // broken toggle. So: verify the source object exists; if not, locate it
+    // by filename (including the upload-sanitized underscore variant) in the
+    // known folders and repair the pointer instead of failing forever.
+    {
+      const { HeadObjectCommand } = await import('@aws-sdk/client-s3');
+      const objectExists = async (key) => {
+        try { await s3Client.send(new HeadObjectCommand({ Bucket: bucketName, Key: key })); return true; }
+        catch { return false; }
+      };
+      if (!(await objectExists(sourceKey))) {
+        const sanitized = String(fileName).replace(/[^a-zA-Z0-9.-]/g, '_');
+        const candidates = [];
+        for (const folder of [`${userId}/${kbName}/`, `${userId}/archived/`, `${userId}/imports/`, `${userId}/`]) {
+          for (const n of new Set([fileName, sanitized])) candidates.push(`${folder}${n}`);
+        }
+        let foundKey = null;
+        for (const cand of candidates) {
+          if (cand !== sourceKey && await objectExists(cand)) { foundKey = cand; break; }
+        }
+        if (!foundKey) {
+          return res.status(404).json({
+            success: false,
+            error: 'FILE_OBJECT_NOT_FOUND',
+            message: `"${fileName}" was not found in storage at its recorded location or any known folder. Delete the entry and re-upload the file.`
+          });
+        }
+        console.log(`[toggle-kb] Healed stale bucketKey for ${userId}: ${sourceKey} -> ${foundKey}`);
+        sourceKey = foundKey;
+        fileName = foundKey.split('/').pop();
+        userDoc.files[fileIndex].bucketKey = foundKey;
+        if (inKnowledgeBase && foundKey.startsWith(`${userId}/${kbName}/`)) {
+          // The object is ALREADY in the KB folder — nothing to move; repair
+          // the pointer and report success so the UI finally reflects reality.
+          userDoc.files[fileIndex].updatedAt = new Date().toISOString();
+          userDoc.updatedAt = userDoc.files[fileIndex].updatedAt;
+          for (let attempt = 0; attempt < 3; attempt++) {
+            try { await cloudant.saveDocument('maia_users', userDoc); break; }
+            catch (e) {
+              if (e?.statusCode === 409 && attempt < 2) {
+                userDoc = await cloudant.getDocument('maia_users', userId);
+                const idx = userDoc.files?.findIndex(f => f.bucketKey === bucketKey || f.bucketKey === foundKey);
+                if (idx >= 0) {
+                  userDoc.files[idx].bucketKey = foundKey;
+                  userDoc.files[idx].updatedAt = new Date().toISOString();
+                }
+                continue;
+              }
+              throw e;
+            }
+          }
+          return res.json({ success: true, message: 'Knowledge base status updated', repaired: true, bucketKey: foundKey });
+        }
+      }
+    }
+
     // Check if file is at root level (not archived yet)
     const isRootLevel = sourceKey.startsWith(`${userId}/`) && 
                         !sourceKey.startsWith(`${userId}/archived/`) && 
