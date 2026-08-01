@@ -6443,6 +6443,17 @@ app.post('/api/user-current-medications', async (req, res) => {
     userDoc.currentMedications = currentMedications;
     userDoc.currentMedicationsUpdatedAt = new Date().toISOString();
     userDoc.updatedAt = userDoc.currentMedicationsUpdatedAt;
+    // Phase 2 of the PS/CM redesign: persistent verified state. A save with
+    // verified:true is the user's Verify / Save-edit act in the Lists tab and
+    // stamps the list verified; any OTHER save (automated extraction, candidate
+    // refresh) clears the stamp — existence of meds text no longer implies
+    // verification. Drives the amber Lists tab across reloads.
+    const medsVerified = req.body.verified === true;
+    if (medsVerified) {
+      userDoc.currentMedicationsVerifiedAt = userDoc.currentMedicationsUpdatedAt;
+    } else {
+      delete userDoc.currentMedicationsVerifiedAt;
+    }
 
     // Save with retry logic for conflicts
     let retries = 3;
@@ -6457,7 +6468,13 @@ app.post('/api/user-current-medications', async (req, res) => {
           // Conflict - re-read and retry
           userDoc = await cloudant.getDocument('maia_users', userId);
           userDoc.currentMedications = currentMedications;
-          userDoc.updatedAt = new Date().toISOString();
+          userDoc.currentMedicationsUpdatedAt = new Date().toISOString();
+          userDoc.updatedAt = userDoc.currentMedicationsUpdatedAt;
+          if (medsVerified) {
+            userDoc.currentMedicationsVerifiedAt = userDoc.currentMedicationsUpdatedAt;
+          } else {
+            delete userDoc.currentMedicationsVerifiedAt;
+          }
           retries--;
           await new Promise(resolve => setTimeout(resolve, 100));
         } else {
@@ -9893,6 +9910,11 @@ app.get('/api/user-status', async (req, res) => {
       listsBuild: userDoc.listsBuild || null,
       initialFile,
       currentMedications: userDoc.currentMedications || null,
+      // Phase 2 (PS/CM redesign): persistent verified stamps. Existence of
+      // meds/summary text no longer implies verification — these drive the
+      // amber Lists / Patient Summary tabs across reloads.
+      currentMedicationsVerifiedAt: userDoc.currentMedicationsVerifiedAt || null,
+      patientSummaryVerifiedAt: userDoc.patientSummaryVerifiedAt || null,
       recordsPipeline: computeRecordsPipeline(userDoc, { hasFilesInKB })
     });
   } catch (error) {
@@ -14008,6 +14030,9 @@ app.get('/api/patient-summary', async (req, res) => {
     res.json({
       success: true,
       summary: returnedSummary,
+      // Phase 2: the persistent verified stamp for the CURRENT summary.
+      // Cleared whenever a new/replacement summary is saved unverified.
+      verifiedAt: userDoc.patientSummaryVerifiedAt || null,
       summaries: summaries.map((s, index) => ({
         text: s.text,
         createdAt: s.createdAt,
@@ -14086,6 +14111,16 @@ app.post('/api/patient-summary', async (req, res) => {
     if (userDoc.draftPatientSummary) {
       delete userDoc.draftPatientSummary;
     }
+    // Phase 2 (PS/CM redesign): saving with verified:true is a user act that
+    // counts as verification (the tab's Edit + Save). Any other save commits
+    // NEW, unreviewed content — clear the stamp so the tab goes amber until
+    // the user clicks VERIFY.
+    const psVerified = req.body.verified === true;
+    if (psVerified) {
+      userDoc.patientSummaryVerifiedAt = userDoc.updatedAt;
+    } else {
+      delete userDoc.patientSummaryVerifiedAt;
+    }
 
     let docToReturn = userDoc;
     let saveErr = await saveWithRetry(userDoc);
@@ -14109,6 +14144,11 @@ app.post('/api/patient-summary', async (req, res) => {
         if (freshDoc.draftPatientSummary) {
           delete freshDoc.draftPatientSummary;
         }
+        if (psVerified) {
+          freshDoc.patientSummaryVerifiedAt = freshDoc.updatedAt;
+        } else {
+          delete freshDoc.patientSummaryVerifiedAt;
+        }
         saveErr = await saveWithRetry(freshDoc);
         if (!saveErr) docToReturn = freshDoc;
       }
@@ -14130,11 +14170,43 @@ app.post('/api/patient-summary', async (req, res) => {
     });
   } catch (error) {
     console.error('Error saving patient summary:', error);
-    res.status(500).json({ 
-      success: false, 
+    res.status(500).json({
+      success: false,
       message: 'Failed to save patient summary',
-      error: error.message 
+      error: error.message
     });
+  }
+});
+
+// Phase 2 (PS/CM redesign): explicit verification of the CURRENT summary.
+// The tab's VERIFY button posts here; the stamp drives the amber Patient
+// Summary tab across reloads. Conflict-tolerant.
+app.post('/api/patient-summary/verify', async (req, res) => {
+  try {
+    const userId = resolveUserId(req, res);
+    if (!userId) return; // 403 already sent on mismatch
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const userDoc = await cloudant.getDocument('maia_users', userId);
+      if (!userDoc) {
+        return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+      }
+      const current = getCurrentSummary(userDoc);
+      if (!current || !current.text) {
+        return res.status(400).json({ success: false, error: 'NO_SUMMARY_TO_VERIFY' });
+      }
+      userDoc.patientSummaryVerifiedAt = new Date().toISOString();
+      userDoc.updatedAt = userDoc.patientSummaryVerifiedAt;
+      try {
+        await cloudant.saveDocument('maia_users', userDoc);
+        return res.json({ success: true, verifiedAt: userDoc.patientSummaryVerifiedAt });
+      } catch (e) {
+        if (e?.statusCode === 409 && attempt < 2) continue;
+        throw e;
+      }
+    }
+  } catch (error) {
+    console.error('Error verifying patient summary:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
@@ -14178,8 +14250,11 @@ app.post('/api/patient-summary/swap', async (req, res) => {
         error: 'INVALID_SWAP'
       });
     }
-    
+
     userDoc.updatedAt = new Date().toISOString();
+    // Swapping changes WHICH summary is current — the verify stamp refers to
+    // the previous current summary, so it no longer applies (Phase 2).
+    delete userDoc.patientSummaryVerifiedAt;
     await cloudant.saveDocument('maia_users', userDoc);
     
     const summaries = initializeSummariesArray(userDoc);

@@ -3222,7 +3222,10 @@ const saveCurrentMedicationsValue = async (value: string, markEdited: boolean, c
       credentials: 'include',
       body: JSON.stringify({
         userId: props.userId,
-        currentMedications: value
+        currentMedications: value,
+        // This save IS the user's Verify / Save-edit act — stamp the list
+        // verified (Phase 2). Automated extractions never pass this flag.
+        verified: true
       })
     });
 
