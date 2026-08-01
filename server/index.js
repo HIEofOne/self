@@ -14086,7 +14086,12 @@ function seedPseudonymMappingFromSummary(userDoc, summaryText) {
     let h = hashName(original.toLowerCase());
     let pseudonym;
     do {
-      pseudonym = `${PSEUDO_FIRST[h % PSEUDO_FIRST.length]} ${PSEUDO_LAST[Math.floor(h / 7) % PSEUDO_LAST.length]}`;
+      // Chat-filter style: two-digit markers on BOTH parts ("Emily45
+      // Johnson67") so filtered names are obviously fake, never mistaken for
+      // a real person. Digits are hash-derived → stable across regenerations.
+      const firstNum = 10 + (h % 90);
+      const lastNum = 10 + (Math.floor(h / 90) % 90);
+      pseudonym = `${PSEUDO_FIRST[h % PSEUDO_FIRST.length]}${firstNum} ${PSEUDO_LAST[Math.floor(h / 7) % PSEUDO_LAST.length]}${lastNum}`;
       h++;
     } while (used.has(pseudonym));
     used.add(pseudonym);
@@ -14110,6 +14115,27 @@ function refreshPrivacyFilteredSummary(userDoc) {
     // No mapping yet → seed it from the summary itself (no-op if one exists),
     // so the filtered copy is actually filtered by default.
     seedPseudonymMappingFromSummary(userDoc, text);
+    // One-time upgrade: early auto-seeded entries lacked the two-digit
+    // "obviously fake" markers ("Rowan Vance" → "Rowan73 Vance28"). Only
+    // machine-made entries (source: 'auto-summary') without digits are
+    // touched — user-authored pseudonyms are never modified.
+    {
+      const entries = userDoc.privacyFilter?.pseudonymMapping || [];
+      let upgraded = false;
+      for (const e of entries) {
+        if (e?.source === 'auto-summary' && e.pseudonym && !/\d/.test(e.pseudonym)) {
+          const h = hashName(String(e.original || '').toLowerCase());
+          const firstNum = 10 + (h % 90);
+          const lastNum = 10 + (Math.floor(h / 90) % 90);
+          e.pseudonym = String(e.pseudonym)
+            .split(/\s+/)
+            .map((p, i, arr) => `${p}${i === 0 ? firstNum : (i === arr.length - 1 ? lastNum : '')}`)
+            .join(' ');
+          upgraded = true;
+        }
+      }
+      if (upgraded) userDoc.privacyFilter.lastUpdated = new Date().toISOString();
+    }
     const mapping = userDoc.privacyFilter?.pseudonymMapping || [];
     userDoc.privacyFilteredSummary = {
       text: applyPseudonymMapping(mapping, text),
