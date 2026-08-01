@@ -22,6 +22,7 @@ import { generateCurrentMedicationsToken } from './utils/token-service.js';
 import { computeRecordsPipeline, decideNextAction } from './records-pipeline.js';
 import { moveObjectWithVerify } from './utils/spaces-move.js';
 import { deleteObjectWithLog , asciiSafeMetadata } from './utils/spaces-ops.js';
+import { applyPseudonymMapping } from './privacyFilter.js';
 import { ChatClient } from '../lib/chat-client/index.js';
 import { findUserAgent, getOrCreateAgentApiKey } from './utils/agent-helper.js';
 import { getClinicalPrompt } from './utils/clinical-prompts.js';
@@ -13972,6 +13973,30 @@ function swapSummary(userDoc, index) {
 }
 
 // Patient Summary endpoints
+// Phase 4 (PS/CM redesign): regenerate the privacy-filtered copy of the
+// CURRENT summary from the user's pseudonym mapping (Workbook → Privacy
+// Filter). Deterministic, no AI call. Mutates the doc; callers save it.
+// Runs at every verification moment, so the filtered copy always tracks the
+// verified summary — it is the DEFAULT artifact for sharing-request responses.
+function refreshPrivacyFilteredSummary(userDoc) {
+  try {
+    const current = getCurrentSummary(userDoc);
+    const text = current && current.text ? String(current.text) : '';
+    if (!text.trim()) {
+      delete userDoc.privacyFilteredSummary;
+      return;
+    }
+    const mapping = userDoc.privacyFilter?.pseudonymMapping || [];
+    userDoc.privacyFilteredSummary = {
+      text: applyPseudonymMapping(mapping, text),
+      mappingCount: mapping.length,
+      createdAt: new Date().toISOString()
+    };
+  } catch (e) {
+    console.warn('[privacy-filtered-summary] refresh failed (non-fatal):', e?.message || e);
+  }
+}
+
 app.get('/api/patient-summary', async (req, res) => {
   try {
     const { userId } = req.query;
@@ -14033,6 +14058,9 @@ app.get('/api/patient-summary', async (req, res) => {
       // Phase 2: the persistent verified stamp for the CURRENT summary.
       // Cleared whenever a new/replacement summary is saved unverified.
       verifiedAt: userDoc.patientSummaryVerifiedAt || null,
+      // Phase 4: the auto-generated privacy-filtered copy ({text,
+      // mappingCount, createdAt}) — default for sharing-request responses.
+      privacyFiltered: userDoc.privacyFilteredSummary || null,
       summaries: summaries.map((s, index) => ({
         text: s.text,
         createdAt: s.createdAt,
@@ -14118,6 +14146,10 @@ app.post('/api/patient-summary', async (req, res) => {
     const psVerified = req.body.verified === true;
     if (psVerified) {
       userDoc.patientSummaryVerifiedAt = userDoc.updatedAt;
+      // Phase 4: every Verify/Edit automatically refreshes the privacy-
+      // filtered version of the CURRENT summary — the default artifact for
+      // responding to sharing requests.
+      refreshPrivacyFilteredSummary(userDoc);
     } else {
       delete userDoc.patientSummaryVerifiedAt;
     }
@@ -14146,6 +14178,7 @@ app.post('/api/patient-summary', async (req, res) => {
         }
         if (psVerified) {
           freshDoc.patientSummaryVerifiedAt = freshDoc.updatedAt;
+          refreshPrivacyFilteredSummary(freshDoc);
         } else {
           delete freshDoc.patientSummaryVerifiedAt;
         }
@@ -14196,6 +14229,9 @@ app.post('/api/patient-summary/verify', async (req, res) => {
       }
       userDoc.patientSummaryVerifiedAt = new Date().toISOString();
       userDoc.updatedAt = userDoc.patientSummaryVerifiedAt;
+      // Phase 4: verification refreshes the privacy-filtered version — the
+      // default artifact for responding to sharing requests.
+      refreshPrivacyFilteredSummary(userDoc);
       try {
         await cloudant.saveDocument('maia_users', userDoc);
         return res.json({ success: true, verifiedAt: userDoc.patientSummaryVerifiedAt });
