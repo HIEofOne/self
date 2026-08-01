@@ -14042,6 +14042,63 @@ function swapSummary(userDoc, index) {
 // Filter). Deterministic, no AI call. Mutates the doc; callers save it.
 // Runs at every verification moment, so the filtered copy always tracks the
 // verified summary — it is the DEFAULT artifact for sharing-request responses.
+// Deterministic pseudonym pools for auto-seeded privacy-filter entries.
+// Hash-picked so the same original name always maps to the same pseudonym.
+const PSEUDO_FIRST = ['Alex', 'Morgan', 'Jordan', 'Taylor', 'Casey', 'Riley', 'Avery', 'Quinn', 'Rowan', 'Sage', 'Emerson', 'Finley', 'Harper', 'Kendall', 'Logan', 'Marlow', 'Nico', 'Parker', 'Reese', 'Skyler', 'Tatum', 'Devon', 'Ellis', 'Blake'];
+const PSEUDO_LAST = ['Ashford', 'Barrett', 'Calloway', 'Draper', 'Ellery', 'Fairbanks', 'Granger', 'Holloway', 'Ingram', 'Jennings', 'Kingsley', 'Lockhart', 'Merritt', 'Norwood', 'Ogden', 'Prescott', 'Quimby', 'Radcliffe', 'Sterling', 'Thornton', 'Underhill', 'Vance', 'Whitfield', 'Yates'];
+const hashName = (s) => { let h = 0; for (const c of String(s)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h; };
+
+// Seed the pseudonym mapping from the VERIFIED summary itself when the user
+// has none. The Privacy Filter tab's original mapping builder analyzes CHAT
+// messages with the Private AI — a records-first user who never chats can
+// NEVER get a mapping that way ("No Private AI chat messages available"),
+// leaving the "privacy-filtered" summary identical to the real one. But the
+// summary's own structure names exactly the people that must be filtered:
+// the patient header line ("Adrian Gropper, 74 y, M") and the parenthesized
+// providers in Recent Visits ("(Wei Lien, MD)"). Extract those
+// conservatively, assign stable pseudonyms, and store them as ordinary
+// mapping entries — visible and editable in Workbook → Privacy Filter.
+function seedPseudonymMappingFromSummary(userDoc, summaryText) {
+  const existing = userDoc.privacyFilter?.pseudonymMapping || [];
+  if (existing.length > 0) return false; // never touch a user's mapping
+  // A user who EXPLICITLY emptied their mapping (lastUpdated set, list empty)
+  // has made a choice — don't re-seed behind their back. Seed only the
+  // never-configured state.
+  if (userDoc.privacyFilter?.lastUpdated) return false;
+  const text = String(summaryText || '');
+  const names = new Set();
+  const patient = text.match(/^\s*([A-Z][A-Za-z'’-]+(?:\s+[A-Z][A-Za-z'’-]+)+),\s*\d+\s*y/m);
+  if (patient) names.add(patient[1].replace(/\s+/g, ' ').trim());
+  // Parenthesized people: "(Wei Lien, MD)", "(Harshal Patil)". Credentials are
+  // stripped; anything with digits or document/section words is skipped.
+  const NOT_A_NAME = /\b(Patient|Verified|File|Health|Summary|Medication|Medications|Documented|Telephone|Encounter|Instructions|Notes|Outpatient|Telemedicine|Progress|Records|History|Apple)\b/i;
+  const provRe = /\(([A-Z][A-Za-z'’-]+(?:\s+[A-Z][A-Za-z'’.-]+)+?)(?:,\s*(?:MD|DO|NP|CNP|PA|RN|CRNA|DDS|DPM|OD|PhD)\b[^)]*)?\)/g;
+  let m;
+  while ((m = provRe.exec(text)) !== null) {
+    const nm = m[1].replace(/\s+/g, ' ').trim();
+    if (/\d/.test(nm) || NOT_A_NAME.test(nm) || nm.split(' ').length < 2) continue;
+    names.add(nm);
+  }
+  if (names.size === 0) return false;
+  const used = new Set();
+  const mapping = [];
+  for (const original of names) {
+    let h = hashName(original.toLowerCase());
+    let pseudonym;
+    do {
+      pseudonym = `${PSEUDO_FIRST[h % PSEUDO_FIRST.length]} ${PSEUDO_LAST[Math.floor(h / 7) % PSEUDO_LAST.length]}`;
+      h++;
+    } while (used.has(pseudonym));
+    used.add(pseudonym);
+    mapping.push({ original, pseudonym, source: 'auto-summary' });
+  }
+  if (!userDoc.privacyFilter) userDoc.privacyFilter = {};
+  userDoc.privacyFilter.pseudonymMapping = mapping;
+  userDoc.privacyFilter.lastUpdated = new Date().toISOString();
+  console.log(`[privacy-filter] Seeded ${mapping.length} pseudonym(s) from the verified summary for ${userDoc.userId}`);
+  return true;
+}
+
 function refreshPrivacyFilteredSummary(userDoc) {
   try {
     const current = getCurrentSummary(userDoc);
@@ -14050,6 +14107,9 @@ function refreshPrivacyFilteredSummary(userDoc) {
       delete userDoc.privacyFilteredSummary;
       return;
     }
+    // No mapping yet → seed it from the summary itself (no-op if one exists),
+    // so the filtered copy is actually filtered by default.
+    seedPseudonymMappingFromSummary(userDoc, text);
     const mapping = userDoc.privacyFilter?.pseudonymMapping || [];
     userDoc.privacyFilteredSummary = {
       text: applyPseudonymMapping(mapping, text),
@@ -14115,6 +14175,27 @@ app.get('/api/patient-summary', async (req, res) => {
     // never a side effect of loading the tab.
     // (serverReplaceMedicationsInSummary is kept for the consented paths.)
     const returnedSummary = currentSummary ? currentSummary.text : '';
+
+    // The privacy-filtered copy is DERIVED data — a deterministic pseudonym
+    // mapping applied to the verified summary — so refreshing a stale cache
+    // here is NOT the Phase-1 forbidden rewrite of user content. Regenerate
+    // when the summary was verified AFTER the copy was made (accounts
+    // verified before Phase 4 shipped never had one), or when the mapping
+    // changed after it (the user edited the Privacy Filter).
+    try {
+      const verifiedAtMs = userDoc.patientSummaryVerifiedAt ? Date.parse(userDoc.patientSummaryVerifiedAt) : 0;
+      if (returnedSummary && verifiedAtMs) {
+        const pf = userDoc.privacyFilteredSummary;
+        const createdMs = pf?.createdAt ? Date.parse(pf.createdAt) : 0;
+        const mappingMs = userDoc.privacyFilter?.lastUpdated ? Date.parse(userDoc.privacyFilter.lastUpdated) : 0;
+        if (!pf || createdMs < verifiedAtMs || createdMs < mappingMs) {
+          refreshPrivacyFilteredSummary(userDoc);
+          try {
+            await cloudant.saveDocument('maia_users', userDoc);
+          } catch { /* 409 etc. — the next load retries */ }
+        }
+      }
+    } catch { /* non-fatal; the tab just shows the previous copy */ }
 
     res.json({
       success: true,
@@ -14596,6 +14677,9 @@ app.post('/api/privacy-filter-mapping', async (req, res) => {
     userDoc.privacyFilter.pseudonymMapping = mapping;
     userDoc.privacyFilter.lastUpdated = new Date().toISOString();
     userDoc.updatedAt = new Date().toISOString();
+    // Keep the derived privacy-filtered summary in sync with the new mapping
+    // (it is the default artifact for sharing-request responses).
+    refreshPrivacyFilteredSummary(userDoc);
     await cloudant.saveDocument('maia_users', userDoc);
     res.json({
       success: true,
