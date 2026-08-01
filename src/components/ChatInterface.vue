@@ -3601,29 +3601,50 @@ const sendMessage = async () => {
       }
     }
 
-    // MANUAL "patient summary" request to the Private AI:
-    // Re-route through /api/patient-summary/draft so the SAME Layer-2
-    // prompt, identity/encounters/allergies/OOR-labs/currentMedications
-    // injection, and primary-agent instructions are used. A typed message
-    // like "Please regenerate my patient summary" must NOT bypass those
-    // by going through raw /api/chat/digitalocean. The result is also
-    // saved as the formal Patient Summary (same as the SEND path).
+    // TYPED message mentioning "patient summary" (Phase 1 of the PS/CM
+    // redesign): NEVER generate. The old behavior ran a fresh AI draft off a
+    // regex — even a question like "what's in my patient summary?" kicked off
+    // a multi-minute generation. Now: return the STORED summary if one exists,
+    // otherwise point the user at the governed paths (the untouched-default
+    // SEND or the Patient Summary tab, both of which end in the review dialog).
     {
       const providerKeyForCheck = getProviderKey(selectedProvider.value);
       if (mentionsSummary && !isUntouchedDefault && providerKeyForCheck === 'digitalocean' && props.user?.userId) {
-        // THE GATES + the draft, pipeline edition: one advance call with
-        // intent 'draft-summary'. The server gates or runs the draft job;
-        // this surface acts on the decision and renders the result.
         try {
-          const outcome = await requestSummaryViaPipeline();
-          if (outcome !== 'fallthrough') {
-            isStreaming.value = false;
-            return;
+          const pk = getProviderKey(selectedProvider.value);
+          const pl = assistantLabelForKey(pk);
+          let storedSummary = '';
+          try {
+            const r = await fetch(`/api/patient-summary?userId=${encodeURIComponent(props.user.userId)}`, { credentials: 'include' });
+            if (r.ok) {
+              const j = await r.json();
+              storedSummary = String(j.summary || '').trim();
+            }
+          } catch { /* treat as no stored summary */ }
+          const replyContent = storedSummary
+            ? storedSummary
+            : 'You don’t have a saved Patient Summary yet. To create one, open ' +
+              '**Workbook → Patient Summary**, or press SEND on the default ' +
+              '“Click SEND to get the patient summary” prompt — you’ll ' +
+              'review and verify the draft before anything is saved.';
+          if (storedSummary && availableUserFiles.value.length === 0) {
+            await loadUserFilesForChooser(false); // File N citations render as links on first paint
           }
-          // Pipeline unreachable → regular chat so the user still gets
-          // *some* response.
+          messages.value.push({
+            role: 'assistant',
+            content: replyContent,
+            authorType: 'assistant',
+            providerKey: pk,
+            authorId: pk,
+            authorLabel: pl,
+            name: pl
+          });
+          originalMessages.value = JSON.parse(JSON.stringify(messages.value));
+          trulyOriginalMessages.value = JSON.parse(JSON.stringify(messages.value));
+          isStreaming.value = false;
+          return;
         } catch (err) {
-          console.warn('[chat→patient-summary] pipeline request failed; falling back to raw chat:', err);
+          console.warn('[chat→patient-summary] stored-summary reply failed; falling back to raw chat:', err);
         }
       }
     }

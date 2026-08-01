@@ -2045,12 +2045,14 @@ const emit = defineEmits<{
   'provisioning-event': [data: Record<string, any>];
 }>();
 
-// Handle show patient summary from Lists component — regenerate summary with updated medications
+// Handle "Show Patient Summary" from the Lists component — SHOW the stored
+// summary (Phase 1 of the PS/CM redesign). This used to call
+// requestNewSummary(), silently starting a full AI regeneration the user never
+// asked for. Regeneration now happens only through explicit consent: the
+// "Update Patient Summary?" dialog (handleAcceptUpdateSummary) or the New
+// Summary button (handleRequestNewSummary).
 const handleShowPatientSummary = () => {
-  loadingSummary.value = true;          // show spinner immediately
-  currentTab.value = 'summary';         // switch tab (watcher will call loadPatientSummary, but we override below)
-  pendingSummaryRegeneration.value = true; // flag so the tab watcher skips its loadPatientSummary
-  requestNewSummary();                  // regenerate with latest medications
+  currentTab.value = 'summary'; // the tab watcher loads the stored summary
   emit('show-patient-summary');
 };
 
