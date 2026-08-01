@@ -53,8 +53,16 @@
     >
       <template v-slot:body-cell-userId="props">
         <q-td :props="props">
-          <span class="text-weight-bold">{{ props.value }}</span>
-          <span v-if="props.row.domain" class="text-grey-7"> ({{ props.row.domain }})</span>
+          <div>
+            <span class="text-weight-bold">{{ props.value }}</span>
+            <span v-if="props.row.domain" class="text-grey-7"> ({{ props.row.domain }})</span>
+          </div>
+          <div v-if="props.row.email" class="text-caption text-grey-8">
+            {{ props.row.email }}
+            <q-icon v-if="props.row.emailVerified" name="verified" size="12px" color="green-7" class="q-ml-xs">
+              <q-tooltip>Verified email</q-tooltip>
+            </q-icon>
+          </div>
         </q-td>
       </template>
 
@@ -188,6 +196,8 @@ const $q = useQuasar();
 interface User {
   userId: string;
   domain: string | null;
+  email: string | null;
+  emailVerified: boolean;
   workflowStage: string;
   lastActivity: string;
   provisionedDate: string | null;
@@ -281,21 +291,28 @@ const columns = [
     label: 'Saved Files',
     align: 'center' as const,
     field: 'filesIndexed',
-    sortable: true
+    sortable: true,
+    // Narrow column: let the header wrap to multiple lines instead of forcing width.
+    headerStyle: 'white-space: normal; max-width: 60px; padding-left: 4px; padding-right: 4px;',
+    style: 'max-width: 60px; padding-left: 4px; padding-right: 4px;'
   },
   {
     name: 'savedChatsCount',
     label: 'Saved Chats',
     align: 'center' as const,
     field: 'savedChatsCount',
-    sortable: true
+    sortable: true,
+    headerStyle: 'white-space: normal; max-width: 60px; padding-left: 4px; padding-right: 4px;',
+    style: 'max-width: 60px; padding-left: 4px; padding-right: 4px;'
   },
   {
     name: 'deepLinkUsersCount',
     label: '# Deep Link Users',
     align: 'center' as const,
     field: 'deepLinkUsersCount',
-    sortable: true
+    sortable: true,
+    headerStyle: 'white-space: normal; max-width: 64px; padding-left: 4px; padding-right: 4px;',
+    style: 'max-width: 64px; padding-left: 4px; padding-right: 4px;'
   },
   {
     name: 'groups',

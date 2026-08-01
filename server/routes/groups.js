@@ -1030,7 +1030,23 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       if (!doc || doc.type !== 'group') {
         return res.status(404).json({ success: false, error: 'Group not found' });
       }
-      res.json({ success: true, members: (doc.members || []).map(memberAdminView) });
+      // Admin view: resolve each active member's account email via the reverse
+      // membership lookup (single-deployment; a cross-host member isn't found).
+      const members = await Promise.all((doc.members || []).map(async (m) => {
+        const view = memberAdminView(m);
+        if (m.pairwiseId) {
+          try {
+            const r = await cloudant.findDocuments(USERS_DB, {
+              selector: { groupMemberships: { $elemMatch: { groupId: { $eq: doc._id }, pairwiseId: { $eq: m.pairwiseId } } } },
+              limit: 1
+            });
+            const u = r?.docs?.[0];
+            if (u?.email) { view.email = u.email; view.emailVerified = !!u.emailVerified; }
+          } catch { /* skip email for this member */ }
+        }
+        return view;
+      }));
+      res.json({ success: true, members });
     } catch (error) {
       console.error('[groups] members list failed:', error);
       res.status(500).json({ success: false, error: 'Failed to list members' });

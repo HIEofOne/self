@@ -64,7 +64,8 @@
             class="row items-center no-wrap member-row q-py-xs"
           >
             <div class="member-cell" style="flex: 2 1 0; min-width: 0">
-              <span class="ellipsis">{{ m.inviteEmail || m.alias || m.pairwiseId }}</span>
+              <div class="ellipsis">{{ m.inviteEmail || m.alias || m.pairwiseId }}</div>
+              <div v-if="m.email && m.email !== m.inviteEmail" class="ellipsis text-caption text-grey-7">{{ m.email }}</div>
             </div>
             <div class="member-cell" style="flex: 0 0 130px">
               <q-badge
@@ -339,6 +340,8 @@ interface MemberSummary {
   inviteOpenedAt: string | null;
   requestedAt?: string | null;
   mentor: boolean;
+  email?: string | null;
+  emailVerified?: boolean;
 }
 
 const groups = ref<GroupSummary[]>([]);
