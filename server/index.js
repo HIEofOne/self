@@ -14115,15 +14115,18 @@ function refreshPrivacyFilteredSummary(userDoc) {
     // No mapping yet → seed it from the summary itself (no-op if one exists),
     // so the filtered copy is actually filtered by default.
     seedPseudonymMappingFromSummary(userDoc, text);
-    // One-time upgrade: early auto-seeded entries lacked the two-digit
-    // "obviously fake" markers ("Rowan Vance" → "Rowan73 Vance28"). Only
-    // machine-made entries (source: 'auto-summary') without digits are
-    // touched — user-authored pseudonyms are never modified.
+    // Normalize EVERY pseudonym to the house style: two-digit markers on the
+    // first and last parts ("Rowan Vance" → "Rowan73 Vance28"), same as the
+    // chat-area filter's generated names ("Kelsey89 Fisher45"). This runs on
+    // any entry without digits regardless of origin — the markers are the
+    // point of the filter (filtered names must be OBVIOUSLY fake), and keying
+    // on a source tag proved fragile (the chat flow's merge strips it).
+    // Digits are hash-derived from the original name, so they're stable.
     {
       const entries = userDoc.privacyFilter?.pseudonymMapping || [];
       let upgraded = false;
       for (const e of entries) {
-        if (e?.source === 'auto-summary' && e.pseudonym && !/\d/.test(e.pseudonym)) {
+        if (e?.pseudonym && !/\d/.test(e.pseudonym)) {
           const h = hashName(String(e.original || '').toLowerCase());
           const firstNum = 10 + (h % 90);
           const lastNum = 10 + (Math.floor(h / 90) % 90);
@@ -14203,18 +14206,22 @@ app.get('/api/patient-summary', async (req, res) => {
     const returnedSummary = currentSummary ? currentSummary.text : '';
 
     // The privacy-filtered copy is DERIVED data — a deterministic pseudonym
-    // mapping applied to the verified summary — so refreshing a stale cache
+    // mapping applied to the current summary — so refreshing a stale cache
     // here is NOT the Phase-1 forbidden rewrite of user content. Regenerate
-    // when the summary was verified AFTER the copy was made (accounts
-    // verified before Phase 4 shipped never had one), or when the mapping
-    // changed after it (the user edited the Privacy Filter).
+    // whenever the copy is missing or older than the summary's own last
+    // change or the mapping's last edit ("the PS filtering needs to be
+    // automatic every time the PS is changed"), or when any mapping entry
+    // still lacks the two-digit fake-name markers (normalized in refresh).
     try {
-      const verifiedAtMs = userDoc.patientSummaryVerifiedAt ? Date.parse(userDoc.patientSummaryVerifiedAt) : 0;
-      if (returnedSummary && verifiedAtMs) {
+      if (returnedSummary) {
         const pf = userDoc.privacyFilteredSummary;
         const createdMs = pf?.createdAt ? Date.parse(pf.createdAt) : 0;
+        const summaryMs = currentSummary?.updatedAt ? Date.parse(currentSummary.updatedAt)
+          : (currentSummary?.createdAt ? Date.parse(currentSummary.createdAt) : 0);
         const mappingMs = userDoc.privacyFilter?.lastUpdated ? Date.parse(userDoc.privacyFilter.lastUpdated) : 0;
-        if (!pf || createdMs < verifiedAtMs || createdMs < mappingMs) {
+        const hasDigitlessEntry = (userDoc.privacyFilter?.pseudonymMapping || [])
+          .some((e) => e?.pseudonym && !/\d/.test(e.pseudonym));
+        if (!pf || createdMs < summaryMs || createdMs < mappingMs || hasDigitlessEntry) {
           refreshPrivacyFilteredSummary(userDoc);
           try {
             await cloudant.saveDocument('maia_users', userDoc);
@@ -14317,13 +14324,13 @@ app.post('/api/patient-summary', async (req, res) => {
     const psVerified = req.body.verified === true;
     if (psVerified) {
       userDoc.patientSummaryVerifiedAt = userDoc.updatedAt;
-      // Phase 4: every Verify/Edit automatically refreshes the privacy-
-      // filtered version of the CURRENT summary — the default artifact for
-      // responding to sharing requests.
-      refreshPrivacyFilteredSummary(userDoc);
     } else {
       delete userDoc.patientSummaryVerifiedAt;
     }
+    // The privacy-filtered copy tracks EVERY summary change (not just
+    // verified saves) — a stale filtered copy of a superseded summary is
+    // worse than none.
+    refreshPrivacyFilteredSummary(userDoc);
 
     let docToReturn = userDoc;
     let saveErr = await saveWithRetry(userDoc);
@@ -14349,10 +14356,10 @@ app.post('/api/patient-summary', async (req, res) => {
         }
         if (psVerified) {
           freshDoc.patientSummaryVerifiedAt = freshDoc.updatedAt;
-          refreshPrivacyFilteredSummary(freshDoc);
         } else {
           delete freshDoc.patientSummaryVerifiedAt;
         }
+        refreshPrivacyFilteredSummary(freshDoc);
         saveErr = await saveWithRetry(freshDoc);
         if (!saveErr) docToReturn = freshDoc;
       }
@@ -14460,8 +14467,10 @@ app.post('/api/patient-summary/swap', async (req, res) => {
 
     userDoc.updatedAt = new Date().toISOString();
     // Swapping changes WHICH summary is current — the verify stamp refers to
-    // the previous current summary, so it no longer applies (Phase 2).
+    // the previous current summary, so it no longer applies (Phase 2), and
+    // the privacy-filtered copy must track the newly-current summary.
     delete userDoc.patientSummaryVerifiedAt;
+    refreshPrivacyFilteredSummary(userDoc);
     await cloudant.saveDocument('maia_users', userDoc);
     
     const summaries = initializeSummariesArray(userDoc);
