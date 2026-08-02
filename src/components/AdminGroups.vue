@@ -120,7 +120,7 @@
 
     <!-- Create / Edit dialog -->
     <q-dialog v-model="showDialog">
-      <q-card style="min-width: 420px; max-width: 560px">
+      <q-card style="width: 880px; max-width: 95vw">
         <q-card-section>
           <div class="text-h6">{{ editingGroupId ? 'Edit Group' : 'Create Group' }}</div>
         </q-card-section>
@@ -174,21 +174,13 @@
             </div>
             <div class="text-caption text-grey-7 q-mb-xs">
               Shown on the join page; each joiner imports them as their own
-              editable Sharing Policies cards.
+              editable Sharing Policies cards. Click a policy to edit it.
             </div>
-            <div v-for="(c, i) in form.suggestedPolicies" :key="i" class="row items-center no-wrap q-mb-xs">
-              <div class="col text-caption" style="min-width: 0;">{{ suggestedSentence(c) }}</div>
+            <div v-for="(c, i) in form.suggestedPolicies" :key="i" class="row items-center no-wrap q-mb-xs sug-row">
+              <div class="col text-caption cursor-pointer" style="min-width: 0;" @click="openSugEditor(i)">{{ suggestedSentence(c) }}</div>
               <q-btn flat dense round size="sm" icon="delete" color="negative" @click="form.suggestedPolicies.splice(i, 1)" />
             </div>
-            <div class="row q-col-gutter-xs items-center">
-              <q-select v-model="sugForm.outcome" :options="[{value:'allow',label:'Allow'},{value:'deny',label:'Deny'}]" emit-value map-options dense outlined label="Decision" class="col-3" />
-              <q-select v-model="sugForm.scope" :options="SCOPE_OPTIONS" emit-value map-options dense outlined label="Scope" class="col-5" />
-              <q-select v-model="sugForm.purpose" :options="PURPOSE_OPTIONS" emit-value map-options dense outlined label="Purpose" class="col-4" />
-              <q-select v-model="sugForm.signature" :options="SIGNATURE_OPTIONS" emit-value map-options dense outlined label="Min identity" class="col-4" />
-              <q-select v-model="sugForm.payment" :options="PAYMENT_OPTIONS" emit-value map-options dense outlined label="Payment" class="col-4" />
-              <div class="col-3"><q-toggle v-model="sugForm.filtered" dense label="Filtered" /></div>
-              <div class="col-1"><q-btn dense flat round icon="add" color="primary" @click="addSuggestedPolicy" /></div>
-            </div>
+            <q-btn outline dense size="sm" color="primary" icon="add" label="Add suggested policy" class="q-mt-xs" @click="openSugEditor(null)" />
           </div>
           <q-toggle
             v-model="form.publiclyListed"
@@ -244,6 +236,35 @@
             @click="saveGroup"
           />
         </q-card-actions>
+      </q-card>
+    </q-dialog>
+
+    <!-- Suggested-policy editor: the same selection matrix the Sharing
+         Policies tab and welcome page use, with the party fixed to
+         "Anyone in this group". Changes land in the form; nothing reaches
+         the registry until the admin clicks Save. -->
+    <q-dialog v-model="showSugEditor">
+      <q-card style="width: 900px; max-width: 95vw">
+        <q-card-section class="row items-center q-pb-none">
+          <div class="text-h6">{{ editingSugIndex === null ? 'New suggested policy' : 'Edit suggested policy' }}</div>
+          <q-space />
+          <q-btn flat round dense icon="close" v-close-popup />
+        </q-card-section>
+        <q-card-section>
+          <div class="text-caption text-grey-7 q-mb-md">
+            Pick one cell in each column — MAIA writes the rule below. The card is about
+            "Anyone in {{ form.name || 'this group' }}"; each joiner imports it as their own editable card.
+          </div>
+          <PolicyCardBuilder
+            :key="sugEditorKey"
+            mode="edit"
+            :existing="editingSugCard"
+            :show-try-it="false"
+            :party="{ type: 'group', groupId: editingGroupId || '', groupName: form.name }"
+            :save-label="editingSugIndex === null ? 'Add to suggested policies' : 'Update suggested policy'"
+            @save="onSugSave"
+          />
+        </q-card-section>
       </q-card>
     </q-dialog>
 
@@ -304,7 +325,8 @@
 import { ref, computed, watch, onMounted } from 'vue';
 import { useQuasar } from 'quasar';
 import QRCode from 'qrcode';
-import { sentenceFor, SCOPE_OPTIONS, PURPOSE_OPTIONS, SIGNATURE_OPTIONS, PAYMENT_OPTIONS, type PolicyCard } from '../utils/policyCards';
+import { sentenceFor, type PolicyCard } from '../utils/policyCards';
+import PolicyCardBuilder from './PolicyCardBuilder.vue';
 
 const $q = useQuasar();
 
@@ -355,9 +377,26 @@ const saving = ref(false);
 const editingGroupId = ref<string | null>(null);
 const form = ref<{ name: string; description: string; tags: string; postingPolicy: string; memberInvitesAllowed: boolean; joinMode: string; publiclyListed: boolean; suggestedPolicies: any[] }>({ name: '', description: '', tags: '', postingPolicy: '', memberInvitesAllowed: true, joinMode: 'invite-only', publiclyListed: false, suggestedPolicies: [] });
 
-// Mini-editor for one suggested policy (party is fixed to "anyone in
-// this group" — the natural subject of a group's suggestions).
-const sugForm = ref({ outcome: 'allow', scope: 'patient-summary', purpose: 'any', signature: 'group-member', payment: 'none', filtered: true });
+// Suggested-policy editor: the shared selection matrix (PolicyCardBuilder)
+// with the party fixed to "anyone in this group" — the natural subject of
+// a group's suggestions. null index = adding a new card.
+const showSugEditor = ref(false);
+const editingSugIndex = ref<number | null>(null);
+const sugEditorKey = ref(0); // remount so prefill re-reads `existing`
+const editingSugCard = computed<PolicyCard | null>(() =>
+  editingSugIndex.value === null
+    ? null
+    : ((form.value.suggestedPolicies[editingSugIndex.value] as PolicyCard) || null));
+const openSugEditor = (i: number | null) => {
+  editingSugIndex.value = i;
+  sugEditorKey.value++;
+  showSugEditor.value = true;
+};
+const onSugSave = (card: PolicyCard) => {
+  if (editingSugIndex.value === null) form.value.suggestedPolicies.push(card);
+  else form.value.suggestedPolicies[editingSugIndex.value] = card;
+  showSugEditor.value = false;
+};
 
 // ── Policy pack export/import (local JSON file) ─────────────────────
 // The portable unit is { postingPolicy, suggestedPolicies } — a group's
@@ -416,21 +455,6 @@ const importPolicies = async (e: Event) => {
   }
 };
 const suggestedSentence = (c: any) => sentenceFor(c as PolicyCard);
-const addSuggestedPolicy = () => {
-  form.value.suggestedPolicies.push({
-    outcome: sugForm.value.outcome,
-    enabled: true,
-    provenance: 'user',
-    elements: {
-      party: { type: 'group', groupId: editingGroupId.value || '', groupName: form.value.name },
-      purpose: sugForm.value.purpose,
-      scope: sugForm.value.scope,
-      filtered: sugForm.value.filtered,
-      signature: sugForm.value.signature,
-      payment: sugForm.value.payment
-    }
-  });
-};
 
 /** Join link of the group being edited (server-computed once saved). */
 const editingJoinLink = computed(() => {
@@ -799,5 +823,13 @@ onMounted(loadGroups);
 }
 .member-cell {
   padding-right: 8px;
+}
+.sug-row {
+  border-radius: 6px;
+  padding: 2px 6px;
+  margin-left: -6px;
+}
+.sug-row:hover {
+  background: #eef4f7;
 }
 </style>
