@@ -99,9 +99,9 @@
         <div class="text-caption text-grey-7 q-mb-xs">
           {{ section.label }}
         </div>
-        <div v-for="card in section.cards" :key="card.id" class="policy-card" :class="card.outcome === 'deny' ? 'policy-card--deny' : 'policy-card--allow'">
+        <div v-for="card in section.cards" :key="card.id" class="policy-card" :class="card.outcome === 'deny' ? 'policy-card--deny' : card.outcome === 'ask' ? 'policy-card--ask' : 'policy-card--allow'">
           <div class="row items-start no-wrap q-gutter-sm">
-            <q-badge :color="card.outcome === 'deny' ? 'negative' : 'green'" :label="card.outcome" class="q-mt-xs" />
+            <q-badge :color="card.outcome === 'deny' ? 'negative' : card.outcome === 'ask' ? 'orange' : 'green'" :label="card.outcome === 'ask' ? 'ask me' : card.outcome" class="q-mt-xs" />
             <div class="col text-body2" :class="{ 'text-grey-5': card.enabled === false }" style="min-width: 0">
               {{ sentenceFor(card) }}
               <span v-if="card.createdFrom === 'request'" class="text-caption text-grey-6">(from a request you answered)</span>
@@ -638,6 +638,7 @@ onMounted(loadAll);
 
   &--allow { border-left-color: #4caf50; }
   &--deny { border-left-color: #ef5350; }
+  &--ask { border-left-color: #f59e0b; }
 }
 </style>
 

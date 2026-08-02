@@ -23,7 +23,10 @@ const SCOPES = ['notification-only', 'meds-allergies', 'patient-summary', 'not-s
 const SIGNATURES = ['unverified', 'verified-email', 'group-member', 'npi', 'doximity', 'verified-by-me'];
 const PAYMENTS = ['none', 'spam-deposit', 'notification-deposit', 'ai-prepay', 'sharing-payment'];
 const PARTY_TYPES = ['anyone', 'group', 'peer'];
-const OUTCOMES = ['allow', 'deny'];
+// 'ask' is an EXPLICIT approval requirement: it carves an ask-me-first
+// exception out of any broader allow (evaluation: deny → ask → allow →
+// default ask). The default when nothing matches is still ask.
+const OUTCOMES = ['allow', 'deny', 'ask'];
 
 /** Validate + normalize a card sent by the client. Returns the clean
  *  card or null. Unknown enum values are rejected rather than coerced —
@@ -104,7 +107,9 @@ export const policySentence = (card) => {
   const sig = e.signature === 'unverified' ? '(no identity check)' : `with ${e.signature} identity or stronger`;
   const verb = card.outcome === 'allow'
     ? 'may receive'
-    : (card.denyMode === 'respond' ? 'is declined, with a reason, for' : 'is silently denied');
+    : card.outcome === 'ask'
+      ? 'needs my approval to receive'
+      : (card.denyMode === 'respond' ? 'is declined, with a reason, for' : 'is silently denied');
   const what = e.scope === 'ah-category' ? `my ${e.ahCategory || 'Apple Health'} data` : (SCOPE_LABELS[e.scope] || e.scope);
   const why = e.purpose === 'any' ? 'for any purpose' : `for ${e.purpose} use`;
   const filt = card.outcome === 'allow' ? (e.filtered !== false ? ', privacy-filtered' : ', unfiltered') : '';
@@ -146,11 +151,15 @@ const cardMatches = (card, req) => {
   return true;
 };
 
-/** Deterministic, Cedar-style: enabled DENY wins, then ALLOW, else ASK. */
+/** Deterministic, Cedar-style: enabled DENY wins, then an explicit ASK
+ *  ("ask me first" — beats allow so it can carve an approval requirement
+ *  out of a broader Respond card), then ALLOW, else default ASK. */
 export const evaluatePolicies = (cards, req) => {
   const active = (cards || []).filter((c) => c && c.enabled !== false);
   const deny = active.find((c) => c.outcome === 'deny' && cardMatches(c, req));
   if (deny) return { outcome: 'deny', decidedBy: deny };
+  const ask = active.find((c) => c.outcome === 'ask' && cardMatches(c, req));
+  if (ask) return { outcome: 'ask', decidedBy: ask };
   const allow = active.find((c) => c.outcome === 'allow' && cardMatches(c, req));
   if (allow) return { outcome: 'allow', decidedBy: allow };
   return { outcome: 'ask', decidedBy: null };
