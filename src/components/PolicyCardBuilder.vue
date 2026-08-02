@@ -27,6 +27,11 @@
         </button>
       </div>
     </div>
+    <div class="pcb-default-note">
+      A request that matches <b>no card</b> always notifies you for approval —
+      cards exist to pre-authorize, pre-refuse, or (Ask me first) pin that
+      approval step even where a broader Respond card would apply.
+    </div>
 
     <!-- ── Verify your own email ────────────────────────── -->
     <!-- Welcome onboarding only: choosing "Verified email" as the signature
@@ -185,6 +190,7 @@ const columns: Column[] = [
   { key: 'action', head: 'MAIA Action', options: [
     { v: 'deny-silent', label: 'Deny silently', sub: 'requester hears nothing', cls: 'act-deny' },
     { v: 'deny-respond', label: 'Deny with response', sub: 'a reason for the decline', cls: 'act-deny' },
+    { v: 'ask', label: 'Ask me first', sub: 'notify me for approval', cls: 'act-ask' },
     { v: 'respond', label: 'Respond', sub: 'fulfil the request', cls: 'act-respond' }
   ]}
 ];
@@ -202,7 +208,9 @@ if (props.existing) {
   sel.payment = e.payment;
   sel.action = props.existing.outcome === 'allow'
     ? 'respond'
-    : (props.existing.denyMode === 'respond' ? 'deny-respond' : 'deny-silent');
+    : props.existing.outcome === 'ask'
+      ? 'ask'
+      : (props.existing.denyMode === 'respond' ? 'deny-respond' : 'deny-silent');
   if (e.scope === 'ah-category' && e.ahCategory) ahCategory.value = e.ahCategory;
 }
 
@@ -212,7 +220,7 @@ const complete = computed(() => !!(sel.signature && sel.scope && sel.purpose && 
 // ── Build the card object from selections ──
 const builtCard = computed<PolicyCard>(() => ({
   id: props.existing?.id || 'preview',
-  outcome: sel.action === 'respond' ? 'allow' : 'deny',
+  outcome: sel.action === 'respond' ? 'allow' : sel.action === 'ask' ? 'ask' : 'deny',
   ...(sel.action === 'deny-respond' ? { denyMode: 'respond' as const } : (sel.action === 'deny-silent' ? { denyMode: 'silent' as const } : {})),
   enabled: true,
   provenance: props.existing?.provenance || 'user',
@@ -228,10 +236,11 @@ const builtCard = computed<PolicyCard>(() => ({
 }));
 
 const sigLabel = computed(() => SIGNATURE_OPTIONS.find((o) => o.value === sel.signature)?.label || sel.signature);
-const cardClass = computed(() => sel.action === 'respond' ? 'is-respond' : 'is-deny');
-const badgeClass = computed(() => sel.action === 'respond' ? 'respond' : 'deny');
+const cardClass = computed(() => sel.action === 'respond' ? 'is-respond' : sel.action === 'ask' ? 'is-ask' : 'is-deny');
+const badgeClass = computed(() => sel.action === 'respond' ? 'respond' : sel.action === 'ask' ? 'ask' : 'deny');
 const badgeText = computed(() =>
   sel.action === 'respond' ? 'Respond'
+  : sel.action === 'ask' ? 'Ask me first'
   : sel.action === 'deny-respond' ? 'Deny · with reason'
   : 'Deny · silent');
 const sentenceHtml = computed(() => sentenceFor(builtCard.value)
@@ -268,7 +277,14 @@ const runTry = () => {
   const sigLbl = SIGNATURE_OPTIONS.find((o) => o.value === req.signature)?.label || req.signature;
   const purLbl = PURPOSE_OPTIONS.find((o) => o.value === req.purpose)?.label || req.purpose;
 
-  if (decision.outcome === 'ask') {
+  if (decision.outcome === 'ask' && decision.decidedBy) {
+    verdict.value = {
+      cls: 'ask', head: '◆ MAIA asks you — your rule',
+      body: 'This request matches your <b>Ask me first</b> card, so MAIA notifies you and waits for your decision before anything is shared.',
+      speaker: `A requester presenting <b>${sigLbl}</b> wants <b>${asked}</b> for <b>${purLbl}</b>. Share it?`,
+      speakerFrom: 'Notification to you'
+    };
+  } else if (decision.outcome === 'ask') {
     const reasons: string[] = [];
     if (SIG_RANK[req.signature] < SIG_RANK[sel.signature!]) reasons.push(`identity too weak (needs ${sigLabel.value}+)`);
     if (sel.scope !== req.scope) reasons.push('different scope than the card');
@@ -314,6 +330,7 @@ defineExpose({ complete, builtCard });
   --pcb-accent-soft: #e2f1f4;
   --pcb-respond: #15803d;
   --pcb-deny: #b91c1c;
+  --pcb-ask: #b45309;
   --pcb-line: #dde5eb;
   --pcb-chip: #f1f5f8;
   --pcb-ink: #17222e;
@@ -347,10 +364,16 @@ defineExpose({ complete, builtCard });
 .pcb-cell.is-sel::after { content: "✓"; position: absolute; right: 9px; top: 12px; font-size: 11px; opacity: .9; }
 .pcb-cell.act-respond.is-sel { background: var(--pcb-respond); }
 .pcb-cell.act-deny.is-sel { background: var(--pcb-deny); }
+.pcb-cell.act-ask.is-sel { background: var(--pcb-ask); }
 .pcb-sub { display: block; font-size: 11px; color: var(--pcb-muted); margin-top: 2px; }
 .pcb-cell.is-sel .pcb-sub { color: rgba(255,255,255,.85); }
 .pcb-ah { display: block; margin-top: 6px; }
 .pcb-ah select { width: 100%; font: inherit; font-size: 12px; padding: 4px 5px; border-radius: 6px; border: 1px solid #c4d0da; background: #fff; color: var(--pcb-ink); }
+
+.pcb-default-note {
+  margin-top: 8px; font-size: 12.5px; color: var(--pcb-muted); line-height: 1.45;
+}
+.pcb-default-note b { color: #46586a; }
 
 /* Verify-email box (welcome onboarding) */
 .pcb-verify { margin-top: 16px; background: #fff; border: 1px solid var(--pcb-line); border-radius: 10px; padding: 14px 16px; }
@@ -369,12 +392,14 @@ defineExpose({ complete, builtCard });
 }
 .pcb-card.is-respond { border-left-color: var(--pcb-respond); }
 .pcb-card.is-deny { border-left-color: var(--pcb-deny); }
+.pcb-card.is-ask { border-left-color: var(--pcb-ask); }
 .pcb-badge {
   display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 700;
   letter-spacing: .04em; text-transform: uppercase; padding: 3px 9px; border-radius: 999px; margin-bottom: 9px;
 }
 .pcb-badge.respond { background: #e7f4ec; color: var(--pcb-respond); }
 .pcb-badge.deny { background: #fbe9e9; color: var(--pcb-deny); }
+.pcb-badge.ask { background: #fbefdd; color: var(--pcb-ask); }
 .pcb-sentence { font-size: 15.5px; line-height: 1.5; margin: 0 0 12px; }
 :deep(.pcb-sentence b) { color: #0b5566; font-weight: 650; }
 .pcb-meta { display: flex; flex-wrap: wrap; gap: 6px; font-family: ui-monospace, Menlo, monospace; font-size: 11px; padding-top: 11px; border-top: 1px solid var(--pcb-line); }

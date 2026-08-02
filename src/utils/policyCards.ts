@@ -30,9 +30,12 @@ export interface PolicyElements {
 
 export interface PolicyCard {
   id: string;
-  outcome: 'allow' | 'deny';
+  /** 'ask' is an EXPLICIT approval requirement: it carves an ask-me-first
+   *  exception out of any broader allow (evaluation: deny → ask → allow →
+   *  default ask). The default when nothing matches is still ask. */
+  outcome: 'allow' | 'deny' | 'ask';
   /** For a DENY card: 'silent' drops the request (default), 'respond'
-   *  sends the requester a reason for the decline. Ignored for allow. */
+   *  sends the requester a reason for the decline. Ignored otherwise. */
   denyMode?: 'silent' | 'respond';
   enabled: boolean;
   provenance: string; // 'user' | 'group:<groupId>'
@@ -134,7 +137,9 @@ export const sentenceFor = (card: PolicyCard): string => {
     : `with ${SIGNATURE_OPTIONS.find((o) => o.value === e.signature)?.label} identity or stronger`;
   const verb = card.outcome === 'allow'
     ? 'may receive'
-    : (card.denyMode === 'respond' ? 'is declined, with a reason, for' : 'is silently denied');
+    : card.outcome === 'ask'
+      ? 'needs my approval to receive'
+      : (card.denyMode === 'respond' ? 'is declined, with a reason, for' : 'is silently denied');
   const what = e.scope === 'notification-only' ? 'a notification (no record data)' : scopePhrase(e);
   const why = e.purpose === 'any' ? 'for any purpose' : `for ${PURPOSE_OPTIONS.find((o) => o.value === e.purpose)?.label} use`;
   const filt = card.outcome === 'allow' ? (e.filtered ? ', privacy-filtered' : ', unfiltered') : '';
@@ -189,12 +194,16 @@ export interface PolicyDecision {
   filtered: boolean;
 }
 
-/** Deterministic evaluation, Cedar-style: forbid wins, then permit,
- *  else ASK (the default). Disabled cards never participate. */
+/** Deterministic evaluation, Cedar-style: forbid wins, then an explicit
+ *  ASK ("ask me first" — beats permit so it can carve an approval
+ *  requirement out of a broader Respond card), then permit, else ASK
+ *  (the default). Disabled cards never participate. */
 export const evaluate = (cards: PolicyCard[], req: PolicyRequest): PolicyDecision => {
   const active = cards.filter((c) => c.enabled !== false);
   const deny = active.find((c) => c.outcome === 'deny' && matches(c, req));
   if (deny) return { outcome: 'deny', decidedBy: deny, filtered: true };
+  const ask = active.find((c) => c.outcome === 'ask' && matches(c, req));
+  if (ask) return { outcome: 'ask', decidedBy: ask, filtered: true };
   const allow = active.find((c) => c.outcome === 'allow' && matches(c, req));
   if (allow) return { outcome: 'allow', decidedBy: allow, filtered: allow.elements.filtered };
   return { outcome: 'ask', decidedBy: null, filtered: true };
