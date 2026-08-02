@@ -112,6 +112,16 @@ export const policySentence = (card) => {
   return `${who} ${sig} ${verb} ${what} ${why}${filt}${pay}.`;
 };
 
+// Scope containment for card matching (kept in sync with utils/policyCards.ts).
+const SCOPE_COVERS = {
+  'everything': ['everything', 'not-sensitive', 'patient-summary', 'meds-allergies'],
+  'not-sensitive': ['not-sensitive', 'meds-allergies'],
+  'patient-summary': ['patient-summary', 'meds-allergies'],
+  'meds-allergies': ['meds-allergies'],
+  'notification-only': ['notification-only'],
+  'ah-category': ['ah-category']
+};
+
 const cardMatches = (card, req) => {
   const e = card.elements;
   // A card imported from a group (provenance 'group:<id>') belongs to THAT
@@ -123,7 +133,13 @@ const cardMatches = (card, req) => {
   if (e.party.type === 'group' && (req.party.type !== 'group' || req.party.groupId !== cardGroupId)) return false;
   if (e.party.type === 'peer' && req.party.pairwiseId !== e.party.pairwiseId) return false;
   if (e.purpose !== 'any' && e.purpose !== req.purpose) return false;
-  if (e.scope !== req.scope) return false;
+  // Scope subsumption (Cedar-style, downward; mirrors utils/policyCards.ts):
+  // a card covers a request asking for the SAME scope or a CONTAINED one.
+  // "everything" ⊇ {not-sensitive, patient-summary, meds-allergies};
+  // not-sensitive and patient-summary each cover meds-allergies but NOT each
+  // other (the PS may contain sensitive-category content). notification-only
+  // and ah-category stay exact-match. Applies to allow AND deny alike.
+  if (!(SCOPE_COVERS[e.scope] || [e.scope]).includes(req.scope)) return false;
   if (e.scope === 'ah-category' && e.ahCategory && req.ahCategory && e.ahCategory !== req.ahCategory) return false;
   if ((SIGNATURE_RANK[req.signature] ?? 0) < (SIGNATURE_RANK[e.signature] ?? 0)) return false;
   if (e.payment !== 'none' && req.payment !== e.payment) return false;
