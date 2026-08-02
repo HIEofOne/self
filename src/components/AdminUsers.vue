@@ -14,15 +14,27 @@
           User Administration
           <span class="text-caption text-grey-6 q-ml-sm">v{{ appVersion }}</span>
         </div>
-        <q-btn
-          flat
-          dense
-          color="negative"
-          label="Sign Out"
-          icon="logout"
-          :loading="signingOut"
-          @click="signOutAdmin"
-        />
+        <div class="row no-wrap items-center q-gutter-sm">
+          <q-btn
+            outline
+            dense
+            color="primary"
+            label="Broadcast email"
+            icon="campaign"
+            @click="openBroadcast"
+          >
+            <q-tooltip>Email an announcement to all account holders</q-tooltip>
+          </q-btn>
+          <q-btn
+            flat
+            dense
+            color="negative"
+            label="Sign Out"
+            icon="logout"
+            :loading="signingOut"
+            @click="signOutAdmin"
+          />
+        </div>
       </div>
       <!-- Customer balance collapsed to a single line just below the header -->
       <div class="text-caption text-grey-7 q-mb-md">
@@ -180,6 +192,44 @@
       class="q-mt-md"
       @click="loadUsers"
     />
+
+    <!-- Broadcast announcement composer. Recipients are enumerated
+         server-side at send time; the counts here (from the loaded user
+         table) are a preview. Send test first, then the real thing. -->
+    <q-dialog v-model="showBroadcast">
+      <q-card style="width: 760px; max-width: 95vw">
+        <q-card-section class="row items-center q-pb-none">
+          <div class="text-h6">Broadcast email to account holders</div>
+          <q-space />
+          <q-btn flat round dense icon="close" v-close-popup :disable="broadcastSending" />
+        </q-card-section>
+        <q-card-section class="q-gutter-y-md">
+          <div class="text-caption text-grey-7">
+            Will go to {{ broadcastRecipientCount }} address{{ broadcastRecipientCount === 1 ? '' : 'es' }}
+            ({{ bcOnlyVerified ? 'verified only' : 'any email on file' }}, deduplicated),
+            each as an individual email — recipients never see each other.
+          </div>
+          <q-input v-model="bcSubject" dense outlined label="Subject" maxlength="200" :disable="broadcastSending" />
+          <q-input v-model="bcBody" outlined type="textarea" label="Message (plain text)" autogrow
+                   input-style="min-height: 220px" maxlength="20000" :disable="broadcastSending" />
+          <q-toggle v-model="bcOnlyVerified" dense label="Verified emails only" :disable="broadcastSending" />
+          <div class="row items-center q-gutter-sm">
+            <q-input v-model="bcTestTo" dense outlined label="Test address" type="email"
+                     style="flex: 1; min-width: 220px" :disable="broadcastSending" />
+            <q-btn outline dense color="primary" label="Send test"
+                   :disable="!bcTestTo.trim() || !bcSubject.trim() || !bcBody.trim() || broadcastSending"
+                   :loading="broadcastTesting" @click="sendBroadcast(true)" />
+          </div>
+        </q-card-section>
+        <q-card-actions align="right">
+          <q-btn flat label="Cancel" v-close-popup :disable="broadcastSending" />
+          <q-btn unelevated color="primary" icon="campaign"
+                 :label="`Send to ${broadcastRecipientCount} recipient${broadcastRecipientCount === 1 ? '' : 's'}`"
+                 :disable="!bcSubject.trim() || !bcBody.trim() || broadcastRecipientCount === 0"
+                 :loading="broadcastSending" @click="confirmBroadcast" />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
   </q-page>
 </template>
 
@@ -230,6 +280,99 @@ const usageList = ref<UsageEntry[]>([]);
 const deletingUsers = ref(new Set<string>());
 const recoveringUsers = ref(new Set<string>());
 const signingOut = ref(false);
+
+// ── Broadcast announcement email ─────────────────────────────────────
+const showBroadcast = ref(false);
+const broadcastSending = ref(false);
+const broadcastTesting = ref(false);
+const bcOnlyVerified = ref(true);
+const bcTestTo = ref('');
+const bcSubject = ref('');
+const bcBody = ref('');
+
+// Editable draft for the groups-redesign announcement; the admin rewrites
+// freely — this just saves starting from a blank page.
+const BC_DRAFT_SUBJECT = 'MAIA has changed: patient groups, sharing policies, and verified email';
+const BC_DRAFT_BODY = [
+  'Hello,',
+  '',
+  'You are receiving this because you created a MAIA account at maia.agropper.xyz.',
+  '',
+  'MAIA has been substantially redesigned around patient groups:',
+  '',
+  '- You can join a patient group (such as the Trustee group) and message other members.',
+  '- Requests for your health information are answered by YOUR sharing policies — plain-language cards you author. Only your privacy-filtered Patient Summary ever leaves automatically.',
+  '- By policy, Trustee group membership and a VERIFIED email address are now required for group features and notifications.',
+  '',
+  'One-time step: open https://maia.agropper.xyz and reload the page once (Cmd-Shift-R on Mac, Ctrl-Shift-R on Windows) to get the current version. From now on, MAIA will tell you in the app whenever a new version is available.',
+  '',
+  'If you no longer want your MAIA account, you can delete it (including its cloud data) from the Workbook — or simply ignore this email.',
+  '',
+  '— Adrian Gropper, MD'
+].join('\n');
+
+const broadcastRecipientCount = computed(() => {
+  const seen = new Set<string>();
+  for (const u of users.value) {
+    const email = (u.email || '').trim().toLowerCase();
+    if (!email) continue;
+    if (bcOnlyVerified.value && !u.emailVerified) continue;
+    seen.add(email);
+  }
+  return seen.size;
+});
+
+const openBroadcast = () => {
+  if (!bcSubject.value.trim()) bcSubject.value = BC_DRAFT_SUBJECT;
+  if (!bcBody.value.trim()) bcBody.value = BC_DRAFT_BODY;
+  showBroadcast.value = true;
+};
+
+const sendBroadcast = async (test: boolean) => {
+  if (test) broadcastTesting.value = true; else broadcastSending.value = true;
+  try {
+    const res = await fetch('/api/admin/broadcast-email', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        subject: bcSubject.value.trim(),
+        body: bcBody.value.trim(),
+        onlyVerified: bcOnlyVerified.value,
+        ...(test ? { testTo: bcTestTo.value.trim() } : {})
+      })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    if (test) {
+      $q.notify({ type: 'positive', message: `Test sent to ${bcTestTo.value.trim()}.` });
+    } else {
+      const failed = Array.isArray(data.failed) ? data.failed.length : 0;
+      $q.notify({
+        type: failed ? 'warning' : 'positive',
+        timeout: 8000,
+        message: `Broadcast sent to ${data.sent} of ${data.recipients} recipients${failed ? ` — ${failed} failed (see server logs)` : '.'}`
+      });
+      showBroadcast.value = false;
+    }
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Broadcast failed' });
+  } finally {
+    broadcastSending.value = false;
+    broadcastTesting.value = false;
+  }
+};
+
+const confirmBroadcast = () => {
+  const n = broadcastRecipientCount.value;
+  $q.dialog({
+    title: 'Send broadcast?',
+    message: `This emails ${n} account holder${n === 1 ? '' : 's'} (${bcOnlyVerified.value ? 'verified addresses only' : 'any email on file'}). This cannot be recalled.`,
+    ok: { label: `Send to ${n}`, color: 'primary' },
+    cancel: { label: 'Cancel', flat: true },
+    persistent: true
+  }).onOk(() => { void sendBroadcast(false); });
+};
 const balanceLoading = ref(false);
 const balanceError = ref('');
 const balanceHint = ref('');
