@@ -8860,6 +8860,85 @@ app.get('/api/admin/users', async (req, res) => {
   }
 });
 
+// Admin: broadcast an announcement email to account holders (e.g. the
+// groups-redesign notice). The admin composes in the UI; recipients are
+// enumerated server-side from maia_users at send time (deduped by
+// address, optionally verified-only). testTo sends a single preview
+// instead. Individual sends — never CC/BCC — so addresses stay private.
+app.post('/api/admin/broadcast-email', async (req, res) => {
+  try {
+    const isLocalhost = req.hostname === 'localhost' || req.hostname === '127.0.0.1';
+    if (!isLocalhost) {
+      const sessionUserId = req.session?.userId;
+      const adminUsername = (process.env.ADMIN_USERNAME || 'admin');
+      if (!sessionUserId) {
+        return res.status(401).json({ success: false, error: 'Authentication required' });
+      }
+      if (sessionUserId !== adminUsername) {
+        return res.status(403).json({ success: false, error: 'Access denied. Admin privileges required.' });
+      }
+    }
+    const subject = String(req.body?.subject || '').trim().slice(0, 200);
+    const body = String(req.body?.body || '').trim().slice(0, 20000);
+    const onlyVerified = req.body?.onlyVerified !== false;
+    const testTo = String(req.body?.testTo || '').trim();
+    if (!subject || !body) {
+      return res.status(400).json({ success: false, error: 'subject and body are required' });
+    }
+    const resend = await initResend();
+    if (!resend) {
+      return res.status(503).json({ success: false, error: 'Email is not configured (RESEND_API_KEY missing)' });
+    }
+    const from = process.env.RESEND_FROM_EMAIL || 'noreply@maia.healthurl.com';
+
+    if (testTo) {
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(testTo)) {
+        return res.status(400).json({ success: false, error: 'testTo is not a valid email address' });
+      }
+      await resend.emails.send({ from, to: testTo, subject: `[TEST] ${subject}`, text: body });
+      return res.json({ success: true, test: true, sent: 1 });
+    }
+
+    const allUsers = await cloudant.getAllDocuments('maia_users');
+    const seen = new Set();
+    const recipients = [];
+    for (const u of allUsers || []) {
+      if (!u?.userId || String(u._id || '').startsWith('_design')) continue;
+      const email = String(u.email || '').trim().toLowerCase();
+      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) continue;
+      if (onlyVerified && !u.emailVerified) continue;
+      if (seen.has(email)) continue;
+      seen.add(email);
+      recipients.push(email);
+    }
+    if (recipients.length === 0) {
+      return res.status(409).json({ success: false, error: 'No matching recipients' });
+    }
+
+    let sent = 0;
+    const failed = [];
+    for (const to of recipients) {
+      try {
+        await resend.emails.send({ from, to, subject, text: body });
+        sent++;
+      } catch (e) {
+        failed.push(to);
+        console.warn(`[broadcast] send failed for ${to}:`, e?.message || e);
+      }
+    }
+    auditLog.logEvent({
+      type: 'admin_broadcast_email',
+      userId: req.session?.userId || 'admin-local',
+      ip: req.ip,
+      details: { subject, recipients: recipients.length, sent, failed: failed.length, onlyVerified }
+    });
+    res.json({ success: true, recipients: recipients.length, sent, failed });
+  } catch (error) {
+    console.error('[broadcast] failed:', error);
+    res.status(500).json({ success: false, error: 'Broadcast failed' });
+  }
+});
+
 // Admin: Recover user provisioning - check DO API and update user document
 app.post('/api/admin/users/:userId/recover', async (req, res) => {
   try {
