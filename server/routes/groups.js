@@ -668,6 +668,38 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     }
   });
 
+  // POST /api/groups/:groupId/outside-request/:reqId/responded — count an
+  // autonomous decision a member's AS made at INGEST time (the cross-host
+  // twin of the delivery-time counts above; also the same-host fallback
+  // when delivery could not decide). Counts only — no identities, no
+  // content; knowing the unguessable reqId is the capability, exactly as
+  // for the status GET. Conflict-tolerant like the decision endpoint.
+  app.post('/api/groups/:groupId/outside-request/:reqId/responded', async (req, res) => {
+    try {
+      const outcome = req.body?.outcome === 'declined' ? 'declined' : 'accepted';
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const tally = await cloudant.getDocument(RELAY_DB, `outreq_${req.params.reqId}`);
+          if (!tally || tally.type !== 'outside_request_tally' || tally.groupId !== req.params.groupId) {
+            return res.status(404).json({ success: false, error: 'Unknown request' });
+          }
+          tally.responded = (tally.responded || 0) + 1;
+          if (outcome === 'accepted') tally.accepted = (tally.accepted || 0) + 1;
+          else tally.declined = (tally.declined || 0) + 1;
+          await cloudant.saveDocument(RELAY_DB, tally);
+          return res.json({ success: true });
+        } catch (e) {
+          if (e?.statusCode === 409 && attempt < 2) continue;
+          throw e;
+        }
+      }
+      res.status(409).json({ success: false, error: 'Conflict recording response' });
+    } catch (error) {
+      console.error('[groups] outside-request responded failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to record response' });
+    }
+  });
+
   // POST /api/groups/outside-request-proxy — same-origin helper for the
   // welcome page: forwards an outside request to a FEATURED (remote)
   // group's registry, since the browser can't POST cross-origin (CORS
@@ -3294,24 +3326,41 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
           payment: 'none'
         });
       }
+      // The outside requester's stated (registry-validated when signature is
+      // 'verified-email') reply address, from the sealed envelope.
+      const outsiderEmail = r.fromOutsider
+        && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(r.payload?.requester?.email || '').trim())
+        ? String(r.payload.requester.email).trim() : '';
+      let ingestDeclined = false; // deny-respond decided HERE (stored, emailed)
+      let requesterNotice = null; // { to, artifact, artifactLabel } — emailed after the doc stores
+      let memberReply = null; // { artifact, artifactLabel } — sealed relay reply to a member requester
+
       if (decision && decision.outcome === 'deny') {
-        auditLog.logEvent({
-          type: 'as_request_policy_denied',
-          userId: userDoc.userId,
-          details: { groupId: membership.groupId, fromPairwiseId: r.fromPairwiseId, resource: r.resource, policyId: decision.decidedBy?.id || null }
-        });
-        continue; // silent drop — the Cedar-style forbid
+        // An outsider deny-RESPOND card answers the requester right here —
+        // this ingest may be the only evaluation the request ever gets when
+        // the member's AS lives on a different host than the registry.
+        if (r.fromOutsider && decision.decidedBy?.denyMode === 'respond' && outsiderEmail) {
+          ingestDeclined = true;
+          requesterNotice = { to: outsiderEmail, artifact: '', artifactLabel: '' };
+        } else {
+          auditLog.logEvent({
+            type: 'as_request_policy_denied',
+            userId: userDoc.userId,
+            details: { groupId: membership.groupId, fromPairwiseId: r.fromPairwiseId, resource: r.resource, policyId: decision.decidedBy?.id || null }
+          });
+          continue; // silent drop — the Cedar-style forbid
+        }
       }
 
-      // Autonomous fulfilment (member-to-member): an ALLOW card on a data
-      // scope means this member's MAIA answers the requesting member NOW —
-      // the privacy-filtered artifact goes out by email, so the requester
-      // hears back whether either party is logged in or not. Only the
+      // Autonomous fulfilment: an ALLOW card on a data scope means this
+      // member's MAIA answers the requester NOW — outside requesters get the
+      // privacy-filtered artifact by email; member requesters get it by email
+      // (when their account lives on this host) AND as a sealed relay reply
+      // (which reaches them on ANY host, in their message thread). Only the
       // privacy-filtered artifacts ever leave; if none exists yet (summary
       // never verified) the request escalates to the human instead of
       // accepting with an empty response.
-      let memberAutoEmail = null; // { to, artifact, artifactLabel } — sent after the doc stores
-      if (decision && decision.outcome === 'allow' && !r.fromOutsider
+      if (decision && decision.outcome === 'allow'
           && r.resource && r.resource !== 'notification-only' && POLICY_SCOPES.includes(r.resource)) {
         const mapping = userDoc.privacyFilter?.pseudonymMapping || [];
         let artifact = '';
@@ -3325,7 +3374,13 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         }
         if (!artifact) {
           decision = { outcome: 'ask', decidedBy: null };
+        } else if (r.fromOutsider) {
+          if (outsiderEmail) requesterNotice = { to: outsiderEmail, artifact, artifactLabel };
+          // No usable reply address → escalate to the human rather than
+          // accept with a response nobody can receive.
+          else decision = { outcome: 'ask', decidedBy: null };
         } else {
+          memberReply = { artifact, artifactLabel };
           try {
             const rq = await cloudant.findDocuments(USERS_DB, {
               selector: { groupMemberships: { $elemMatch: { groupId: { $eq: membership.groupId }, pairwiseId: { $eq: r.fromPairwiseId } } } },
@@ -3333,9 +3388,9 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
             });
             const requester = rq?.docs?.[0];
             if (requester?.email && requester.emailVerified) {
-              memberAutoEmail = { to: requester.email, artifact, artifactLabel };
+              requesterNotice = { to: requester.email, artifact, artifactLabel };
             }
-          } catch { /* no email resolved — the accepted status still shows in-app */ }
+          } catch { /* cross-host requester — the relay reply still reaches them */ }
         }
       }
 
@@ -3366,7 +3421,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         receivedAt: new Date(now).toISOString(),
         status: r.autoDecision
           ? r.autoDecision.outcome // 'accepted' | 'declined' — decided at the registry
-          : (decision.outcome === 'allow' ? 'accepted' : 'pending'),
+          : (ingestDeclined ? 'declined' : (decision.outcome === 'allow' ? 'accepted' : 'pending')),
         ...(r.autoDecision ? {
           decidedBySentence: r.autoDecision.sentence || null,
           decidedAt: new Date(now).toISOString(),
@@ -3394,29 +3449,69 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         console.warn('[as-requests] store failed:', e?.message || e);
         continue;
       }
-      if (memberAutoEmail && typeof sendEmail === 'function') {
+      if (requesterNotice && typeof sendEmail === 'function') {
         try {
           const appUrl = (process.env.PUBLIC_APP_URL || '').replace(/\/$/, '');
-          await sendEmail(
-            memberAutoEmail.to,
-            `A "${membership.groupName}" member's MAIA responded to your request`,
-            [
-              // Outcome + artifact only — which policy card decided is the
-              // responding member's own business, never the requester's.
-              `Your request to ${membership.alias || 'a member'} in "${membership.groupName}" matched their sharing policies, so their MAIA responded autonomously.`,
-              '',
-              `--- ${memberAutoEmail.artifactLabel} ---`,
-              memberAutoEmail.artifact,
-              ...(appUrl ? ['', appUrl] : [])
-            ].join('\n')
-          );
+          // Outcome + artifact only — which policy card decided is the
+          // responding member's own business, never the requester's.
+          if (doc.status === 'declined') {
+            await sendEmail(
+              requesterNotice.to,
+              `Your request to a "${membership.groupName}" member was declined`,
+              `A member of the "${membership.groupName}" group has a sharing policy that declines your request, so their MAIA responded autonomously.`
+            );
+          } else {
+            await sendEmail(
+              requesterNotice.to,
+              `A "${membership.groupName}" member's MAIA responded to your request`,
+              [
+                r.fromOutsider
+                  ? `A member of the "${membership.groupName}" group has a sharing policy that allows your request, so their MAIA responded autonomously.`
+                  : `Your request to ${membership.alias || 'a member'} in "${membership.groupName}" matched their sharing policies, so their MAIA responded autonomously.`,
+                '',
+                `--- ${requesterNotice.artifactLabel} ---`,
+                requesterNotice.artifact,
+                ...(appUrl ? ['', appUrl] : [])
+              ].join('\n')
+            );
+          }
           auditLog.logEvent({
             type: 'as_request_responded',
             userId: userDoc.userId,
-            details: { requestId: doc._id, groupId: membership.groupId, outcome: 'accepted', autonomous: true, decidedByPolicyId: decision?.decidedBy?.id || null }
+            details: { requestId: doc._id, groupId: membership.groupId, outcome: doc.status, autonomous: true, decidedByPolicyId: decision?.decidedBy?.id || null }
           });
         } catch (e) {
-          console.warn('[as-requests] autonomous member respond failed:', e?.message || e);
+          console.warn('[as-requests] autonomous respond email failed:', e?.message || e);
+        }
+      }
+      // In-app reply to a member requester: sealed to their pairwise key via
+      // the registry relay, so it reaches them whichever host their MAIA
+      // lives on. The generic relay nudge stays on unless we already emailed
+      // them directly above.
+      if (memberReply) {
+        try {
+          await deliverSealed(membership, r.fromPairwiseId, [
+            'My MAIA responded to your request automatically:',
+            '',
+            `--- ${memberReply.artifactLabel} ---`,
+            memberReply.artifact
+          ].join('\n'), { suppressNotify: !!requesterNotice });
+        } catch (e) {
+          console.warn('[as-requests] autonomous relay reply failed:', e?.message || e);
+        }
+      }
+      // Count this ingest-side decision in the registry's public tally (the
+      // registry may be another host — HTTP either way; counts only). The
+      // delivery-time path already counted anything it decided itself
+      // (r.autoDecision), so this only fires for decisions made HERE.
+      if (r.fromOutsider && !r.autoDecision && r.nonce && doc.status !== 'pending') {
+        try {
+          await fetch(
+            `${registryBase(membership)}/api/groups/${encodeURIComponent(membership.groupId)}/outside-request/${encodeURIComponent(r.nonce)}/responded`,
+            { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ outcome: doc.status }) }
+          );
+        } catch (e) {
+          console.warn('[as-requests] tally bump failed:', e?.message || e);
         }
       }
     }
