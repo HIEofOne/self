@@ -114,7 +114,13 @@ export const policySentence = (card) => {
 
 const cardMatches = (card, req) => {
   const e = card.elements;
-  if (e.party.type === 'group' && (req.party.type !== 'group' || req.party.groupId !== e.party.groupId)) return false;
+  // A card imported from a group (provenance 'group:<id>') belongs to THAT
+  // group, whatever groupId its elements embed — heals cards imported with a
+  // stale id from a recreated group's policy file (trustee-0zujj2 bug).
+  const cardGroupId = (typeof card.provenance === 'string' && card.provenance.startsWith('group:'))
+    ? card.provenance.slice(6)
+    : e.party.groupId;
+  if (e.party.type === 'group' && (req.party.type !== 'group' || req.party.groupId !== cardGroupId)) return false;
   if (e.party.type === 'peer' && req.party.pairwiseId !== e.party.pairwiseId) return false;
   if (e.purpose !== 'any' && e.purpose !== req.purpose) return false;
   if (e.scope !== req.scope) return false;

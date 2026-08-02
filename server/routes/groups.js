@@ -329,7 +329,14 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       }
       if (req.body?.suggestedPolicies !== undefined) {
         const raw = Array.isArray(req.body.suggestedPolicies) ? req.body.suggestedPolicies : [];
-        const clean = raw.map((c) => normalizeCard(c)).filter(Boolean).slice(0, 20);
+        // A group's own suggested cards always refer to THIS group. Stamp the
+        // authoritative id/name before normalizing — imported policy files and
+        // creation-time authoring otherwise carry a stale or empty groupId
+        // (the trustee-0zujj2 vs trustee-mchluz bug: cards that never match).
+        const stamped = raw.map((c) => (c?.elements?.party?.type === 'group'
+          ? { ...c, elements: { ...c.elements, party: { ...c.elements.party, groupId: doc._id, groupName: doc.name } } }
+          : c));
+        const clean = stamped.map((c) => normalizeCard(c)).filter(Boolean).slice(0, 20);
         if (clean.length !== raw.length) {
           return res.status(400).json({ success: false, error: 'One or more suggested policies are invalid' });
         }
@@ -1798,7 +1805,12 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       outcome: c.outcome,
       enabled: c.enabled !== false,
       provenance: prov,
-      elements: c.elements,
+      // The card belongs to the group being JOINED — stamp its id so a stale
+      // embedded groupId (from a recreated group / imported policy file) can
+      // never make the card unmatchable.
+      elements: (c.elements?.party?.type === 'group')
+        ? { ...c.elements, party: { ...c.elements.party, groupId } }
+        : c.elements,
       createdFrom: 'manual',
       createdAt: now,
       updatedAt: now
