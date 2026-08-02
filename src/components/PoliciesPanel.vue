@@ -25,15 +25,31 @@
       silently, and anything with no matching card comes to you as a question.
     </q-banner>
 
-    <!-- Try it: examples teach, rules don't -->
+    <!-- Try it: examples teach, rules don't. Same table design as the
+         Welcome page and the New Policy editor — pick one cell per column.
+         The requesting party is DERIVED from Signature Strength (group-member
+         or verified-by-me ⇒ a member of your group), so no separate dropdown. -->
     <q-expansion-item icon="science" label="Try it — test a hypothetical request" class="q-mb-md" header-class="text-primary">
       <div class="q-pa-sm" style="border: 1px solid #e0e0e0; border-radius: 8px">
-        <div class="row q-col-gutter-sm">
-          <q-select v-model="sim.partyKind" :options="simPartyOptions" emit-value map-options dense outlined label="Requesting party" class="col-6" />
-          <q-select v-model="sim.signature" :options="SIGNATURE_OPTIONS" emit-value map-options dense outlined label="Identity presented" class="col-6" />
-          <q-select v-model="sim.purpose" :options="PURPOSE_OPTIONS" emit-value map-options dense outlined label="Purpose" class="col-6" />
-          <q-select v-model="sim.scope" :options="SCOPE_OPTIONS" emit-value map-options dense outlined label="Scope requested" class="col-6" />
-          <q-select v-model="sim.payment" :options="PAYMENT_OPTIONS" emit-value map-options dense outlined label="Payment offered" class="col-6" />
+        <div class="pp-matrix">
+          <div v-for="col in simColumns" :key="col.key" class="pp-col">
+            <div class="pp-col-head">{{ col.head }}</div>
+            <button
+              v-for="opt in col.options"
+              :key="opt.value"
+              type="button"
+              class="pp-cell"
+              :class="{ 'is-sel': simSel[col.key] === opt.value }"
+              :aria-pressed="simSel[col.key] === opt.value"
+              @click="pickSim(col.key, opt.value)"
+            >
+              {{ opt.label }}
+            </button>
+          </div>
+        </div>
+        <div v-if="memberships.length" class="text-caption text-grey-7 q-mt-xs">
+          Group membership follows from Signature Strength — “Group member” or
+          stronger tests as a member of {{ memberships[0].groupName }}.
         </div>
         <div class="q-mt-sm row items-center q-gutter-sm">
           <q-badge :color="simResult.outcome === 'allow' ? 'green' : simResult.outcome === 'deny' ? 'negative' : 'orange'"
@@ -42,6 +58,17 @@
             <template v-if="simResult.decidedBy">decided by: “{{ sentenceFor(simResult.decidedBy) }}”</template>
             <template v-else>no card matches — MAIA would ask you</template>
           </span>
+        </div>
+        <!-- ALLOW → show exactly what would leave your MAIA -->
+        <div v-if="simResult.outcome === 'allow'" class="q-mt-sm">
+          <div class="text-caption text-weight-medium text-grey-8 q-mb-xs">What would be shared</div>
+          <div class="pp-share-preview">
+            <div v-if="sharePreviewLoading" class="text-center q-pa-md"><q-spinner size="1.2em" color="primary" /></div>
+            <template v-else>
+              <div v-if="sharePreviewNote" class="text-caption text-orange-9 q-mb-xs">{{ sharePreviewNote }}</div>
+              <div v-if="sharePreviewText" style="white-space: pre-wrap; word-break: break-word;">{{ sharePreviewText }}</div>
+            </template>
+          </div>
         </div>
       </div>
     </q-expansion-item>
@@ -199,7 +226,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
+import { ref, reactive, computed, watch, onMounted } from 'vue';
 import PendingJoinCard from './PendingJoinCard.vue';
 import PolicyCardBuilder from './PolicyCardBuilder.vue';
 import { useQuasar } from 'quasar';
@@ -351,20 +378,88 @@ const sections = computed(() => {
 });
 
 // ── Simulator ───────────────────────────────────────────────────────
-const sim = ref<{ partyKind: string; purpose: Purpose; scope: Scope; signature: Signature; payment: Payment }>({
-  partyKind: 'anyone', purpose: 'clinical', scope: 'patient-summary', signature: 'unverified', payment: 'none'
+// Try-it uses the SAME table design as the Welcome page's request builder and
+// the New Policy editor (one cell per column). The requesting party is derived
+// from Signature Strength: group-member / verified-by-me test as a member of
+// the user's (first) group; everything else tests as a stranger.
+type SimKey = 'scope' | 'purpose' | 'signature' | 'payment';
+const simColumns: Array<{ key: SimKey; head: string; options: Array<{ value: string; label: string }> }> = [
+  { key: 'scope', head: 'Scope of Request', options: SCOPE_OPTIONS },
+  { key: 'purpose', head: 'Claimed Purpose', options: PURPOSE_OPTIONS },
+  { key: 'signature', head: 'Signature Strength', options: SIGNATURE_OPTIONS },
+  { key: 'payment', head: 'Deposit or Payment', options: PAYMENT_OPTIONS }
+];
+const simSel = reactive<{ scope: Scope; purpose: Purpose; signature: Signature; payment: Payment }>({
+  scope: 'patient-summary', purpose: 'clinical', signature: 'unverified', payment: 'none'
 });
-const simPartyOptions = computed(() => [
-  { value: 'anyone', label: 'A stranger (not in your groups)' },
-  ...memberships.value.map((m) => ({ value: `group:${m.groupId}`, label: `A member of ${m.groupName}` }))
-]);
+const pickSim = (key: SimKey, value: string) => { (simSel as Record<SimKey, string>)[key] = value; };
 const toRequest = (partyKind: string, purpose: Purpose, scope: Scope, signature: Signature, payment: Payment): PolicyRequest => ({
   party: partyKind.startsWith('group:') ? { type: 'group', groupId: partyKind.slice(6) } : { type: 'anyone' },
   purpose, scope, signature, payment
 });
+const simPartyKind = computed(() =>
+  (simSel.signature === 'group-member' || simSel.signature === 'verified-by-me') && memberships.value.length
+    ? `group:${memberships.value[0].groupId}`
+    : 'anyone');
 const simResult = computed(() =>
-  evaluate(policies.value, toRequest(sim.value.partyKind, sim.value.purpose, sim.value.scope, sim.value.signature, sim.value.payment))
+  evaluate(policies.value, toRequest(simPartyKind.value, simSel.purpose, simSel.scope, simSel.signature, simSel.payment))
 );
+
+// ── ALLOW → preview of what would actually leave this MAIA ──────────
+// patient-summary (and broader scopes) → the privacy-filtered Patient
+// Summary (the default sharing artifact, Phase 4); meds-allergies → the
+// verified Current Medications run through the same privacy filter;
+// notification-only → no record data at all.
+const sharePreviewText = ref('');
+const sharePreviewNote = ref('');
+const sharePreviewLoading = ref(false);
+const loadSharePreview = async () => {
+  if (simResult.value.outcome !== 'allow') return;
+  sharePreviewLoading.value = true;
+  sharePreviewText.value = '';
+  sharePreviewNote.value = '';
+  try {
+    const scope = simSel.scope;
+    if (scope === 'notification-only') {
+      sharePreviewText.value = 'No record data is shared — the requester’s message is delivered to you, and you decide whether to reply.';
+      return;
+    }
+    if (scope === 'meds-allergies') {
+      const r = await fetch(`/api/user-status?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
+      const meds = r.ok ? String((await r.json()).currentMedications || '').trim() : '';
+      if (!meds) {
+        sharePreviewNote.value = 'No verified Current Medications yet — there is nothing to share for this scope.';
+        return;
+      }
+      try {
+        const f = await fetch('/api/user-groups/filter-text', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+          body: JSON.stringify({ userId: props.userId, text: meds })
+        });
+        const fj = await f.json().catch(() => ({} as any));
+        sharePreviewText.value = (f.ok && fj.success) ? fj.filtered : meds;
+      } catch { sharePreviewText.value = meds; }
+      return;
+    }
+    // patient-summary / not-sensitive / everything / ah-category
+    const r = await fetch(`/api/patient-summary?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
+    const j = r.ok ? await r.json() : ({} as any);
+    const pf = j.privacyFiltered;
+    if (pf && pf.text) {
+      if (scope !== 'patient-summary') {
+        sharePreviewNote.value = 'Preview shows the privacy-filtered Patient Summary — the default sharing artifact. Broader scopes additionally grant records access per the card.';
+      } else if (!pf.mappingCount) {
+        sharePreviewNote.value = 'No privacy-filter names are configured, so this is identical to your Patient Summary.';
+      }
+      sharePreviewText.value = pf.text;
+    } else {
+      sharePreviewNote.value = 'No privacy-filtered summary yet — it is created automatically when you verify your Patient Summary (Workbook → Patient Summary).';
+    }
+  } finally {
+    sharePreviewLoading.value = false;
+  }
+};
+watch([() => simResult.value.outcome, () => simSel.scope], () => { void loadSharePreview(); });
 
 // ── Editor ──────────────────────────────────────────────────────────
 const showEditor = ref(false);
@@ -482,5 +577,38 @@ onMounted(loadAll);
 
   &--allow { border-left-color: #4caf50; }
   &--deny { border-left-color: #ef5350; }
+}
+</style>
+
+<style scoped>
+/* Try-it matrix — same visual language as PolicyCardBuilder / RequestBuilder */
+.pp-matrix {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 0;
+  border: 1px solid #dde5ec; border-radius: 10px; overflow: hidden; background: #fff;
+}
+.pp-col { border-right: 1px solid #dde5ec; display: flex; flex-direction: column; }
+.pp-col:last-child { border-right: none; }
+.pp-col-head {
+  font-size: 11px; letter-spacing: .05em; text-transform: uppercase; font-weight: 700;
+  color: #46586a; padding: 10px 11px; background: #f2f6fa;
+  border-bottom: 1px solid #dde5ec; min-height: 54px; display: flex; align-items: center;
+}
+.pp-cell {
+  appearance: none; text-align: left; width: 100%; cursor: pointer; background: transparent;
+  border: none; border-bottom: 1px solid #dde5ec; color: #24313d;
+  font: inherit; font-size: 13px; padding: 10px 11px; line-height: 1.32; position: relative;
+  transition: background .12s ease, color .12s ease;
+}
+.pp-col .pp-cell:last-child { border-bottom: none; }
+.pp-cell:hover { background: rgba(25, 118, 210, .08); }
+.pp-cell:focus-visible { outline: 2px solid #1976d2; outline-offset: -2px; }
+.pp-cell.is-sel { background: #1976d2; color: #fff; font-weight: 600; }
+.pp-cell.is-sel::after { content: "✓"; position: absolute; right: 9px; top: 12px; font-size: 11px; opacity: .9; }
+
+/* "What would be shared" — scrolls, roughly half the matrix height */
+.pp-share-preview {
+  max-height: 300px; overflow-y: auto;
+  border: 1px solid #e0e0e0; border-radius: 8px; padding: 10px 12px;
+  background: #fafbfc; font-size: 13px; line-height: 1.45;
 }
 </style>
