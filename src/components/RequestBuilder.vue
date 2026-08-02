@@ -234,7 +234,10 @@ const sendRequest = async () => {
         organization: requesterOrg.value.trim() || undefined,
         message: message.value.trim(),
         scope: sel.scope,
-        purpose: sel.purpose
+        purpose: sel.purpose,
+        // Lets the registry prove 'verified-email' when evaluating the
+        // members' policies at delivery time (autonomous demo responses).
+        emailVerifyToken: verifiedEmail.token || undefined
       })
     });
     const data = await res.json().catch(() => ({}));
