@@ -490,7 +490,7 @@ async function createUserBucketFolders(userId, kbName) {
     throw new Error('DigitalOcean bucket not configured');
   }
   
-  const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+  const bucketName = bucketUrl || 'maia';
   
   try {
     const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
@@ -555,7 +555,7 @@ async function createUserBucketFolders(userId, kbName) {
 async function generateCleanIndexSidecars(userId, kbName, kbFiles) {
   const bucketUrl = getSpacesBucketName();
   if (!bucketUrl) return { written: 0, skipped: 0, folder: null };
-  const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+  const bucketName = bucketUrl || 'maia';
   const folder = kbCleanIndexFolder(userId, kbName);
   const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
   const s3Client = new S3Client({
@@ -602,7 +602,7 @@ async function generateCleanIndexSidecars(userId, kbName, kbFiles) {
 async function deleteKbFolderPlaceholder(userId, kbName) {
   const bucketUrl = getSpacesBucketName();
   if (!bucketUrl || !userId || !kbName) return;
-  const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+  const bucketName = bucketUrl || 'maia';
   try {
     const { S3Client } = await import('@aws-sdk/client-s3');
     const s3Client = new S3Client({
@@ -790,8 +790,14 @@ app.post('/api/client-log', express.json(), (req, res) => {
   res.json({ ok: true });
 });
 
-// Start listening immediately so readiness probes pass while CouchDB droplet setup runs
-app.get('/health', (req, res) => res.json({ status: 'ok', app: 'maia-cloud-user-app' }));
+// Start listening immediately so readiness probes pass while CouchDB droplet setup runs.
+// version: lets an already-open client detect a redeploy and offer a reload
+// (the client compares its build-time package.json version against this).
+let deployedVersion = '';
+try {
+  deployedVersion = JSON.parse(readFileSync(path.join(__dirname, '../package.json'), 'utf8')).version || '';
+} catch { /* version stays blank; the client then never prompts */ }
+app.get('/health', (req, res) => res.json({ status: 'ok', app: 'maia-cloud-user-app', version: deployedVersion }));
 app.listen(PORT, () => console.log(`User app server listening on port ${PORT} (startup in progress)`));
 
 // Auto-provision CouchDB droplet for cloud deployments (any non-localhost URL = cloud)
@@ -3160,7 +3166,7 @@ app.post('/api/admin/provision/confirm', async (req, res) => {
         // Delete all files in user's bucket folder
         const bucketUrl = getSpacesBucketName();
         if (bucketUrl) {
-          const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+          const bucketName = bucketUrl || 'maia';
         const { S3Client, ListObjectsV2Command } = await import('@aws-sdk/client-s3');
           const s3Client = new S3Client({
             endpoint: getSpacesEndpoint(),
@@ -3340,7 +3346,7 @@ async function verifyProvisioningComplete(userId, agentId, agentName, kbName, ex
       const { S3Client, ListObjectsV2Command } = await import('@aws-sdk/client-s3');
       const bucketUrl = getSpacesBucketName();
       if (bucketUrl) {
-        const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+        const bucketName = bucketUrl || 'maia';
         const s3Client = new S3Client({
           endpoint: getSpacesEndpoint(),
           region: 'us-east-1',
@@ -3738,7 +3744,7 @@ async function provisionUserAsync(userId, token) {
       throw new Error('DigitalOcean bucket not configured');
     }
     
-    const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+    const bucketName = bucketUrl || 'maia';
     const kbName = await ensureKBNameOnUserDoc(userDoc, userId);
     
     // Check if folders already exist (created during registration)
@@ -4406,7 +4412,7 @@ async function provisionUserAsync(userId, token) {
           logProvisioning(userId, `⚠️  [CURRENT MEDICATIONS] DigitalOcean bucket not configured. Skipping.`, 'warning');
         } else {
           console.log(`[CUR MEDS] Bucket URL: ${bucketUrl}`);
-          const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+          const bucketName = bucketUrl || 'maia';
           const s3Client = new S3Client({
             endpoint: getSpacesEndpoint(),
             region: 'us-east-1',
@@ -5289,7 +5295,7 @@ app.post('/api/cleanup-imported-files', async (req, res) => {
       });
     }
 
-    const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+    const bucketName = bucketUrl || 'maia';
 
     const s3Client = new S3Client({
       endpoint: getSpacesEndpoint(),
@@ -5412,7 +5418,7 @@ app.post('/api/archive-user-files', async (req, res) => {
       });
     }
 
-    const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+    const bucketName = bucketUrl || 'maia';
 
     const s3Client = new S3Client({
       endpoint: getSpacesEndpoint(),
@@ -5621,7 +5627,7 @@ app.get('/api/verify-file-state', async (req, res) => {
       });
     }
 
-    const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+    const bucketName = bucketUrl || 'maia';
 
     const { S3Client, HeadObjectCommand, ListObjectsV2Command } = await import('@aws-sdk/client-s3');
     const s3Client = new S3Client({
@@ -6053,7 +6059,7 @@ app.post('/api/toggle-file-knowledge-base', async (req, res) => {
       });
     }
 
-    const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+    const bucketName = bucketUrl || 'maia';
 
     const s3Client = new S3Client({
       endpoint: getSpacesEndpoint(),
@@ -6782,7 +6788,7 @@ app.delete('/api/delete-file', async (req, res) => {
       });
     }
 
-    const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+    const bucketName = bucketUrl || 'maia';
 
     const s3Client = new S3Client({
       endpoint: getSpacesEndpoint(),
@@ -7274,7 +7280,7 @@ async function ensureKb2(userId) {
     }
 
     const bucketUrl = getSpacesBucketName();
-    const bucketName = bucketUrl ? (bucketUrl.split('//')[1]?.split('.')[0] || 'maia') : 'maia';
+    const bucketName = bucketUrl || 'maia';
     // KB-2 indexes the SAME folder KB-1 uses → no duplicate uploads.
     const itemPath = `${userId}/${kb1Name}/`;
     // KB-2 deliberately uses the OPPOSITE chunking strategy from KB-1,
@@ -7392,7 +7398,7 @@ app.post('/api/update-knowledge-base', async (req, res) => {
         message: 'DigitalOcean bucket not configured'
       });
     }
-    const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+    const bucketName = bucketUrl || 'maia';
     const useEphemeralSpaces = shouldUseEphemeralSpaces();
     let indexingBucketName = bucketName;
     let indexingRegion = getDoRegion();
@@ -8344,7 +8350,7 @@ app.post('/api/cancel-kb-indexing', async (req, res) => {
     if (kbName) {
       const { S3Client, CopyObjectCommand, DeleteObjectCommand, ListObjectsV2Command } = await import('@aws-sdk/client-s3');
       const bucketUrl = getSpacesBucketName();
-      const bucketName = bucketUrl?.split('//')[1]?.split('.')[0] || 'maia';
+      const bucketName = bucketUrl || 'maia';
       const s3Client = new S3Client({
         endpoint: getSpacesEndpoint(),
         region: 'us-east-1',
@@ -8748,7 +8754,7 @@ app.get('/api/admin/users', async (req, res) => {
       try {
         const bucketUrl = getSpacesBucketName();
         if (bucketUrl && process.env.DIGITALOCEAN_AWS_ACCESS_KEY_ID && process.env.DIGITALOCEAN_AWS_SECRET_ACCESS_KEY) {
-          const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+          const bucketName = bucketUrl || 'maia';
           const s3Client = new S3Client({
             endpoint: getSpacesEndpoint(),
             region: 'us-east-1',
@@ -9166,7 +9172,7 @@ async function deleteUserAndResources(userId, options = {}) {
     console.log(`[DESTROY] Deleting stored files for ${userId}`);
     const bucketUrl = getSpacesBucketName();
     if (bucketUrl) {
-      const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+      const bucketName = bucketUrl || 'maia';
       const { S3Client, ListObjectsV2Command } = await import('@aws-sdk/client-s3');
       
       const s3Client = new S3Client({
@@ -9465,7 +9471,7 @@ async function deleteUserAndResources(userId, options = {}) {
   try {
     const bucketUrl = getSpacesBucketName();
     if (bucketUrl) {
-      const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+      const bucketName = bucketUrl || 'maia';
       const s3Verify = new S3Client({
         endpoint: getSpacesEndpoint(),
         region: 'us-east-1',
@@ -9778,7 +9784,7 @@ app.get('/api/cloud-health', async (req, res) => {
     try {
       const bucketUrl = getSpacesBucketName();
       if (bucketUrl) {
-        const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+        const bucketName = bucketUrl || 'maia';
         const s3 = new S3Client({
           endpoint: getSpacesEndpoint(),
           region: 'us-east-1',
@@ -10679,7 +10685,7 @@ app.put('/api/account/rehydrate', async (req, res) => {
     try {
       const { S3Client, HeadObjectCommand, ListObjectsV2Command } = await import('@aws-sdk/client-s3');
       const bucketUrl = getSpacesBucketName();
-      const bucketName = bucketUrl ? (bucketUrl.split('//')[1]?.split('.')[0] || 'maia') : null;
+      const bucketName = bucketUrl || null;
       if (bucketName) {
         const s3Client = new S3Client({
           endpoint: getSpacesEndpoint(),
@@ -10758,7 +10764,7 @@ app.post('/api/files/restore-bytes', restoreBytesUpload.single('file'), async (r
     const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
     const bucketUrl = getSpacesBucketName();
     if (!bucketUrl) return res.status(500).json({ error: 'BUCKET_NOT_CONFIGURED' });
-    const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+    const bucketName = bucketUrl || 'maia';
     const s3Client = new S3Client({
       endpoint: getSpacesEndpoint(),
       region: 'us-east-1',
@@ -12531,7 +12537,7 @@ const runDraftGeneration = async (userId) => {
     try {
       const { ensureAppleHealthListsBuilt } = await import('./utils/lists-builder.js');
       const bucketUrl = getSpacesBucketName();
-      const bucketName = bucketUrl ? (bucketUrl.split('//')[1]?.split('.')[0] || 'maia') : null;
+      const bucketName = bucketUrl || null;
       if (bucketName) {
         const { S3Client } = await import('@aws-sdk/client-s3');
         const s3Client = new S3Client({
@@ -12894,7 +12900,7 @@ ${medMarkdown}`;
 async function readSpacesTextObject(key) {
   const bucketUrl = getSpacesBucketName();
   if (!bucketUrl) return null;
-  const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+  const bucketName = bucketUrl || 'maia';
   try {
     const { S3Client, GetObjectCommand } = await import('@aws-sdk/client-s3');
     const s3Client = new S3Client({
@@ -12955,7 +12961,7 @@ ${medListText}`;
 async function readSpacesObjectBuffer(key) {
   const bucketUrl = getSpacesBucketName();
   if (!bucketUrl) return null;
-  const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+  const bucketName = bucketUrl || 'maia';
   try {
     const { S3Client, GetObjectCommand } = await import('@aws-sdk/client-s3');
     const s3Client = new S3Client({
@@ -12983,7 +12989,7 @@ async function readSpacesObjectBuffer(key) {
 async function findMedicationRecordsMarkdown(userId) {
   const bucketUrl = getSpacesBucketName();
   if (!bucketUrl) return null;
-  const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+  const bucketName = bucketUrl || 'maia';
   try {
     const { S3Client, ListObjectsV2Command } = await import('@aws-sdk/client-s3');
     const s3Client = new S3Client({

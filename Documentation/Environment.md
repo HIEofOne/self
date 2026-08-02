@@ -176,6 +176,23 @@ Only these variables are needed in production:
 | `SPACES_AWS_ACCESS_KEY_ID` | S3-compatible access key for DO Spaces. |
 | `SPACES_AWS_SECRET_ACCESS_KEY` | S3-compatible secret key for DO Spaces. |
 
+#### Optional — running a second app against shared infrastructure
+
+Two MAIA deployments (e.g., a production app and a test app) can share one
+CouchDB droplet, one Spaces subscription, and one OpenSearch cluster while
+keeping their data fully separate. The production app sets **neither**
+variable, so its existing databases and bucket are untouched; only the
+second app sets both:
+
+| Variable | Example | Purpose |
+|---|---|---|
+| `COUCHDB_DB_PREFIX` | `test_` | Namespaces every CouchDB database (`test_maia_users`, `test_maia_groups`, …) inside the shared instance. Applied inside `lib/cloudant`; the code's database names never change. |
+| `SPACES_BUCKET` | `maia-test` | Separate bucket under the same $5/mo Spaces subscription (which covers 250 GiB across all buckets). Default is `maia`. |
+
+The OpenSearch cluster needs no variable: startup auto-discovery enforces
+one cluster per DO account, and Knowledge Bases are per-user resources, so
+both apps share the cluster safely.
+
 ### Local Development
 
 | Variable | Typical Value | Purpose |

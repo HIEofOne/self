@@ -1,5 +1,20 @@
 <template>
   <q-layout view="hHh lpR fFf">
+    <!-- Redeploy detector: this tab is running an older build than the
+         server. One click reloads; no user ever needs to know about
+         force-reload. Re-checked on focus, so a dismissed banner returns. -->
+    <q-banner
+      v-if="updateAvailable"
+      dense
+      class="bg-amber-2 text-grey-9"
+      style="position: fixed; top: 0; left: 0; right: 0; z-index: 9999"
+    >
+      A new version of MAIA is available (v{{ serverVersion }} — you're on v{{ appVersion }}).
+      <template #action>
+        <q-btn flat dense color="primary" label="Reload now" @click="reloadForUpdate" />
+        <q-btn flat dense color="grey-8" label="Later" @click="updateAvailable = false" />
+      </template>
+    </q-banner>
     <q-page-container class="full-width">
       <q-page>
         <!-- Not authenticated - show auth dialog -->
@@ -987,6 +1002,8 @@ const checkRouteRef = ref<(() => void) | null>(null);
 
 // Register cleanup hook at top level (before any async operations)
 onUnmounted(() => {
+  document.removeEventListener('visibilitychange', onVisibleCheckVersion);
+  window.removeEventListener('focus', onVisibleCheckVersion);
   if (routeCheckInterval.value) {
     clearInterval(routeCheckInterval.value);
     routeCheckInterval.value = null;
@@ -1020,6 +1037,29 @@ import {
 import packageJson from '../package.json';
 
 const appVersion = packageJson.version;
+
+// ── Redeploy detection ───────────────────────────────────────────────
+// The bundle knows its build-time version; /health reports the server's.
+// A mismatch means this tab predates the last deploy — offer a reload.
+// Checked at load and whenever the tab regains focus (min 60s apart).
+const updateAvailable = ref(false);
+const serverVersion = ref('');
+let lastVersionCheck = 0;
+const checkAppVersion = async () => {
+  const now = Date.now();
+  if (now - lastVersionCheck < 60_000) return;
+  lastVersionCheck = now;
+  try {
+    const r = await fetch('/health', { cache: 'no-store' });
+    const j = await r.json().catch(() => ({}));
+    if (j?.version && j.version !== appVersion) {
+      serverVersion.value = j.version;
+      updateAvailable.value = true;
+    }
+  } catch { /* offline or transient — try again on next focus */ }
+};
+const reloadForUpdate = () => window.location.reload();
+const onVisibleCheckVersion = () => { if (!document.hidden) void checkAppVersion(); };
 
 interface User {
   userId: string;
@@ -3808,6 +3848,10 @@ onMounted(async () => {
   void loadPublicGroups();
   // Cross-fill any email already verified earlier in this session.
   void hydrateVerifiedEmail();
+  // Redeploy detection: check now and whenever the tab regains focus.
+  void checkAppVersion();
+  document.addEventListener('visibilitychange', onVisibleCheckVersion);
+  window.addEventListener('focus', onVisibleCheckVersion);
 
   // Check for admin page route
   const isAdminPage = window.location.pathname === '/admin';
