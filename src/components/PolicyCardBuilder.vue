@@ -57,7 +57,7 @@
           <q-btn
             v-if="mode === 'edit'"
             unelevated color="primary" :loading="saving"
-            :label="existing ? 'Done — update this card' : 'Done — save this card'"
+            :label="saveLabel || (existing ? 'Done — update this card' : 'Done — save this card')"
             @click="emitSave"
           />
           <q-btn flat color="grey-8" label="Clear" @click="clearAll" />
@@ -122,7 +122,7 @@ import { ref, reactive, computed } from 'vue';
 import {
   SIGNATURE_OPTIONS, SCOPE_OPTIONS, PURPOSE_OPTIONS, PAYMENT_OPTIONS,
   sentenceFor, evaluate,
-  type PolicyCard, type PolicyRequest, type Scope, type Signature, type Purpose, type Payment
+  type PolicyCard, type PolicyElements, type PolicyRequest, type Scope, type Signature, type Purpose, type Payment
 } from '../utils/policyCards';
 import EmailVerifyBox from './EmailVerifyBox.vue';
 
@@ -132,7 +132,13 @@ const props = withDefaults(defineProps<{
   ahCategories?: string[];
   saving?: boolean;
   showTryIt?: boolean;
-}>(), { mode: 'demo', existing: null, saving: false, showTryIt: true });
+  /** Who the card is about. Defaults to the edited card's own party, else
+   *  'anyone'. A group editor passes its group so suggested cards read
+   *  "Anyone in <group> …". */
+  party?: PolicyElements['party'] | null;
+  /** Override for the save button's label (e.g. "Add to suggested policies"). */
+  saveLabel?: string;
+}>(), { mode: 'demo', existing: null, saving: false, showTryIt: true, party: null, saveLabel: '' });
 
 const emit = defineEmits<{ save: [card: PolicyCard]; cancel: [] }>();
 
@@ -211,7 +217,7 @@ const builtCard = computed<PolicyCard>(() => ({
   enabled: true,
   provenance: props.existing?.provenance || 'user',
   elements: {
-    party: { type: 'anyone' },
+    party: props.party || props.existing?.elements?.party || { type: 'anyone' },
     purpose: (sel.purpose || 'clinical') as Purpose,
     scope: (sel.scope || 'patient-summary') as Scope,
     ...(sel.scope === 'ah-category' ? { ahCategory: ahCategory.value } : {}),

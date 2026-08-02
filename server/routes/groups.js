@@ -532,8 +532,9 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
                 email,
                 `A "${doc.name}" member's MAIA responded to your request`,
                 [
+                  // The deciding card is the member's own business — the
+                  // requester learns the outcome, never the policy.
                   `A member of the "${doc.name}" group has a sharing policy that allows your request, so their MAIA responded autonomously.`,
-                  `Decided by their card: "${policySentence(decision.decidedBy)}"`,
                   '',
                   `--- ${artifactLabel} ---`,
                   artifact,
@@ -565,10 +566,9 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
               await sendEmail(
                 email,
                 `Your request to a "${doc.name}" member was declined`,
-                [
-                  `A member's MAIA declined your request per their sharing policy:`,
-                  `"${policySentence(decision.decidedBy)}"`
-                ].join('\n')
+                // Outcome only — which policy decided is not the requester's
+                // business.
+                `A member of the "${doc.name}" group has a sharing policy that declines your request, so their MAIA responded autonomously.`
               );
               autoDeclined++;
               auditLog.logEvent({
@@ -1515,8 +1515,13 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       await cloudant.saveDocument(RELAY_DB, msg);
       // Nudge the recipient by email (best-effort, fire-and-forget so the relay
       // response isn't delayed). Replaces polling for message awareness.
-      const appUrl = (process.env.PUBLIC_APP_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
-      notifyGroupMessageRecipient(doc, toPairwiseId, appUrl).catch(() => {});
+      // Senders of AS-request envelopes suppress this generic nudge — the
+      // recipient's ingest sends a request-specific email instead (both
+      // resolve the recipient the same way, so nothing is lost).
+      if (!req.body?.suppressNotify) {
+        const appUrl = (process.env.PUBLIC_APP_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+        notifyGroupMessageRecipient(doc, toPairwiseId, appUrl).catch(() => {});
+      }
       res.json({ success: true, messageId: msg._id });
     } catch (error) {
       console.error('[groups] relay failed:', error);
@@ -1920,6 +1925,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     const imported = cards.slice(0, 20).map((c, i) => ({
       id: `pol_${Date.now()}_${i}_${randomBytes(3).toString('hex')}`,
       outcome: c.outcome,
+      ...(c.outcome === 'deny' ? { denyMode: c.denyMode === 'respond' ? 'respond' : 'silent' } : {}),
       enabled: c.enabled !== false,
       provenance: prov,
       // The card belongs to the group being JOINED — stamp its id so a stale
@@ -2861,7 +2867,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
   /** Look up the recipient's encryption key (signed), seal `plaintext` to
    *  it, and relay. Shared by plain messages (/send) and AS requests
    *  (/request). Returns { ok } or { ok:false, status, error }. */
-  const deliverSealed = async (membership, toPairwiseId, plaintext) => {
+  const deliverSealed = async (membership, toPairwiseId, plaintext, { suppressNotify = false } = {}) => {
     const base = registryBase(membership);
     const kq = signWithMembership(membership, {
       action: 'member-key', groupId: membership.groupId, caller: membership.pairwiseId, ts: new Date().toISOString()
@@ -2881,7 +2887,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     const relayRes = await fetch(`${base}/api/groups/${encodeURIComponent(membership.groupId)}/relay`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fromPairwiseId: membership.pairwiseId, toPairwiseId, box, payload: rq.payload, signature: rq.signature })
+      body: JSON.stringify({ fromPairwiseId: membership.pairwiseId, toPairwiseId, box, payload: rq.payload, signature: rq.signature, ...(suppressNotify ? { suppressNotify: true } : {}) })
     });
     const relayData = await relayRes.json().catch(() => ({}));
     if (!relayRes.ok || !relayData.success) {
@@ -2998,9 +3004,29 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         created: new Date().toISOString(),
         payload: payload ?? null
       });
-      const result = await deliverSealed(membership, toPairwiseId, envelope);
+      const result = await deliverSealed(membership, toPairwiseId, envelope, { suppressNotify: true });
       if (!result.ok) return res.status(result.status).json({ success: false, error: result.error });
       auditLog.logEvent({ type: 'user_group_request_sent', userId, ip: req.ip, details: { groupId, toPairwiseId, action } });
+      // Phase 1 same-host shortcut: the recipient's MAIA lives on this server,
+      // so pull + ingest their mail NOW instead of waiting for their next
+      // login or the daily cron. Their sharing policies answer autonomously
+      // (and email this requester) even while they are offline; an ASK
+      // emails them the review-and-respond notification immediately.
+      // Best-effort: on any failure the request simply waits in the relay
+      // for the recipient's normal refresh, exactly as before.
+      try {
+        const rr = await cloudant.findDocuments(USERS_DB, {
+          selector: { groupMemberships: { $elemMatch: { groupId: { $eq: groupId }, pairwiseId: { $eq: toPairwiseId } } } },
+          limit: 1
+        });
+        const recipDoc = rr?.docs?.[0];
+        if (recipDoc) {
+          const r = await refreshUserMemberships(recipDoc);
+          if (r.changed) await cloudant.saveDocument(USERS_DB, recipDoc);
+        }
+      } catch (e) {
+        console.warn('[user-groups] delivery-time ingest failed (recipient pulls later):', e?.message || e);
+      }
       res.json({ success: true });
     } catch (error) {
       console.error('[user-groups] request failed:', error);
@@ -3277,9 +3303,49 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         continue; // silent drop — the Cedar-style forbid
       }
 
+      // Autonomous fulfilment (member-to-member): an ALLOW card on a data
+      // scope means this member's MAIA answers the requesting member NOW —
+      // the privacy-filtered artifact goes out by email, so the requester
+      // hears back whether either party is logged in or not. Only the
+      // privacy-filtered artifacts ever leave; if none exists yet (summary
+      // never verified) the request escalates to the human instead of
+      // accepting with an empty response.
+      let memberAutoEmail = null; // { to, artifact, artifactLabel } — sent after the doc stores
+      if (decision && decision.outcome === 'allow' && !r.fromOutsider
+          && r.resource && r.resource !== 'notification-only' && POLICY_SCOPES.includes(r.resource)) {
+        const mapping = userDoc.privacyFilter?.pseudonymMapping || [];
+        let artifact = '';
+        let artifactLabel = '';
+        if (r.resource === 'meds-allergies') {
+          const meds = String(userDoc.currentMedications || '').trim();
+          if (meds) { artifact = applyPseudonymMapping(mapping, meds); artifactLabel = 'privacy-filtered Current Medications'; }
+        } else {
+          const pf = String(userDoc.privacyFilteredSummary?.text || '').trim();
+          if (pf) { artifact = pf; artifactLabel = 'privacy-filtered Patient Summary'; }
+        }
+        if (!artifact) {
+          decision = { outcome: 'ask', decidedBy: null };
+        } else {
+          try {
+            const rq = await cloudant.findDocuments(USERS_DB, {
+              selector: { groupMemberships: { $elemMatch: { groupId: { $eq: membership.groupId }, pairwiseId: { $eq: r.fromPairwiseId } } } },
+              limit: 1
+            });
+            const requester = rq?.docs?.[0];
+            if (requester?.email && requester.emailVerified) {
+              memberAutoEmail = { to: requester.email, artifact, artifactLabel };
+            }
+          } catch { /* no email resolved — the accepted status still shows in-app */ }
+        }
+      }
+
       const now = Date.now();
       const doc = {
-        _id: `asreq_${now}_${randomBytes(6).toString('hex')}`,
+        // Deterministic id (derived from the relay message id) makes ingest
+        // idempotent: a concurrent refresh (the delivery-time trigger racing
+        // the recipient's own client) cannot store the same request twice or
+        // reset an already-made decision.
+        _id: r.relayId ? `asreq_${r.relayId}` : `asreq_${now}_${randomBytes(6).toString('hex')}`,
         type: 'as_request',
         userId: userDoc.userId,
         groupId: membership.groupId,
@@ -3318,11 +3384,40 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         membership.acceptedSenders = Array.from(new Set([...(membership.acceptedSenders || []), r.fromPairwiseId]));
       }
       try {
+        if (r.relayId && await cloudant.getDocument(AS_REQUESTS_DB, doc._id)) {
+          continue; // a concurrent refresh already ingested (and maybe decided) it
+        }
         await cloudant.saveDocument(AS_REQUESTS_DB, doc);
         stored++;
-        if (r.autoDecision) autoAnswered++;
+        if (doc.status !== 'pending') autoAnswered++;
       } catch (e) {
         console.warn('[as-requests] store failed:', e?.message || e);
+        continue;
+      }
+      if (memberAutoEmail && typeof sendEmail === 'function') {
+        try {
+          const appUrl = (process.env.PUBLIC_APP_URL || '').replace(/\/$/, '');
+          await sendEmail(
+            memberAutoEmail.to,
+            `A "${membership.groupName}" member's MAIA responded to your request`,
+            [
+              // Outcome + artifact only — which policy card decided is the
+              // responding member's own business, never the requester's.
+              `Your request to ${membership.alias || 'a member'} in "${membership.groupName}" matched their sharing policies, so their MAIA responded autonomously.`,
+              '',
+              `--- ${memberAutoEmail.artifactLabel} ---`,
+              memberAutoEmail.artifact,
+              ...(appUrl ? ['', appUrl] : [])
+            ].join('\n')
+          );
+          auditLog.logEvent({
+            type: 'as_request_responded',
+            userId: userDoc.userId,
+            details: { requestId: doc._id, groupId: membership.groupId, outcome: 'accepted', autonomous: true, decidedByPolicyId: decision?.decidedBy?.id || null }
+          });
+        } catch (e) {
+          console.warn('[as-requests] autonomous member respond failed:', e?.message || e);
+        }
       }
     }
     // Best-effort patient notification (in-app inbox is the primary channel).
