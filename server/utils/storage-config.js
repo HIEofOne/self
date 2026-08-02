@@ -10,9 +10,11 @@ export function getSpacesEndpoint() {
   return `https://${getSpacesRegion()}.digitaloceanspaces.com`;
 }
 
-/** Spaces bucket name (see NEW-AGENT.txt). No env var needed. */
+/** Spaces bucket name. Production default 'maia'; a second deployment
+ *  sharing the Spaces subscription sets SPACES_BUCKET (e.g. 'maia-test')
+ *  to keep its user folders in its own bucket at no extra cost. */
 export function getSpacesBucketName() {
-  return 'maia';
+  return process.env.SPACES_BUCKET || 'maia';
 }
 
 export function normalizeStorageEnv() {

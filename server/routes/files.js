@@ -568,7 +568,7 @@ function getS3Client() {
     throw new Error('DigitalOcean bucket not configured');
   }
 
-  const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+  const bucketName = bucketUrl || 'maia';
 
   return {
     client: new S3Client({
@@ -726,7 +726,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         });
       }
 
-      const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+      const bucketName = bucketUrl || 'maia';
 
       const s3Client = new S3Client({
         endpoint: getSpacesEndpoint(),
@@ -946,7 +946,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       const userId = effectiveUserId;
       
       const bucketUrl = getSpacesBucketName();
-      const bucketName = bucketUrl?.split('//')[1]?.split('.')[0] || 'maia';
+      const bucketName = bucketUrl || 'maia';
 
       const s3Client = new S3Client({
         endpoint: getSpacesEndpoint(),
@@ -1052,7 +1052,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       const userId = effectiveUserId;
       
       const bucketUrl = getSpacesBucketName();
-      const bucketName = bucketUrl?.split('//')[1]?.split('.')[0] || 'maia';
+      const bucketName = bucketUrl || 'maia';
 
       const s3Client = new S3Client({
         endpoint: getSpacesEndpoint(),
@@ -1152,7 +1152,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       const { bucketKey } = req.params;
       
       const bucketUrl = getSpacesBucketName();
-      const bucketName = bucketUrl?.split('//')[1]?.split('.')[0] || 'maia';
+      const bucketName = bucketUrl || 'maia';
 
       const s3Client = new S3Client({
         endpoint: getSpacesEndpoint(),
@@ -1210,7 +1210,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
 
       const { bucketKey } = req.params;
       const bucketUrl = getSpacesBucketName();
-      const bucketName = bucketUrl?.split('//')[1]?.split('.')[0] || 'maia';
+      const bucketName = bucketUrl || 'maia';
 
       const s3Client = new S3Client({
         endpoint: getSpacesEndpoint(),
@@ -1273,7 +1273,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         });
       }
 
-      const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+      const bucketName = bucketUrl || 'maia';
 
       const s3Client = new S3Client({
         endpoint: getSpacesEndpoint(),
@@ -1317,7 +1317,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       const { bucketKey } = req.params;
 
       const bucketUrl = getSpacesBucketName();
-      const bucketName = bucketUrl?.split('//')[1]?.split('.')[0] || 'maia';
+      const bucketName = bucketUrl || 'maia';
 
       const s3Client = new S3Client({
         endpoint: getSpacesEndpoint(),
