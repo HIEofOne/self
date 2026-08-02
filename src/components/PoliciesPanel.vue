@@ -66,7 +66,15 @@
             <div v-if="sharePreviewLoading" class="text-center q-pa-md"><q-spinner size="1.2em" color="primary" /></div>
             <template v-else>
               <div v-if="sharePreviewNote" class="text-caption text-orange-9 q-mb-xs">{{ sharePreviewNote }}</div>
-              <div v-if="sharePreviewText" style="white-space: pre-wrap; word-break: break-word;">{{ sharePreviewText }}</div>
+              <!-- Rendered like the Patient Summary tab: markdown + clickable
+                   [File N p.X] citations (forwarded to the PDF viewer). -->
+              <div
+                v-if="sharePreviewHtml"
+                class="pp-share-md text-body2"
+                v-html="sharePreviewHtml"
+                @click="onPreviewCitationClick"
+              ></div>
+              <div v-else-if="sharePreviewText" style="white-space: pre-wrap; word-break: break-word;">{{ sharePreviewText }}</div>
             </template>
           </div>
         </div>
@@ -230,6 +238,22 @@ import { ref, reactive, computed, watch, onMounted } from 'vue';
 import PendingJoinCard from './PendingJoinCard.vue';
 import PolicyCardBuilder from './PolicyCardBuilder.vue';
 import { useQuasar } from 'quasar';
+import MarkdownIt from 'markdown-it';
+import { processFileNCitations } from '../utils/fileNCitations';
+
+// Same renderer setup as the Patient Summary tab (MyStuffDialog.psMarkdown):
+// html:true so the <a class="page-link"> citation anchors survive; ordinary
+// links open in a new tab.
+const previewMarkdown = new MarkdownIt({ html: true, linkify: true, breaks: false });
+{
+  const defaultLinkOpen = previewMarkdown.renderer.rules.link_open
+    || ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
+  previewMarkdown.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+    tokens[idx].attrSet('target', '_blank');
+    tokens[idx].attrSet('rel', 'noopener');
+    return defaultLinkOpen(tokens, idx, options, env, self);
+  };
+}
 import {
   sentenceFor, evaluate,
   PURPOSE_OPTIONS, SCOPE_OPTIONS, SIGNATURE_OPTIONS, PAYMENT_OPTIONS,
@@ -238,7 +262,12 @@ import {
 
 const $q = useQuasar();
 const props = defineProps<{ userId: string }>();
-const emit = defineEmits<{ 'group-joined': [] }>();
+const emit = defineEmits<{
+  'group-joined': [];
+  // A [File N p.X] citation in the share preview was clicked — the parent
+  // (MyStuffDialog) opens the PDF viewer exactly like the Patient Summary tab.
+  'view-citation': [payload: { bucketKey: string; fileName: string; page?: number }];
+}>();
 
 // The card being edited, handed to the builder to prefill its matrix.
 const editingCard = ref<PolicyCard | null>(null);
@@ -413,11 +442,43 @@ const simResult = computed(() =>
 const sharePreviewText = ref('');
 const sharePreviewNote = ref('');
 const sharePreviewLoading = ref(false);
+// Rendered exactly like the Patient Summary tab: markdown → HTML with
+// [File N p.X] citations as clickable page-links.
+const sharePreviewHtml = ref('');
+const previewFiles = ref<Array<{ fileName: string; bucketKey: string }>>([]);
+let previewFilesLoaded = false;
+const ensurePreviewFiles = async () => {
+  if (previewFilesLoaded) return;
+  previewFilesLoaded = true;
+  try {
+    const r = await fetch(`/api/user-files?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
+    if (r.ok) {
+      const j = await r.json();
+      previewFiles.value = (Array.isArray(j.files) ? j.files : [])
+        .map((f: any) => ({ fileName: f.fileName, bucketKey: f.bucketKey }))
+        .filter((f: any) => f.fileName && f.bucketKey);
+    }
+  } catch { /* citations render as plain text */ }
+};
+const renderPreview = (text: string) =>
+  previewMarkdown.render(processFileNCitations(String(text || ''), previewFiles.value as any));
+const onPreviewCitationClick = (event: Event) => {
+  const link = (event.target as HTMLElement).closest('.page-link') as HTMLElement | null;
+  if (!link) return;
+  event.preventDefault();
+  const bucketKey = link.getAttribute('data-bucket-key');
+  const fileName = link.getAttribute('data-filename');
+  const pageStr = link.getAttribute('data-page');
+  if (!bucketKey || !fileName) return;
+  emit('view-citation', { bucketKey, fileName, page: pageStr ? parseInt(pageStr, 10) : undefined });
+};
 const loadSharePreview = async () => {
   if (simResult.value.outcome !== 'allow') return;
   sharePreviewLoading.value = true;
   sharePreviewText.value = '';
+  sharePreviewHtml.value = '';
   sharePreviewNote.value = '';
+  await ensurePreviewFiles();
   try {
     const scope = simSel.scope;
     if (scope === 'notification-only') {
@@ -437,8 +498,8 @@ const loadSharePreview = async () => {
           body: JSON.stringify({ userId: props.userId, text: meds })
         });
         const fj = await f.json().catch(() => ({} as any));
-        sharePreviewText.value = (f.ok && fj.success) ? fj.filtered : meds;
-      } catch { sharePreviewText.value = meds; }
+        sharePreviewHtml.value = renderPreview((f.ok && fj.success) ? fj.filtered : meds);
+      } catch { sharePreviewHtml.value = renderPreview(meds); }
       return;
     }
     // patient-summary / not-sensitive / everything / ah-category
@@ -451,7 +512,7 @@ const loadSharePreview = async () => {
       } else if (!pf.mappingCount) {
         sharePreviewNote.value = 'No privacy-filter names are configured, so this is identical to your Patient Summary.';
       }
-      sharePreviewText.value = pf.text;
+      sharePreviewHtml.value = renderPreview(pf.text);
     } else {
       sharePreviewNote.value = 'No privacy-filtered summary yet — it is created automatically when you verify your Patient Summary (Workbook → Patient Summary).';
     }
@@ -610,5 +671,13 @@ onMounted(loadAll);
   max-height: 300px; overflow-y: auto;
   border: 1px solid #e0e0e0; border-radius: 8px; padding: 10px 12px;
   background: #fafbfc; font-size: 13px; line-height: 1.45;
+}
+/* Rendered-markdown spacing, matching the Patient Summary tab's look */
+.pp-share-md :deep(p) { margin: 0 0 8px; }
+.pp-share-md :deep(ul), .pp-share-md :deep(ol) { margin: 0 0 8px; padding-left: 20px; }
+.pp-share-md :deep(li) { margin-bottom: 2px; }
+.pp-share-md :deep(strong) { font-weight: 600; }
+.pp-share-md :deep(h1), .pp-share-md :deep(h2), .pp-share-md :deep(h3) {
+  font-size: 14px; font-weight: 700; margin: 10px 0 6px;
 }
 </style>

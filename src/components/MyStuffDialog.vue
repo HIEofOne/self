@@ -1107,7 +1107,11 @@
           </q-tab-panel>
 
           <q-tab-panel name="policies" class="q-pa-none" style="overflow-y: auto;">
-            <PoliciesPanel :userId="userId" @group-joined="emit('group-joined')" />
+            <PoliciesPanel
+              :userId="userId"
+              @group-joined="emit('group-joined')"
+              @view-citation="handlePolicyPreviewCitation"
+            />
           </q-tab-panel>
 
           <!-- Privacy Filter Tab -->
@@ -2784,6 +2788,19 @@ const patientSummaryHtml = computed(() => {
   void userFiles.value;
   return renderPsHtml(patientSummary.value);
 });
+/** Citation clicked in the Sharing Policies "What would be shared" preview —
+ *  open the PDF viewer exactly like a Patient Summary citation. */
+const handlePolicyPreviewCitation = (payload: { bucketKey: string; fileName: string; page?: number }) => {
+  pdfViewerInitialPage.value = payload.page;
+  viewFileInPdfViewer({
+    fileName: payload.fileName,
+    bucketKey: payload.bucketKey,
+    fileSize: 0,
+    uploadedAt: '',
+    inKnowledgeBase: true
+  } as UserFile);
+};
+
 const handlePsCitationClick = (event: Event) => {
   const target = event.target as HTMLElement;
   const link = target.closest('.page-link') as HTMLElement | null;
