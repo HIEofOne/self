@@ -15,6 +15,7 @@
  */
 import { evaluatePolicies, policySentence, normalizeCard, POLICY_SCOPES, POLICY_PURPOSES } from './policies.js';
 import { applyPseudonymMapping } from '../privacyFilter.js';
+import { isVerified as emailTokenVerified } from '../emailVerification.js';
 import {
   generateKeyPairSync, createHash, createPrivateKey, createPublicKey,
   randomBytes, sign as edSign, verify as edVerify,
@@ -467,21 +468,137 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       }
       const now = Date.now();
       const reqId = randomBytes(8).toString('hex');
-      const envelope = JSON.stringify({
-        maiaType: 'as-request',
-        action: 'share',
-        resource: scope,
-        purpose,
-        created: new Date(now).toISOString(),
-        nonce: reqId,
-        payload: {
-          message,
-          requester: { name, email, organization: organization || null }
-        }
-      });
+      // Honest signature strength: the welcome builder verifies the requester's
+      // email through OUR code flow before allowing a real send, so a request
+      // carrying a matching verify token evaluates as 'verified-email'.
+      // Claims of stronger identities (NPI/Doximity) still evaluate as
+      // unverified until real verification exists.
+      const emailVerifyToken = typeof b.emailVerifyToken === 'string' ? b.emailVerifyToken : null;
+      const requestSignature = (emailVerifyToken && emailTokenVerified(emailVerifyToken, email))
+        ? 'verified-email' : 'unverified';
+      const appUrl = (process.env.PUBLIC_APP_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+
       let delivered = 0;
+      let autoAccepted = 0;
+      let autoDeclined = 0;
       for (const m of members) {
+        // Delivery-time evaluation (Phase 1, single deployment: this server IS
+        // each member's authorization server). A member whose sharing-policy
+        // cards decide the request gets an AUTONOMOUS outcome right now — the
+        // agent works even while the patient is offline. Anything undecided is
+        // sealed to the member's relay exactly as before (human-in-the-loop).
+        let ownerDoc = null;
         try {
+          const rr = await cloudant.findDocuments(USERS_DB, {
+            selector: { groupMemberships: { $elemMatch: { groupId: { $eq: doc._id }, pairwiseId: { $eq: m.pairwiseId } } } },
+            limit: 1
+          });
+          ownerDoc = rr?.docs?.[0] || null;
+        } catch { /* cross-host / lookup failure → escalate path below */ }
+
+        let decision = { outcome: 'ask', decidedBy: null };
+        if (ownerDoc) {
+          decision = evaluatePolicies(ownerDoc.sharingPolicies || [], {
+            party: { type: 'anyone' }, purpose, scope, signature: requestSignature, payment: 'none'
+          });
+        }
+
+        // autoDecision rides inside the sealed envelope so the member's MAIA
+        // stores the request as already-answered (with the deciding sentence)
+        // instead of re-asking.
+        let autoDecision = null;
+        if (decision.outcome === 'allow' && ownerDoc) {
+          // ONLY the privacy-filtered artifacts ever leave (allow cards are
+          // filtered-by-default; unfiltered autonomous sharing is not offered).
+          const mapping = ownerDoc.privacyFilter?.pseudonymMapping || [];
+          let artifact = '';
+          let artifactLabel = '';
+          if (scope === 'meds-allergies') {
+            const meds = String(ownerDoc.currentMedications || '').trim();
+            if (meds) {
+              artifact = applyPseudonymMapping(mapping, meds);
+              artifactLabel = 'privacy-filtered Current Medications';
+            }
+          } else if (scope !== 'notification-only') {
+            const pf = String(ownerDoc.privacyFilteredSummary?.text || '').trim();
+            if (pf) {
+              artifact = pf;
+              artifactLabel = 'privacy-filtered Patient Summary';
+            }
+          }
+          if (artifact && typeof sendEmail === 'function') {
+            try {
+              await sendEmail(
+                email,
+                `A "${doc.name}" member's MAIA responded to your request`,
+                [
+                  `A member of the "${doc.name}" group has a sharing policy that allows your request, so their MAIA responded autonomously.`,
+                  `Decided by their card: "${policySentence(decision.decidedBy)}"`,
+                  '',
+                  `--- ${artifactLabel} ---`,
+                  artifact,
+                  '',
+                  appUrl
+                ].join('\n')
+              );
+              autoAccepted++;
+              autoDecision = { outcome: 'accepted', sentence: policySentence(decision.decidedBy) };
+              auditLog.logEvent({
+                type: 'as_request_responded',
+                userId: ownerDoc.userId,
+                ip: req.ip,
+                details: { requestId: reqId, groupId: doc._id, outcome: 'accepted', autonomous: true, decidedByPolicyId: decision.decidedBy?.id || null }
+              });
+            } catch (e) {
+              console.warn('[outside-request] autonomous respond failed:', e?.message || e);
+            }
+          }
+          // No filtered artifact to share yet → fall through and escalate (ask).
+        } else if (decision.outcome === 'deny' && ownerDoc) {
+          const denyMode = decision.decidedBy?.denyMode === 'respond' ? 'respond' : 'silent';
+          if (denyMode === 'silent') {
+            // Cedar-style silent drop: nothing sealed, requester hears nothing.
+            continue;
+          }
+          if (typeof sendEmail === 'function') {
+            try {
+              await sendEmail(
+                email,
+                `Your request to a "${doc.name}" member was declined`,
+                [
+                  `A member's MAIA declined your request per their sharing policy:`,
+                  `"${policySentence(decision.decidedBy)}"`
+                ].join('\n')
+              );
+              autoDeclined++;
+              auditLog.logEvent({
+                type: 'as_request_responded',
+                userId: ownerDoc.userId,
+                ip: req.ip,
+                details: { requestId: reqId, groupId: doc._id, outcome: 'declined', autonomous: true, decidedByPolicyId: decision.decidedBy?.id || null }
+              });
+            } catch (e) {
+              console.warn('[outside-request] autonomous decline failed:', e?.message || e);
+            }
+          }
+          autoDecision = { outcome: 'declined', sentence: policySentence(decision.decidedBy) };
+        }
+
+        try {
+          const envelope = JSON.stringify({
+            maiaType: 'as-request',
+            action: 'share',
+            resource: scope,
+            purpose,
+            signature: requestSignature,
+            created: new Date(now).toISOString(),
+            nonce: reqId,
+            ...(autoDecision ? { autoDecision } : {}),
+            payload: {
+              message,
+              requester: { name, email, organization: organization || null }
+            }
+          });
           const box = sealTo(m.encryptionPublicKeyJwk, envelope);
           await cloudant.saveDocument(RELAY_DB, {
             _id: `relay_${now}_${randomBytes(6).toString('hex')}`,
@@ -499,7 +616,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         }
       }
       // Public tally (counts only — no identities, no content) so the requester
-      // can watch reach + responses. Swept with the relay TTL.
+      // can watch reach + responses. Autonomous outcomes count immediately.
       try {
         await cloudant.saveDocument(RELAY_DB, {
           _id: `outreq_${reqId}`,
@@ -507,9 +624,9 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
           groupId: doc._id,
           requestId: reqId,
           delivered,
-          responded: 0,
-          accepted: 0,
-          declined: 0,
+          responded: autoAccepted + autoDeclined,
+          accepted: autoAccepted,
+          declined: autoDeclined,
           createdAt: new Date(now).toISOString(),
           expiresAt: new Date(now + RELAY_TTL_MS).toISOString()
         });
@@ -2691,6 +2808,13 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
           payment: envelope.payment || null, // reserved (§3.4); unused in Phase 1
           nonce: envelope.nonce || null,
           created: envelope.created || null,
+          // Verified signature strength the REGISTRY established at delivery
+          // (outside requests with a matching email-verify token), and any
+          // autonomous decision the member's own policies already made there.
+          signature: envelope.signature === 'verified-email' ? 'verified-email' : null,
+          autoDecision: (envelope.autoDecision && ['accepted', 'declined'].includes(envelope.autoDecision.outcome))
+            ? { outcome: envelope.autoDecision.outcome, sentence: String(envelope.autoDecision.sentence || '') }
+            : null,
           payload: envelope.payload ?? null
         });
         // Remember the relay id so the next refresh ACKs it (deleting it
@@ -3111,6 +3235,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
    */
   const ingestAsRequests = async (userDoc, membership, requests) => {
     let stored = 0;
+    let autoAnswered = 0; // stored requests the registry already decided
     const blocked = new Set(membership.blockedSenders || []);
     for (const r of requests) {
       if (blocked.has(r.fromPairwiseId)) continue; // spam-drop
@@ -3120,22 +3245,30 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       // claim); stronger levels (NPI/Doximity) arrive in a later phase.
       // Payment: the envelope's §3.4 slot is unused in Phase 1 → 'none'.
       let decision = { outcome: 'ask', decidedBy: null };
-      if (POLICY_SCOPES.includes(r.resource)) {
-        // Outsiders (W3) present no membership and no identity: they
-        // evaluate as an unverified 'anyone' — which is exactly what
-        // "Anyone (no identity check) may NOT receive ... for Marketing
-        // use" deny cards exist to drop.
+      if (r.autoDecision) {
+        // The registry already answered this request autonomously at
+        // delivery time (the member's own policies, evaluated there).
+        // Store it as a record of that decision — no re-evaluation, no
+        // silent drop; the requester has already been emailed.
+        decision = null;
+      } else if (POLICY_SCOPES.includes(r.resource)) {
+        // Outsiders (W3) present no membership and no identity — UNLESS
+        // the registry proved a verified email at delivery time
+        // (r.signature === 'verified-email'). Either way they evaluate
+        // as 'anyone'; the signature level is what their proof supports.
         decision = evaluatePolicies(userDoc.sharingPolicies || [], {
           party: r.fromOutsider
             ? { type: 'anyone' }
             : { type: 'group', groupId: membership.groupId, pairwiseId: r.fromPairwiseId },
           purpose: r.purpose || 'any',
           scope: r.resource,
-          signature: r.fromOutsider ? 'unverified' : 'group-member',
+          signature: r.fromOutsider
+            ? (r.signature === 'verified-email' ? 'verified-email' : 'unverified')
+            : 'group-member',
           payment: 'none'
         });
       }
-      if (decision.outcome === 'deny') {
+      if (decision && decision.outcome === 'deny') {
         auditLog.logEvent({
           type: 'as_request_policy_denied',
           userId: userDoc.userId,
@@ -3165,8 +3298,15 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         nonce: r.nonce,
         createdAt: r.created || new Date(now).toISOString(),
         receivedAt: new Date(now).toISOString(),
-        status: decision.outcome === 'allow' ? 'accepted' : 'pending',
-        ...(decision.decidedBy ? {
+        status: r.autoDecision
+          ? r.autoDecision.outcome // 'accepted' | 'declined' — decided at the registry
+          : (decision.outcome === 'allow' ? 'accepted' : 'pending'),
+        ...(r.autoDecision ? {
+          decidedBySentence: r.autoDecision.sentence || null,
+          decidedAt: new Date(now).toISOString(),
+          autonomous: true
+        } : {}),
+        ...(decision?.decidedBy ? {
           decidedByPolicyId: decision.decidedBy.id,
           decidedBySentence: policySentence(decision.decidedBy),
           decidedAt: new Date(now).toISOString()
@@ -3174,27 +3314,36 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       };
       // Autonomous accept also pre-accepts the sender (same fact the
       // human Accept button writes).
-      if (decision.outcome === 'allow') {
+      if (decision?.outcome === 'allow' || r.autoDecision?.outcome === 'accepted') {
         membership.acceptedSenders = Array.from(new Set([...(membership.acceptedSenders || []), r.fromPairwiseId]));
       }
       try {
         await cloudant.saveDocument(AS_REQUESTS_DB, doc);
         stored++;
+        if (r.autoDecision) autoAnswered++;
       } catch (e) {
         console.warn('[as-requests] store failed:', e?.message || e);
       }
     }
     // Best-effort patient notification (in-app inbox is the primary channel).
+    // Requests the registry already answered per the member's own policy get
+    // a "your MAIA responded" note, not a call to action.
     if (stored > 0 && userDoc.email && typeof sendEmail === 'function') {
       try {
         const appUrl = (process.env.PUBLIC_APP_URL || '').replace(/\/$/, '');
+        const pending = stored - autoAnswered;
         await sendEmail(
           userDoc.email,
           `New request in your MAIA group "${membership.groupName}"`,
           [
-            `You have ${stored} new request from a member of "${membership.groupName}".`,
+            `You have ${stored} new request${stored === 1 ? '' : 's'} in "${membership.groupName}".`,
+            ...(autoAnswered > 0
+              ? [`Your MAIA already responded to ${autoAnswered} of them autonomously, per your sharing policies.`]
+              : []),
             '',
-            'Open MAIA → Workbook → Groups → Requests to review and respond.',
+            pending > 0
+              ? 'Open MAIA → Workbook → Groups → Requests to review and respond.'
+              : 'Open MAIA → Workbook → Groups → Requests to see what was shared and why.',
             appUrl ? `\n${appUrl}` : ''
           ].join('\n')
         );
