@@ -143,6 +143,19 @@ export const sentenceFor = (card: PolicyCard): string => {
 };
 
 /** Does this card's constraints cover the request? (Card as pattern.) */
+/** Scope containment for card matching: which REQUEST scopes a card scope
+ *  covers. Everything ⊇ {not-sensitive, patient-summary, meds-allergies};
+ *  not-sensitive and patient-summary each cover meds-allergies but NOT each
+ *  other (the PS may contain sensitive-category content). */
+const SCOPE_COVERS: Record<string, Scope[]> = {
+  'everything': ['everything', 'not-sensitive', 'patient-summary', 'meds-allergies'],
+  'not-sensitive': ['not-sensitive', 'meds-allergies'],
+  'patient-summary': ['patient-summary', 'meds-allergies'],
+  'meds-allergies': ['meds-allergies'],
+  'notification-only': ['notification-only'],
+  'ah-category': ['ah-category']
+};
+
 const matches = (card: PolicyCard, req: PolicyRequest): boolean => {
   const e = card.elements;
   // A card imported from a group (provenance 'group:<id>') belongs to THAT
@@ -154,10 +167,14 @@ const matches = (card: PolicyCard, req: PolicyRequest): boolean => {
   if (e.party.type === 'group' && (req.party.type !== 'group' || req.party.groupId !== cardGroupId)) return false;
   if (e.party.type === 'peer' && req.party.pairwiseId !== e.party.pairwiseId) return false;
   if (e.purpose !== 'any' && e.purpose !== req.purpose) return false;
-  // Scope: the card covers the request only if it grants the SAME scope.
-  // (Scope-subsumption — "everything covers patient-summary" — is a Cedar-
-  // phase refinement; exact match keeps v1 predictable.)
-  if (e.scope !== req.scope) return false;
+  // Scope subsumption (Cedar-style, downward): a card covers a request asking
+  // for the SAME scope or a CONTAINED one — "everything" covers a Patient
+  // Summary ask; a Patient Summary card covers a meds ask (the PS contains
+  // the meds list). Deliberately NOT a naive chain: "not-sensitive" does NOT
+  // cover the Patient Summary, because the PS can carry sensitive-category
+  // content. notification-only and ah-category stay exact-match.
+  // Applies to allow AND deny alike ("deny everything" blocks any data ask).
+  if (!(SCOPE_COVERS[e.scope] || [e.scope]).includes(req.scope)) return false;
   // Apple Health category: a category-specific card only covers a request
   // for that same category (when both name one).
   if (e.scope === 'ah-category' && e.ahCategory && req.ahCategory && e.ahCategory !== req.ahCategory) return false;
