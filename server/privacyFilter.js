@@ -89,7 +89,7 @@ export const hashName = (s) => { let h = 0; for (const c of String(s)) h = (h * 
 // Words that mean a capitalized phrase is NOT a person: document/section
 // vocabulary plus organization words ("Boston Medical Center",
 // "PARTNERS HEALTHCARE").
-const NOT_A_NAME = /\b(Patient|Verified|File|Health|Healthcare|Summary|Medication|Medications|Documented|Telephone|Encounter|Instructions|Note|Notes|Outpatient|Telemedicine|Progress|Records|History|Apple|Hospital|Clinic|Center|Centre|Medical|General|Department|Laboratory|Radiology|Imaging|Associates|Group|Practice|Services|Partners|System|Network|Foundation|Institute|University|College|Pharmacy|Insurance|Care|Clinical|Visit|Report|Letter|Plan|Referral|Consult|Consultation|Discharge|Admission|Office|Emergency|Medicine|Surgery|Exam|Examination|Assessment|Procedure|Operative|Pathology|Physical|Annual|Wellness|Immunization|Vaccination|Screening|Preventive|Order|Orders|Message|Document|Results?)\b/i;
+const NOT_A_NAME = /\b(Patient|Verified|File|Health|Healthcare|Summary|Medication|Medications|Documented|Telephone|Encounter|Instructions|Note|Notes|Outpatient|Telemedicine|Progress|Records|History|Apple|Hospital|Clinic|Center|Centre|Medical|General|Department|Lab|Labs|Laboratory|Radiology|Imaging|Associates|Group|Practice|Services|Partners|System|Network|Foundation|Institute|University|College|Pharmacy|Insurance|Care|Clinical|Visit|Report|Letter|Plan|Referral|Consult|Consultation|Discharge|Admission|Office|Emergency|Medicine|Surgery|Exam|Examination|Assessment|Procedure|Operative|Pathology|Physical|Annual|Wellness|Immunization|Vaccination|Screening|Preventive|Order|Orders|Message|Document|Results?)\b/i;
 
 /** Credentials that mark the preceding capitalized phrase as a PERSON —
  *  the strongest, format-independent signal in every summary variant. */
@@ -107,8 +107,16 @@ export function looksLikePersonName(raw) {
   // ALL-CAPS multi-word phrases are organizations or document headings
   // ("PARTNERS HEALTHCARE"), never how a summary writes a person.
   if (words.length >= 2 && nm === nm.toUpperCase()) return false;
+  // A pure-caps ACRONYM word inside a mixed phrase ("MGH Lab Waltham",
+  // "UCLA Health West") marks an organization too.
+  if (words.length >= 2 && words.some((w) => w.length >= 2 && /^[A-Z]+$/.test(w))) return false;
   return true;
 }
+
+/** Names the USER removed from the mapping — auto-seeding must never
+ *  resurrect them. */
+const suppressedSet = (userDoc) =>
+  new Set((userDoc.privacyFilter?.suppressed || []).map((s) => String(s).toLowerCase()));
 
 /** Extract the people a Patient Summary names. Formats the generator is
  *  known to emit:
@@ -178,7 +186,8 @@ export function seedPseudonymMappingFromSummary(userDoc, summaryText) {
   const existing = userDoc.privacyFilter?.pseudonymMapping || [];
   if (existing.length > 0) return false;
   if (userDoc.privacyFilter?.lastUpdated) return false;
-  const names = extractSummaryNames(summaryText);
+  const suppressed = suppressedSet(userDoc);
+  const names = extractSummaryNames(summaryText).filter((n) => !suppressed.has(n.toLowerCase()));
   if (names.length === 0) return false;
   const used = new Set();
   const mapping = names.map((original) => ({ original, pseudonym: makePseudonym(original, used), source: 'auto-summary' }));
@@ -198,10 +207,11 @@ export function seedPseudonymMappingFromSummary(userDoc, summaryText) {
 export function seedMissingNames(userDoc, summaryText) {
   const entries = userDoc.privacyFilter?.pseudonymMapping || [];
   const have = new Set(entries.map((e) => String(e?.original || '').toLowerCase()));
+  const suppressed = suppressedSet(userDoc);
   const used = new Set(entries.map((e) => String(e?.pseudonym || '')));
   let added = 0;
   for (const original of extractSummaryNames(summaryText)) {
-    if (have.has(original.toLowerCase())) continue;
+    if (have.has(original.toLowerCase()) || suppressed.has(original.toLowerCase())) continue;
     entries.push({ original, pseudonym: makePseudonym(original, used), source: 'auto-summary' });
     have.add(original.toLowerCase());
     added++;

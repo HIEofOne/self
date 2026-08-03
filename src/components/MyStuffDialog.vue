@@ -1161,14 +1161,30 @@
                   :rows="privacyFilterMapping"
                   :columns="[
                     { name: 'original', label: 'Original Name', field: 'original', align: 'left' },
-                    { name: 'pseudonym', label: 'Pseudonym', field: 'pseudonym', align: 'left' }
+                    { name: 'pseudonym', label: 'Pseudonym', field: 'pseudonym', align: 'left' },
+                    { name: 'actions', label: '', field: 'original', align: 'right' }
                   ]"
                   row-key="original"
                   flat
                   bordered
                   :rows-per-page-options="[0]"
                   hide-pagination
-                />
+                >
+                  <template #body-cell-actions="props">
+                    <q-td :props="props" auto-width>
+                      <q-btn
+                        flat dense round size="sm" icon="delete" color="negative"
+                        :loading="removingMappingOriginal === props.row.original"
+                        @click="removeMappingEntry(props.row)"
+                      >
+                        <q-tooltip>
+                          Remove this entry — it will not be re-added
+                          automatically, and the filtered summary updates.
+                        </q-tooltip>
+                      </q-btn>
+                    </q-td>
+                  </template>
+                </q-table>
               </div>
             </div>
 
@@ -1476,7 +1492,7 @@
                 </div>
                 <div
                   class="text-body2 q-pa-md bg-grey-1 rounded-borders"
-                  v-html="renderPsHtml(privacyFilteredSummary.text)"
+                  v-html="renderPsHtml(privacyFilteredSummary.text, privacyFilteredSummary.mapping)"
                   @click="handlePsCitationClick"
                 ></div>
               </div>
@@ -1961,6 +1977,7 @@ import PoliciesPanel from './PoliciesPanel.vue';
 import { useQuasar } from 'quasar';
 import { deleteChatById } from '../utils/chatApi';
 import { processFileNCitations } from '../utils/fileNCitations';
+import { applyPseudonymsClient } from '../utils/pseudonyms';
 import { advancePipeline, waitForStageDone } from '../utils/pipeline';
 import { logModalEvent } from '../utils/modalLog';
 
@@ -2714,6 +2731,32 @@ const loadingPrivacyFilter = ref(false);
 const privacyFilterError = ref('');
 const privacyFilterResponse = ref('');
 const privacyFilterMapping = ref<Array<{ original: string; pseudonym: string }>>([]);
+
+// Remove a mapping row. The server records the original as SUPPRESSED so
+// auto-seeding never resurrects it (deleting "MGH Lab Waltham" must stick),
+// and regenerates the privacy-filtered summary with the smaller mapping.
+const removingMappingOriginal = ref<string | null>(null);
+const removeMappingEntry = async (row: { original: string; pseudonym: string }) => {
+  if (removingMappingOriginal.value) return;
+  removingMappingOriginal.value = row.original;
+  try {
+    const newMapping = privacyFilterMapping.value.filter((e) => e.original !== row.original);
+    const res = await fetch('/api/privacy-filter-mapping', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ mapping: newMapping, suppressOriginals: [row.original] })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+    privacyFilterMapping.value = newMapping;
+    $q.notify({ type: 'positive', message: `Removed “${row.original}” — it won't be re-added automatically.` });
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to remove entry' });
+  } finally {
+    removingMappingOriginal.value = null;
+  }
+};
 const loadingRandomNames = ref(false);
 const patientSummary = ref('');
 const patientSummaries = ref<Array<{ text: string; createdAt: string; updatedAt: string; isCurrent: boolean }>>([]);
@@ -2778,10 +2821,16 @@ const pdfViewerInitialPage = ref<number | undefined>(undefined);
 // default strips HTML). Caller must put a @click handler on the
 // container that calls handlePsCitationClick to actually open the
 // PDF when one of the anchors is clicked.
-const renderPsHtml = (text: string | null | undefined): string => {
+const renderPsHtml = (text: string | null | undefined, maskMapping?: Array<{ original: string; pseudonym: string }> | null): string => {
   const txt = String(text || '');
   if (!txt.trim()) return '';
-  const processed = processFileNCitations(txt, userFiles.value as any);
+  // On privacy-filtered surfaces the citation processor composes VISIBLE
+  // strings (File legend, tooltips) from the user's REAL file names — mask
+  // them with the same mapping the server used on the text itself.
+  const nameFilter = maskMapping?.length
+    ? (s: string) => applyPseudonymsClient(maskMapping, s)
+    : undefined;
+  const processed = processFileNCitations(txt, userFiles.value as any, nameFilter);
   return psMarkdown.render(processed);
 };
 const patientSummaryHtml = computed(() => {
@@ -6630,7 +6679,7 @@ const pairError = ref('');
 const summarySubTab = ref<'summary' | 'filtered' | 'inst-default' | 'inst-gpt'>('summary');
 // Phase 4: the auto-generated privacy-filtered copy of the current summary
 // (from GET /api/patient-summary.privacyFiltered).
-const privacyFilteredSummary = ref<{ text: string; mappingCount: number; createdAt: string | null } | null>(null);
+const privacyFilteredSummary = ref<{ text: string; mappingCount: number; createdAt: string | null; mapping?: Array<{ original: string; pseudonym: string }> } | null>(null);
 const summaryInstr = ref<{ loading: boolean; saving: boolean; profileKey: string; text: string; defaultText: string; status: string }>({
   loading: false, saving: false, profileKey: 'default', text: '', defaultText: '', status: ''
 });

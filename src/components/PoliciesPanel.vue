@@ -278,6 +278,7 @@ import PolicyCardBuilder from './PolicyCardBuilder.vue';
 import { useQuasar } from 'quasar';
 import MarkdownIt from 'markdown-it';
 import { processFileNCitations } from '../utils/fileNCitations';
+import { applyPseudonymsClient } from '../utils/pseudonyms';
 
 // Same renderer setup as the Patient Summary tab (MyStuffDialog.psMarkdown):
 // html:true so the <a class="page-link"> citation anchors survive; ordinary
@@ -486,6 +487,7 @@ const sharePreviewLoading = ref(false);
 // [File N p.X] citations as clickable page-links.
 const sharePreviewHtml = ref('');
 const previewFiles = ref<Array<{ fileName: string; bucketKey: string }>>([]);
+const previewMapping = ref<Array<{ original: string; pseudonym: string }>>([]);
 let previewFilesLoaded = false;
 const ensurePreviewFiles = async () => {
   if (previewFilesLoaded) return;
@@ -499,9 +501,25 @@ const ensurePreviewFiles = async () => {
         .filter((f: any) => f.fileName && f.bucketKey);
     }
   } catch { /* citations render as plain text */ }
+  try {
+    const m = await fetch('/api/privacy-filter-mapping', { credentials: 'include' });
+    if (m.ok) {
+      const mj = await m.json();
+      previewMapping.value = (Array.isArray(mj.mapping) ? mj.mapping : [])
+        .filter((e: any) => e && e.original && e.pseudonym)
+        .map((e: any) => ({ original: e.original, pseudonym: e.pseudonym }));
+    }
+  } catch { /* legend shows real names — matches an unconfigured filter */ }
 };
+// This preview shows WHAT WOULD LEAVE — so the File legend and citation
+// tooltips (composed client-side from real file names) get the same
+// pseudonym masking the shared text itself already carries.
 const renderPreview = (text: string) =>
-  previewMarkdown.render(processFileNCitations(String(text || ''), previewFiles.value as any));
+  previewMarkdown.render(processFileNCitations(
+    String(text || ''),
+    previewFiles.value as any,
+    previewMapping.value.length ? (s: string) => applyPseudonymsClient(previewMapping.value, s) : undefined
+  ));
 const onPreviewCitationClick = (event: Event) => {
   const link = (event.target as HTMLElement).closest('.page-link') as HTMLElement | null;
   if (!link) return;
