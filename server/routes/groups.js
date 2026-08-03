@@ -3128,6 +3128,8 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
           action: r.action,
           purpose: r.purpose || 'any',
           decidedBySentence: r.decidedBySentence || null,
+          decidedAt: r.decidedAt || null,
+          autonomous: !!r.autonomous,
           resource: r.resource,
           payload: r.payload,
           receivedAt: r.receivedAt,

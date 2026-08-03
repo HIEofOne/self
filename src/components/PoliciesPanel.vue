@@ -118,6 +118,44 @@
       </div>
     </template>
 
+    <!-- Request log: every request the AS received and what happened —
+         the accountability view for "your AI acts on your behalf". -->
+    <q-separator class="q-my-md" />
+    <div class="text-subtitle2 q-mb-xs">Request log</div>
+    <div class="text-caption text-grey-7 q-mb-sm">
+      Every request your MAIA received, newest first — who asked, for what,
+      and how it was decided. "Auto" outcomes were answered by your policy
+      cards above; pending ones await you in Workbook → Groups.
+    </div>
+    <div v-if="!requestLog.length" class="text-caption text-grey-6 q-mb-md">
+      No requests yet.
+    </div>
+    <div v-for="r in visibleRequestLog" :key="r.id" class="reqlog-row">
+      <div class="row items-start no-wrap q-gutter-sm">
+        <q-badge :color="reqOutcome(r).color" :label="reqOutcome(r).label" class="q-mt-xs" style="flex: 0 0 auto" />
+        <div class="col" style="min-width: 0">
+          <div class="text-body2">
+            <strong>{{ reqWho(r) }}</strong>
+            <span class="text-grey-8"> asked for {{ reqScopeLabel(r.resource) }}</span>
+            <span v-if="r.purpose && r.purpose !== 'any'" class="text-grey-8"> for {{ r.purpose }} use</span>
+            <span class="text-caption text-grey-6"> · {{ r.groupName }}</span>
+          </div>
+          <div v-if="r.decidedBySentence" class="text-caption text-grey-7">
+            Decided by your card: “{{ r.decidedBySentence }}”
+          </div>
+          <div class="text-caption text-grey-6">
+            {{ reqWhen(r.receivedAt) }}<template v-if="r.decidedAt"> · decided {{ reqWhen(r.decidedAt) }}</template>
+          </div>
+        </div>
+      </div>
+    </div>
+    <q-btn
+      v-if="requestLog.length > requestLogLimit"
+      flat dense size="sm" color="primary" class="q-mb-md"
+      :label="showAllRequests ? 'Show fewer' : `Show all ${requestLog.length}`"
+      @click="showAllRequests = !showAllRequests"
+    />
+
     <!-- Display name: member-signed rename, no leave-and-rejoin -->
     <q-separator class="q-my-md" />
     <div class="text-subtitle2 q-mb-xs">Your display name</div>
@@ -537,8 +575,61 @@ const openEditor = (card: PolicyCard | null) => {
 };
 
 // ── CRUD ────────────────────────────────────────────────────────────
+// ── Request log (accountability view) ────────────────────────────────
+interface LoggedRequest {
+  id: string;
+  groupName: string;
+  fromAlias: string | null;
+  fromOutsider: boolean;
+  requester: { name?: string; email?: string; organization?: string | null } | null;
+  purpose: string;
+  resource: string;
+  status: string;
+  autonomous: boolean;
+  decidedBySentence: string | null;
+  decidedAt: string | null;
+  receivedAt: string;
+}
+const requestLog = ref<LoggedRequest[]>([]);
+const requestLogLimit = 20;
+const showAllRequests = ref(false);
+const visibleRequestLog = computed(() =>
+  showAllRequests.value ? requestLog.value : requestLog.value.slice(0, requestLogLimit));
+const reqOutcome = (r: LoggedRequest): { label: string; color: string } => {
+  if (r.status === 'accepted') return r.autonomous ? { label: 'auto-accepted', color: 'teal' } : { label: 'accepted by you', color: 'green' };
+  if (r.status === 'declined') return r.autonomous ? { label: 'auto-declined', color: 'deep-orange' } : { label: 'declined by you', color: 'deep-orange' };
+  if (r.status === 'blocked') return { label: 'blocked', color: 'grey-7' };
+  return { label: 'awaiting you', color: 'orange' };
+};
+const reqWho = (r: LoggedRequest): string => {
+  if (r.fromOutsider) {
+    const name = r.requester?.name || 'An outside requester';
+    const org = r.requester?.organization;
+    return `${name}${org ? ` (${org})` : ''} — outside the group`;
+  }
+  return r.fromAlias || 'A group member';
+};
+const reqScopeLabel = (resource: string): string => {
+  const opt = SCOPE_OPTIONS.find((o) => o.value === resource);
+  return opt ? opt.label : (resource === 'inbox' ? 'a message' : resource);
+};
+const reqWhen = (iso: string): string => {
+  try {
+    const d = new Date(iso);
+    return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
+  } catch { return iso; }
+};
+const loadRequestLog = async () => {
+  try {
+    const res = await fetch(`/api/user-groups/requests?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.success) requestLog.value = data.requests || [];
+  } catch { /* section shows empty state */ }
+};
+
 const loadAll = async () => {
   loading.value = true;
+  void loadRequestLog();
   try {
     const [pRes, gRes] = await Promise.all([
       fetch(`/api/user-policies?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' }),
@@ -641,6 +732,11 @@ onMounted(loadAll);
   &--allow { border-left-color: #4caf50; }
   &--deny { border-left-color: #ef5350; }
   &--ask { border-left-color: #f59e0b; }
+}
+.reqlog-row {
+  border-bottom: 1px solid #eee;
+  padding: 8px 2px;
+  &:last-of-type { border-bottom: none; }
 }
 </style>
 
