@@ -1045,10 +1045,12 @@ const appVersion = packageJson.version;
 const updateAvailable = ref(false);
 const serverVersion = ref('');
 let lastVersionCheck = 0;
-// "Later" snoozes THAT server version for this tab's session — without it,
-// every tab refocus re-showed the banner within a minute, which reads as
-// duplicate nags during active multi-tab use. A NEWER deploy (different
-// version) still breaks through, and a reload clears the mismatch anyway.
+// "Later" snoozes THAT server version — in localStorage, so ONE click
+// covers every open tab of this origin (sessionStorage was per-tab, which
+// still read as repeated nags across a three-tab session). A NEWER deploy
+// (different version) still breaks through, and a reload clears the
+// mismatch anyway. Tabs running builds older than this feature keep
+// nagging until their one final reload — unavoidable from here.
 const UPDATE_SNOOZE_KEY = 'maiaUpdateSnoozedVersion';
 const checkAppVersion = async () => {
   const now = Date.now();
@@ -1059,16 +1061,18 @@ const checkAppVersion = async () => {
     const j = await r.json().catch(() => ({}));
     if (j?.version && j.version !== appVersion) {
       let snoozed = '';
-      try { snoozed = sessionStorage.getItem(UPDATE_SNOOZE_KEY) || ''; } catch { /* ignore */ }
+      try { snoozed = localStorage.getItem(UPDATE_SNOOZE_KEY) || ''; } catch { /* ignore */ }
       if (snoozed === j.version) return;
       serverVersion.value = j.version;
       updateAvailable.value = true;
+    } else if (updateAvailable.value) {
+      updateAvailable.value = false; // caught up (e.g. reloaded elsewhere)
     }
   } catch { /* offline or transient — try again on next focus */ }
 };
 const snoozeUpdate = () => {
   updateAvailable.value = false;
-  try { sessionStorage.setItem(UPDATE_SNOOZE_KEY, serverVersion.value); } catch { /* ignore */ }
+  try { localStorage.setItem(UPDATE_SNOOZE_KEY, serverVersion.value); } catch { /* ignore */ }
 };
 const reloadForUpdate = () => window.location.reload();
 const onVisibleCheckVersion = () => { if (!document.hidden) void checkAppVersion(); };

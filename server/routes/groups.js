@@ -3012,9 +3012,28 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         sentAt: new Date().toISOString(),
         ...(toPairwiseId === '@everyone' ? { recipients: result.recipients } : {})
       };
-      membership.outbox = [...(membership.outbox || []), sent].slice(-OUTBOX_MAX);
-      userDoc.updatedAt = new Date().toISOString();
-      await cloudant.saveDocument(USERS_DB, userDoc);
+      // The message is already delivered — recording it locally must never
+      // turn a delivered message into a user-facing "Failed to send". With
+      // several tabs open, their polling writes race this one on the
+      // userDoc; retry once on conflict with a fresh doc, then degrade to
+      // success-without-record.
+      try {
+        membership.outbox = [...(membership.outbox || []), sent].slice(-OUTBOX_MAX);
+        userDoc.updatedAt = new Date().toISOString();
+        await cloudant.saveDocument(USERS_DB, userDoc);
+      } catch (e) {
+        try {
+          const fresh = await cloudant.getDocument(USERS_DB, userId);
+          const fm = (fresh?.groupMemberships || []).find((m) => m.groupId === groupId);
+          if (fm) {
+            fm.outbox = [...(fm.outbox || []), sent].slice(-OUTBOX_MAX);
+            fresh.updatedAt = new Date().toISOString();
+            await cloudant.saveDocument(USERS_DB, fresh);
+          }
+        } catch (e2) {
+          console.warn('[user-groups] outbox record failed (message WAS delivered):', e2?.message || e2);
+        }
+      }
       auditLog.logEvent({ type: 'user_group_message_sent', userId, ip: req.ip, details: { groupId, toPairwiseId } });
       res.json({ success: true, sent });
     } catch (error) {
@@ -3569,7 +3588,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
 
   /** Refresh every membership on a userDoc; drop revoked ones; ingest any
    *  AS requests. Mutates userDoc.groupMemberships. Returns { changed, summary }. */
-  const refreshUserMemberships = async (userDoc) => {
+  const refreshUserMemberships = async (userDoc, { notifyNewMail = false } = {}) => {
     const memberships = userDoc.groupMemberships || [];
     if (memberships.length === 0) {
       return { changed: false, summary: { refreshed: 0, revoked: 0, newMessages: 0, newRequests: 0 } };
@@ -3603,6 +3622,30 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     }
     userDoc.groupMemberships = kept;
     if (changed) userDoc.updatedAt = new Date().toISOString();
+    // Cron-driven pulls email the member about newly arrived PLAIN messages
+    // from THIS host — the only host that knows their address. This is how
+    // a CROSS-HOST member ever hears about messages: the registry cannot
+    // resolve their email (deleted at join, by design), so its send-time
+    // nudge never reaches them. Client-driven refreshes (the user is in
+    // the app) never email — notifyNewMail defaults off. As-requests are
+    // excluded: ingestAsRequests sends its own, more specific email.
+    if (notifyNewMail && newMessages > 0 && userDoc.email && userDoc.emailVerified && typeof sendEmail === 'function') {
+      try {
+        const appUrl = (process.env.PUBLIC_APP_URL || '').replace(/\/$/, '');
+        await sendEmail(
+          userDoc.email,
+          `New message${newMessages === 1 ? '' : 's'} in your MAIA groups`,
+          [
+            `You have ${newMessages} new message${newMessages === 1 ? '' : 's'} waiting in your MAIA groups.`,
+            '',
+            'Open MAIA → Workbook → Groups to read and reply.',
+            appUrl ? `\n${appUrl}` : ''
+          ].join('\n')
+        );
+      } catch (e) {
+        console.warn('[user-groups] new-mail notify failed:', e?.message || e);
+      }
+    }
     return { changed, summary: { refreshed, revoked, newMessages, newRequests } };
   };
 
@@ -3622,7 +3665,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       for (const userDoc of users || []) {
         if (!userDoc || !Array.isArray(userDoc.groupMemberships) || userDoc.groupMemberships.length === 0) continue;
         try {
-          const r = await refreshUserMemberships(userDoc);
+          const r = await refreshUserMemberships(userDoc, { notifyNewMail: true });
           if (r.changed) await cloudant.saveDocument(USERS_DB, userDoc);
           usersProcessed++;
           totalRevoked += r.summary.revoked;
@@ -3638,5 +3681,34 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       `refreshed ${usersProcessed} users, ${totalRevoked} revoked, ${totalMessages} new messages`);
   };
 
-  return { runDailyGroupMaintenance };
+  /** Lightweight hourly mail pull (server/index.js schedules it): refresh
+   *  every member's inbox and email them about newly arrived messages.
+   *  This bounds cross-host message-notification latency to ~1h instead
+   *  of the daily maintenance cycle. Server-to-server, one refresh per
+   *  membership — cheap at this scale, and the only polling the design
+   *  permits (a member's host must PULL; the registry can't push to a
+   *  host it cannot identify). */
+  const runHourlyMailPull = async () => {
+    let processed = 0;
+    let mails = 0;
+    try {
+      const users = await cloudant.getAllDocuments(USERS_DB);
+      for (const userDoc of users || []) {
+        if (!userDoc || !Array.isArray(userDoc.groupMemberships) || userDoc.groupMemberships.length === 0) continue;
+        try {
+          const r = await refreshUserMemberships(userDoc, { notifyNewMail: true });
+          if (r.changed) await cloudant.saveDocument(USERS_DB, userDoc);
+          processed++;
+          mails += r.summary.newMessages;
+        } catch (e) {
+          console.warn(`[groups-mail] user ${userDoc.userId} pull failed:`, e?.message || e);
+        }
+      }
+    } catch (e) {
+      console.warn('[groups-mail] user iteration failed:', e?.message || e);
+    }
+    if (mails > 0) console.log(`[groups-mail] pulled ${mails} new message(s) across ${processed} users`);
+  };
+
+  return { runDailyGroupMaintenance, runHourlyMailPull };
 }

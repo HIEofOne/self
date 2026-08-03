@@ -97,13 +97,13 @@ const mkHost = (origin) => {
   const cloudant = new FakeCloudant();
   const emails = [];
   const audits = [];
-  setupGroupRoutes(app, cloudant, { logEvent: (e) => audits.push(e) }, {
+  const jobs = setupGroupRoutes(app, cloudant, { logEvent: (e) => audits.push(e) }, {
     sendEmail: async (to, subject, textOrLines) => {
       emails.push({ to, subject, text: Array.isArray(textOrLines) ? textOrLines.join('\n') : String(textOrLines) });
       return true;
     }
   });
-  hosts[origin] = { app, cloudant, emails, audits };
+  hosts[origin] = { app, cloudant, emails, audits, jobs };
   return hosts[origin];
 };
 
@@ -269,5 +269,29 @@ describe('cross-host autonomous responses (registry on Host A, member AS on Host
     // …but no second nudge inside the quiet period.
     const nudgesAfter = A.emails.filter((e) => e.to === 'bob@example.com' && /new message/i.test(e.subject)).length;
     expect(nudgesAfter).toBe(nudgesBefore);
+  });
+
+  it('cross-host plain message: registry cannot nudge, but the hourly mail pull emails the recipient', async () => {
+    // bob (Host A) messages jessica (Host B). The registry (A) cannot
+    // resolve her email — deleted at join, by design — so no send-time
+    // nudge is possible. Her own host's hourly pull must both deliver
+    // the message and email her.
+    const bBefore = B.emails.length;
+    const send = await A.app.request('hosta.test', 'POST', '/api/user-groups/send', {
+      userId: 'bob', groupId, toPairwiseId: jessPw, text: 'hello across hosts'
+    });
+    expect(send.body?.success).toBe(true);
+    expect(B.emails.length).toBe(bBefore); // nothing yet — nobody could email her
+
+    await B.jobs.runHourlyMailPull();
+
+    const jmsgs = await B.app.request('hostb.test', 'GET', `/api/user-groups/messages?userId=jessica76&groupId=${groupId}`);
+    expect((jmsgs.body.messages || []).some((m) => m.text === 'hello across hosts')).toBe(true);
+    const digest = B.emails.slice(bBefore).find((e) => e.to === 'jessica76@example.com' && /new message/i.test(e.subject));
+    expect(digest).toBeTruthy();
+    // A second pull with no new mail sends nothing.
+    const afterDigest = B.emails.length;
+    await B.jobs.runHourlyMailPull();
+    expect(B.emails.length).toBe(afterDigest);
   });
 });
