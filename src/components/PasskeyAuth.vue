@@ -66,6 +66,19 @@
           @click="resetFlow"
         />
       </div>
+      <!-- Escape hatch when the passkey can't be produced (lost device,
+           different browser profile): switch to registration. For the
+           admin user this reveals the Admin Secret prompt, which is the
+           designed recovery path. -->
+      <q-btn
+        v-if="action === 'signin' && !loading"
+        flat
+        dense
+        color="primary"
+        class="q-mt-sm"
+        label="Passkey not working? Create or replace it"
+        @click="switchToRegister"
+      />
     </div>
 
     <!-- Step 3: Registration/Authentication -->
@@ -190,7 +203,11 @@ const startRegistrationFlow = async () => {
 
 const resetFlow = () => {
   currentStep.value = 'choose';
-  userId.value = '';
+  // Keep the prefilled id (e.g. 'admin' on /admin): clearing it while the
+  // input stays readonly-by-prefill left "Create New Passkey" with an
+  // empty, uneditable field — a dead end with no way to reach the admin
+  // secret prompt.
+  userId.value = props.prefillUserId || '';
   error.value = '';
   action.value = '';
   loading.value = false;
@@ -241,6 +258,16 @@ const handleEnterKey = () => {
   if (userId.value && userId.value.length >= 3 && !loading.value) {
     continueAction();
   }
+};
+
+/** Sign-in step → registration for the SAME user id. For the admin user,
+ *  continueAction's check-user reveals the Admin Secret field (the
+ *  designed passkey-recovery gate); for a normal user with a passkey it
+ *  explains that signing in is the only path. */
+const switchToRegister = async () => {
+  action.value = 'register';
+  error.value = '';
+  await continueAction();
 };
 
 const continueAction = async () => {
