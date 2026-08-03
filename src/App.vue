@@ -12,7 +12,7 @@
       A new version of MAIA is available (v{{ serverVersion }} — you're on v{{ appVersion }}).
       <template #action>
         <q-btn flat dense color="primary" label="Reload now" @click="reloadForUpdate" />
-        <q-btn flat dense color="grey-8" label="Later" @click="updateAvailable = false" />
+        <q-btn flat dense color="grey-8" label="Later" @click="snoozeUpdate" />
       </template>
     </q-banner>
     <q-page-container class="full-width">
@@ -1045,6 +1045,11 @@ const appVersion = packageJson.version;
 const updateAvailable = ref(false);
 const serverVersion = ref('');
 let lastVersionCheck = 0;
+// "Later" snoozes THAT server version for this tab's session — without it,
+// every tab refocus re-showed the banner within a minute, which reads as
+// duplicate nags during active multi-tab use. A NEWER deploy (different
+// version) still breaks through, and a reload clears the mismatch anyway.
+const UPDATE_SNOOZE_KEY = 'maiaUpdateSnoozedVersion';
 const checkAppVersion = async () => {
   const now = Date.now();
   if (now - lastVersionCheck < 60_000) return;
@@ -1053,10 +1058,17 @@ const checkAppVersion = async () => {
     const r = await fetch('/health', { cache: 'no-store' });
     const j = await r.json().catch(() => ({}));
     if (j?.version && j.version !== appVersion) {
+      let snoozed = '';
+      try { snoozed = sessionStorage.getItem(UPDATE_SNOOZE_KEY) || ''; } catch { /* ignore */ }
+      if (snoozed === j.version) return;
       serverVersion.value = j.version;
       updateAvailable.value = true;
     }
   } catch { /* offline or transient — try again on next focus */ }
+};
+const snoozeUpdate = () => {
+  updateAvailable.value = false;
+  try { sessionStorage.setItem(UPDATE_SNOOZE_KEY, serverVersion.value); } catch { /* ignore */ }
 };
 const reloadForUpdate = () => window.location.reload();
 const onVisibleCheckVersion = () => { if (!document.hidden) void checkAppVersion(); };
