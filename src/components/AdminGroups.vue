@@ -258,16 +258,36 @@
           <q-btn flat round dense icon="close" v-close-popup />
         </q-card-section>
         <q-card-section>
-          <div class="text-caption text-grey-7 q-mb-md">
-            Pick one cell in each column — MAIA writes the rule below. The card is about
-            "Anyone in {{ form.name || 'this group' }}"; each joiner imports it as their own editable card.
+          <div class="text-caption text-grey-7 q-mb-sm">
+            Pick one cell in each column — MAIA writes the rule below. Each
+            joiner imports it as their own editable card.
+          </div>
+          <div class="q-mb-md">
+            <div class="text-caption text-weight-medium text-grey-8 q-mb-xs">Who the card is about</div>
+            <q-btn-toggle
+              v-model="sugPartyKind"
+              unelevated
+              dense
+              toggle-color="primary"
+              :options="[
+                { value: 'group', label: `Anyone in ${form.name || 'this group'}` },
+                { value: 'anyone', label: 'Anyone — including outsiders' }
+              ]"
+            />
+            <div class="text-caption text-grey-7 q-mt-xs">
+              {{ sugPartyKind === 'group'
+                ? 'Applies only to fellow group members (their requests prove membership).'
+                : 'Also applies to outside requesters — e.g. welcome-page visitors with a verified email. Pair it with a signature floor you trust.' }}
+            </div>
           </div>
           <PolicyCardBuilder
             :key="sugEditorKey"
             mode="edit"
             :existing="editingSugCard"
             :show-try-it="false"
-            :party="{ type: 'group', groupId: editingGroupId || '', groupName: form.name }"
+            :party="sugPartyKind === 'anyone'
+              ? { type: 'anyone' }
+              : { type: 'group', groupId: editingGroupId || '', groupName: form.name }"
             :save-label="editingSugIndex === null ? 'Add to suggested policies' : 'Update suggested policy'"
             @save="onSugSave"
           />
@@ -391,12 +411,21 @@ const form = ref<{ name: string; description: string; tags: string; postingPolic
 const showSugEditor = ref(false);
 const editingSugIndex = ref<number | null>(null);
 const sugEditorKey = ref(0); // remount so prefill re-reads `existing`
+// Who a suggested card is about: fellow members ('group', the default) or
+// 'anyone' — the latter is what lets a group SUGGEST outsider-facing cards
+// (e.g. "Anyone with verified-email identity … may receive Current
+// Medications"), which the welcome-page request flow needs to auto-respond.
+const sugPartyKind = ref<'group' | 'anyone'>('group');
 const editingSugCard = computed<PolicyCard | null>(() =>
   editingSugIndex.value === null
     ? null
     : ((form.value.suggestedPolicies[editingSugIndex.value] as PolicyCard) || null));
 const openSugEditor = (i: number | null) => {
   editingSugIndex.value = i;
+  sugPartyKind.value =
+    i !== null && form.value.suggestedPolicies[i]?.elements?.party?.type === 'anyone'
+      ? 'anyone'
+      : 'group';
   sugEditorKey.value++;
   showSugEditor.value = true;
 };
