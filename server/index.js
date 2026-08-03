@@ -22,7 +22,7 @@ import { generateCurrentMedicationsToken } from './utils/token-service.js';
 import { computeRecordsPipeline, decideNextAction } from './records-pipeline.js';
 import { moveObjectWithVerify } from './utils/spaces-move.js';
 import { deleteObjectWithLog , asciiSafeMetadata } from './utils/spaces-ops.js';
-import { applyPseudonymMapping, seedPseudonymMappingFromSummary, hashName } from './privacyFilter.js';
+import { applyPseudonymMapping, seedPseudonymMappingFromSummary, seedMissingNames, extractSummaryNames, looksLikePersonName, hashName } from './privacyFilter.js';
 import { ChatClient } from '../lib/chat-client/index.js';
 import { findUserAgent, getOrCreateAgentApiKey } from './utils/agent-helper.js';
 import { getClinicalPrompt } from './utils/clinical-prompts.js';
@@ -14151,6 +14151,27 @@ function refreshPrivacyFilteredSummary(userDoc) {
     // No mapping yet → seed it from the summary itself (no-op if one exists),
     // so the filtered copy is actually filtered by default.
     seedPseudonymMappingFromSummary(userDoc, text);
+    // Heal auto-created entries the improved person check now rejects (e.g.
+    // "PARTNERS HEALTHCARE" once seeded as if it were a person), and — while
+    // the mapping is still entirely auto-generated — add people the current
+    // summary names that earlier extraction missed (new providers, a
+    // single-name patient header). A hand-curated mapping (any entry without
+    // the auto tag) is never modified beyond removing our own bad entries.
+    {
+      const entries = userDoc.privacyFilter?.pseudonymMapping || [];
+      const kept = entries.filter((e) => e?.source !== 'auto-summary' || looksLikePersonName(e.original));
+      const pruned = kept.length !== entries.length;
+      if (pruned) {
+        userDoc.privacyFilter.pseudonymMapping = kept;
+        userDoc.privacyFilter.lastUpdated = new Date().toISOString();
+      }
+      const after = userDoc.privacyFilter?.pseudonymMapping || [];
+      const allAuto = after.every((e) => e?.source === 'auto-summary'); // vacuously true when empty
+      // Empty-after-prune means WE emptied it (not the user) — reseed.
+      if (allAuto && (after.length > 0 || pruned)) {
+        seedMissingNames(userDoc, text);
+      }
+    }
     // Normalize EVERY pseudonym to the house style: two-digit markers on the
     // first and last parts ("Rowan Vance" → "Rowan73 Vance28"), same as the
     // chat-area filter's generated names ("Kelsey89 Fisher45"). This runs on
@@ -14264,7 +14285,17 @@ app.get('/api/patient-summary', async (req, res) => {
         const unseeded = (pf?.mappingCount === 0 || (pf && pf.mappingCount === undefined))
           && (userDoc.privacyFilter?.pseudonymMapping || []).length === 0
           && !userDoc.privacyFilter?.lastUpdated;
-        if (!pf || createdMs < summaryMs || createdMs < mappingMs || hasDigitlessEntry || unseeded) {
+        // Heal triggers for auto-generated mappings: an entry the improved
+        // person check now rejects (an org seeded as a "person"), or a name
+        // in the current summary that extraction now finds but the stored
+        // mapping lacks. Both re-run the refresh, whose prune/augment pass
+        // fixes the mapping. Cheap: one regex pass over the summary text.
+        const entriesNow = userDoc.privacyFilter?.pseudonymMapping || [];
+        const hasInvalidAutoEntry = entriesNow.some((e) => e?.source === 'auto-summary' && !looksLikePersonName(e.original));
+        const allAutoNow = entriesNow.length > 0 && entriesNow.every((e) => e?.source === 'auto-summary');
+        const mappedLower = new Set(entriesNow.map((e) => String(e?.original || '').toLowerCase()));
+        const hasUnmappedName = allAutoNow && extractSummaryNames(returnedSummary).some((n) => !mappedLower.has(n.toLowerCase()));
+        if (!pf || createdMs < summaryMs || createdMs < mappingMs || hasDigitlessEntry || unseeded || hasInvalidAutoEntry || hasUnmappedName) {
           refreshPrivacyFilteredSummary(userDoc);
           try {
             await cloudant.saveDocument('maia_users', userDoc);

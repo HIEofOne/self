@@ -6,7 +6,10 @@
  * "privacy-filtered" copy identical to the real summary.
  */
 import { describe, it, expect } from 'vitest';
-import { extractSummaryNames, seedPseudonymMappingFromSummary, applyPseudonymMapping } from '../../server/privacyFilter.js';
+import {
+  extractSummaryNames, seedPseudonymMappingFromSummary, seedMissingNames,
+  looksLikePersonName, applyPseudonymMapping
+} from '../../server/privacyFilter.js';
 
 const FORMAT_A = [
   'Adrian Gropper, 74, M',
@@ -73,5 +76,71 @@ describe('seedPseudonymMappingFromSummary', () => {
     const userDoc = { userId: 'u' };
     expect(seedPseudonymMappingFromSummary(userDoc, '## Medical History\nNo names here.')).toBe(false);
     expect(userDoc.privacyFilter).toBeUndefined();
+  });
+});
+
+// The Margarita regression: single-name patient header, credential-anchored
+// visit lines with an ALL-CAPS org in parens ("PARTNERS HEALTHCARE"). The
+// old code seeded ONLY the org (as a fake "person") and none of the people,
+// producing "Theodor Sauer, MD (Blake45 Granger10)" — real names visible,
+// nonsense pseudonym appended.
+const FORMAT_C = [
+  'Margarita, 68, Female',
+  '',
+  '## Medical History',
+  "Margarita has Crohn's disease of the small intestine.",
+  '',
+  '## Recent Visits (past 12 months)',
+  '- 2026-02-02 Outpatient – Theodor Sauer, MD (PARTNERS HEALTHCARE)',
+  '- 2025-12-29 Outpatient – Caroline Macharia Mwangi, RN (PARTNERS HEALTHCARE)',
+  '- 2025-12-22 Outpatient – Sharon Chou, MD (PARTNERS HEALTHCARE)',
+  '- 2025-11-13 Outpatient – Joshua Korzenik, MD (PARTNERS HEALTHCARE)',
+  '- 2025-10-25 Outpatient – Sharon Chou, MD, PARTNERS HEALTHCARE (Imaging, Radiology)'
+].join('\n');
+
+describe('single-name patients + credential-anchored providers (Margarita regression)', () => {
+  it('extracts the single-name patient and every credentialed provider — never the org', () => {
+    const names = extractSummaryNames(FORMAT_C);
+    expect(names).toContain('Margarita');
+    expect(names).toContain('Theodor Sauer');
+    expect(names).toContain('Caroline Macharia Mwangi');
+    expect(names).toContain('Sharon Chou');
+    expect(names).toContain('Joshua Korzenik');
+    expect(names.some((n) => /HEALTHCARE/i.test(n))).toBe(false);
+  });
+
+  it('the filtered copy contains no real names, including the single name', () => {
+    const userDoc = { userId: 'ashley24' };
+    expect(seedPseudonymMappingFromSummary(userDoc, FORMAT_C)).toBe(true);
+    const filtered = applyPseudonymMapping(userDoc.privacyFilter.pseudonymMapping, FORMAT_C);
+    expect(filtered).not.toContain('Margarita');
+    expect(filtered).not.toContain('Theodor Sauer');
+    expect(filtered).not.toContain('Sharon Chou');
+    expect(filtered).not.toContain('Caroline Macharia Mwangi');
+    expect(filtered).not.toContain('Joshua Korzenik');
+    // The org is not a person: it stays, unmasked, and no pseudonym rides
+    // along next to a real name.
+    expect(filtered).toContain('PARTNERS HEALTHCARE');
+  });
+
+  it('looksLikePersonName rejects orgs and accepts people', () => {
+    expect(looksLikePersonName('PARTNERS HEALTHCARE')).toBe(false);
+    expect(looksLikePersonName('Boston Medical Center')).toBe(false);
+    expect(looksLikePersonName('Theodor Sauer')).toBe(true);
+    expect(looksLikePersonName('Caroline Macharia Mwangi')).toBe(true);
+  });
+
+  it('seedMissingNames augments an auto mapping without touching existing entries', () => {
+    const userDoc = { userId: 'u' };
+    seedPseudonymMappingFromSummary(userDoc, FORMAT_A);
+    const before = userDoc.privacyFilter.pseudonymMapping.map((e) => ({ ...e }));
+    const added = seedMissingNames(userDoc, FORMAT_C);
+    expect(added).toBeGreaterThanOrEqual(4); // Margarita + the new providers
+    for (const b of before) {
+      const still = userDoc.privacyFilter.pseudonymMapping.find((e) => e.original === b.original);
+      expect(still?.pseudonym).toBe(b.pseudonym);
+    }
+    // Idempotent: a second pass adds nothing.
+    expect(seedMissingNames(userDoc, FORMAT_C)).toBe(0);
   });
 });
