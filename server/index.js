@@ -22,7 +22,7 @@ import { generateCurrentMedicationsToken } from './utils/token-service.js';
 import { computeRecordsPipeline, decideNextAction } from './records-pipeline.js';
 import { moveObjectWithVerify } from './utils/spaces-move.js';
 import { deleteObjectWithLog , asciiSafeMetadata } from './utils/spaces-ops.js';
-import { applyPseudonymMapping } from './privacyFilter.js';
+import { applyPseudonymMapping, seedPseudonymMappingFromSummary, hashName } from './privacyFilter.js';
 import { ChatClient } from '../lib/chat-client/index.js';
 import { findUserAgent, getOrCreateAgentApiKey } from './utils/agent-helper.js';
 import { getClinicalPrompt } from './utils/clinical-prompts.js';
@@ -14136,67 +14136,9 @@ function swapSummary(userDoc, index) {
 // Filter). Deterministic, no AI call. Mutates the doc; callers save it.
 // Runs at every verification moment, so the filtered copy always tracks the
 // verified summary — it is the DEFAULT artifact for sharing-request responses.
-// Deterministic pseudonym pools for auto-seeded privacy-filter entries.
-// Hash-picked so the same original name always maps to the same pseudonym.
-const PSEUDO_FIRST = ['Alex', 'Morgan', 'Jordan', 'Taylor', 'Casey', 'Riley', 'Avery', 'Quinn', 'Rowan', 'Sage', 'Emerson', 'Finley', 'Harper', 'Kendall', 'Logan', 'Marlow', 'Nico', 'Parker', 'Reese', 'Skyler', 'Tatum', 'Devon', 'Ellis', 'Blake'];
-const PSEUDO_LAST = ['Ashford', 'Barrett', 'Calloway', 'Draper', 'Ellery', 'Fairbanks', 'Granger', 'Holloway', 'Ingram', 'Jennings', 'Kingsley', 'Lockhart', 'Merritt', 'Norwood', 'Ogden', 'Prescott', 'Quimby', 'Radcliffe', 'Sterling', 'Thornton', 'Underhill', 'Vance', 'Whitfield', 'Yates'];
-const hashName = (s) => { let h = 0; for (const c of String(s)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h; };
-
-// Seed the pseudonym mapping from the VERIFIED summary itself when the user
-// has none. The Privacy Filter tab's original mapping builder analyzes CHAT
-// messages with the Private AI — a records-first user who never chats can
-// NEVER get a mapping that way ("No Private AI chat messages available"),
-// leaving the "privacy-filtered" summary identical to the real one. But the
-// summary's own structure names exactly the people that must be filtered:
-// the patient header line ("Adrian Gropper, 74 y, M") and the parenthesized
-// providers in Recent Visits ("(Wei Lien, MD)"). Extract those
-// conservatively, assign stable pseudonyms, and store them as ordinary
-// mapping entries — visible and editable in Workbook → Privacy Filter.
-function seedPseudonymMappingFromSummary(userDoc, summaryText) {
-  const existing = userDoc.privacyFilter?.pseudonymMapping || [];
-  if (existing.length > 0) return false; // never touch a user's mapping
-  // A user who EXPLICITLY emptied their mapping (lastUpdated set, list empty)
-  // has made a choice — don't re-seed behind their back. Seed only the
-  // never-configured state.
-  if (userDoc.privacyFilter?.lastUpdated) return false;
-  const text = String(summaryText || '');
-  const names = new Set();
-  const patient = text.match(/^\s*([A-Z][A-Za-z'’-]+(?:\s+[A-Z][A-Za-z'’-]+)+),\s*\d+\s*y/m);
-  if (patient) names.add(patient[1].replace(/\s+/g, ' ').trim());
-  // Parenthesized people: "(Wei Lien, MD)", "(Harshal Patil)". Credentials are
-  // stripped; anything with digits or document/section words is skipped.
-  const NOT_A_NAME = /\b(Patient|Verified|File|Health|Summary|Medication|Medications|Documented|Telephone|Encounter|Instructions|Notes|Outpatient|Telemedicine|Progress|Records|History|Apple)\b/i;
-  const provRe = /\(([A-Z][A-Za-z'’-]+(?:\s+[A-Z][A-Za-z'’.-]+)+?)(?:,\s*(?:MD|DO|NP|CNP|PA|RN|CRNA|DDS|DPM|OD|PhD)\b[^)]*)?\)/g;
-  let m;
-  while ((m = provRe.exec(text)) !== null) {
-    const nm = m[1].replace(/\s+/g, ' ').trim();
-    if (/\d/.test(nm) || NOT_A_NAME.test(nm) || nm.split(' ').length < 2) continue;
-    names.add(nm);
-  }
-  if (names.size === 0) return false;
-  const used = new Set();
-  const mapping = [];
-  for (const original of names) {
-    let h = hashName(original.toLowerCase());
-    let pseudonym;
-    do {
-      // Chat-filter style: two-digit markers on BOTH parts ("Emily45
-      // Johnson67") so filtered names are obviously fake, never mistaken for
-      // a real person. Digits are hash-derived → stable across regenerations.
-      const firstNum = 10 + (h % 90);
-      const lastNum = 10 + (Math.floor(h / 90) % 90);
-      pseudonym = `${PSEUDO_FIRST[h % PSEUDO_FIRST.length]}${firstNum} ${PSEUDO_LAST[Math.floor(h / 7) % PSEUDO_LAST.length]}${lastNum}`;
-      h++;
-    } while (used.has(pseudonym));
-    used.add(pseudonym);
-    mapping.push({ original, pseudonym, source: 'auto-summary' });
-  }
-  if (!userDoc.privacyFilter) userDoc.privacyFilter = {};
-  userDoc.privacyFilter.pseudonymMapping = mapping;
-  userDoc.privacyFilter.lastUpdated = new Date().toISOString();
-  console.log(`[privacy-filter] Seeded ${mapping.length} pseudonym(s) from the verified summary for ${userDoc.userId}`);
-  return true;
-}
+// Pseudonym pools + auto-seeding live in server/privacyFilter.js (imported
+// above) so the extraction patterns are unit-testable without booting the
+// whole server.
 
 function refreshPrivacyFilteredSummary(userDoc) {
   try {
@@ -14315,7 +14257,14 @@ app.get('/api/patient-summary', async (req, res) => {
         const mappingMs = userDoc.privacyFilter?.lastUpdated ? Date.parse(userDoc.privacyFilter.lastUpdated) : 0;
         const hasDigitlessEntry = (userDoc.privacyFilter?.pseudonymMapping || [])
           .some((e) => e?.pseudonym && !/\d/.test(e.pseudonym));
-        if (!pf || createdMs < summaryMs || createdMs < mappingMs || hasDigitlessEntry) {
+        // A filtered copy generated with ZERO names while the user never
+        // configured the filter means seeding failed on an earlier summary
+        // format — retry it on every load until it succeeds (heals users
+        // whose summaries predate an extraction-pattern fix).
+        const unseeded = (pf?.mappingCount === 0 || (pf && pf.mappingCount === undefined))
+          && (userDoc.privacyFilter?.pseudonymMapping || []).length === 0
+          && !userDoc.privacyFilter?.lastUpdated;
+        if (!pf || createdMs < summaryMs || createdMs < mappingMs || hasDigitlessEntry || unseeded) {
           refreshPrivacyFilteredSummary(userDoc);
           try {
             await cloudant.saveDocument('maia_users', userDoc);
