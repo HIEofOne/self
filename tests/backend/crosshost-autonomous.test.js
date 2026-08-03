@@ -221,7 +221,8 @@ describe('cross-host autonomous responses (registry on Host A, member AS on Host
 
   it("bob's cross-host PS request gets an in-app relay reply + nudge from jessica's card", async () => {
     // Drain bob's relay queue (pull, then ack-and-delete on the second
-    // refresh) so the nudge debounce sees the reply as his FIRST unread.
+    // refresh) so his own copy of the earlier outside request doesn't
+    // clutter the message assertions below.
     await A.app.request('hosta.test', 'POST', '/api/user-groups/refresh', { userId: 'bob' });
     await A.app.request('hosta.test', 'POST', '/api/user-groups/refresh', { userId: 'bob' });
 
@@ -251,5 +252,22 @@ describe('cross-host autonomous responses (registry on Host A, member AS on Host
     expect(reply).toBeTruthy();
     expect(reply.text).toContain('hypertension');
     expect(A.emails.some((e) => e.to === 'bob@example.com' && /new message/i.test(e.subject))).toBe(true);
+  });
+
+  it('nudge is time-debounced: a second message inside the quiet period sends no second email', async () => {
+    const nudgesBefore = A.emails.filter((e) => e.to === 'bob@example.com' && /new message/i.test(e.subject)).length;
+    const groupDoc = await A.cloudant.getDocument('maia_groups', groupId);
+    const bobPw = groupDoc.members.find((m) => m.alias === 'bob')?.pairwiseId;
+    const send = await B.app.request('hostb.test', 'POST', '/api/user-groups/send', {
+      userId: 'jessica76', groupId, toPairwiseId: bobPw, text: 'follow-up note'
+    });
+    expect(send.body?.success).toBe(true);
+    // Delivered (bob sees it on his next pull)…
+    await A.app.request('hosta.test', 'POST', '/api/user-groups/refresh', { userId: 'bob' });
+    const bobMsgs = await A.app.request('hosta.test', 'GET', `/api/user-groups/messages?userId=bob&groupId=${groupId}`);
+    expect((bobMsgs.body.messages || []).some((m) => m.text === 'follow-up note')).toBe(true);
+    // …but no second nudge inside the quiet period.
+    const nudgesAfter = A.emails.filter((e) => e.to === 'bob@example.com' && /new message/i.test(e.subject)).length;
+    expect(nudgesAfter).toBe(nudgesBefore);
   });
 });

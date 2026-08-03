@@ -73,6 +73,13 @@
                 :label="m.status"
               />
               <q-badge v-if="m.mentor" color="teal" label="mentor" class="q-ml-xs" />
+              <q-badge v-if="m.crossHost" color="blue-grey" label="cross-host" class="q-ml-xs">
+                <q-tooltip>
+                  This member's MAIA account lives on another host, so their
+                  email isn't visible here — the registry never learns member
+                  emails. Check the admin page of their own host.
+                </q-tooltip>
+              </q-badge>
             </div>
             <div class="member-cell text-caption text-grey-7" style="flex: 3 1 0; min-width: 0">
               <template v-if="m.status === 'active'">
@@ -364,6 +371,7 @@ interface MemberSummary {
   mentor: boolean;
   email?: string | null;
   emailVerified?: boolean;
+  crossHost?: boolean;
 }
 
 const groups = ref<GroupSummary[]>([]);

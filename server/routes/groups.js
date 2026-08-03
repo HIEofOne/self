@@ -1188,7 +1188,10 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         return res.status(404).json({ success: false, error: 'Group not found' });
       }
       // Admin view: resolve each active member's account email via the reverse
-      // membership lookup (single-deployment; a cross-host member isn't found).
+      // membership lookup. A member whose MAIA account lives on ANOTHER host
+      // resolves to nothing — by design (the registry deletes the invite email
+      // at join and never learns member emails); flag them so the admin UI
+      // can say "cross-host member" instead of showing a confusing blank.
       const members = await Promise.all((doc.members || []).map(async (m) => {
         const view = memberAdminView(m);
         if (m.pairwiseId) {
@@ -1199,7 +1202,8 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
             });
             const u = r?.docs?.[0];
             if (u?.email) { view.email = u.email; view.emailVerified = !!u.emailVerified; }
-          } catch { /* skip email for this member */ }
+            if (!u && m.status === 'active') view.crossHost = true;
+          } catch { /* lookup failed — leave email and crossHost unset */ }
         }
         return view;
       }));
@@ -1467,20 +1471,20 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
   // FIRST unread since their last poll sends an email (a burst never floods).
   // Single-deployment: the recipient's account is in this USERS_DB; a
   // cross-host member simply isn't found here and is skipped. Never throws.
+  /** At most one nudge per quiet period per member. Time-based on purpose:
+   *  the old count-based de-bounce (skip when >1 undelivered item) went
+   *  SILENT precisely for members who hadn't visited in a while — their
+   *  queue only grows until they pull, so the busier it got, the fewer
+   *  emails they received. Exactly backwards for notify-instead-of-poll. */
+  const NUDGE_QUIET_MS = 6 * 60 * 60 * 1000;
+
   const notifyGroupMessageRecipient = async (groupDoc, toPairwiseId, appUrl) => {
     try {
       if (typeof sendEmail !== 'function' || !groupDoc || !toPairwiseId) return;
-      // De-bounce: if the member already has unread relay items they've been
-      // nudged already — only the first-since-poll triggers an email. (The new
-      // message is already stored, so its own presence is the "1".)
-      const pending = await cloudant.findDocuments(RELAY_DB, {
-        selector: {
-          type: { $eq: 'relay_message' },
-          groupId: { $eq: groupDoc._id },
-          toPairwiseId: { $eq: toPairwiseId }
-        }
-      });
-      if ((pending?.docs?.length || 0) > 1) return;
+      const member = findActiveMember(groupDoc, toPairwiseId);
+      if (!member) return;
+      const last = member.lastNudgeAt ? new Date(member.lastNudgeAt).getTime() : 0;
+      if (Date.now() - last < NUDGE_QUIET_MS) return;
       // Resolve the recipient's local account via their pairwise membership.
       const users = await cloudant.findDocuments(USERS_DB, {
         selector: {
@@ -1500,6 +1504,16 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
           '(Open it in the same browser where you use MAIA.)'
         ]
       );
+      // Stamp the quiet period on a FRESH doc (best-effort — a conflict just
+      // means one extra nudge is possible later).
+      try {
+        const fresh = await cloudant.getDocument(GROUPS_DB, groupDoc._id);
+        const fm = fresh ? findActiveMember(fresh, toPairwiseId) : null;
+        if (fm) {
+          fm.lastNudgeAt = new Date().toISOString();
+          await cloudant.saveDocument(GROUPS_DB, fresh);
+        }
+      } catch { /* best-effort */ }
       console.log(`[NOTIFY] ✅ Group-message email sent to ${recip.email} (group ${groupDoc._id})`);
     } catch (err) {
       console.warn('[NOTIFY] group-message notify failed (non-fatal):', err?.message || err);
@@ -3036,28 +3050,37 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         created: new Date().toISOString(),
         payload: payload ?? null
       });
-      const result = await deliverSealed(membership, toPairwiseId, envelope, { suppressNotify: true });
-      if (!result.ok) return res.status(result.status).json({ success: false, error: result.error });
-      auditLog.logEvent({ type: 'user_group_request_sent', userId, ip: req.ip, details: { groupId, toPairwiseId, action } });
-      // Phase 1 same-host shortcut: the recipient's MAIA lives on this server,
-      // so pull + ingest their mail NOW instead of waiting for their next
-      // login or the daily cron. Their sharing policies answer autonomously
-      // (and email this requester) even while they are offline; an ASK
-      // emails them the review-and-respond notification immediately.
-      // Best-effort: on any failure the request simply waits in the relay
-      // for the recipient's normal refresh, exactly as before.
+      // Same-host precheck BEFORE delivery: only when the recipient's MAIA
+      // lives on THIS server can the immediate ingest below send them the
+      // request-specific email — and only then is the registry's generic
+      // nudge redundant. A CROSS-HOST recipient keeps the nudge: their own
+      // host can't ingest until their next pull, and the registry may be
+      // exactly the host that knows their address.
+      let recipDoc = null;
       try {
         const rr = await cloudant.findDocuments(USERS_DB, {
           selector: { groupMemberships: { $elemMatch: { groupId: { $eq: groupId }, pairwiseId: { $eq: toPairwiseId } } } },
           limit: 1
         });
-        const recipDoc = rr?.docs?.[0];
-        if (recipDoc) {
+        recipDoc = rr?.docs?.[0] || null;
+      } catch { /* treat as cross-host — the nudge stays on */ }
+      const result = await deliverSealed(membership, toPairwiseId, envelope, { suppressNotify: !!recipDoc });
+      if (!result.ok) return res.status(result.status).json({ success: false, error: result.error });
+      auditLog.logEvent({ type: 'user_group_request_sent', userId, ip: req.ip, details: { groupId, toPairwiseId, action } });
+      // Phase 1 same-host shortcut: pull + ingest the recipient's mail NOW
+      // instead of waiting for their next login or the daily cron. Their
+      // sharing policies answer autonomously (and email this requester)
+      // even while they are offline; an ASK emails them the
+      // review-and-respond notification immediately. Best-effort: on any
+      // failure the request simply waits in the relay for the recipient's
+      // normal refresh, exactly as before.
+      if (recipDoc) {
+        try {
           const r = await refreshUserMemberships(recipDoc);
           if (r.changed) await cloudant.saveDocument(USERS_DB, recipDoc);
+        } catch (e) {
+          console.warn('[user-groups] delivery-time ingest failed (recipient pulls later):', e?.message || e);
         }
-      } catch (e) {
-        console.warn('[user-groups] delivery-time ingest failed (recipient pulls later):', e?.message || e);
       }
       res.json({ success: true });
     } catch (error) {

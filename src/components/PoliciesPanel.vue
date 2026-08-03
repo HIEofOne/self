@@ -311,8 +311,10 @@ const saveAlias = async (m: { groupId: string; groupName: string; alias: string 
       credentials: 'include',
       body: JSON.stringify({ userId: props.userId, groupId: m.groupId, alias: clean })
     });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    // A platform error page (HTML during a redeploy) must read as a retry
+    // hint, not a JSON parser stack trace.
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) throw new Error(data.error || `The server didn't respond properly (HTTP ${res.status}) — try again in a moment.`);
     m.alias = data.alias;
     aliasSaved.value[m.groupId] = data.alias;
     $q.notify({ type: 'positive', message: `You're now "${data.alias}" in ${m.groupName}.` });
@@ -335,8 +337,8 @@ const saveMessagePrefs = async (m: { groupId: string; groupName: string; broadca
       credentials: 'include',
       body: JSON.stringify({ userId: props.userId, groupId: m.groupId, everyone })
     });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) throw new Error(data.error || `The server didn't respond properly (HTTP ${res.status}) — try again in a moment.`);
     m.broadcastMessages = data.everyone;
     $q.notify({
       type: 'positive',
@@ -365,8 +367,8 @@ const saveMentor = async (m: { groupId: string; groupName: string; mentor: boole
       credentials: 'include',
       body: JSON.stringify({ userId: props.userId, groupId: m.groupId, mentor, tag })
     });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) throw new Error(data.error || `The server didn't respond properly (HTTP ${res.status}) — try again in a moment.`);
     m.mentor = data.mentor;
     m.mentorTag = data.tag;
     mentorSaved.value[m.groupId] = `${data.mentor}|${data.tag}`;
