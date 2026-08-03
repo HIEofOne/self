@@ -282,7 +282,7 @@
                     </div>
 
                     <template v-if="trusteeGroup">
-                      <div><q-checkbox v-model="wf.joinTrustee" dense :label="`Willing to join the ${trusteeGroup.name} user group (recommended)`" /></div>
+                      <div><q-checkbox v-model="wf.joinTrustee" dense :label="`Join the ${trusteeGroup.name} user group (required)`" /></div>
                       <div v-if="wf.joinTrustee" class="text-caption q-mb-sm" style="margin-left: 28px;">
                         MAIA ID&nbsp;<strong>{{ wfSuggestedId || '…' }}</strong>
                         <span class="text-grey-7">&nbsp;You can add a display name later.</span>
@@ -313,7 +313,7 @@
                     <div class="q-mt-md">
                       <q-btn
                         unelevated color="primary" class="full-width" size="lg" label="GET STARTED"
-                        :disable="!wf.privateComputer || !verifiedEmail.verified || (wf.haveFile && !wfFile) || (wf.haveFolder && !wfFolderHandle)" :loading="tempStartLoading" @click="welcomeFormStart"
+                        :disable="!wf.privateComputer || !verifiedEmail.verified || (!!trusteeGroup && !wf.joinTrustee) || (wf.haveFile && !wfFile) || (wf.haveFolder && !wfFolderHandle)" :loading="tempStartLoading" @click="welcomeFormStart"
                       />
                     </div>
                     <div class="text-caption text-grey-7 q-mt-sm">
@@ -596,6 +596,23 @@
         </q-card-section>
         <q-card-actions align="right">
           <q-btn flat label="Cancel" color="grey-7" @click="showGetStartedChoiceDialog = false" />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
+    <!-- Add family member: informational only — setup always goes through
+         the GET STARTED checklist (the old flow bypassed it). -->
+    <q-dialog v-model="showAddFamilyDialog">
+      <q-card style="min-width: 380px; max-width: 480px">
+        <q-card-section>
+          <div class="text-h6">Add a family member</div>
+        </q-card-section>
+        <q-card-section class="q-pt-none text-body2">
+          You can add another family member on the same browser and computer.
+          Make sure records are in a separate folder for every family member.
+        </q-card-section>
+        <q-card-actions align="right">
+          <q-btn unelevated color="primary" label="OK" @click="confirmAddFamilyMember" />
         </q-card-actions>
       </q-card>
     </q-dialog>
@@ -1357,6 +1374,8 @@ const wfEstimate = computed(() => {
  *  chat with the Workbook sidebar open. */
 const welcomeFormStart = async () => {
   if (!wf.value.privateComputer || tempStartLoading.value) return;
+  // Trustee membership is required by policy (when the group is listed).
+  if (trusteeGroup.value && !wf.value.joinTrustee) return;
   sharedComputerMode.value = false;
   deviceChoiceResolved.value = true;
   tempStartLoading.value = true;
@@ -1805,15 +1824,26 @@ const refreshDiscoveredUsers = async () => {
 };
 
 /** When user switches in the multi-user toggle, reload welcome status for that user. */
-/** Add family member: go through new-account flow */
+/** Add family member: explain the ground rules (separate records folder per
+ *  person), then send them through the SAME GET STARTED checklist as any new
+ *  user — the old flow jumped straight to account creation, bypassing the
+ *  required checks (private computer, verified email, Trustee). */
 const addingFamilyMember = ref(false);
+const showAddFamilyDialog = ref(false);
 const handleAddFamilyMember = () => {
-  // Clear any existing user context so startTemporarySession creates a new account
+  showAddFamilyDialog.value = true;
+};
+const confirmAddFamilyMember = () => {
+  showAddFamilyDialog.value = false;
+  // Clear the resumed-user context so GET STARTED creates a NEW account
+  // instead of resuming the existing one on this device.
   addingFamilyMember.value = true;
   welcomeLocalUserId.value = null;
   selectedWelcomeUserId.value = null;
   welcomeStatus.value = {};
-  showDevicePrivacyDialog.value = true;
+  void nextTick(() => {
+    document.querySelector('.wf-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
 };
 
 /** [PHASE 4] Confirmation dialog for new account creation */
