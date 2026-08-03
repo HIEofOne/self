@@ -1565,7 +1565,7 @@ setupFileRoutes(app, cloudant, doClient);
 // cards on the userDoc; the AS consults them for incoming requests.
 setupPolicyRoutes(app, cloudant, auditLog);
 
-const { runDailyGroupMaintenance } = setupGroupRoutes(app, cloudant, auditLog, {
+const { runDailyGroupMaintenance, runHourlyMailPull } = setupGroupRoutes(app, cloudant, auditLog, {
   sendEmail: async (to, subject, text) => {
     const resend = await initResend();
     if (!resend) return false;
@@ -1587,6 +1587,15 @@ setTimeout(() => {
     runDailyGroupMaintenance().catch((e) => console.warn('[groups-cron] run failed:', e?.message || e));
   }, GROUP_MAINTENANCE_INTERVAL_MS);
 }, 5 * 60 * 1000);
+// Hourly mail pull: bounds CROSS-HOST message-notification latency to ~1h
+// (the member's own host is the only one that knows their email; it must
+// pull — the registry cannot push). Offset from the daily maintenance.
+const GROUP_MAIL_PULL_INTERVAL_MS = 60 * 60 * 1000;
+setTimeout(() => {
+  setInterval(() => {
+    runHourlyMailPull().catch((e) => console.warn('[groups-mail] run failed:', e?.message || e));
+  }, GROUP_MAIL_PULL_INTERVAL_MS);
+}, 15 * 60 * 1000);
 
 const DEEP_LINK_COOKIE = 'maia_deep_link_user';
 const DEEP_LINK_COOKIE_MAX_AGE = 30 * 24 * 60 * 60 * 1000;
