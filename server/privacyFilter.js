@@ -89,7 +89,7 @@ export const hashName = (s) => { let h = 0; for (const c of String(s)) h = (h * 
 // Words that mean a capitalized phrase is NOT a person: document/section
 // vocabulary plus organization words ("Boston Medical Center",
 // "PARTNERS HEALTHCARE").
-const NOT_A_NAME = /\b(Patient|Verified|File|Health|Healthcare|Summary|Medication|Medications|Documented|Telephone|Encounter|Instructions|Notes|Outpatient|Telemedicine|Progress|Records|History|Apple|Hospital|Clinic|Center|Centre|Medical|General|Department|Laboratory|Radiology|Imaging|Associates|Group|Practice|Services|Partners|System|Network|Foundation|Institute|University|College|Pharmacy|Insurance|Care)\b/i;
+const NOT_A_NAME = /\b(Patient|Verified|File|Health|Healthcare|Summary|Medication|Medications|Documented|Telephone|Encounter|Instructions|Note|Notes|Outpatient|Telemedicine|Progress|Records|History|Apple|Hospital|Clinic|Center|Centre|Medical|General|Department|Laboratory|Radiology|Imaging|Associates|Group|Practice|Services|Partners|System|Network|Foundation|Institute|University|College|Pharmacy|Insurance|Care|Clinical|Visit|Report|Letter|Plan|Referral|Consult|Consultation|Discharge|Admission|Office|Emergency|Medicine|Surgery|Exam|Examination|Assessment|Procedure|Operative|Pathology|Physical|Annual|Wellness|Immunization|Vaccination|Screening|Preventive|Order|Orders|Message|Document|Results?)\b/i;
 
 /** Credentials that mark the preceding capitalized phrase as a PERSON —
  *  the strongest, format-independent signal in every summary variant. */
@@ -138,8 +138,16 @@ export function extractSummaryNames(summaryText) {
   // Credential-anchored (works in EVERY visit-line format).
   const credRe = new RegExp(`([A-Z][A-Za-z'’-]+(?:\\s+[A-Z][A-Za-z'’.-]+){1,3}),\\s*(?:${CRED})\\b`, 'g');
   while ((m = credRe.exec(text)) !== null) consider(m[1]);
+  // Parenthesized people — "(Wei Lien, MD)", "(Harshal Patil)". STRUCTURAL
+  // exclusion: a paren group that immediately FOLLOWS a credential
+  // ("Theodor Sauer, MD (Clinical Note)") is a document type or an
+  // organization, never a person — the provider already stands before it.
   const provRe = new RegExp(`\\(([A-Z][A-Za-z'’-]+(?:\\s+[A-Z][A-Za-z'’.-]+)+?)(?:,\\s*(?:${CRED})\\b[^)]*)?\\)`, 'g');
-  while ((m = provRe.exec(text)) !== null) consider(m[1]);
+  const credBeforeParen = new RegExp(`(?:${CRED})[.,]?\\s*$`);
+  while ((m = provRe.exec(text)) !== null) {
+    if (credBeforeParen.test(text.slice(Math.max(0, m.index - 12), m.index))) continue;
+    consider(m[1]);
+  }
   const byRe = /\bby\s+([A-Z][A-Za-z'’-]+(?:\s+[A-Z][A-Za-z'’.-]+){1,3})/g;
   while ((m = byRe.exec(text)) !== null) consider(m[1]);
   return [...names];

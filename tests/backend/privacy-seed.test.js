@@ -123,11 +123,28 @@ describe('single-name patients + credential-anchored providers (Margarita regres
     expect(filtered).toContain('PARTNERS HEALTHCARE');
   });
 
-  it('looksLikePersonName rejects orgs and accepts people', () => {
+  it('looksLikePersonName rejects orgs, document types, and accepts people', () => {
     expect(looksLikePersonName('PARTNERS HEALTHCARE')).toBe(false);
     expect(looksLikePersonName('Boston Medical Center')).toBe(false);
+    expect(looksLikePersonName('Clinical Note')).toBe(false);
+    expect(looksLikePersonName('Progress Note')).toBe(false);
+    expect(looksLikePersonName('Office Visit')).toBe(false);
     expect(looksLikePersonName('Theodor Sauer')).toBe(true);
     expect(looksLikePersonName('Caroline Macharia Mwangi')).toBe(true);
+  });
+
+  it('a paren group after a credential is never a person — structural, not stoplist', () => {
+    // "Anna Karenina" is NOT in any stoplist; only its position (right
+    // after ", MD") excludes it. The provider before it is still found.
+    const text = [
+      'Margarita, 68, Female',
+      '- 02 Feb 2026 – Outpatient – Theodor Sauer, MD (Anna Karenina)',
+      '- 05 Jan 2026 – Office visit (Wei Lien, MD)'
+    ].join('\n');
+    const names = extractSummaryNames(text);
+    expect(names).toContain('Theodor Sauer');
+    expect(names).toContain('Wei Lien'); // parenthesized PROVIDER still works
+    expect(names).not.toContain('Anna Karenina');
   });
 
   it('seedMissingNames augments an auto mapping without touching existing entries', () => {
