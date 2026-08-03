@@ -147,6 +147,32 @@ describe('single-name patients + credential-anchored providers (Margarita regres
     expect(names).not.toContain('Anna Karenina');
   });
 
+  it('masks the patient name inside file keys (underscore forms)', () => {
+    const mapping = [{ original: 'Adrian Gropper', pseudonym: 'Rowan78 Vance26' }];
+    const masked = applyPseudonymMapping(mapping, 'File 1: GROPPER_ADRIAN_05_12_26_1233-main.PDF');
+    expect(masked).not.toMatch(/GROPPER/i);
+    expect(masked).toContain('Vance26_Rowan78');
+  });
+
+  it('acronym words mark organizations ("MGH Lab Waltham" is never a person)', () => {
+    expect(looksLikePersonName('MGH Lab Waltham')).toBe(false);
+    expect(looksLikePersonName('UCLA Health West')).toBe(false);
+    expect(looksLikePersonName('Theodor Sauer')).toBe(true);
+  });
+
+  it('suppressed (user-deleted) names are never reseeded or re-augmented', () => {
+    const userDoc = { userId: 'u', privacyFilter: { suppressed: ['wei lien'] } };
+    // lastUpdated unset + empty mapping → fresh seed runs, but skips the tombstone.
+    expect(seedPseudonymMappingFromSummary(userDoc, FORMAT_A)).toBe(true);
+    expect(userDoc.privacyFilter.pseudonymMapping.some((e) => e.original === 'Wei Lien')).toBe(false);
+    // Augment respects it too: FORMAT_B introduces Jane Doe (added) but
+    // Wei Lien stays suppressed.
+    expect(seedMissingNames(userDoc, FORMAT_B)).toBe(1);
+    const originals = userDoc.privacyFilter.pseudonymMapping.map((e) => e.original);
+    expect(originals).toContain('Jane Doe');
+    expect(originals).not.toContain('Wei Lien');
+  });
+
   it('seedMissingNames augments an auto mapping without touching existing entries', () => {
     const userDoc = { userId: 'u' };
     seedPseudonymMappingFromSummary(userDoc, FORMAT_A);

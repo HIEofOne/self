@@ -88,7 +88,11 @@ export function processFileNCitations(
     const escapedLabel = label.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const safeFileName = (target.fileName || '').replace(/"/g, '&quot;');
     const safeBucketKey = (target.bucketKey || '').replace(/"/g, '&quot;');
-    return `<a href="#" class="page-link" data-filename="${safeFileName}" data-page="${pageNum}" data-bucket-key="${safeBucketKey}" title="${safeFileName}">${escapedLabel}</a>`;
+    // The hover tooltip is a VISIBLE surface — on privacy-filtered renders
+    // the caller's nameFilter masks it (data-filename stays real: it is
+    // what actually opens the PDF, and never displays).
+    const titleName = (nameFilter ? nameFilter(target.fileName || '') : (target.fileName || '')).replace(/"/g, '&quot;');
+    return `<a href="#" class="page-link" data-filename="${safeFileName}" data-page="${pageNum}" data-bucket-key="${safeBucketKey}" title="${titleName}">${escapedLabel}</a>`;
   };
 
   // Pass 1: bracketed `[File N p.<N>]` → anchor.

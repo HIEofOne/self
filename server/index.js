@@ -14294,7 +14294,11 @@ app.get('/api/patient-summary', async (req, res) => {
         const hasInvalidAutoEntry = entriesNow.some((e) => e?.source === 'auto-summary' && !looksLikePersonName(e.original));
         const allAutoNow = entriesNow.length > 0 && entriesNow.every((e) => e?.source === 'auto-summary');
         const mappedLower = new Set(entriesNow.map((e) => String(e?.original || '').toLowerCase()));
-        const hasUnmappedName = allAutoNow && extractSummaryNames(returnedSummary).some((n) => !mappedLower.has(n.toLowerCase()));
+        // Suppressed (user-deleted) names are deliberately unmapped — they
+        // must not re-trigger the heal refresh forever.
+        const suppressedLower = new Set((userDoc.privacyFilter?.suppressed || []).map((s) => String(s).toLowerCase()));
+        const hasUnmappedName = allAutoNow && extractSummaryNames(returnedSummary)
+          .some((n) => !mappedLower.has(n.toLowerCase()) && !suppressedLower.has(n.toLowerCase()));
         if (!pf || createdMs < summaryMs || createdMs < mappingMs || hasDigitlessEntry || unseeded || hasInvalidAutoEntry || hasUnmappedName) {
           refreshPrivacyFilteredSummary(userDoc);
           try {
@@ -14312,7 +14316,17 @@ app.get('/api/patient-summary', async (req, res) => {
       verifiedAt: userDoc.patientSummaryVerifiedAt || null,
       // Phase 4: the auto-generated privacy-filtered copy ({text,
       // mappingCount, createdAt}) — default for sharing-request responses.
-      privacyFiltered: userDoc.privacyFilteredSummary || null,
+      // mapping rides along so the CLIENT can mask names in strings it
+      // composes itself on filtered surfaces (the File legend and citation
+      // tooltips are built from real file names at render time).
+      privacyFiltered: userDoc.privacyFilteredSummary
+        ? {
+            ...userDoc.privacyFilteredSummary,
+            mapping: (userDoc.privacyFilter?.pseudonymMapping || [])
+              .filter((e) => e && e.original && e.pseudonym)
+              .map(({ original, pseudonym }) => ({ original, pseudonym }))
+          }
+        : null,
       summaries: summaries.map((s, index) => ({
         text: s.text,
         createdAt: s.createdAt,
@@ -14784,6 +14798,18 @@ app.post('/api/privacy-filter-mapping', async (req, res) => {
       userDoc.privacyFilter = {};
     }
     userDoc.privacyFilter.pseudonymMapping = mapping;
+    // Tombstones: names the user REMOVED must stay removed — without this,
+    // the auto-seeder would re-add them from the summary on the next
+    // refresh (deleting "MGH Lab Waltham" has to stick).
+    const suppressOriginals = Array.isArray(req.body.suppressOriginals) ? req.body.suppressOriginals : [];
+    if (suppressOriginals.length > 0) {
+      const cur = new Set((userDoc.privacyFilter.suppressed || []).map((s) => String(s).toLowerCase()));
+      for (const s of suppressOriginals) {
+        const v = String(s || '').trim().toLowerCase();
+        if (v) cur.add(v);
+      }
+      userDoc.privacyFilter.suppressed = [...cur].slice(-200);
+    }
     userDoc.privacyFilter.lastUpdated = new Date().toISOString();
     userDoc.updatedAt = new Date().toISOString();
     // Keep the derived privacy-filtered summary in sync with the new mapping
