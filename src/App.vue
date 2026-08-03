@@ -236,19 +236,21 @@
                     You can edit the {{ landingGroupName }} group policies to adjust privacy
                     and notification preferences at any time.
                   </div>
-                  <div class="row q-col-gutter-sm">
-                    <div class="col-auto">
-                      <q-btn outline color="primary" label="MAIA Welcome Page" @click="landingDismissed = true" />
-                    </div>
-                    <div class="col">
-                      <q-btn
-                        unelevated color="primary" class="full-width" size="lg" label="JOIN"
-                        :loading="tempStartLoading"
-                        @click="handleGetStartedNoPassword"
-                      />
-                    </div>
+                  <!-- No JOIN here: joining always goes through the Welcome
+                       page's GET STARTED checklist (private computer,
+                       verified email, group membership) — a direct join
+                       would bypass those required steps. -->
+                  <div class="text-body2 text-grey-8 q-mb-sm">
+                    To join, continue to the Welcome page and complete the
+                    GET STARTED checklist — {{ landingGroupName }} membership is part
+                    of it. Already have a MAIA account? Sign in with your passkey
+                    above, then use "Use my invitation or link".
                   </div>
-                  <div v-if="tempStartError" class="text-negative text-center q-mt-sm">{{ tempStartError }}</div>
+                  <q-btn
+                    unelevated color="primary" class="full-width" size="lg"
+                    label="CONTINUE TO THE MAIA WELCOME PAGE"
+                    @click="landingDismissed = true"
+                  />
                 </div>
 
                 <div v-if="!showAuth && !inviteLandingActive">
