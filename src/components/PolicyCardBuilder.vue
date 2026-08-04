@@ -1,32 +1,15 @@
 <template>
   <div class="pcb">
-    <!-- ── Selection matrix ─────────────────────────────── -->
-    <div class="pcb-matrix">
-      <div v-for="col in columns" :key="col.key" class="pcb-col">
-        <div class="pcb-col-head">{{ col.head }}</div>
-        <button
-          v-for="opt in col.options"
-          :key="opt.v"
-          type="button"
-          class="pcb-cell"
-          :class="[opt.cls, { 'is-sel': sel[col.key] === opt.v }]"
-          :aria-pressed="sel[col.key] === opt.v"
-          @click="pick(col.key, opt.v)"
-        >
-          <span>{{ opt.label }}</span>
-          <span v-if="opt.sub" class="pcb-sub">{{ opt.sub }}</span>
-          <span
-            v-if="opt.ah && sel.scope === 'ah-category'"
-            class="pcb-ah"
-            @click.stop
-          >
-            <select v-model="ahCategory" @click.stop>
-              <option v-for="cat in ahCategoryList" :key="cat" :value="cat">{{ cat }}</option>
-            </select>
-          </span>
-        </button>
-      </div>
-    </div>
+    <!-- ── Selection matrix: the ONE policy table (PolicyMatrix), author
+         context — every cell enabled, every cell explains itself. -->
+    <PolicyMatrix
+      context="author"
+      :model-value="sel"
+      :ah-category="ahCategory"
+      :ah-categories="ahCategories"
+      @pick="pick"
+      @update:ah-category="ahCategory = $event"
+    />
     <div class="pcb-default-note">
       A request that matches <b>no card</b> always notifies you for approval —
       cards exist to pre-authorize, pre-refuse, or (Ask me first) pin that
@@ -130,6 +113,7 @@ import {
   type PolicyCard, type PolicyElements, type PolicyRequest, type Scope, type Signature, type Purpose, type Payment
 } from '../utils/policyCards';
 import EmailVerifyBox from './EmailVerifyBox.vue';
+import PolicyMatrix from './PolicyMatrix.vue';
 
 const props = withDefaults(defineProps<{
   mode?: 'demo' | 'edit';
@@ -152,48 +136,6 @@ const ahCategoryList = computed(() => (props.ahCategories?.length ? props.ahCate
 const ahCategory = ref(ahCategoryList.value[0]);
 
 type ColKey = 'signature' | 'scope' | 'purpose' | 'payment' | 'action';
-interface CellOpt { v: string; label: string; sub?: string; cls?: string; ah?: boolean }
-interface Column { key: ColKey; head: string; options: CellOpt[] }
-
-// Payment labels here follow the proposed table; the stored enum is MAIA's.
-// Column order (left→right): Scope · Purpose · Signature Strength · Deposit · Action.
-const columns: Column[] = [
-  { key: 'scope', head: 'Scope of Request', options: [
-    { v: 'notification-only', label: 'Patient notification only', sub: 'reach you, no record data' },
-    { v: 'meds-allergies', label: 'Current medications' },
-    { v: 'patient-summary', label: 'Patient summary' },
-    { v: 'not-sensitive', label: 'Everything not sensitive' },
-    { v: 'everything', label: 'Everything' },
-    { v: 'ah-category', label: 'Apple Health category', ah: true }
-  ]},
-  { key: 'purpose', head: 'Claimed Purpose', options: [
-    { v: 'peer-support', label: 'Peer support' },
-    { v: 'clinical', label: 'Clinical' },
-    { v: 'research', label: 'Research' },
-    { v: 'public-health', label: 'Public health' },
-    { v: 'marketing', label: 'Marketing' }
-  ]},
-  { key: 'signature', head: 'Signature Strength', options: [
-    { v: 'unverified', label: 'Unverified', sub: 'no identity check' },
-    { v: 'verified-email', label: 'Verified email' },
-    { v: 'group-member', label: 'Group member' },
-    { v: 'npi', label: 'NPI verified', sub: 'licensed provider' },
-    { v: 'doximity', label: 'Doximity verified', sub: 'verified clinician' },
-    { v: 'verified-by-me', label: 'Verified by me', sub: 'someone you vouched for' }
-  ]},
-  { key: 'payment', head: 'Deposit or Payment', options: [
-    { v: 'none', label: 'None' },
-    { v: 'spam-deposit', label: 'Spam evaluation deposit', sub: 'returnable' },
-    { v: 'notification-deposit', label: 'Request evaluation payment' },
-    { v: 'sharing-payment', label: 'Payment for information' }
-  ]},
-  { key: 'action', head: 'MAIA Action', options: [
-    { v: 'deny-silent', label: 'Deny silently', sub: 'requester hears nothing', cls: 'act-deny' },
-    { v: 'deny-respond', label: 'Deny with response', sub: 'a reason for the decline', cls: 'act-deny' },
-    { v: 'ask', label: 'Ask me first', sub: 'notify me for approval', cls: 'act-ask' },
-    { v: 'respond', label: 'Respond', sub: 'fulfil the request', cls: 'act-respond' }
-  ]}
-];
 
 const sel = reactive<Record<ColKey, string | null>>({
   signature: null, scope: null, purpose: null, payment: null, action: null
@@ -204,7 +146,7 @@ if (props.existing) {
   const e = props.existing.elements;
   sel.signature = e.signature;
   sel.scope = e.scope;
-  sel.purpose = e.purpose === 'any' ? null : e.purpose;
+  sel.purpose = e.purpose; // 'any' now has its own (author-only) cell
   sel.payment = e.payment;
   sel.action = props.existing.outcome === 'allow'
     ? 'respond'
@@ -339,42 +281,6 @@ defineExpose({ complete, builtCard });
   font-size: 14px;
 }
 
-/* Matrix */
-.pcb-matrix {
-  display: grid; grid-template-columns: repeat(5, 1fr); gap: 0;
-  border: 1px solid var(--pcb-line); border-radius: 10px; overflow: hidden; background: #fff;
-}
-.pcb-col { border-right: 1px solid var(--pcb-line); display: flex; flex-direction: column; }
-.pcb-col:last-child { border-right: none; }
-.pcb-col-head {
-  font-size: 11px; letter-spacing: .05em; text-transform: uppercase; font-weight: 700;
-  color: #46586a; padding: 10px 11px; background: var(--pcb-chip);
-  border-bottom: 1px solid var(--pcb-line); min-height: 54px; display: flex; align-items: center;
-}
-.pcb-cell {
-  appearance: none; text-align: left; width: 100%; cursor: pointer; background: transparent;
-  border: none; border-bottom: 1px solid var(--pcb-line); color: var(--pcb-ink);
-  font: inherit; font-size: 13px; padding: 10px 11px; line-height: 1.32; position: relative;
-  transition: background .12s ease, color .12s ease;
-}
-.pcb-col .pcb-cell:last-child { border-bottom: none; }
-.pcb-cell:hover { background: var(--pcb-accent-soft); }
-.pcb-cell:focus-visible { outline: 2px solid var(--pcb-accent); outline-offset: -2px; }
-.pcb-cell.is-sel { background: var(--pcb-accent); color: #fff; font-weight: 600; }
-.pcb-cell.is-sel::after { content: "✓"; position: absolute; right: 9px; top: 12px; font-size: 11px; opacity: .9; }
-.pcb-cell.act-respond.is-sel { background: var(--pcb-respond); }
-.pcb-cell.act-deny.is-sel { background: var(--pcb-deny); }
-.pcb-cell.act-ask.is-sel { background: var(--pcb-ask); }
-.pcb-sub { display: block; font-size: 11px; color: var(--pcb-muted); margin-top: 2px; }
-.pcb-cell.is-sel .pcb-sub { color: rgba(255,255,255,.85); }
-.pcb-ah { display: block; margin-top: 6px; }
-.pcb-ah select { width: 100%; font: inherit; font-size: 12px; padding: 4px 5px; border-radius: 6px; border: 1px solid #c4d0da; background: #fff; color: var(--pcb-ink); }
-
-.pcb-default-note {
-  margin-top: 8px; font-size: 12.5px; color: var(--pcb-muted); line-height: 1.45;
-}
-.pcb-default-note b { color: #46586a; }
-
 /* Verify-email box (welcome onboarding) */
 .pcb-verify { margin-top: 16px; background: #fff; border: 1px solid var(--pcb-line); border-radius: 10px; padding: 14px 16px; }
 .pcb-verify-head { font-weight: 650; font-size: 14.5px; }
@@ -436,8 +342,6 @@ defineExpose({ complete, builtCard });
 .pcb-ask-choices { display: flex; gap: 7px; margin-top: 9px; }
 
 @media (max-width: 640px) {
-  .pcb-matrix { grid-template-columns: 1fr; }
-  .pcb-col { border-right: none; border-bottom: 1px solid var(--pcb-line); }
   .pcb-req-grid { grid-template-columns: 1fr; }
 }
 </style>

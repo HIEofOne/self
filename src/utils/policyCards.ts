@@ -103,6 +103,121 @@ export const PAYMENT_OPTIONS: Array<{ value: Payment; label: string }> = [
   { value: 'sharing-payment', label: 'a sharing payment' }
 ];
 
+// ── The ONE policy matrix ────────────────────────────────────────────
+// Every matrix surface in MAIA (welcome-page request table, welcome policy
+// demo, Sharing Policies editor + Try-it, group editor) renders THIS
+// definition via PolicyMatrix.vue. The same table appears everywhere —
+// contexts only DISABLE cells that don't apply (with the reason in the
+// tooltip), so even a visitor browsing the welcome page sees the whole
+// vocabulary and learns what each piece means.
+//   author   — composing a policy card (patient or group admin)
+//   request  — composing a real request (welcome-page visitor)
+//   simulate — testing a hypothetical request (Try-it)
+
+export type MatrixContext = 'author' | 'request' | 'simulate';
+export type MatrixColKey = 'scope' | 'purpose' | 'signature' | 'payment' | 'action';
+
+export interface MatrixCell {
+  v: string;
+  label: string;
+  sub?: string;
+  cls?: string;
+  /** Scope cell that carries the Apple Health category picker (author). */
+  ah?: boolean;
+  /** Teaching tooltip — shown on EVERY cell, in every context. */
+  tip: string;
+  /** Context → reason this cell is disabled there (appended to the tip). */
+  disabledIn?: Partial<Record<MatrixContext, string>>;
+}
+
+export interface MatrixColumn {
+  key: MatrixColKey;
+  head: string;
+  headTip: string;
+  options: MatrixCell[];
+  /** Context → reason the whole column is disabled there. */
+  disabledIn?: Partial<Record<MatrixContext, string>>;
+}
+
+const REQ_NO_ACTION = 'The patient’s cards choose the action — requesters only ask.';
+
+export const POLICY_MATRIX: MatrixColumn[] = [
+  { key: 'scope', head: 'Scope of Request', headTip: 'How much of the record is involved. Broader scopes cover narrower ones: a card for "Everything" also decides a Patient Summary ask.', options: [
+    { v: 'notification-only', label: 'Patient notification only', sub: 'reach them, no record data',
+      tip: 'The requester only wants to reach the patient. No record data is involved — accepting delivers their message, and the patient chooses whether to reply.' },
+    { v: 'meds-allergies', label: 'Current medications',
+      tip: 'The verified Current Medications and Allergies list — the small, high-value slice a clinician needs first. Only the privacy-filtered copy ever leaves.' },
+    { v: 'patient-summary', label: 'Patient summary',
+      tip: 'The verified Patient Summary. What actually leaves is the privacy-filtered copy, with every name replaced by an obviously-fake pseudonym.' },
+    { v: 'not-sensitive', label: 'Everything not sensitive',
+      tip: 'The record except sensitive categories (mental health, reproductive health, substance use…). Deliberately does NOT include the Patient Summary — a summary can contain sensitive content.' },
+    { v: 'everything', label: 'Everything',
+      tip: 'The whole record. A card at this scope also covers every narrower ask — Patient Summary, medications — so pair it with a strong identity floor.' },
+    { v: 'ah-category', label: 'Apple Health category', ah: true,
+      tip: 'One Apple Health category (labs, vitals, immunizations…). A card names the exact category it covers.',
+      disabledIn: {
+        request: 'An outside requester can’t know which Apple Health categories a record contains — ask for a broader scope instead.'
+      } }
+  ]},
+  { key: 'purpose', head: 'Claimed Purpose', headTip: 'Why the requester says they want it. MAIA can’t verify a purpose — but your cards decide what each claimed purpose is allowed to receive.', options: [
+    { v: 'any', label: 'Any purpose',
+      tip: 'Card-only: a card "for any purpose" matches every claimed purpose.',
+      disabledIn: {
+        request: 'A requester claims one concrete purpose — "any purpose" is something only a card says.',
+        simulate: 'A simulated request claims one concrete purpose — "any purpose" is something only a card says.'
+      } },
+    { v: 'peer-support', label: 'Peer support',
+      tip: 'Patient-to-patient help inside a group — the reason groups exist.' },
+    { v: 'clinical', label: 'Clinical',
+      tip: 'Care delivery by a clinician or care team.' },
+    { v: 'research', label: 'Research',
+      tip: 'Studies and registries. Patients often pair this with a strong identity floor or a payment requirement.' },
+    { v: 'public-health', label: 'Public health',
+      tip: 'Population-level reporting to health authorities.' },
+    { v: 'marketing', label: 'Marketing',
+      tip: 'Commercial outreach — the classic reason for a silent-deny card.' }
+  ]},
+  { key: 'signature', head: 'Signature Strength', headTip: 'How strongly the requester’s identity is PROVED — not claimed. A card states the minimum level it requires; stronger always qualifies.', options: [
+    { v: 'unverified', label: 'Unverified', sub: 'no identity check',
+      tip: 'No identity proof at all. Whatever the requester typed about themselves is just a claim.' },
+    { v: 'verified-email', label: 'Verified email',
+      tip: 'The requester proved control of an email address with a one-time code — exactly what this page’s request form does before sending.' },
+    { v: 'group-member', label: 'Group member',
+      tip: 'A signed membership credential proves they belong to the patient’s group. Members’ MAIAs present this automatically.' },
+    { v: 'npi', label: 'NPI verified', sub: 'licensed provider',
+      tip: 'A licensed provider verified against the NPI registry. (Verification is not live yet — until it is, such claims evaluate as unverified.)' },
+    { v: 'doximity', label: 'Doximity verified', sub: 'verified clinician',
+      tip: 'Clinician identity verified through Doximity. (Not live yet — until it is, such claims evaluate as unverified.)' },
+    { v: 'verified-by-me', label: 'Verified by me', sub: 'someone you vouched for',
+      tip: 'The patient personally vouched for this requester — the strongest level of all.',
+      disabledIn: {
+        request: 'A first-time visitor can’t have been vouched for by the patient yet.'
+      } }
+  ]},
+  { key: 'payment', head: 'Deposit or Payment', headTip: 'Money as a spam filter and a fairness tool. All payment types are reserved for a later phase — cards can already require them, but nothing is charged yet.', options: [
+    { v: 'none', label: 'None',
+      tip: 'No money involved — the default.' },
+    { v: 'spam-deposit', label: 'Spam evaluation deposit', sub: 'returnable',
+      tip: 'A small returnable deposit that makes bulk spam uneconomical: returned when the request turns out to be legitimate. (Reserved for a later phase.)' },
+    { v: 'notification-deposit', label: 'Request evaluation payment',
+      tip: 'Pays for the patient’s (or their AI’s) work of evaluating the request. (Reserved for a later phase.)' },
+    { v: 'sharing-payment', label: 'Payment for information',
+      tip: 'Payment to the patient for the information itself. (Reserved for a later phase.)' }
+  ]},
+  { key: 'action', head: 'MAIA Action', headTip: 'What the patient’s MAIA does when a request matches the card. Anything NO card covers always comes to the patient as a question.',
+    disabledIn: { request: REQ_NO_ACTION, simulate: 'The action comes out of the evaluation — pick the request, and the cards decide.' },
+    options: [
+    { v: 'deny-silent', label: 'Deny silently', sub: 'requester hears nothing', cls: 'act-deny',
+      tip: 'The request is dropped. The requester never learns it was even seen — the spam answer.' },
+    { v: 'deny-respond', label: 'Deny with response', sub: 'a reason for the decline', cls: 'act-deny',
+      tip: 'MAIA declines and tells the requester so — but never which card decided.' },
+    { v: 'ask', label: 'Ask me first', sub: 'notify me for approval', cls: 'act-ask',
+      tip: 'MAIA notifies the patient and waits. This is also the DEFAULT for anything no card covers; as a card, it pins the approval step even where a broader Respond card would otherwise apply.' },
+    { v: 'respond', label: 'Respond', sub: 'fulfil the request', cls: 'act-respond',
+      tip: 'MAIA answers automatically with the privacy-filtered artifact — even while the patient is offline.' }
+  ]}
+];
+
 /** Identity strength ladder for "minimum level" comparisons. NPI and
  *  Doximity are treated as equally strong professional verification. */
 const SIGNATURE_RANK: Record<Signature, number> = {
