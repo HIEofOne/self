@@ -1952,12 +1952,14 @@
         </q-card-section>
         <q-card-section class="q-pt-none">
           <div class="text-body1">
-            Your Current Medications have changed. Would you like to regenerate the Patient Summary to reflect the update?
+            The Current Medications in your Patient Summary differ from the
+            list you just verified. Update only that section of the summary
+            to match? Everything else in the summary stays exactly as it is.
           </div>
         </q-card-section>
         <q-card-actions align="right" class="q-pa-md">
-          <q-btn flat label="Not Now" color="grey-8" @click="showUpdateSummaryDialog = false" />
-          <q-btn flat label="Update Summary" color="primary" @click="handleAcceptUpdateSummary" />
+          <q-btn flat label="Keep summary as is" color="grey-8" @click="handleDeclineUpdateSummary" />
+          <q-btn unelevated label="Update summary" color="primary" @click="handleAcceptUpdateSummary" />
         </q-card-actions>
       </q-card>
     </q-dialog>
@@ -2130,24 +2132,117 @@ const handleShowPatientSummary = () => {
 
 const handleCurrentMedicationsSaved = (payload: { value: string; edited: boolean; changed?: boolean; source?: string; verified?: boolean }) => {
   emit('current-medications-saved', payload);
-  if (payload.changed && payload.verified && !props.wizardActive) {
-    // Only show "Update Patient Summary?" outside the wizard — during the wizard,
-    // ChatInterface patches the draft PS directly via update-summary-meds.
-    showUpdateSummaryDialog.value = true;
-    summaryNeedsVerify.value = true;
+  if (payload.verified && !props.wizardActive) {
+    // Outside the wizard, EVERY verified save reconciles against the
+    // Patient Summary. Deliberately not gated on payload.changed: the
+    // Verify click usually re-saves a value a row edit already stored
+    // (changed=false), which is exactly the Margarita bug — the meds
+    // changed, then Verify "changed nothing", and no dialog ever fired.
+    // The genuine comparison is PS meds vs the verified list, below.
+    void maybeOfferSummaryUpdate(payload.value);
   } else if (payload.verified) {
+    // Wizard: ChatInterface patches the draft directly (update-summary-meds).
     summaryNeedsVerify.value = true;
   }
 };
 
-const handleAcceptUpdateSummary = () => {
+/** After a verified meds save: show the Patient Summary and — only when its
+ *  Current Medications genuinely differ from the just-verified list — ask
+ *  whether to update it. A verified summary is NEVER touched without this
+ *  explicit consent (the user may have edited more than the meds). */
+const maybeOfferSummaryUpdate = async (verifiedValue: string) => {
+  try {
+    if (!patientSummary.value) await loadPatientSummary();
+  } catch { /* no stored summary */ }
+  currentTab.value = 'summary'; // the user SEES what their summary says
+  if (!patientSummary.value) return; // nothing to reconcile (draft/no-PS flows handle themselves)
+  const normMed = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim();
+  const psSorted = extractMedsFromPS(patientSummary.value).map(normMed).sort().join('|');
+  const verifiedSorted = String(verifiedValue || '')
+    .split('\n')
+    .map((l) => l.replace(/^[-*•]\s*/, '').trim())
+    .filter((l) => l && !/^none$/i.test(l))
+    .map(normMed)
+    .sort()
+    .join('|');
+  if (psSorted === verifiedSorted) {
+    if ($q && typeof $q.notify === 'function') {
+      $q.notify({ type: 'positive', message: 'Medications verified — the Patient Summary already matches.' });
+    }
+    return;
+  }
+  summaryNeedsVerify.value = true;
+  showUpdateSummaryDialog.value = true;
+};
+
+/** "Keep summary as is": the summary was not touched, so its verify state
+ *  reverts to what its stamp says — an already-verified summary must not
+ *  demand re-verification just because the user chose to keep it. */
+const handleDeclineUpdateSummary = () => {
+  showUpdateSummaryDialog.value = false;
+  summaryNeedsVerify.value = !psVerifiedAt.value;
+};
+
+const handleAcceptUpdateSummary = async () => {
   showUpdateSummaryDialog.value = false;
   currentTab.value = 'summary';
-  loadingSummary.value = true;
-  pendingSummaryRegeneration.value = true;
-  // The user just chose "Update Summary" after a meds change — that IS the
-  // CM-difference consent, so don't ask again (Phase 3).
-  requestNewSummary({ skipCmGate: true });
+  // The user consented to updating ONLY the Current Medications section —
+  // PATCH it in place (no AI call): the rest of their summary, which they
+  // may have hand-edited, stays byte-for-byte intact. The verified stamp
+  // is preserved because this change is itself explicitly confirmed.
+  try {
+    let meds = '';
+    try {
+      const res = await fetch(`/api/user-status?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
+      if (res.ok) meds = String((await res.json()).currentMedications || '').trim();
+    } catch { /* fall through — patch with empty → "None" */ }
+    if (!patientSummary.value) await loadPatientSummary();
+    if (!patientSummary.value) {
+      // No summary to patch — generating one (with the verified meds
+      // injected) is the only path; consent was just given.
+      loadingSummary.value = true;
+      pendingSummaryRegeneration.value = true;
+      requestNewSummary({ skipCmGate: true });
+      return;
+    }
+    const wasVerified = !!psVerifiedAt.value;
+    const updated = replaceMedicationsInSummary(patientSummary.value, meds || '', true);
+    if (!updated) {
+      // Couldn't locate the Current Medications section — regenerate with
+      // the consent already given rather than fail silently.
+      loadingSummary.value = true;
+      pendingSummaryRegeneration.value = true;
+      requestNewSummary({ skipCmGate: true });
+      return;
+    }
+    if (updated !== patientSummary.value) {
+      const response = await fetch('/api/patient-summary', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          userId: props.userId,
+          summary: updated,
+          replaceStrategy: 'newest',
+          verified: wasVerified
+        })
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.message || 'Failed to update the summary');
+      }
+    }
+    summaryNeedsVerify.value = !wasVerified;
+    await loadPatientSummary();
+    emit('patient-summary-saved', { userId: props.userId, summary: updated });
+    if ($q && typeof $q.notify === 'function') {
+      $q.notify({ type: 'positive', message: 'Patient Summary updated with your verified medications.' });
+    }
+  } catch (err) {
+    if ($q && typeof $q.notify === 'function') {
+      $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to update the summary' });
+    }
+  }
 };
 
 const handleMedicationsOffered = (payload: {

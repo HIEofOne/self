@@ -1603,9 +1603,14 @@ const clearVerifyRequirement = () => {
 const handleVerifyCurrentMedications = async () => {
   const medsToSave = currentMedications.value || 'None';
   await saveCurrentMedicationsValue(medsToSave, true, true, true);
-  // Verification is the errand — take the user back to the chat (long
-  // operations like indexing keep running server-side; chatting works).
-  emit('back-to-chat');
+  // No emit needed: the verified save above already reaches MyStuffDialog
+  // (current-medications-saved), which switches to the Patient Summary tab
+  // and — when its Current Medications differ from the list just verified —
+  // asks whether to update the summary. (Deliberately NOT
+  // 'show-patient-summary': that emit chain ends in ChatInterface
+  // requesting a summary GENERATION, and verify must never trigger an
+  // unconsented AI call. And no 'back-to-chat': the user should SEE what
+  // their summary says about the meds they just confirmed.)
 };
 
 // Step 4 (modal diet): L1 is the meds gate's destination — log open + choice.
@@ -3197,6 +3202,10 @@ const commitInlineEditRow = async () => {
   // The red "please verify" borders on Edit/Verify remain until
   // the user clicks Verify.
   await saveCurrentMedicationsValue(serializeMedLines(rows), true, false);
+  // The user just changed the list — VERIFY is now the next step, and it
+  // must SAY so (highlight): "add a med, hit Enter, nothing happens" was
+  // the reported dead end.
+  markVerifyRequired();
 };
 
 const deleteMedRow = async (idx: number) => {
@@ -3206,6 +3215,7 @@ const deleteMedRow = async (idx: number) => {
   // Same reasoning as commitInlineEditRow above — a single-row
   // delete doesn't count as verifying the whole list.
   await saveCurrentMedicationsValue(serializeMedLines(rows), true, false);
+  markVerifyRequired();
 };
 
 
@@ -3232,9 +3242,13 @@ const saveCurrentMedicationsValue = async (value: string, markEdited: boolean, c
       body: JSON.stringify({
         userId: props.userId,
         currentMedications: value,
-        // This save IS the user's Verify / Save-edit act — stamp the list
-        // verified (Phase 2). Automated extractions never pass this flag.
-        verified: true
+        // HONEST stamping: only an explicit Verify (or a whole-list
+        // Edit-and-save) passes verified:true. Per-row adds/edits/deletes
+        // pass false so the server CLEARS the verified stamp — the list is
+        // mid-edit until the user confirms with the highlighted VERIFY.
+        // (This used to hard-code true, which silently verified every
+        // keystroke while the UI still showed "please verify".)
+        verified
       })
     });
 
