@@ -31,22 +31,10 @@
          or verified-by-me ⇒ a member of your group), so no separate dropdown. -->
     <q-expansion-item icon="science" label="Try it — test a hypothetical request" class="q-mb-md" header-class="text-primary">
       <div class="q-pa-sm" style="border: 1px solid #e0e0e0; border-radius: 8px">
-        <div class="pp-matrix">
-          <div v-for="col in simColumns" :key="col.key" class="pp-col">
-            <div class="pp-col-head">{{ col.head }}</div>
-            <button
-              v-for="opt in col.options"
-              :key="opt.value"
-              type="button"
-              class="pp-cell"
-              :class="{ 'is-sel': simSel[col.key] === opt.value }"
-              :aria-pressed="simSel[col.key] === opt.value"
-              @click="pickSim(col.key, opt.value)"
-            >
-              {{ opt.label }}
-            </button>
-          </div>
-        </div>
+        <!-- The ONE policy table (PolicyMatrix), simulate context: the
+             action column shows but is disabled — the outcome comes out of
+             the evaluation below, not a pick. -->
+        <PolicyMatrix context="simulate" :model-value="simSel" @pick="pickSim" />
         <div v-if="memberships.length" class="text-caption text-grey-7 q-mt-xs">
           Group membership follows from Signature Strength — “Group member” or
           stronger tests as a member of {{ memberships[0].groupName }}.
@@ -275,6 +263,7 @@
 import { ref, reactive, computed, watch, onMounted } from 'vue';
 import PendingJoinCard from './PendingJoinCard.vue';
 import PolicyCardBuilder from './PolicyCardBuilder.vue';
+import PolicyMatrix from './PolicyMatrix.vue';
 import { useQuasar } from 'quasar';
 import MarkdownIt from 'markdown-it';
 import { processFileNCitations } from '../utils/fileNCitations';
@@ -294,8 +283,7 @@ const previewMarkdown = new MarkdownIt({ html: true, linkify: true, breaks: fals
   };
 }
 import {
-  sentenceFor, evaluate,
-  PURPOSE_OPTIONS, SCOPE_OPTIONS, SIGNATURE_OPTIONS, PAYMENT_OPTIONS,
+  sentenceFor, evaluate, SCOPE_OPTIONS,
   type PolicyCard, type PolicyRequest, type Purpose, type Scope, type Signature, type Payment
 } from '../utils/policyCards';
 
@@ -452,17 +440,14 @@ const sections = computed(() => {
 // the New Policy editor (one cell per column). The requesting party is derived
 // from Signature Strength: group-member / verified-by-me test as a member of
 // the user's (first) group; everything else tests as a stranger.
-type SimKey = 'scope' | 'purpose' | 'signature' | 'payment';
-const simColumns: Array<{ key: SimKey; head: string; options: Array<{ value: string; label: string }> }> = [
-  { key: 'scope', head: 'Scope of Request', options: SCOPE_OPTIONS },
-  { key: 'purpose', head: 'Claimed Purpose', options: PURPOSE_OPTIONS },
-  { key: 'signature', head: 'Signature Strength', options: SIGNATURE_OPTIONS },
-  { key: 'payment', head: 'Deposit or Payment', options: PAYMENT_OPTIONS }
-];
 const simSel = reactive<{ scope: Scope; purpose: Purpose; signature: Signature; payment: Payment }>({
   scope: 'patient-summary', purpose: 'clinical', signature: 'unverified', payment: 'none'
 });
-const pickSim = (key: SimKey, value: string) => { (simSel as Record<SimKey, string>)[key] = value; };
+const pickSim = (key: string, value: string) => {
+  // The action column is disabled in simulate context — the outcome comes
+  // out of the evaluation, never a pick.
+  if (key in simSel) (simSel as Record<string, string>)[key] = value;
+};
 const toRequest = (partyKind: string, purpose: Purpose, scope: Scope, signature: Signature, payment: Payment): PolicyRequest => ({
   party: partyKind.startsWith('group:') ? { type: 'group', groupId: partyKind.slice(6) } : { type: 'anyone' },
   purpose, scope, signature, payment
@@ -759,30 +744,6 @@ onMounted(loadAll);
 </style>
 
 <style scoped>
-/* Try-it matrix — same visual language as PolicyCardBuilder / RequestBuilder */
-.pp-matrix {
-  display: grid; grid-template-columns: repeat(4, 1fr); gap: 0;
-  border: 1px solid #dde5ec; border-radius: 10px; overflow: hidden; background: #fff;
-}
-.pp-col { border-right: 1px solid #dde5ec; display: flex; flex-direction: column; }
-.pp-col:last-child { border-right: none; }
-.pp-col-head {
-  font-size: 11px; letter-spacing: .05em; text-transform: uppercase; font-weight: 700;
-  color: #46586a; padding: 10px 11px; background: #f2f6fa;
-  border-bottom: 1px solid #dde5ec; min-height: 54px; display: flex; align-items: center;
-}
-.pp-cell {
-  appearance: none; text-align: left; width: 100%; cursor: pointer; background: transparent;
-  border: none; border-bottom: 1px solid #dde5ec; color: #24313d;
-  font: inherit; font-size: 13px; padding: 10px 11px; line-height: 1.32; position: relative;
-  transition: background .12s ease, color .12s ease;
-}
-.pp-col .pp-cell:last-child { border-bottom: none; }
-.pp-cell:hover { background: rgba(25, 118, 210, .08); }
-.pp-cell:focus-visible { outline: 2px solid #1976d2; outline-offset: -2px; }
-.pp-cell.is-sel { background: #1976d2; color: #fff; font-weight: 600; }
-.pp-cell.is-sel::after { content: "✓"; position: absolute; right: 9px; top: 12px; font-size: 11px; opacity: .9; }
-
 /* "What would be shared" — scrolls, roughly half the matrix height */
 .pp-share-preview {
   max-height: 300px; overflow-y: auto;

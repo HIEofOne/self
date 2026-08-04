@@ -1,23 +1,9 @@
 <template>
   <div class="rqb">
-    <!-- ── Request matrix ───────────────────────────────── -->
-    <div class="rqb-matrix">
-      <div v-for="col in columns" :key="col.key" class="rqb-col">
-        <div class="rqb-col-head">{{ col.head }}</div>
-        <button
-          v-for="opt in col.options"
-          :key="opt.v"
-          type="button"
-          class="rqb-cell"
-          :class="{ 'is-sel': sel[col.key] === opt.v }"
-          :aria-pressed="sel[col.key] === opt.v"
-          @click="pick(col.key, opt.v)"
-        >
-          <span>{{ opt.label }}</span>
-          <span v-if="opt.sub" class="rqb-sub">{{ opt.sub }}</span>
-        </button>
-      </div>
-    </div>
+    <!-- ── Request matrix: the ONE policy table (PolicyMatrix), request
+         context. Cells that don't apply to an outside requester are shown
+         but disabled — the tooltips teach the whole vocabulary either way. -->
+    <PolicyMatrix context="request" :model-value="sel" @pick="pick" />
 
     <!-- ── Expandable message / special instructions ────── -->
     <div class="rqb-msg">
@@ -100,6 +86,7 @@ import { ref, reactive, computed, nextTick, onUnmounted } from 'vue';
 import { useQuasar } from 'quasar';
 import { useVerifiedEmail } from '../composables/verifiedEmail';
 import EmailVerifyBox from './EmailVerifyBox.vue';
+import PolicyMatrix from './PolicyMatrix.vue';
 
 // The group the request is really sent to (the welcome page passes the Trustee
 // group + its registry origin). Without it, the builder stays a preview.
@@ -119,42 +106,10 @@ let statusTimer: ReturnType<typeof setInterval> | null = null;
 const stopPolling = () => { if (statusTimer) { clearInterval(statusTimer); statusTimer = null; } };
 onUnmounted(stopPolling);
 
+// The visitor's selections. The matrix itself comes from POLICY_MATRIX
+// (PolicyMatrix.vue, context "request") — the identical table every other
+// surface shows, with requester-inapplicable cells disabled.
 type ColKey = 'signature' | 'scope' | 'purpose' | 'payment';
-interface CellOpt { v: string; label: string; sub?: string }
-interface Column { key: ColKey; head: string; options: CellOpt[] }
-
-// The request the visitor composes. Labels + column order mirror
-// PolicyCardBuilder's matrix (Scope · Purpose · Signature Strength · Deposit)
-// so "what you present" here reads the same as "what they present" there.
-const columns: Column[] = [
-  { key: 'scope', head: 'Scope of Request', options: [
-    { v: 'notification-only', label: 'Patient notification only', sub: 'reach them, no record data' },
-    { v: 'meds-allergies', label: 'Current medications' },
-    { v: 'patient-summary', label: 'Patient summary' },
-    { v: 'not-sensitive', label: 'Everything not sensitive' },
-    { v: 'everything', label: 'Everything' }
-  ]},
-  { key: 'purpose', head: 'Claimed Purpose', options: [
-    { v: 'peer-support', label: 'Peer support' },
-    { v: 'clinical', label: 'Clinical' },
-    { v: 'research', label: 'Research' },
-    { v: 'public-health', label: 'Public health' },
-    { v: 'marketing', label: 'Marketing' }
-  ]},
-  { key: 'signature', head: 'Signature Strength', options: [
-    { v: 'unverified', label: 'Unverified', sub: 'no identity check' },
-    { v: 'verified-email', label: 'Verified email' },
-    { v: 'group-member', label: 'Group member' },
-    { v: 'npi', label: 'NPI verified', sub: 'licensed provider' },
-    { v: 'doximity', label: 'Doximity verified', sub: 'verified clinician' }
-  ]},
-  { key: 'payment', head: 'Deposit or Payment', options: [
-    { v: 'none', label: 'None' },
-    { v: 'spam-deposit', label: 'Spam evaluation deposit', sub: 'returnable' },
-    { v: 'notification-deposit', label: 'Request evaluation payment' },
-    { v: 'sharing-payment', label: 'Payment for information' }
-  ]}
-];
 
 const sel = reactive<Record<ColKey, string | null>>({
   signature: null, scope: null, purpose: null, payment: null
@@ -162,7 +117,11 @@ const sel = reactive<Record<ColKey, string | null>>({
 const message = ref('');
 const msgEl = ref<HTMLTextAreaElement | null>(null);
 
-const pick = (key: ColKey, v: string) => { sel[key] = sel[key] === v ? null : v; };
+const pick = (key: string, v: string) => {
+  if (!(key in sel)) return; // action column is disabled in request context
+  const k = key as ColKey;
+  sel[k] = sel[k] === v ? null : v;
+};
 // Payment is optional — it defaults to "None" if the visitor doesn't pick one.
 const ready = computed(() => !!(sel.signature && sel.scope && sel.purpose));
 
@@ -350,32 +309,6 @@ const runTry = () => {
   font-size: 14px;
 }
 
-/* Matrix */
-.rqb-matrix {
-  display: grid; grid-template-columns: repeat(4, 1fr); gap: 0;
-  border: 1px solid var(--rqb-line); border-radius: 10px; overflow: hidden; background: #fff;
-}
-.rqb-col { border-right: 1px solid var(--rqb-line); display: flex; flex-direction: column; }
-.rqb-col:last-child { border-right: none; }
-.rqb-col-head {
-  font-size: 11px; letter-spacing: .05em; text-transform: uppercase; font-weight: 700;
-  color: #46586a; padding: 10px 11px; background: var(--rqb-chip);
-  border-bottom: 1px solid var(--rqb-line); min-height: 40px; display: flex; align-items: center;
-}
-.rqb-cell {
-  appearance: none; text-align: left; width: 100%; cursor: pointer; background: transparent;
-  border: none; border-bottom: 1px solid var(--rqb-line); color: var(--rqb-ink);
-  font: inherit; font-size: 13px; padding: 10px 11px; line-height: 1.32; position: relative;
-  transition: background .12s ease, color .12s ease;
-}
-.rqb-col .rqb-cell:last-child { border-bottom: none; }
-.rqb-cell:hover { background: var(--rqb-accent-soft); }
-.rqb-cell:focus-visible { outline: 2px solid var(--rqb-accent); outline-offset: -2px; }
-.rqb-cell.is-sel { background: var(--rqb-accent); color: #fff; font-weight: 600; }
-.rqb-cell.is-sel::after { content: "✓"; position: absolute; right: 9px; top: 12px; font-size: 11px; opacity: .9; }
-.rqb-sub { display: block; font-size: 11px; color: var(--rqb-muted); margin-top: 2px; }
-.rqb-cell.is-sel .rqb-sub { color: rgba(255,255,255,.85); }
-
 /* Message box */
 .rqb-msg { margin-top: 16px; }
 .rqb-msg-label { display: block; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--rqb-muted); font-weight: 700; margin-bottom: 5px; }
@@ -434,8 +367,4 @@ const runTry = () => {
 .rqb-speaker.ai .rqb-speaker-from { color: var(--rqb-accent); }
 .rqb-emailnote { margin-top: 10px; font-size: 12px; color: var(--rqb-muted); }
 
-@media (max-width: 640px) {
-  .rqb-matrix { grid-template-columns: 1fr; }
-  .rqb-col { border-right: none; border-bottom: 1px solid var(--rqb-line); }
-}
 </style>
