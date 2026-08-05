@@ -113,6 +113,28 @@
                   <div v-if="expandedReasoning[idx]" class="reasoning-content">{{ msg.reasoningContent }}</div>
                 </div>
                 <div v-html="messageDisplayHtml[idx]"></div>
+                <!-- Policy Advisor proposals: cards the advisor drafted.
+                     NOTHING changes until the user saves one — the save
+                     goes through /api/user-policies (normalizeCard). -->
+                <div v-for="(pc, pci) in (msg.policyCards || [])" :key="'pc' + pci" class="pa-proposed-card q-mt-sm">
+                  <div class="row items-center q-gutter-xs q-mb-xs">
+                    <q-badge :color="pc.outcome === 'deny' ? 'negative' : pc.outcome === 'ask' ? 'orange' : 'green'" :label="pc.outcome === 'ask' ? 'ask me' : pc.outcome" />
+                    <span class="text-caption text-grey-7">proposed policy — nothing changes until you save it</span>
+                  </div>
+                  <div class="text-body2">{{ policyCardSentence(pc) }}</div>
+                  <div class="text-caption text-grey-7 q-mt-xs">
+                    Deterministic check: a matching request would {{ proposedCardCheck(pc) }}.
+                  </div>
+                  <div class="q-mt-xs">
+                    <q-btn
+                      v-if="!pc.saved"
+                      dense unelevated size="sm" color="primary" label="Save this card"
+                      :loading="savingPolicyCardKey === idx + ':' + pci"
+                      @click="saveProposedCard(pc, idx, pci)"
+                    />
+                    <q-badge v-else color="green" label="saved to your Sharing Policies" />
+                  </div>
+                </div>
                 <div class="q-mt-sm">
                   <q-btn
                     flat
@@ -953,6 +975,7 @@
       @patient-summary-saved="handlePatientSummarySaved"
       @patient-summary-verified="handlePatientSummaryVerified"
       @show-patient-summary="handleMyStuffShowSummary"
+      @open-policy-advisor="handleOpenPolicyAdvisor"
       @rehydration-file-removed="handleRehydrationFileRemoved"
       @rehydration-complete="handleRehydrationComplete"
       @file-added-to-kb="handleFileAddedToKb"
@@ -1137,6 +1160,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue';
 import { useQuasar } from 'quasar';
+import { sentenceFor as policySentenceFor, evaluate as policyEvaluate, type PolicyCard } from '../utils/policyCards';
 import PdfViewerModal from './PdfViewerModal.vue';
 import TextViewerModal from './TextViewerModal.vue';
 import SavedChatsModal from './SavedChatsModal.vue';
@@ -1173,6 +1197,8 @@ interface Message {
   authorType?: 'user' | 'assistant';
   providerKey?: string;
   reasoningContent?: string;
+  /** Policy Advisor proposals extracted from ```policy-card fences. */
+  policyCards?: Array<PolicyCard & { saved?: boolean }>;
 }
 
 interface User {
@@ -3372,6 +3398,109 @@ watch(
 );
 
 // Send message (streaming)
+// ── Policy Advisor (Phase 1) ─────────────────────────────────────────
+// The Sharing Policies tab hands the conversation to the patient's own
+// private AI with a SERVER-assembled policy context (their cards, request
+// log, record profile). The AI advises and drafts; saving a proposed card
+// is always the user's explicit act, validated by normalizeCard.
+const POLICY_ADVISOR_PROMPT =
+  'Review my sharing policies: which requests would be answered automatically today, ' +
+  'do any cards look redundant, risky, or dead given my record and request history, ' +
+  'and what changes would you suggest?';
+const policyAdvisorMode = ref(false);
+const handleOpenPolicyAdvisor = () => {
+  showMyStuffDialog.value = false; // reveal the chat under the Workbook
+  policyAdvisorMode.value = true;  // sticky for this conversation (server injects context per turn)
+  inputMessage.value = POLICY_ADVISOR_PROMPT;
+  void sendMessage();
+};
+// A blank slate ends advisor mode.
+watch(() => messages.value.length, (n) => { if (n === 0) policyAdvisorMode.value = false; });
+
+/** Pull ```policy-card fenced JSON out of a finished assistant message and
+ *  attach the parsed cards for the confirmable-card renderer. */
+const extractPolicyCards = (msg: Message) => {
+  if (!policyAdvisorMode.value || !msg?.content || msg.role !== 'assistant') return;
+  const fences = /```policy-card\s*\n([\s\S]*?)```/g;
+  const cards: Array<PolicyCard & { saved?: boolean }> = [];
+  let m: RegExpExecArray | null;
+  while ((m = fences.exec(msg.content)) !== null) {
+    try {
+      const parsed = JSON.parse(m[1]);
+      if (parsed && ['allow', 'deny', 'ask'].includes(parsed.outcome) && parsed.elements?.party?.type) {
+        cards.push({
+          id: 'proposed',
+          enabled: true,
+          provenance: 'user',
+          outcome: parsed.outcome,
+          ...(parsed.denyMode ? { denyMode: parsed.denyMode } : {}),
+          elements: parsed.elements
+        } as PolicyCard);
+      }
+    } catch { /* not a valid card — leave the fence visible */ }
+  }
+  if (cards.length) {
+    msg.policyCards = cards;
+    msg.content = msg.content.replace(fences, '').replace(/\n{3,}/g, '\n\n').trim();
+  }
+};
+
+const policyCardSentence = (pc: PolicyCard): string => {
+  try { return policySentenceFor(pc); } catch { return '(unreadable proposal)'; }
+};
+
+/** Deterministic annotation: what THIS card alone would do to a request at
+ *  exactly its own scope/purpose/signature floor — the evaluator speaks,
+ *  not the AI. */
+const proposedCardCheck = (pc: PolicyCard): string => {
+  try {
+    const e = pc.elements;
+    const d = policyEvaluate([pc], {
+      party: e.party.type === 'group' ? { type: 'group', groupId: e.party.groupId } : { type: 'anyone' },
+      purpose: e.purpose === 'any' ? 'clinical' : e.purpose,
+      scope: e.scope,
+      ...(e.scope === 'ah-category' && e.ahCategory ? { ahCategory: e.ahCategory } : {}),
+      signature: e.signature,
+      payment: e.payment
+    });
+    if (d.outcome === 'allow') return 'be answered automatically with the privacy-filtered artifact';
+    if (d.outcome === 'deny') return pc.denyMode === 'respond' ? 'be declined with a response' : 'be silently denied';
+    return 'come to you for approval';
+  } catch { return 'not evaluate (malformed proposal)'; }
+};
+
+const savingPolicyCardKey = ref<string | null>(null);
+const saveProposedCard = async (pc: PolicyCard & { saved?: boolean }, idx: number, pci: number) => {
+  if (!props.user?.userId || savingPolicyCardKey.value) return;
+  savingPolicyCardKey.value = `${idx}:${pci}`;
+  try {
+    const res = await fetch('/api/user-policies', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        userId: props.user.userId,
+        policy: {
+          outcome: pc.outcome,
+          ...(pc.denyMode ? { denyMode: pc.denyMode } : {}),
+          enabled: true,
+          provenance: 'user',
+          elements: pc.elements,
+          createdFrom: 'manual'
+        }
+      })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    pc.saved = true;
+    $q.notify({ type: 'positive', message: 'Policy card saved — it is active in your Sharing Policies now.' });
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to save the card' });
+  } finally {
+    savingPolicyCardKey.value = null;
+  }
+};
+
 const sendMessage = async () => {
   if (!inputMessage.value || isStreaming.value || isRequestSent.value) return;
   emit('session-dirty');
@@ -3705,7 +3834,10 @@ const sendMessage = async () => {
         credentials: 'include', // Include session cookie
         body: JSON.stringify({
           messages: sanitizedMessages,
-          options: requestOptions
+          options: requestOptions,
+          // Policy Advisor: the server assembles and injects the policy
+          // context (cards, request log, profile) for this user only.
+          ...(policyAdvisorMode.value ? { policyAdvisor: true } : {})
         })
       }
     );
@@ -3795,6 +3927,9 @@ const sendMessage = async () => {
                 }
               }
 
+              // Policy Advisor: lift any ```policy-card fences into confirmable cards.
+              extractPolicyCards(assistantMessage);
+
               // Update originalMessages AFTER streaming completes with full content
               originalMessages.value = JSON.parse(JSON.stringify(messages.value));
               // Update trulyOriginalMessages when assistant response completes (new message added)
@@ -3825,6 +3960,9 @@ const sendMessage = async () => {
         showNewSummaryDialog.value = true;
       }
     }
+
+    // Policy Advisor: lift any ```policy-card fences into confirmable cards.
+    extractPolicyCards(assistantMessage);
 
     // Update originalMessages AFTER streaming completes with full content
     originalMessages.value = JSON.parse(JSON.stringify(messages.value));
@@ -10100,6 +10238,14 @@ defineExpose({
 </script>
 
 <style scoped>
+/* Policy Advisor proposed-card box (rendered inside assistant bubbles) */
+.pa-proposed-card {
+  border: 1px solid #dde5eb;
+  border-left: 4px solid #0e7490;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #fff;
+}
 .chat-interface {
   width: 100%;
   height: 100vh;

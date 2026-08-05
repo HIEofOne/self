@@ -1111,6 +1111,7 @@
               :userId="userId"
               @group-joined="emit('group-joined')"
               @view-citation="handlePolicyPreviewCitation"
+              @open-policy-advisor="emit('open-policy-advisor')"
             />
           </q-tab-panel>
 
@@ -2111,6 +2112,8 @@ const emit = defineEmits<{
   // we just forward the user's click.
   'wizard-requested': [];
   'open-peer-thread': [payload: { groupId: string; peerId: string; alias: string | null; groupName: string }];
+  // Sharing Policies tab → chat-based Policy Advisor (ChatInterface owns the chat).
+  'open-policy-advisor': [];
   'provisioning-event': [data: Record<string, any>];
 }>();
 
