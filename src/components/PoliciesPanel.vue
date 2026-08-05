@@ -72,6 +72,16 @@
     <div class="row items-center q-mb-sm">
       <div class="text-subtitle2">Your policy cards</div>
       <q-space />
+      <q-btn
+        dense outline color="primary" icon="psychology" label="Policy advisor" class="q-mr-sm"
+        @click="emit('open-policy-advisor')"
+      >
+        <q-tooltip>
+          Ask your private AI to review these policies against your record
+          and request history. It can propose new cards — you confirm every
+          change; nothing is ever changed for you.
+        </q-tooltip>
+      </q-btn>
       <q-btn dense unelevated color="primary" icon="add" label="New policy" @click="openEditor(null)" />
     </div>
 
@@ -294,6 +304,8 @@ const emit = defineEmits<{
   // A [File N p.X] citation in the share preview was clicked — the parent
   // (MyStuffDialog) opens the PDF viewer exactly like the Patient Summary tab.
   'view-citation': [payload: { bucketKey: string; fileName: string; page?: number }];
+  // Open the chat-based Policy Advisor (ChatInterface owns the chat).
+  'open-policy-advisor': [];
 }>();
 
 // The card being edited, handed to the builder to prefill its matrix.
