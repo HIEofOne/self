@@ -4,9 +4,11 @@
  * admin stats aggregation. In-memory cloudant fake; no CouchDB needed.
  */
 import { describe, it, expect } from 'vitest';
+import { createHmac } from 'crypto';
 import {
   grantCredits, chargeCredits, holdCredits, resolveHold,
   getAccount, creditsStats, getCreditsConfig, setCreditsConfig,
+  verifyStripeSignature, handleStripeCheckoutEvent,
   CREDIT_PRICES, CREDITS_PER_PURCHASE, PURCHASE_PRICE_USD
 } from '../../server/credits.js';
 
@@ -112,13 +114,84 @@ describe('credits ledger', () => {
     expect(s.outstanding).toBe(100 - 2 - 25 + 100 - 5 - 5);
   });
 
-  it('config round-trips purchase link and charity', async () => {
+  it('config round-trips purchase link and charity; blank webhook secret keeps the stored one', async () => {
     const c = new FakeCloudant();
-    expect(await getCreditsConfig(c)).toEqual({ purchaseUrl: '', charity: '' });
-    await setCreditsConfig(c, { purchaseUrl: 'https://buy.stripe.com/test', charity: 'Médecins Sans Frontières' });
+    expect(await getCreditsConfig(c)).toEqual({ purchaseUrl: '', charity: '', webhookSecret: '' });
+    await setCreditsConfig(c, { purchaseUrl: 'https://buy.stripe.com/test', charity: 'Médecins Sans Frontières', webhookSecret: 'whsec_abc' });
     expect(await getCreditsConfig(c)).toEqual({
       purchaseUrl: 'https://buy.stripe.com/test',
-      charity: 'Médecins Sans Frontières'
+      charity: 'Médecins Sans Frontières',
+      webhookSecret: 'whsec_abc'
     });
+    // Re-saving link/charity without a secret must NOT wipe the secret.
+    await setCreditsConfig(c, { purchaseUrl: 'https://buy.stripe.com/test2', charity: 'MSF' });
+    expect((await getCreditsConfig(c)).webhookSecret).toBe('whsec_abc');
+  });
+});
+
+describe('Stripe webhook (automatic purchase grants)', () => {
+  const SECRET = 'whsec_testsecret';
+  const signed = (bodyObj, { secret = SECRET, ts = Math.floor(Date.now() / 1000) } = {}) => {
+    const raw = Buffer.from(JSON.stringify(bodyObj), 'utf8');
+    const sig = createHmac('sha256', secret).update(`${ts}.${raw.toString('utf8')}`).digest('hex');
+    return { raw, header: `t=${ts},v1=${sig}` };
+  };
+  const checkoutEvent = (over = {}, sessionOver = {}) => ({
+    id: over.id || `evt_${Math.random().toString(36).slice(2, 12)}`,
+    type: 'checkout.session.completed',
+    data: {
+      object: {
+        id: 'cs_test_1', payment_status: 'paid', currency: 'usd', amount_total: 200,
+        customer_details: { email: 'Buyer@Example.com' },
+        ...sessionOver
+      }
+    },
+    ...over
+  });
+
+  it('accepts a genuine signature and rejects tampering, wrong secrets, and stale timestamps', () => {
+    const { raw, header } = signed({ hello: 'stripe' });
+    expect(verifyStripeSignature(raw, header, SECRET)).toBe(true);
+    expect(verifyStripeSignature(Buffer.from('{"hello":"evil"}'), header, SECRET)).toBe(false);
+    expect(verifyStripeSignature(raw, header, 'whsec_other')).toBe(false);
+    const stale = signed({ hello: 'stripe' }, { ts: Math.floor(Date.now() / 1000) - 3600 });
+    expect(verifyStripeSignature(stale.raw, stale.header, SECRET)).toBe(false);
+    expect(verifyStripeSignature(raw, 'garbage', SECRET)).toBe(false);
+    expect(verifyStripeSignature(raw, header, '')).toBe(false);
+  });
+
+  it('a $2 checkout grants 100 credits to the buyer email (lowercased)', async () => {
+    const c = new FakeCloudant();
+    const out = await handleStripeCheckoutEvent(c, checkoutEvent({ id: 'evt_a1' }));
+    expect(out).toMatchObject({ handled: true, credits: 100, email: 'buyer@example.com' });
+    expect((await getAccount(c, 'buyer@example.com')).balance).toBe(100);
+  });
+
+  it('quantity purchases scale by the amount actually paid (2¢ per credit)', async () => {
+    const c = new FakeCloudant();
+    await handleStripeCheckoutEvent(c, checkoutEvent({ id: 'evt_q3' }, { amount_total: 600 }));
+    expect((await getAccount(c, 'buyer@example.com')).balance).toBe(300);
+  });
+
+  it('Stripe redeliveries of the same event never double-grant', async () => {
+    const c = new FakeCloudant();
+    const evt = checkoutEvent({ id: 'evt_dup' });
+    await handleStripeCheckoutEvent(c, evt);
+    const again = await handleStripeCheckoutEvent(c, evt);
+    expect(again.duplicate).toBe(true);
+    expect((await getAccount(c, 'buyer@example.com')).balance).toBe(100);
+    // Even with the marker missing (crash before it recorded the grant),
+    // the ledger ref makes the grant itself idempotent.
+    await grantCredits(c, 'buyer@example.com', 100, 'retry', 'evt_dup');
+    expect((await getAccount(c, 'buyer@example.com')).balance).toBe(100);
+  });
+
+  it('ignores what it must: other event types, unpaid sessions, non-USD, missing email', async () => {
+    const c = new FakeCloudant();
+    expect((await handleStripeCheckoutEvent(c, { id: 'evt_x', type: 'invoice.paid', data: { object: {} } })).handled).toBe(false);
+    expect((await handleStripeCheckoutEvent(c, checkoutEvent({ id: 'evt_u' }, { payment_status: 'unpaid' }))).handled).toBe(false);
+    expect((await handleStripeCheckoutEvent(c, checkoutEvent({ id: 'evt_e' }, { currency: 'eur' }))).handled).toBe(false);
+    expect((await handleStripeCheckoutEvent(c, checkoutEvent({ id: 'evt_n' }, { customer_details: {} }))).handled).toBe(false);
+    expect((await creditsStats(c)).granted).toBe(0);
   });
 });

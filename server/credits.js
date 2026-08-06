@@ -26,6 +26,8 @@
  * has a hold is a no-op, so conflict retries and racing sweeps are safe.
  */
 
+import { createHmac, timingSafeEqual } from 'crypto';
+
 export const CREDITS_DB = 'maia_credits';
 const CONFIG_DB = 'maia_config';
 const CONFIG_DOC_ID = 'credits_config';
@@ -38,6 +40,9 @@ export const CREDIT_PRICES = Object.freeze({
 export const ADVISOR_QUESTION_CREDITS = 1;
 export const CREDITS_PER_PURCHASE = 100;
 export const PURCHASE_PRICE_USD = 2;
+/** 1 credit = 2¢ — the Stripe webhook grants amount_total / 2, so a buyer
+ *  who pays for quantity 2 on the Payment Link simply gets 200 credits. */
+export const CENTS_PER_CREDIT = 100 * PURCHASE_PRICE_USD / CREDITS_PER_PURCHASE;
 
 const LEDGER_CAP = 300;
 
@@ -89,14 +94,23 @@ export async function getAccount(cloudant, email) {
   return { balance: doc.balance || 0, held: heldTotal(doc) };
 }
 
-/** Admin adds purchased credits to an account. */
-export async function grantCredits(cloudant, email, amount, note) {
+/** Add purchased credits to an account (admin grant or Stripe webhook).
+ *  An optional `ref` makes the grant idempotent: if the ledger already
+ *  holds a grant under that ref, nothing is added again — the conflict
+ *  retry in withAccount turns racing duplicate deliveries into exactly
+ *  one grant. */
+export async function grantCredits(cloudant, email, amount, note, ref) {
   const n = Math.floor(Number(amount));
   if (!Number.isFinite(n) || n <= 0) return false;
   const r = await withAccount(cloudant, email, (doc) => {
+    if (ref && (doc.ledger || []).some((e) => e.kind === 'grant' && e.ref === ref)) return; // already granted
     doc.balance = (doc.balance || 0) + n;
     doc.totals.granted = (doc.totals.granted || 0) + n;
-    pushLedger(doc, { kind: 'grant', amount: n, ...(note ? { note: String(note).slice(0, 200) } : {}) });
+    pushLedger(doc, {
+      kind: 'grant', amount: n,
+      ...(ref ? { ref } : {}),
+      ...(note ? { note: String(note).slice(0, 200) } : {})
+    });
   });
   return r.ok;
 }
@@ -183,19 +197,27 @@ export async function creditsStats(cloudant) {
 export async function getCreditsConfig(cloudant) {
   try {
     const doc = await cloudant.getDocument(CONFIG_DB, CONFIG_DOC_ID);
-    return { purchaseUrl: doc?.purchaseUrl || '', charity: doc?.charity || '' };
+    return {
+      purchaseUrl: doc?.purchaseUrl || '',
+      charity: doc?.charity || '',
+      webhookSecret: doc?.webhookSecret || ''
+    };
   } catch {
-    return { purchaseUrl: '', charity: '' };
+    return { purchaseUrl: '', charity: '', webhookSecret: '' };
   }
 }
 
-export async function setCreditsConfig(cloudant, { purchaseUrl, charity }) {
+/** `webhookSecret` is only overwritten when a non-empty value is supplied —
+ *  the admin form sends blank to mean "keep what's stored". */
+export async function setCreditsConfig(cloudant, { purchaseUrl, charity, webhookSecret }) {
   for (let attempt = 0; attempt < 3; attempt++) {
     let doc = null;
     try { doc = await cloudant.getDocument(CONFIG_DB, CONFIG_DOC_ID); } catch { /* new */ }
     if (!doc) doc = { _id: CONFIG_DOC_ID };
     doc.purchaseUrl = String(purchaseUrl || '').trim().slice(0, 500);
     doc.charity = String(charity || '').trim().slice(0, 300);
+    const sec = String(webhookSecret || '').trim();
+    if (sec) doc.webhookSecret = sec.slice(0, 200);
     doc.updatedAt = new Date().toISOString();
     try { await cloudant.saveDocument(CONFIG_DB, doc); return true; } catch (e) {
       if (e?.statusCode === 409 && attempt < 2) continue;
@@ -203,6 +225,80 @@ export async function setCreditsConfig(cloudant, { purchaseUrl, charity }) {
     }
   }
   return false;
+}
+
+/**
+ * Verify a Stripe webhook signature (the `Stripe-Signature` header:
+ * `t=<unix>,v1=<hmac>`) against the endpoint's signing secret. The HMAC is
+ * computed over `${t}.${rawBody}` — the EXACT bytes Stripe sent, which is
+ * why the webhook route needs the raw body preserved. A timestamp outside
+ * the tolerance window fails (replay protection), and comparison is
+ * timing-safe. No Stripe SDK needed for any of this.
+ */
+export function verifyStripeSignature(rawBody, sigHeader, secret, toleranceSec = 300) {
+  if (!rawBody || !sigHeader || !secret) return false;
+  let t = null;
+  const v1s = [];
+  for (const part of String(sigHeader).split(',')) {
+    const i = part.indexOf('=');
+    if (i < 1) continue;
+    const k = part.slice(0, i).trim();
+    const v = part.slice(i + 1).trim();
+    if (k === 't') t = v;
+    else if (k === 'v1') v1s.push(v);
+  }
+  const ts = Number(t);
+  if (!Number.isFinite(ts) || Math.abs(Date.now() / 1000 - ts) > toleranceSec) return false;
+  const payload = `${t}.${Buffer.isBuffer(rawBody) ? rawBody.toString('utf8') : String(rawBody)}`;
+  const expected = Buffer.from(createHmac('sha256', secret).update(payload).digest('hex'));
+  return v1s.some((sig) => {
+    const got = Buffer.from(String(sig));
+    return got.length === expected.length && timingSafeEqual(got, expected);
+  });
+}
+
+/**
+ * Grant credits for a verified `checkout.session.completed` event (Stripe
+ * Payment Link purchase). Credits = amount actually paid ÷ 2¢, so quantity
+ * purchases just work. Idempotent per Stripe event id — Stripe retries
+ * deliveries until it sees a 2xx, and a crash between the marker write and
+ * the grant is healed by the retry (the marker only reads `granted: true`
+ * after the grant succeeded).
+ */
+export async function handleStripeCheckoutEvent(cloudant, event) {
+  if (event?.type !== 'checkout.session.completed') return { handled: false, reason: 'ignored-event-type' };
+  const s = event.data?.object || {};
+  if (s.payment_status !== 'paid') return { handled: false, reason: 'not-paid' };
+  if (String(s.currency || '').toLowerCase() !== 'usd') return { handled: false, reason: 'not-usd' };
+  const email = String(s.customer_details?.email || s.customer_email || '').trim();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { handled: false, reason: 'no-email' };
+  const credits = Math.floor(Number(s.amount_total) / CENTS_PER_CREDIT);
+  if (!Number.isFinite(credits) || credits <= 0 || credits > 100000) return { handled: false, reason: 'bad-amount' };
+  const evtId = String(event.id || '');
+  if (!/^evt_[A-Za-z0-9]+$/.test(evtId)) return { handled: false, reason: 'bad-event-id' };
+
+  const markerId = `stripe_${evtId}`;
+  let marker = null;
+  try { marker = await cloudant.getDocument(CREDITS_DB, markerId); } catch { /* first delivery */ }
+  if (marker?.granted) return { handled: true, duplicate: true, credits: 0, email: email.toLowerCase() };
+  if (!marker) {
+    marker = {
+      _id: markerId, type: 'stripe_event', email: email.toLowerCase(),
+      credits, sessionId: s.id || null, granted: false, createdAt: new Date().toISOString()
+    };
+    await cloudant.saveDocument(CREDITS_DB, marker);
+  }
+  const ok = await grantCredits(cloudant, email, credits, `Stripe purchase ${s.id || evtId}`, evtId);
+  if (!ok) return { handled: false, reason: 'grant-failed' };
+  marker.granted = true;
+  marker.grantedAt = new Date().toISOString();
+  try { await cloudant.saveDocument(CREDITS_DB, marker); } catch (e) {
+    // Grant landed; a stale marker only risks one extra grant if Stripe
+    // retries AND this save raced a concurrent delivery — the initial
+    // marker write makes that window effectively unreachable.
+    console.warn('[credits] stripe marker update failed:', e?.message || e);
+  }
+  return { handled: true, credits, email: email.toLowerCase() };
 }
 
 /**
@@ -272,6 +368,14 @@ export function setupCreditRoutes(app, cloudant, { emailTokenVerified }) {
     }
   });
 
+  // The signing secret itself never leaves the server — the admin UI only
+  // learns whether one is set.
+  const publicConfig = (config) => ({
+    purchaseUrl: config.purchaseUrl,
+    charity: config.charity,
+    webhookConfigured: !!config.webhookSecret
+  });
+
   app.get('/api/admin/credits-stats', async (req, res) => {
     if (!requireAdmin(req, res)) return;
     try {
@@ -280,7 +384,7 @@ export function setupCreditRoutes(app, cloudant, { emailTokenVerified }) {
       res.json({
         success: true,
         stats,
-        config,
+        config: publicConfig(config),
         prices: CREDIT_PRICES,
         purchase: { credits: CREDITS_PER_PURCHASE, usd: PURCHASE_PRICE_USD }
       });
@@ -295,12 +399,46 @@ export function setupCreditRoutes(app, cloudant, { emailTokenVerified }) {
     try {
       await setCreditsConfig(cloudant, {
         purchaseUrl: req.body?.purchaseUrl,
-        charity: req.body?.charity
+        charity: req.body?.charity,
+        webhookSecret: req.body?.webhookSecret // blank keeps the stored one
       });
-      res.json({ success: true, config: await getCreditsConfig(cloudant) });
+      res.json({ success: true, config: publicConfig(await getCreditsConfig(cloudant)) });
     } catch (error) {
       console.error('[credits] config failed:', error?.message || error);
       res.status(500).json({ success: false, error: 'Failed to save config' });
+    }
+  });
+
+  // Stripe webhook: automates the grant the admin previously did by hand.
+  // Stripe charges the buyer on its own pages, then calls here with a
+  // signed `checkout.session.completed`; a verified signature + the
+  // buyer's checkout email are all we need — MAIA still never sees card
+  // data. Unconfigured (no signing secret) → 503, so nothing can be
+  // granted by unsigned POSTs. Non-2xx makes Stripe retry, so validation
+  // failures return errors while ignorable events return 200.
+  app.post('/api/stripe/webhook', async (req, res) => {
+    try {
+      const { webhookSecret } = await getCreditsConfig(cloudant);
+      if (!webhookSecret) {
+        return res.status(503).json({ received: false, error: 'Webhook not configured' });
+      }
+      const sig = req.headers?.['stripe-signature'];
+      if (!req.rawBody || !verifyStripeSignature(req.rawBody, sig, webhookSecret)) {
+        return res.status(400).json({ received: false, error: 'Signature verification failed' });
+      }
+      const event = JSON.parse(req.rawBody.toString('utf8'));
+      const out = await handleStripeCheckoutEvent(cloudant, event);
+      if (!out.handled && out.reason === 'grant-failed') {
+        // Transient store failure — let Stripe redeliver.
+        return res.status(500).json({ received: false, error: 'Grant failed' });
+      }
+      if (out.credits) {
+        console.log(`[credits] Stripe purchase: granted ${out.credits} credits to ${out.email}`);
+      }
+      res.json({ received: true });
+    } catch (error) {
+      console.error('[credits] stripe webhook failed:', error?.message || error);
+      res.status(500).json({ received: false, error: 'Webhook processing failed' });
     }
   });
 }
