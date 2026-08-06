@@ -7,6 +7,7 @@ import { DigitalOceanProvider } from '../../lib/chat-client/providers/digitaloce
 import { getOrCreateAgentApiKey, recreateAgentApiKey } from '../utils/agent-helper.js';
 import { ensureUserAgent, ensureSecondaryAgent } from './auth.js';
 import { policySentence, POLICY_SCOPES, POLICY_PURPOSES } from './policies.js';
+import { isVerified as emailTokenVerified } from '../emailVerification.js';
 
 /**
  * Policy Advisor context (Phase 1): a server-assembled system block that
@@ -677,6 +678,112 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient, app
         message: `Failed to fetch chats: ${error.message}`,
         error: 'FETCH_FAILED'
       });
+    }
+  });
+
+  // ── Group Advisor (Policy Assist Phase 2) ──────────────────────────
+  // PUBLIC endpoint: a welcome-page visitor with a VERIFIED email can ask
+  // the group's AI how to compose a request. The context is strictly what
+  // the join page already publishes — the group's posting policy and
+  // suggested policy cards, plus the request mechanics. HARD EXCLUSIONS:
+  // member lists, individual members' policies, request logs, records,
+  // per-member outcomes. This advisor describes what the GROUP suggests,
+  // never what any MEMBER holds — a brochure, not a reconnaissance tool.
+  // Runs on a host-level provider (never any patient's agent).
+  const groupAdvisorRate = new Map(); // emailVerifyToken -> { count, resetAt }
+  const GROUP_ADVISOR_MAX_PER_WINDOW = 10;
+  const GROUP_ADVISOR_WINDOW_MS = 10 * 60 * 1000;
+
+  const buildGroupAdvisorContext = (doc) => {
+    const suggested = Array.isArray(doc.suggestedPolicies) ? doc.suggestedPolicies : [];
+    const cardLines = suggested.length
+      ? suggested.map((c, i) => `${i + 1}. ${policySentence(c)}`).join('\n')
+      : '(this group has not published suggested policies yet)';
+    return [
+      `You are the public request advisor for the patient group "${doc.name}" on MAIA.`,
+      'Your job: help an OUTSIDE requester (a visitor with a verified email) compose a',
+      'request for health information that group members\' own AIs are likely to answer.',
+      '',
+      `Group description: ${doc.description || '(none)'}`,
+      `Group posting policy: ${doc.postingPolicy || '(none)'}`,
+      '',
+      'THE GROUP\'S SUGGESTED POLICIES (members adopt these as their own editable cards;',
+      'each member may have changed or disabled them — you CANNOT know any member\'s',
+      'actual policies, records, or history, and you must say so if asked):',
+      cardLines,
+      '',
+      'HOW REQUESTS WORK: the request goes to EVERY active member; each member\'s own',
+      'policy cards decide deterministically (deny wins, then ask-me-first, then allow,',
+      'else the member is asked personally). Allow responses are AUTOMATIC and contain',
+      'only PRIVACY-FILTERED artifacts (names replaced by pseudonyms). Some members may',
+      'silently ignore a request. Responses arrive at the requester\'s verified email as',
+      'they come in; a public tally shows counts only.',
+      'Identity: the visitor can prove only "verified-email" today (their code-verified',
+      `address). Claims of NPI or Doximity verification evaluate as unverified until real`,
+      'verification exists. All payment types are reserved — nothing is charged yet.',
+      `Scopes a request may name: ${JSON.stringify(POLICY_SCOPES.filter((s) => s !== 'ah-category'))}.`,
+      `Purposes: ${JSON.stringify(POLICY_PURPOSES.filter((p) => p !== 'any'))}.`,
+      'Broader scopes are HARDER to get; narrow, well-explained requests with a clear',
+      'purpose do best. A short personal message helps members trust the request.',
+      '',
+      'When you recommend a concrete request, ALSO output exactly one fenced code block',
+      'with language tag `request-suggestion` containing ONLY JSON:',
+      '{"scope":"<scope>","purpose":"<purpose>","message":"<one- or two-sentence message to the group>"}',
+      'The visitor reviews it in the request table and sends it themselves — never imply',
+      'you sent anything or know what any specific member will answer.'
+    ].join('\n');
+  };
+
+  app.post('/api/groups/:groupId/advisor', async (req, res) => {
+    try {
+      const { messages, email, emailVerifyToken } = req.body || {};
+      if (!Array.isArray(messages) || messages.length === 0) {
+        return res.status(400).json({ success: false, error: 'messages array required' });
+      }
+      // Verified-email gate: same proof the real send requires; doubles as
+      // the anti-abuse identity for rate limiting.
+      const addr = String(email || '').trim();
+      if (!emailVerifyToken || !addr || !emailTokenVerified(String(emailVerifyToken), addr)) {
+        return res.status(403).json({ success: false, error: 'EMAIL_NOT_VERIFIED' });
+      }
+      const now = Date.now();
+      const rl = groupAdvisorRate.get(emailVerifyToken);
+      if (rl && now < rl.resetAt && rl.count >= GROUP_ADVISOR_MAX_PER_WINDOW) {
+        return res.status(429).json({ success: false, error: 'RATE_LIMITED' });
+      }
+      groupAdvisorRate.set(emailVerifyToken, (!rl || now >= rl.resetAt)
+        ? { count: 1, resetAt: now + GROUP_ADVISOR_WINDOW_MS }
+        : { count: rl.count + 1, resetAt: rl.resetAt });
+      if (groupAdvisorRate.size > 500) {
+        for (const [k, v] of groupAdvisorRate) if (now >= v.resetAt) groupAdvisorRate.delete(k);
+      }
+
+      const doc = await cloudant.getDocument('maia_groups', req.params.groupId);
+      if (!doc || doc.type !== 'group' || doc.publiclyListed !== true) {
+        return res.status(404).json({ success: false, error: 'Group not found' });
+      }
+
+      // Sanitize history: bounded, roles constrained, content capped.
+      const history = messages.slice(-10)
+        .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
+        .map((m) => ({ role: m.role, content: m.content.slice(0, 4000) }));
+      if (!history.length) {
+        return res.status(400).json({ success: false, error: 'no valid messages' });
+      }
+
+      const provider = ['deepseek', 'anthropic', 'openai', 'gemini']
+        .find((p) => chatClient.isProviderAvailable(p));
+      if (!provider) {
+        return res.status(503).json({ success: false, error: 'No advisor model available' });
+      }
+      const response = await chatClient.chat(provider, [
+        { role: 'system', content: buildGroupAdvisorContext(doc) },
+        ...history
+      ], {});
+      res.json({ success: true, reply: String(response?.content || '').slice(0, 20000) });
+    } catch (error) {
+      console.error('[group-advisor] failed:', error?.message || error);
+      res.status(500).json({ success: false, error: 'Advisor unavailable — try again shortly' });
     }
   });
 
