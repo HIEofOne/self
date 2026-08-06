@@ -86,10 +86,29 @@
                    :loading="crGranting" @click="grantCreditsAdmin" />
             <span class="text-caption text-grey-7">Grant AFTER the purchase arrives (Stripe emails you the buyer's address).</span>
           </div>
-          <div class="row q-gutter-sm items-center" style="flex-wrap: wrap;">
+          <div class="row q-gutter-sm items-center q-mb-sm" style="flex-wrap: wrap;">
             <q-input v-model="crPurchaseUrl" dense outlined label="Purchase link (e.g. Stripe Payment Link)" style="flex: 1; min-width: 280px" :disable="crSavingConfig" />
             <q-input v-model="crCharity" dense outlined label="Surplus charity (shown to buyers)" style="min-width: 220px" :disable="crSavingConfig" />
+          </div>
+          <div class="row q-gutter-sm items-center" style="flex-wrap: wrap;">
+            <q-input
+              v-model="crWebhookSecret" dense outlined type="password" autocomplete="off"
+              :label="crWebhookConfigured ? 'Stripe webhook signing secret (set — blank keeps it)' : 'Stripe webhook signing secret (whsec_…)'"
+              style="flex: 1; min-width: 280px" :disable="crSavingConfig"
+            />
             <q-btn outline dense color="primary" label="Save" :loading="crSavingConfig" @click="saveCreditsConfig" />
+            <q-icon :name="crWebhookConfigured ? 'check_circle' : 'radio_button_unchecked'"
+                    :color="crWebhookConfigured ? 'positive' : 'grey-5'" size="20px">
+              <q-tooltip>{{ crWebhookConfigured ? 'Purchases grant credits automatically.' : 'No webhook yet — grant purchases manually above.' }}</q-tooltip>
+            </q-icon>
+          </div>
+          <div class="text-caption text-grey-7 q-mt-sm">
+            Automatic grants: in Stripe → Developers → Webhooks, add endpoint
+            <code>{{ webhookEndpoint }}</code> for the event
+            <code>checkout.session.completed</code>, then paste its signing secret here.
+            Each completed Payment Link checkout then credits the buyer's email
+            instantly (2¢ per credit, so quantity purchases scale). The grant form
+            above stays for corrections and comps.
           </div>
         </template>
       </q-card>
@@ -333,6 +352,9 @@ const crStats = ref<CreditsStats>({ accounts: 0, granted: 0, charged: 0, capture
 const crPurchase = ref({ credits: 100, usd: 2 });
 const crPurchaseUrl = ref('');
 const crCharity = ref('');
+const crWebhookSecret = ref('');
+const crWebhookConfigured = ref(false);
+const webhookEndpoint = `${window.location.origin}/api/stripe/webhook`;
 const crGrantEmail = ref('');
 const crGrantAmount = ref(100);
 const crGranting = ref(false);
@@ -353,6 +375,7 @@ const loadCreditsAdmin = async () => {
     if (data.purchase) crPurchase.value = data.purchase;
     crPurchaseUrl.value = data.config?.purchaseUrl || '';
     crCharity.value = data.config?.charity || '';
+    crWebhookConfigured.value = !!data.config?.webhookConfigured;
     crLoaded.value = true;
   } catch (err) {
     $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to load credits' });
@@ -388,10 +411,17 @@ const saveCreditsConfig = async () => {
   try {
     const res = await fetch('/api/admin/credits-config', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
-      body: JSON.stringify({ purchaseUrl: crPurchaseUrl.value.trim(), charity: crCharity.value.trim() })
+      body: JSON.stringify({
+        purchaseUrl: crPurchaseUrl.value.trim(),
+        charity: crCharity.value.trim(),
+        // Blank keeps the stored secret; only a pasted value replaces it.
+        webhookSecret: crWebhookSecret.value.trim() || undefined
+      })
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    crWebhookConfigured.value = !!data.config?.webhookConfigured;
+    crWebhookSecret.value = ''; // never keep the secret in the form
     $q.notify({ type: 'positive', message: 'Credits settings saved.' });
   } catch (err) {
     $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Save failed' });
