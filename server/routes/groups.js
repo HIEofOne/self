@@ -16,6 +16,7 @@
 import { evaluatePolicies, policySentence, normalizeCard, POLICY_SCOPES, POLICY_PURPOSES } from './policies.js';
 import { applyPseudonymMapping } from '../privacyFilter.js';
 import { isVerified as emailTokenVerified } from '../emailVerification.js';
+import { CREDIT_PRICES, holdCredits, chargeCredits, resolveHold, getAccount } from '../credits.js';
 import {
   generateKeyPairSync, createHash, createPrivateKey, createPublicKey,
   randomBytes, sign as edSign, verify as edVerify,
@@ -433,6 +434,34 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     }
   });
 
+  /**
+   * Settle an outside request's escrowed payment when its tally records a
+   * real answer (mutates the tally in place; the caller saves it):
+   *   spam-deposit    → any accept OR decline-with-a-reason RETURNS it
+   *                     (the request was evaluated, so it wasn't spam);
+   *                     silence until expiry forfeits it (sweep below).
+   *   sharing-payment → the FIRST accept captures it for the host;
+   *                     declines leave it held (a later accept can still
+   *                     earn it) and expiry with no accept returns it.
+   * resolveHold is idempotent, so conflict retries re-running this are safe.
+   */
+  const settleTallyPayment = async (tally, outcome) => {
+    const p = tally?.payment;
+    if (!p || p.resolved) return;
+    const wants = p.type === 'spam-deposit'
+      ? (outcome === 'accepted' || outcome === 'declined' ? 'release' : null)
+      : (p.type === 'sharing-payment' && outcome === 'accepted' ? 'capture' : null);
+    if (!wants) return;
+    try {
+      await resolveHold(cloudant, p.email, tally.requestId, wants);
+      p.resolved = true;
+      p.resolution = wants === 'release' ? 'released' : 'captured';
+      p.resolvedAt = new Date().toISOString();
+    } catch (e) {
+      console.warn('[credits] settle failed:', e?.message || e);
+    }
+  };
+
   // POST /api/groups/:groupId/outside-request — W3: anyone (a physician,
   // a researcher, a company, a patient kicking the tires) may ASK the
   // members of a group for something. No account needed. The registry
@@ -478,6 +507,32 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         ? 'verified-email' : 'unverified';
       const appUrl = (process.env.PUBLIC_APP_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
 
+      // Optional attached payment (credits, Phase 1). Credits are keyed by
+      // the verified email, so an unverified sender can't attach one. The
+      // money moves BEFORE any delivery: deposits are escrowed under the
+      // request id (settled by settleTallyPayment / the expiry sweep), the
+      // evaluation payment is charged outright. ONE payment covers the
+      // whole request no matter how many members it reaches.
+      const payment = Object.prototype.hasOwnProperty.call(CREDIT_PRICES, b.payment) ? b.payment : null;
+      if (payment) {
+        if (requestSignature !== 'verified-email') {
+          return res.status(400).json({ success: false, error: 'A verified email is required to attach a payment' });
+        }
+        const price = CREDIT_PRICES[payment];
+        const taken = payment === 'notification-deposit'
+          ? await chargeCredits(cloudant, email, price, `request evaluation payment (request ${reqId})`)
+          : await holdCredits(cloudant, email, price, reqId, payment);
+        if (!taken) {
+          const acct = await getAccount(cloudant, email);
+          return res.status(402).json({
+            success: false,
+            error: 'INSUFFICIENT_CREDITS',
+            required: price,
+            balance: acct.balance
+          });
+        }
+      }
+
       let delivered = 0;
       let autoAccepted = 0;
       let autoDeclined = 0;
@@ -499,7 +554,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         let decision = { outcome: 'ask', decidedBy: null };
         if (ownerDoc) {
           decision = evaluatePolicies(ownerDoc.sharingPolicies || [], {
-            party: { type: 'anyone' }, purpose, scope, signature: requestSignature, payment: 'none'
+            party: { type: 'anyone' }, purpose, scope, signature: requestSignature, payment: payment || 'none'
           });
         }
 
@@ -591,6 +646,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
             resource: scope,
             purpose,
             signature: requestSignature,
+            payment: payment || null,
             created: new Date(now).toISOString(),
             nonce: reqId,
             ...(autoDecision ? { autoDecision } : {}),
@@ -617,8 +673,11 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       }
       // Public tally (counts only — no identities, no content) so the requester
       // can watch reach + responses. Autonomous outcomes count immediately.
+      // The tally also carries the escrowed payment's settlement state
+      // (email + resolved flag only — no balances) because every event that
+      // can settle it is a tally transition.
       try {
-        await cloudant.saveDocument(RELAY_DB, {
+        const tally = {
           _id: `outreq_${reqId}`,
           type: 'outside_request_tally',
           groupId: doc._id,
@@ -628,8 +687,14 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
           accepted: autoAccepted,
           declined: autoDeclined,
           createdAt: new Date(now).toISOString(),
-          expiresAt: new Date(now + RELAY_TTL_MS).toISOString()
-        });
+          expiresAt: new Date(now + RELAY_TTL_MS).toISOString(),
+          ...(payment && payment !== 'notification-deposit'
+            ? { payment: { type: payment, email: email.toLowerCase(), resolved: false } }
+            : {})
+        };
+        if (autoAccepted > 0) await settleTallyPayment(tally, 'accepted');
+        else if (autoDeclined > 0) await settleTallyPayment(tally, 'declined');
+        await cloudant.saveDocument(RELAY_DB, tally);
       } catch (e) {
         console.warn('[groups] outside-request tally create failed:', e?.message || e);
       }
@@ -686,6 +751,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
           tally.responded = (tally.responded || 0) + 1;
           if (outcome === 'accepted') tally.accepted = (tally.accepted || 0) + 1;
           else tally.declined = (tally.declined || 0) + 1;
+          await settleTallyPayment(tally, outcome);
           await cloudant.saveDocument(RELAY_DB, tally);
           return res.json({ success: true });
         } catch (e) {
@@ -1910,6 +1976,20 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       const all = await cloudant.getAllDocuments(RELAY_DB);
       for (const m of all || []) {
         if (m && (m.type === 'relay_message' || m.type === 'outside_request_tally') && m.expiresAt && m.expiresAt < nowIso) {
+          // A request that expires with its escrow still open was never
+          // answered by anyone: the spam deposit is FORFEITED (silence is
+          // exactly what the deposit priced in), a sharing payment goes
+          // BACK (nothing was shared, so nothing was earned).
+          if (m.type === 'outside_request_tally' && m.payment && !m.payment.resolved) {
+            try {
+              await resolveHold(
+                cloudant, m.payment.email, m.requestId,
+                m.payment.type === 'spam-deposit' ? 'forfeit' : 'release'
+              );
+            } catch (e) {
+              console.warn('[credits] expiry settle failed:', e?.message || e);
+            }
+          }
           try { await cloudant.deleteDocument(RELAY_DB, m._id); relayDeleted++; } catch { /* ignore */ }
         }
       }
@@ -2857,7 +2937,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
           purpose: POLICY_PURPOSES.includes(envelope.purpose) ? envelope.purpose : 'any',
           resource: String(envelope.resource || ''),
           computationClass: envelope.computationClass || null,
-          payment: envelope.payment || null, // reserved (§3.4); unused in Phase 1
+          payment: envelope.payment || null, // §3.4 — credits the registry attested it collected
           nonce: envelope.nonce || null,
           created: envelope.created || null,
           // Verified signature strength the REGISTRY established at delivery
@@ -3260,6 +3340,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
               tally.responded = (tally.responded || 0) + 1;
               if (outcome === 'accepted') tally.accepted = (tally.accepted || 0) + 1;
               else tally.declined = (tally.declined || 0) + 1;
+              await settleTallyPayment(tally, outcome);
               await cloudant.saveDocument(RELAY_DB, tally);
               break;
             } catch (e) {
@@ -3345,7 +3426,10 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
       // Policy evaluation (deterministic; the AI is never in this path).
       // Signature: 'group-member' is what the relay PROVED (signed member
       // claim); stronger levels (NPI/Doximity) arrive in a later phase.
-      // Payment: the envelope's §3.4 slot is unused in Phase 1 → 'none'.
+      // Payment: the envelope's §3.4 slot carries what the REGISTRY
+      // attested it collected in credits before sealing — the registry is
+      // the only writer of outsider envelopes, so a member's AS on any
+      // host can trust it the same way it trusts the signature level.
       let decision = { outcome: 'ask', decidedBy: null };
       if (r.autoDecision) {
         // The registry already answered this request autonomously at
@@ -3367,7 +3451,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
           signature: r.fromOutsider
             ? (r.signature === 'verified-email' ? 'verified-email' : 'unverified')
             : 'group-member',
-          payment: 'none'
+          payment: Object.prototype.hasOwnProperty.call(CREDIT_PRICES, r.payment) ? r.payment : 'none'
         });
       }
       // The outside requester's stated (registry-validated when signature is
@@ -3458,7 +3542,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         resource: r.resource,
         purpose: r.purpose || 'any',
         computationClass: r.computationClass,
-        payment: r.payment, // reserved (§3.4)
+        payment: r.payment, // §3.4 — registry-attested credits payment
         payload: r.payload,
         nonce: r.nonce,
         createdAt: r.created || new Date(now).toISOString(),

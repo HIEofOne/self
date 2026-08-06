@@ -23,6 +23,7 @@ import { computeRecordsPipeline, decideNextAction } from './records-pipeline.js'
 import { moveObjectWithVerify } from './utils/spaces-move.js';
 import { deleteObjectWithLog , asciiSafeMetadata } from './utils/spaces-ops.js';
 import { applyPseudonymMapping, seedPseudonymMappingFromSummary, seedMissingNames, extractSummaryNames, looksLikePersonName, hashName } from './privacyFilter.js';
+import { setupCreditRoutes } from './credits.js';
 import { ChatClient } from '../lib/chat-client/index.js';
 import { findUserAgent, getOrCreateAgentApiKey } from './utils/agent-helper.js';
 import { getClinicalPrompt } from './utils/clinical-prompts.js';
@@ -849,7 +850,7 @@ ensureBucketExists();
     return;
   }
 
-  const databases = ['maia_sessions', 'maia_users', 'maia_audit_log', 'maia_chats', 'maia_groups', 'maia_relay', 'maia_as_requests'];
+  const databases = ['maia_sessions', 'maia_users', 'maia_audit_log', 'maia_chats', 'maia_groups', 'maia_relay', 'maia_as_requests', 'maia_credits'];
 
   for (const dbName of databases) {
     try {
@@ -1564,6 +1565,10 @@ setupFileRoutes(app, cloudant, doClient);
 // Sharing Policies (Groups_Design.md Refinement 7): structured policy
 // cards on the userDoc; the AS consults them for incoming requests.
 setupPolicyRoutes(app, cloudant, auditLog);
+
+// Credits (mini-payments behind the Deposit/Payment policy column):
+// balance lookup for verified visitors + admin grant/stats/config.
+setupCreditRoutes(app, cloudant, { emailTokenVerified: emailVerification.isVerified });
 
 const { runDailyGroupMaintenance, runHourlyMailPull } = setupGroupRoutes(app, cloudant, auditLog, {
   sendEmail: async (to, subject, text) => {

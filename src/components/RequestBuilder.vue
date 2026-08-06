@@ -28,6 +28,19 @@
       <div class="rqb-verify">
         <EmailVerifyBox label="Your email — verify it to receive responses" />
       </div>
+      <!-- ── Credits (mini-payments) ── shown once the email is verified,
+           because credits are keyed to that address on this host. -->
+      <div v-if="verifiedEmail.verified && credits" class="rqb-credits">
+        <span>
+          Your credits on this host: <b>{{ credits.balance }}</b><span v-if="credits.held"> (+{{ credits.held }} held in escrow)</span>.
+          <a v-if="credits.purchaseUrl" :href="credits.purchaseUrl" target="_blank" rel="noopener">Buy {{ credits.purchase.credits }} credits for ${{ credits.purchase.usd }}</a>
+          <template v-else>To buy credits ({{ credits.purchase.credits }} for ${{ credits.purchase.usd }}), contact the host admin.</template>
+        </span>
+        <div v-if="credits.charity" class="rqb-hint">
+          Credits are non-refundable and cover this host’s hosting + AI costs; any surplus goes to {{ credits.charity }}.
+        </div>
+        <div v-if="paymentShortfall" class="rqb-hint rqb-credits-short">{{ paymentShortfall }}</div>
+      </div>
     </div>
 
     <!-- ── Live request line ────────────────────────────── -->
@@ -120,7 +133,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, nextTick, onUnmounted } from 'vue';
+import { ref, reactive, computed, nextTick, onUnmounted, watch } from 'vue';
 import { useQuasar } from 'quasar';
 import { useVerifiedEmail } from '../composables/verifiedEmail';
 import EmailVerifyBox from './EmailVerifyBox.vue';
@@ -160,6 +173,45 @@ const pick = (key: string, v: string) => {
   const k = key as ColKey;
   sel[k] = sel[k] === v ? null : v;
 };
+
+// ── Credits (mini-payments behind the Deposit/Payment column) ────────
+// Balance lives on THIS host, keyed by the verified email — the same proof
+// the send itself requires. A remote (featured) group's registry holds its
+// own credit accounts, so payments there aren't offered from this page.
+interface CreditsInfo {
+  balance: number; held: number;
+  prices: Record<string, number>;
+  purchase: { credits: number; usd: number };
+  purchaseUrl: string; charity: string;
+}
+const credits = ref<CreditsInfo | null>(null);
+const groupIsLocal = computed(() =>
+  !!props.group && (!props.group.origin || props.group.origin === window.location.origin));
+const loadCredits = async () => {
+  if (!groupIsLocal.value || !verifiedEmail.verified || !verifiedEmail.token) {
+    credits.value = null;
+    return;
+  }
+  try {
+    const r = await fetch('/api/credits/balance', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+      body: JSON.stringify({ email: verifiedEmail.email, token: verifiedEmail.token })
+    });
+    const d = await r.json().catch(() => ({}));
+    credits.value = r.ok && d.success ? d : null;
+  } catch { credits.value = null; }
+};
+watch(() => verifiedEmail.verified, () => { void loadCredits(); }, { immediate: true });
+
+const paymentShortfall = computed(() => {
+  const p = sel.payment;
+  if (!p || p === 'none' || !credits.value) return '';
+  const price = credits.value.prices?.[p];
+  if (!price) return '';
+  return credits.value.balance < price
+    ? `The selected payment needs ${price} credits — you have ${credits.value.balance}.`
+    : `The selected payment will use ${price} of your ${credits.value.balance} credits.`;
+});
 
 // ── Group advisor (Policy Assist Phase 2) ────────────────────────────
 interface AdvisorSuggestion { scope: string; purpose: string; message?: string }
@@ -233,10 +285,14 @@ const sendAdvisorMessage = async () => {
         ? 'Too many questions for now — try again in a few minutes.'
         : data.error === 'EMAIL_NOT_VERIFIED'
           ? 'Verify your email above first.'
-          : (data.error || `HTTP ${res.status}`));
+          : data.error === 'INSUFFICIENT_CREDITS'
+            ? 'You’ve used the free questions — each further one costs 1 credit. '
+              + (credits.value?.purchaseUrl ? 'Use the buy link above to add credits.' : 'Contact the host admin to buy credits (100 for $2).')
+            : (data.error || `HTTP ${res.status}`));
     }
     const { content, suggestion } = extractSuggestion(String(data.reply || ''));
     advisorMessages.value.push({ role: 'assistant', content: content || '(no reply)', suggestion });
+    void loadCredits(); // metered questions (past the free window) cost a credit
   } catch (err) {
     advisorError.value = err instanceof Error ? err.message : 'The advisor is unavailable — try again shortly.';
     advisorMessages.value.pop(); // let the user re-send their question
@@ -317,17 +373,29 @@ const sendRequest = async () => {
         message: message.value.trim(),
         scope: sel.scope,
         purpose: sel.purpose,
+        // Attached payment (credits): held/charged by the registry BEFORE
+        // delivery; deposits settle off the public tally.
+        payment: sel.payment && sel.payment !== 'none' ? sel.payment : undefined,
         // Lets the registry prove 'verified-email' when evaluating the
         // members' policies at delivery time (autonomous demo responses).
         emailVerifyToken: verifiedEmail.token || undefined
       })
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    if (!res.ok || !data.success) {
+      if (data.error === 'INSUFFICIENT_CREDITS') {
+        throw new Error(`This payment needs ${data.required} credits — your balance is ${data.balance ?? 0}. `
+          + (credits.value?.purchaseUrl
+            ? 'Use the buy link above to add credits.'
+            : 'Contact the host admin to buy credits (100 for $2).'));
+      }
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
     sentEmail.value = verifiedEmail.email;
     sentResult.value = { delivered: data.delivered || 0, responded: 0, accepted: 0, declined: 0 };
     response.value = null; // the real result replaces the preview
     if (data.requestId) startStatusPoll(String(data.requestId));
+    void loadCredits(); // a hold/charge changes the balance
   } catch (e) {
     $q.notify({ type: 'negative', message: e instanceof Error ? e.message : 'Could not send request' });
   } finally {
@@ -461,6 +529,16 @@ const runTry = () => {
 .rqb-text:focus { outline: none; border-color: var(--rqb-accent); box-shadow: 0 0 0 3px var(--rqb-accent-soft); }
 .rqb-text::placeholder { color: #9aa8b4; }
 .rqb-verify { max-width: 460px; }
+.rqb-credits {
+  margin-top: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--rqb-border, #d5dbe3);
+  border-radius: 8px;
+  background: rgba(25, 118, 210, 0.04);
+  font-size: 13px;
+}
+.rqb-credits a { font-weight: 600; }
+.rqb-credits-short { color: #b26a00; font-weight: 600; }
 
 /* Live request line */
 .rqb-card-stage { margin-top: 16px; }

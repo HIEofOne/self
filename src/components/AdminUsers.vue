@@ -53,6 +53,47 @@
 
     <!-- Patient Groups management (Groups & AS feature — Documentation/Groups.md) -->
     <AdminGroups />
+
+    <!-- Credits accounting: mini-payments behind the Deposit/Payment policy
+         column. The admin sells credits out-of-band (Stripe Payment Link),
+         grants them here, and watches what the escrow settled. -->
+    <q-expansion-item
+      icon="paid"
+      label="Credits"
+      :caption="creditsCaption"
+      class="q-mt-sm"
+      header-class="text-weight-medium"
+      @show="loadCreditsAdmin"
+    >
+      <q-card flat bordered class="q-pa-md">
+        <div v-if="crLoading" class="text-caption text-grey-7">Loading…</div>
+        <template v-else>
+          <div class="text-caption q-mb-md">
+            <b>{{ crStats.accounts }}</b> account{{ crStats.accounts === 1 ? '' : 's' }}
+            &nbsp;•&nbsp; granted <b>{{ crStats.granted }}</b>
+            &nbsp;•&nbsp; earned <b>{{ crStats.earned }}</b>
+            (charged {{ crStats.charged }} + captured {{ crStats.captured }} + forfeited {{ crStats.forfeited }})
+            &nbsp;•&nbsp; held in escrow <b>{{ crStats.held }}</b>
+            &nbsp;•&nbsp; unspent balances <b>{{ crStats.outstanding }}</b>
+            &nbsp;•&nbsp; returned {{ crStats.released }}
+            <span class="text-grey-7">— 1 credit = 2¢ ({{ crPurchase.credits }} for ${{ crPurchase.usd }})</span>
+          </div>
+          <div class="row q-gutter-sm items-center q-mb-md" style="flex-wrap: wrap;">
+            <q-input v-model="crGrantEmail" dense outlined label="Buyer's verified email" style="min-width: 240px" :disable="crGranting" />
+            <q-input v-model.number="crGrantAmount" dense outlined type="number" label="Credits" style="width: 110px" :disable="crGranting" />
+            <q-btn unelevated dense color="primary" label="Grant"
+                   :disable="!crGrantEmail.trim() || !(crGrantAmount > 0)"
+                   :loading="crGranting" @click="grantCreditsAdmin" />
+            <span class="text-caption text-grey-7">Grant AFTER the purchase arrives (Stripe emails you the buyer's address).</span>
+          </div>
+          <div class="row q-gutter-sm items-center" style="flex-wrap: wrap;">
+            <q-input v-model="crPurchaseUrl" dense outlined label="Purchase link (e.g. Stripe Payment Link)" style="flex: 1; min-width: 280px" :disable="crSavingConfig" />
+            <q-input v-model="crCharity" dense outlined label="Surplus charity (shown to buyers)" style="min-width: 220px" :disable="crSavingConfig" />
+            <q-btn outline dense color="primary" label="Save" :loading="crSavingConfig" @click="saveCreditsConfig" />
+          </div>
+        </template>
+      </q-card>
+    </q-expansion-item>
     </div>
 
     <q-table
@@ -280,6 +321,84 @@ const usageList = ref<UsageEntry[]>([]);
 const deletingUsers = ref(new Set<string>());
 const recoveringUsers = ref(new Set<string>());
 const signingOut = ref(false);
+
+// ── Credits (mini-payment accounting) ────────────────────────────────
+interface CreditsStats {
+  accounts: number; granted: number; charged: number; captured: number;
+  forfeited: number; released: number; outstanding: number; held: number; earned: number;
+}
+const crLoading = ref(false);
+const crLoaded = ref(false);
+const crStats = ref<CreditsStats>({ accounts: 0, granted: 0, charged: 0, captured: 0, forfeited: 0, released: 0, outstanding: 0, held: 0, earned: 0 });
+const crPurchase = ref({ credits: 100, usd: 2 });
+const crPurchaseUrl = ref('');
+const crCharity = ref('');
+const crGrantEmail = ref('');
+const crGrantAmount = ref(100);
+const crGranting = ref(false);
+const crSavingConfig = ref(false);
+
+const creditsCaption = computed(() =>
+  crLoaded.value
+    ? `${crStats.value.accounts} accounts • ${crStats.value.earned} earned • ${crStats.value.held} held`
+    : 'Sell, grant, and account for credits (100 for $2)');
+
+const loadCreditsAdmin = async () => {
+  crLoading.value = true;
+  try {
+    const res = await fetch('/api/admin/credits-stats', { credentials: 'include' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    crStats.value = { ...crStats.value, ...data.stats };
+    if (data.purchase) crPurchase.value = data.purchase;
+    crPurchaseUrl.value = data.config?.purchaseUrl || '';
+    crCharity.value = data.config?.charity || '';
+    crLoaded.value = true;
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to load credits' });
+  } finally {
+    crLoading.value = false;
+  }
+};
+
+const grantCreditsAdmin = async () => {
+  const email = crGrantEmail.value.trim();
+  const credits = Math.floor(crGrantAmount.value);
+  if (!email || !(credits > 0)) return;
+  crGranting.value = true;
+  try {
+    const res = await fetch('/api/admin/credits-grant', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+      body: JSON.stringify({ email, credits, note: 'admin grant' })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    $q.notify({ type: 'positive', message: `Granted ${credits} credits to ${data.email} — balance now ${data.balance}.` });
+    crGrantEmail.value = '';
+    void loadCreditsAdmin();
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Grant failed' });
+  } finally {
+    crGranting.value = false;
+  }
+};
+
+const saveCreditsConfig = async () => {
+  crSavingConfig.value = true;
+  try {
+    const res = await fetch('/api/admin/credits-config', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+      body: JSON.stringify({ purchaseUrl: crPurchaseUrl.value.trim(), charity: crCharity.value.trim() })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    $q.notify({ type: 'positive', message: 'Credits settings saved.' });
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Save failed' });
+  } finally {
+    crSavingConfig.value = false;
+  }
+};
 
 // ── Broadcast announcement email ─────────────────────────────────────
 const showBroadcast = ref(false);
