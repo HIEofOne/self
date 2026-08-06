@@ -78,6 +78,44 @@
       </div>
       <div v-if="emailNote" class="rqb-emailnote">{{ emailNote }}</div>
     </div>
+
+    <!-- ── Ask the group's AI (Policy Assist Phase 2) ────── -->
+    <!-- Public advisor on the registry host: it knows ONLY what the join
+         page publishes (posting policy + suggested cards + mechanics) —
+         never any member's actual policies, records, or history. Gated
+         behind the same verified email the real send requires. -->
+    <div v-if="props.group" class="rqb-advisor">
+      <div class="rqb-advisor-head">Ask the {{ props.group.name }} group’s AI how to request</div>
+      <div v-if="!verifiedEmail.verified" class="rqb-hint q-mt-xs">
+        Verify your email above first — the advisor (like the request itself) needs it.
+      </div>
+      <template v-else>
+        <div v-for="(am, ai) in advisorMessages" :key="ai" class="rqb-advisor-msg" :class="am.role">
+          <div class="rqb-advisor-from">{{ am.role === 'user' ? 'You' : `${props.group.name} advisor` }}</div>
+          <div style="white-space: pre-wrap; word-break: break-word;">{{ am.content }}</div>
+          <div v-if="am.suggestion" class="rqb-advisor-suggestion">
+            <span>Suggested request: <b>{{ suggestionLabel(am.suggestion) }}</b></span>
+            <q-btn dense size="sm" outline color="primary" label="Apply to the table" @click="applySuggestion(am.suggestion)" />
+          </div>
+        </div>
+        <div class="row q-gutter-sm items-center q-mt-sm no-wrap">
+          <input
+            v-model="advisorInput"
+            class="rqb-text col"
+            type="text"
+            placeholder="e.g. What’s the fastest way to see a member’s medications for a consult?"
+            :disabled="advisorLoading"
+            @keyup.enter="sendAdvisorMessage"
+          />
+          <q-btn dense unelevated color="primary" label="Ask" :loading="advisorLoading" :disable="!advisorInput.trim()" @click="sendAdvisorMessage" />
+        </div>
+        <div v-if="advisorError" class="text-negative q-mt-xs" style="font-size: 12.5px;">{{ advisorError }}</div>
+        <div class="rqb-advisor-note">
+          The advisor knows only the group’s public policies — never any member’s
+          records, personal settings, or what a specific member will answer.
+        </div>
+      </template>
+    </div>
   </div>
 </template>
 
@@ -121,6 +159,91 @@ const pick = (key: string, v: string) => {
   if (!(key in sel)) return; // action column is disabled in request context
   const k = key as ColKey;
   sel[k] = sel[k] === v ? null : v;
+};
+
+// ── Group advisor (Policy Assist Phase 2) ────────────────────────────
+interface AdvisorSuggestion { scope: string; purpose: string; message?: string }
+interface AdvisorMessage { role: 'user' | 'assistant'; content: string; suggestion?: AdvisorSuggestion }
+const advisorMessages = ref<AdvisorMessage[]>([]);
+const advisorInput = ref('');
+const advisorLoading = ref(false);
+const advisorError = ref('');
+
+const SUGGESTION_SCOPES = ['notification-only', 'meds-allergies', 'patient-summary', 'not-sensitive', 'everything'];
+const SUGGESTION_PURPOSES = ['peer-support', 'clinical', 'research', 'public-health', 'marketing'];
+
+const suggestionLabel = (s: AdvisorSuggestion): string =>
+  `${SCOPE_HUMAN[s.scope] || s.scope} for ${PURPOSE_HUMAN[s.purpose] || s.purpose}`;
+
+/** Pull a ```request-suggestion fence out of the advisor's reply. */
+const extractSuggestion = (text: string): { content: string; suggestion?: AdvisorSuggestion } => {
+  const m = /```request-suggestion\s*\n([\s\S]*?)```/.exec(text);
+  if (!m) return { content: text.trim() };
+  try {
+    const parsed = JSON.parse(m[1]);
+    if (SUGGESTION_SCOPES.includes(parsed.scope) && SUGGESTION_PURPOSES.includes(parsed.purpose)) {
+      return {
+        content: text.replace(/```request-suggestion\s*\n[\s\S]*?```/g, '').replace(/\n{3,}/g, '\n\n').trim(),
+        suggestion: {
+          scope: parsed.scope,
+          purpose: parsed.purpose,
+          message: typeof parsed.message === 'string' ? parsed.message.slice(0, 500) : undefined
+        }
+      };
+    }
+  } catch { /* fence wasn't valid JSON — leave it visible */ }
+  return { content: text.trim() };
+};
+
+/** Fill the request table from the advisor's suggestion — the visitor still
+ *  previews and sends it themselves. */
+const applySuggestion = (s: AdvisorSuggestion) => {
+  sel.scope = s.scope;
+  sel.purpose = s.purpose;
+  sel.signature = 'verified-email'; // the only level a visitor can actually prove
+  if (!sel.payment) sel.payment = 'none';
+  if (s.message) {
+    message.value = s.message;
+    void nextTick(autoGrow);
+  }
+  $q.notify({ type: 'positive', message: 'Applied — review the table above, then preview or send.' });
+};
+
+const sendAdvisorMessage = async () => {
+  const text = advisorInput.value.trim();
+  if (!text || advisorLoading.value || !props.group) return;
+  advisorError.value = '';
+  advisorMessages.value.push({ role: 'user', content: text });
+  advisorInput.value = '';
+  advisorLoading.value = true;
+  try {
+    const res = await fetch(`/api/groups/${encodeURIComponent(props.group.groupId)}/advisor`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        messages: advisorMessages.value.map((m) => ({ role: m.role, content: m.content })),
+        email: verifiedEmail.email,
+        emailVerifyToken: verifiedEmail.token || undefined
+      })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) {
+      throw new Error(data.error === 'RATE_LIMITED'
+        ? 'Too many questions for now — try again in a few minutes.'
+        : data.error === 'EMAIL_NOT_VERIFIED'
+          ? 'Verify your email above first.'
+          : (data.error || `HTTP ${res.status}`));
+    }
+    const { content, suggestion } = extractSuggestion(String(data.reply || ''));
+    advisorMessages.value.push({ role: 'assistant', content: content || '(no reply)', suggestion });
+  } catch (err) {
+    advisorError.value = err instanceof Error ? err.message : 'The advisor is unavailable — try again shortly.';
+    advisorMessages.value.pop(); // let the user re-send their question
+    advisorInput.value = text;
+  } finally {
+    advisorLoading.value = false;
+  }
 };
 // Payment is optional — it defaults to "None" if the visitor doesn't pick one.
 const ready = computed(() => !!(sel.signature && sel.scope && sel.purpose));
@@ -308,6 +431,15 @@ const runTry = () => {
   color: var(--rqb-ink);
   font-size: 14px;
 }
+
+/* Group advisor (Phase 2) */
+.rqb-advisor { margin-top: 22px; background: #fff; border: 1px solid var(--rqb-line); border-radius: 10px; padding: 14px 16px; }
+.rqb-advisor-head { font-weight: 650; font-size: 15px; margin-bottom: 6px; }
+.rqb-advisor-msg { margin-top: 10px; padding: 9px 12px; border-radius: 9px; border: 1px solid var(--rqb-line); font-size: 13px; background: #fbfcfd; }
+.rqb-advisor-msg.assistant { background: #f0f7f9; border-color: #cfe3e9; }
+.rqb-advisor-from { font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--rqb-muted); font-weight: 700; margin-bottom: 3px; }
+.rqb-advisor-suggestion { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 8px; padding: 7px 9px; border-radius: 7px; background: #fff; border: 1px dashed #9fc1cc; font-size: 12.5px; }
+.rqb-advisor-note { margin-top: 8px; font-size: 11.5px; color: var(--rqb-muted); }
 
 /* Message box */
 .rqb-msg { margin-top: 16px; }
