@@ -194,15 +194,15 @@ export const POLICY_MATRIX: MatrixColumn[] = [
         request: 'A first-time visitor can’t have been vouched for by the patient yet.'
       } }
   ]},
-  { key: 'payment', head: 'Deposit or Payment', headTip: 'Money as a spam filter and a fairness tool. All payment types are reserved for a later phase — cards can already require them, but nothing is charged yet.', options: [
+  { key: 'payment', head: 'Deposit or Payment', headTip: 'Money as a spam filter and a fairness tool, paid in credits (100 for $2, bought from the host; non-refundable). Credits cover the host’s real hosting and AI costs; any surplus goes to a charity the host names. One payment covers the whole request, however many members it reaches.', options: [
     { v: 'none', label: 'None',
-      tip: 'No money involved — the default.' },
-    { v: 'spam-deposit', label: 'Spam evaluation deposit', sub: 'returnable',
-      tip: 'A small returnable deposit that makes bulk spam uneconomical: returned when the request turns out to be legitimate. (Reserved for a later phase.)' },
-    { v: 'notification-deposit', label: 'Request evaluation payment',
-      tip: 'Pays for the patient’s (or their AI’s) work of evaluating the request. (Reserved for a later phase.)' },
-    { v: 'sharing-payment', label: 'Payment for information',
-      tip: 'Payment to the patient for the information itself. (Reserved for a later phase.)' }
+      tip: 'No money involved — the default. A card requiring no payment matches any request, paid or not.' },
+    { v: 'spam-deposit', label: 'Spam evaluation deposit', sub: '5 credits, returnable',
+      tip: 'A returnable 5-credit deposit that makes bulk spam uneconomical: returned as soon as ANY member answers (accept or decline-with-a-reason), forfeited to the host if everyone silently ignores the request until it expires (30 days).' },
+    { v: 'notification-deposit', label: 'Request evaluation payment', sub: '2 credits',
+      tip: 'A 2-credit payment for the work of evaluating the request, charged when the request is delivered — not returned.' },
+    { v: 'sharing-payment', label: 'Payment for information', sub: '25 credits',
+      tip: 'A 25-credit payment for the information itself: held when the request is sent, charged only when a member actually accepts, returned in full if nobody does. (In this phase captured payments support the host; direct patient payouts come later.)' }
   ]},
   { key: 'action', head: 'MAIA Action', headTip: 'What the patient’s MAIA does when a request matches the card. Anything NO card covers always comes to the patient as a question.',
     disabledIn: { request: REQ_NO_ACTION, simulate: 'The action comes out of the evaluation — pick the request, and the cards decide.' },

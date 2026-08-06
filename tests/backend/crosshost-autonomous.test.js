@@ -12,6 +12,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import setupGroupRoutes from '../../server/routes/groups.js';
 import { issueCode, checkCode } from '../../server/emailVerification.js';
+import { grantCredits, getAccount } from '../../server/credits.js';
 
 const clone = (o) => (o == null ? o : JSON.parse(JSON.stringify(o)));
 
@@ -293,5 +294,126 @@ describe('cross-host autonomous responses (registry on Host A, member AS on Host
     const afterDigest = B.emails.length;
     await B.jobs.runHourlyMailPull();
     expect(B.emails.length).toBe(afterDigest);
+  });
+
+  // ── Credits: paid outside requests end-to-end ──────────────────────
+  // Credit accounts live on the REGISTRY host (A) — the host the request
+  // is sent through — keyed by the requester's verified email.
+
+  it('a payment without enough credits is refused with 402 before any delivery', async () => {
+    const issued = issueCode('poor@example.com');
+    checkCode(issued.token, issued.code);
+    const r = await A.app.request('hosta.test', 'POST', `/api/groups/${groupId}/outside-request`, {
+      name: 'Dr Poor', email: 'poor@example.com', message: 'paid ask',
+      scope: 'patient-summary', purpose: 'clinical',
+      payment: 'sharing-payment', emailVerifyToken: issued.token
+    });
+    expect(r.status).toBe(402);
+    expect(r.body?.error).toBe('INSUFFICIENT_CREDITS');
+    expect(r.body?.required).toBe(25);
+    expect(r.body?.balance).toBe(0);
+  });
+
+  it('an unverified sender cannot attach a payment at all', async () => {
+    const r = await A.app.request('hosta.test', 'POST', `/api/groups/${groupId}/outside-request`, {
+      name: 'No Proof', email: 'noproof@example.com', message: 'hi',
+      scope: 'meds-allergies', purpose: 'clinical', payment: 'spam-deposit'
+    });
+    expect(r.status).toBe(400);
+    expect(r.body?.error).toMatch(/verified email/i);
+  });
+
+  it('spam deposit: held at send, RELEASED when a cross-host member answers', async () => {
+    await grantCredits(A.cloudant, 'payer@example.com', 10, 'test purchase');
+    const issued = issueCode('payer@example.com');
+    checkCode(issued.token, issued.code);
+    const r = await A.app.request('hosta.test', 'POST', `/api/groups/${groupId}/outside-request`, {
+      name: 'Dr Payer', email: 'payer@example.com', message: 'consult please',
+      scope: 'meds-allergies', purpose: 'clinical',
+      payment: 'spam-deposit', emailVerifyToken: issued.token
+    });
+    expect(r.body?.success).toBe(true);
+    // Escrowed on the registry: 5 out of the spendable balance.
+    let acct = await getAccount(A.cloudant, 'payer@example.com');
+    expect(acct.balance).toBe(5);
+    expect(acct.held).toBe(5);
+
+    // jessica's host ingests → her meds card (payment 'none' = no
+    // requirement) auto-accepts → registry tally settles the deposit.
+    await B.app.request('hostb.test', 'POST', '/api/user-groups/refresh', { userId: 'jessica76' });
+    expect(B.emails.some((e) => e.to === 'payer@example.com' && /Aspirin 81mg/.test(e.text))).toBe(true);
+    acct = await getAccount(A.cloudant, 'payer@example.com');
+    expect(acct.balance).toBe(10); // deposit came back
+    expect(acct.held).toBe(0);
+    const tally = await A.cloudant.getDocument('maia_relay', `outreq_${r.body.requestId}`);
+    expect(tally.payment.resolved).toBe(true);
+    expect(tally.payment.resolution).toBe('released');
+  });
+
+  it('a card REQUIRING sharing-payment matches only paid requests; the accept CAPTURES it', async () => {
+    // jessica now offers her summary to any verified email — IF they pay.
+    const jd = await B.cloudant.getDocument('maia_users', 'jessica76');
+    jd.sharingPolicies.push({
+      id: 'pol_paid_ps', outcome: 'allow', enabled: true, provenance: 'user',
+      elements: { party: { type: 'anyone' }, purpose: 'research', scope: 'patient-summary', filtered: true, signature: 'verified-email', payment: 'sharing-payment' },
+      createdFrom: 'manual'
+    });
+    await B.cloudant.saveDocument('maia_users', jd);
+
+    // UNPAID request → no card matches → escalates to jessica (pending).
+    const t1 = issueCode('unpaid@example.com');
+    checkCode(t1.token, t1.code);
+    await A.app.request('hosta.test', 'POST', `/api/groups/${groupId}/outside-request`, {
+      name: 'Dr Unpaid', email: 'unpaid@example.com', message: 'registry study',
+      scope: 'patient-summary', purpose: 'research', emailVerifyToken: t1.token
+    });
+    await B.app.request('hostb.test', 'POST', '/api/user-groups/refresh', { userId: 'jessica76' });
+    const jr = await B.app.request('hostb.test', 'GET', `/api/user-groups/requests?userId=jessica76`);
+    const unpaid = jr.body.requests.find((q) => q.requester?.email === 'unpaid@example.com');
+    expect(unpaid?.status).toBe('pending');
+
+    // PAID request → the card matches → autonomous accept → 25 captured.
+    await grantCredits(A.cloudant, 'sponsor@example.com', 30, 'test purchase');
+    const t2 = issueCode('sponsor@example.com');
+    checkCode(t2.token, t2.code);
+    const pr = await A.app.request('hosta.test', 'POST', `/api/groups/${groupId}/outside-request`, {
+      name: 'Dr Sponsor', email: 'sponsor@example.com', message: 'registry study',
+      scope: 'patient-summary', purpose: 'research',
+      payment: 'sharing-payment', emailVerifyToken: t2.token
+    });
+    expect(pr.body?.success).toBe(true);
+    await B.app.request('hostb.test', 'POST', '/api/user-groups/refresh', { userId: 'jessica76' });
+    expect(B.emails.some((e) => e.to === 'sponsor@example.com' && /hypertension/.test(e.text))).toBe(true);
+    const acct = await getAccount(A.cloudant, 'sponsor@example.com');
+    expect(acct.balance).toBe(5); // 30 − 25 captured, nothing still held
+    expect(acct.held).toBe(0);
+    const tally = await A.cloudant.getDocument('maia_relay', `outreq_${pr.body.requestId}`);
+    expect(tally.payment.resolution).toBe('captured');
+  });
+
+  it('silence until expiry FORFEITS the spam deposit (the sweep settles it)', async () => {
+    await grantCredits(A.cloudant, 'ignored@example.com', 5, 'test purchase');
+    const t = issueCode('ignored@example.com');
+    checkCode(t.token, t.code);
+    // A scope no card covers → nobody answers autonomously, nobody is asked
+    // in time. (not-sensitive matches no member card in this suite.)
+    const r = await A.app.request('hosta.test', 'POST', `/api/groups/${groupId}/outside-request`, {
+      name: 'Dr Ignored', email: 'ignored@example.com', message: 'broad ask',
+      scope: 'not-sensitive', purpose: 'research',
+      payment: 'spam-deposit', emailVerifyToken: t.token
+    });
+    expect(r.body?.success).toBe(true);
+    expect((await getAccount(A.cloudant, 'ignored@example.com')).held).toBe(5);
+
+    // Force the tally past its 30-day TTL, then run the daily sweep.
+    const tally = await A.cloudant.getDocument('maia_relay', `outreq_${r.body.requestId}`);
+    tally.expiresAt = new Date(Date.now() - 1000).toISOString();
+    await A.cloudant.saveDocument('maia_relay', tally);
+    await A.jobs.runDailyGroupMaintenance();
+
+    const acct = await getAccount(A.cloudant, 'ignored@example.com');
+    expect(acct.balance).toBe(0); // gone — silence is what the deposit priced
+    expect(acct.held).toBe(0);
+    expect(await A.cloudant.getDocument('maia_relay', `outreq_${r.body.requestId}`)).toBe(null);
   });
 });

@@ -8,6 +8,7 @@ import { getOrCreateAgentApiKey, recreateAgentApiKey } from '../utils/agent-help
 import { ensureUserAgent, ensureSecondaryAgent } from './auth.js';
 import { policySentence, POLICY_SCOPES, POLICY_PURPOSES } from './policies.js';
 import { isVerified as emailTokenVerified } from '../emailVerification.js';
+import { chargeCredits, ADVISOR_QUESTION_CREDITS } from '../credits.js';
 
 /**
  * Policy Advisor context (Phase 1): a server-assembled system block that
@@ -720,7 +721,14 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient, app
       'they come in; a public tally shows counts only.',
       'Identity: the visitor can prove only "verified-email" today (their code-verified',
       `address). Claims of NPI or Doximity verification evaluate as unverified until real`,
-      'verification exists. All payment types are reserved — nothing is charged yet.',
+      'verification exists.',
+      'PAYMENTS (credits: 100 for $2, bought from the host, non-refundable): a request',
+      'may attach a returnable spam deposit (5 credits — returned when anyone answers,',
+      'forfeited if everyone silently ignores it), a request evaluation payment',
+      '(2 credits, charged at delivery), or a sharing payment (25 credits — charged',
+      'only when a member accepts). Attaching one can satisfy member cards that',
+      'require it; a card requiring no payment matches any request. One payment',
+      'covers the whole request regardless of member count.',
       `Scopes a request may name: ${JSON.stringify(POLICY_SCOPES.filter((s) => s !== 'ah-category'))}.`,
       `Purposes: ${JSON.stringify(POLICY_PURPOSES.filter((p) => p !== 'any'))}.`,
       'Broader scopes are HARDER to get; narrow, well-explained requests with a clear',
@@ -746,14 +754,30 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient, app
       if (!emailVerifyToken || !addr || !emailTokenVerified(String(emailVerifyToken), addr)) {
         return res.status(403).json({ success: false, error: 'EMAIL_NOT_VERIFIED' });
       }
+      // Metering: the first GROUP_ADVISOR_MAX_PER_WINDOW questions per
+      // window are free; past that, each question COSTS a credit (2¢) —
+      // the AI bill is real, and credits are how heavy users cover it.
+      // No credits → 402 with the price, never a silent refusal.
       const now = Date.now();
       const rl = groupAdvisorRate.get(emailVerifyToken);
+      let metered = false;
       if (rl && now < rl.resetAt && rl.count >= GROUP_ADVISOR_MAX_PER_WINDOW) {
-        return res.status(429).json({ success: false, error: 'RATE_LIMITED' });
+        const paid = await chargeCredits(cloudant, addr, ADVISOR_QUESTION_CREDITS,
+          `group advisor question beyond free ${GROUP_ADVISOR_MAX_PER_WINDOW}/window`);
+        if (!paid) {
+          return res.status(402).json({
+            success: false,
+            error: 'INSUFFICIENT_CREDITS',
+            required: ADVISOR_QUESTION_CREDITS
+          });
+        }
+        metered = true; // paid questions don't advance the free counter
       }
-      groupAdvisorRate.set(emailVerifyToken, (!rl || now >= rl.resetAt)
-        ? { count: 1, resetAt: now + GROUP_ADVISOR_WINDOW_MS }
-        : { count: rl.count + 1, resetAt: rl.resetAt });
+      if (!metered) {
+        groupAdvisorRate.set(emailVerifyToken, (!rl || now >= rl.resetAt)
+          ? { count: 1, resetAt: now + GROUP_ADVISOR_WINDOW_MS }
+          : { count: rl.count + 1, resetAt: rl.resetAt });
+      }
       if (groupAdvisorRate.size > 500) {
         for (const [k, v] of groupAdvisorRate) if (now >= v.resetAt) groupAdvisorRate.delete(k);
       }
