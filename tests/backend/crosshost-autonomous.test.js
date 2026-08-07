@@ -93,6 +93,22 @@ class FakeApp {
 const hosts = {}; // origin → { app, cloudant, emails, audits }
 const admin = { userId: 'admin' };
 
+// WebAuthn ceremonies are injectable so the two-host sim can drive the
+// REAL vouch handlers without a browser authenticator: a "response" with
+// fake:'reg'/'auth' verifies; anything else fails, like a bad assertion.
+const fakeWebauthn = {
+  async registrationOptions() { return { challenge: 'chal-reg' }; },
+  async verifyRegistration({ response }) {
+    return response?.fake === 'reg'
+      ? { credentialId: response.id || 'cred_x', credentialPublicKey: 'pk-test', counter: 0 }
+      : null;
+  },
+  async authenticationOptions() { return { challenge: 'chal-auth' }; },
+  async verifyAuthentication({ response }) {
+    return response?.fake === 'auth' ? { newCounter: 1 } : null;
+  }
+};
+
 const mkHost = (origin) => {
   const app = new FakeApp();
   const cloudant = new FakeCloudant();
@@ -102,7 +118,8 @@ const mkHost = (origin) => {
     sendEmail: async (to, subject, textOrLines) => {
       emails.push({ to, subject, text: Array.isArray(textOrLines) ? textOrLines.join('\n') : String(textOrLines) });
       return true;
-    }
+    },
+    webauthn: fakeWebauthn
   });
   hosts[origin] = { app, cloudant, emails, audits, jobs };
   return hosts[origin];
@@ -415,5 +432,115 @@ describe('cross-host autonomous responses (registry on Host A, member AS on Host
     expect(acct.balance).toBe(0); // gone — silence is what the deposit priced
     expect(acct.held).toBe(0);
     expect(await A.cloudant.getDocument('maia_relay', `outreq_${r.body.requestId}`)).toBe(null);
+  });
+
+  // ── Vouch (verified-by-me): patient-issued credential end-to-end ────
+  let vouchCode2, vouchTokenLive, vouchEntryId;
+
+  it('jessica (Host B) mints a vouch code; only its HASH reaches registry A', async () => {
+    const r = await B.app.request('hostb.test', 'POST', '/api/user-groups/vouch', {
+      userId: 'jessica76', groupId, label: 'Dr Vouched — my cardiologist'
+    });
+    expect(r.body?.success).toBe(true);
+    vouchCode2 = r.body.code;
+    vouchEntryId = r.body.vouchId;
+    expect(vouchCode2).toMatch(/^[A-Z2-9]{6}$/);
+    // The registry stores the hash id, never the code or the label.
+    const vd = await A.cloudant.getDocument('maia_groups', vouchEntryId);
+    expect(vd.type).toBe('vouch');
+    expect(vd.redeemed).toBe(false);
+    expect(JSON.stringify(vd)).not.toContain(vouchCode2);
+    expect(JSON.stringify(vd)).not.toContain('cardiologist');
+  });
+
+  it('the requester redeems the code at registry A, binding a passkey; the code is single-use', async () => {
+    const opts = await A.app.request('hosta.test', 'POST', `/api/groups/${groupId}/vouch/redeem-options`, { code: vouchCode2 });
+    expect(opts.body?.success).toBe(true);
+    const done = await A.app.request('hosta.test', 'POST', `/api/groups/${groupId}/vouch/redeem-verify`, {
+      token: opts.body.token, response: { fake: 'reg', id: 'cred_dr_vouched' }
+    });
+    expect(done.body?.success).toBe(true);
+    vouchTokenLive = done.body.vouchToken;
+    // Redeeming again fails — the code was consumed.
+    const again = await A.app.request('hosta.test', 'POST', `/api/groups/${groupId}/vouch/redeem-options`, { code: vouchCode2 });
+    expect(again.status).toBe(404);
+  });
+
+  it("a vouched request evaluates 'verified-by-me' for the voucher ONLY (cross-host)", async () => {
+    // jessica offers her summary for clinical use to people SHE vouched for.
+    const jd = await B.cloudant.getDocument('maia_users', 'jessica76');
+    jd.sharingPolicies.push({
+      id: 'pol_vbm_ps', outcome: 'allow', enabled: true, provenance: 'user',
+      elements: { party: { type: 'anyone' }, purpose: 'clinical', scope: 'patient-summary', filtered: true, signature: 'verified-by-me', payment: 'none' },
+      createdFrom: 'manual'
+    });
+    await B.cloudant.saveDocument('maia_users', jd);
+
+    // CONTROL: same ask WITHOUT the vouch → no card matches → pending.
+    const t0 = issueCode('control@example.com');
+    checkCode(t0.token, t0.code);
+    await A.app.request('hosta.test', 'POST', `/api/groups/${groupId}/outside-request`, {
+      name: 'Dr Control', email: 'control@example.com', message: 'consult',
+      scope: 'patient-summary', purpose: 'clinical', emailVerifyToken: t0.token
+    });
+    await B.app.request('hostb.test', 'POST', '/api/user-groups/refresh', { userId: 'jessica76' });
+    let jr = await B.app.request('hostb.test', 'GET', `/api/user-groups/requests?userId=jessica76`);
+    expect(jr.body.requests.find((q) => q.requester?.email === 'control@example.com')?.status).toBe('pending');
+
+    // Vouched: the envelope to jessica carries 'verified-by-me' → autonomous.
+    const t1 = issueCode('vouched@example.com');
+    checkCode(t1.token, t1.code);
+    const pr = await A.app.request('hosta.test', 'POST', `/api/groups/${groupId}/outside-request`, {
+      name: 'Dr Vouched', email: 'vouched@example.com', message: 'consult',
+      scope: 'patient-summary', purpose: 'clinical',
+      emailVerifyToken: t1.token, vouchToken: vouchTokenLive
+    });
+    expect(pr.body?.success).toBe(true);
+    await B.app.request('hostb.test', 'POST', '/api/user-groups/refresh', { userId: 'jessica76' });
+    jr = await B.app.request('hostb.test', 'GET', `/api/user-groups/requests?userId=jessica76`);
+    expect(jr.body.requests.find((q) => q.requester?.email === 'vouched@example.com')?.status).toBe('accepted');
+    expect(B.emails.some((e) => e.to === 'vouched@example.com' && /hypertension/.test(e.text))).toBe(true);
+    // bob's copy of the same request stayed at base identity → pending for him.
+    const br = await A.app.request('hosta.test', 'POST', '/api/user-groups/refresh', { userId: 'bob' });
+    expect(br.body?.success).toBe(true);
+  });
+
+  it('a returning requester re-proves possession; revocation beats a live session token', async () => {
+    // "I've been vouched on this device": assertion → fresh session token.
+    const opts = await A.app.request('hosta.test', 'POST', `/api/groups/${groupId}/vouch/assert-options`, {});
+    expect(opts.body?.success).toBe(true);
+    const done = await A.app.request('hosta.test', 'POST', `/api/groups/${groupId}/vouch/assert-verify`, {
+      token: opts.body.token, response: { fake: 'auth', id: 'cred_dr_vouched' }
+    });
+    expect(done.body?.success).toBe(true);
+    const freshToken = done.body.vouchToken;
+
+    // jessica sees the redeemed status on HER host, then revokes.
+    const list = await B.app.request('hostb.test', 'GET', `/api/user-groups/vouches?userId=jessica76`);
+    expect(list.body.vouches.find((v) => v.vouchId === vouchEntryId)?.status).toBe('redeemed');
+    const rev = await B.app.request('hostb.test', 'POST', '/api/user-groups/vouch-revoke', {
+      userId: 'jessica76', vouchId: vouchEntryId
+    });
+    expect(rev.body?.success).toBe(true);
+
+    // The session token is still live in the registry's memory — but the
+    // send re-reads the record, so the revocation wins.
+    const t2 = issueCode('vouched@example.com');
+    checkCode(t2.token, t2.code);
+    await A.app.request('hosta.test', 'POST', `/api/groups/${groupId}/outside-request`, {
+      name: 'Dr Vouched', email: 'vouched@example.com', message: 'consult again',
+      scope: 'patient-summary', purpose: 'clinical',
+      emailVerifyToken: t2.token, vouchToken: freshToken
+    });
+    await B.app.request('hostb.test', 'POST', '/api/user-groups/refresh', { userId: 'jessica76' });
+    const jr = await B.app.request('hostb.test', 'GET', `/api/user-groups/requests?userId=jessica76`);
+    const second = jr.body.requests.filter((q) => q.requester?.email === 'vouched@example.com');
+    expect(second.some((q) => q.status === 'pending')).toBe(true);
+    // …and future assertions with the revoked credential are refused outright.
+    const opts2 = await A.app.request('hosta.test', 'POST', `/api/groups/${groupId}/vouch/assert-options`, {});
+    const dead = await A.app.request('hosta.test', 'POST', `/api/groups/${groupId}/vouch/assert-verify`, {
+      token: opts2.body.token, response: { fake: 'auth', id: 'cred_dr_vouched' }
+    });
+    expect(dead.status).toBe(404);
   });
 });

@@ -3,7 +3,7 @@
     <!-- ── Request matrix: the ONE policy table (PolicyMatrix), request
          context. Cells that don't apply to an outside requester are shown
          but disabled — the tooltips teach the whole vocabulary either way. -->
-    <PolicyMatrix context="request" :model-value="sel" @pick="pick" />
+    <PolicyMatrix context="request" :model-value="sel" :unlock="matrixUnlock" @pick="pick" />
 
     <!-- ── Expandable message / special instructions ────── -->
     <div class="rqb-msg">
@@ -40,6 +40,36 @@
           Credits are non-refundable and cover this host’s hosting + AI costs; any surplus goes to {{ credits.charity }}.
         </div>
         <div v-if="paymentShortfall" class="rqb-hint rqb-credits-short">{{ paymentShortfall }}</div>
+      </div>
+      <!-- ── Vouched requester ("verified by me") ── a patient who has
+           matched this visitor out-of-band hands them a one-time code;
+           redeeming binds a passkey on this device. The elevated identity
+           applies ONLY to requests reaching the vouching member. -->
+      <div v-if="groupIsLocal" class="rqb-vouch">
+        <template v-if="vouched">
+          <b>✓ Vouched.</b> Your request will carry <b>“verified by me”</b> to the member who vouched
+          for you (everyone else still sees your verified email at most).
+        </template>
+        <template v-else>
+          <div class="rqb-vouch-head">Did a member personally vouch for you?</div>
+          <div class="row q-gutter-sm items-center" style="flex-wrap: wrap;">
+            <input
+              v-model="vouchCodeInput" class="rqb-text" style="max-width: 150px; text-transform: uppercase;"
+              maxlength="6" placeholder="6-char code" :disabled="vouchBusy"
+              @keyup.enter="redeemVouchCode"
+            />
+            <q-btn dense unelevated color="primary" label="Redeem code" :loading="vouchBusy"
+                   :disable="vouchCodeInput.trim().length !== 6" @click="redeemVouchCode" />
+            <span class="rqb-hint">or</span>
+            <q-btn dense outline color="primary" label="I’ve been vouched on this device"
+                   :loading="vouchBusy" @click="assertVouch" />
+          </div>
+          <div v-if="vouchError" class="text-negative q-mt-xs" style="font-size: 12.5px;">{{ vouchError }}</div>
+          <div class="rqb-hint q-mt-xs">
+            Redeeming creates a passkey on this device — your durable proof of the vouch.
+            The code is single-use and expires 24 hours after the patient created it.
+          </div>
+        </template>
       </div>
     </div>
 
@@ -135,6 +165,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, nextTick, onUnmounted, watch } from 'vue';
 import { useQuasar } from 'quasar';
+import { startRegistration, startAuthentication } from '@simplewebauthn/browser';
 import { useVerifiedEmail } from '../composables/verifiedEmail';
 import EmailVerifyBox from './EmailVerifyBox.vue';
 import PolicyMatrix from './PolicyMatrix.vue';
@@ -202,6 +233,77 @@ const loadCredits = async () => {
   } catch { credits.value = null; }
 };
 watch(() => verifiedEmail.verified, () => { void loadCredits(); }, { immediate: true });
+
+// ── Vouch (verified-by-me) ───────────────────────────────────────────
+// The passkey lives on this device, scoped to this host — so like credits,
+// the flow is offered only for a group whose registry IS this host.
+const vouchCodeInput = ref('');
+const vouchBusy = ref(false);
+const vouchError = ref('');
+const vouchToken = ref<string | null>(null);
+const vouched = computed(() => !!vouchToken.value);
+// A proven vouch lifts the static "can't be vouched yet" disable on the
+// strongest signature cell — the tooltip's premise is no longer true.
+const matrixUnlock = computed(() => (vouched.value ? ['signature:verified-by-me'] : []));
+
+const vouchApi = (path: string) =>
+  `/api/groups/${encodeURIComponent(props.group?.groupId || '')}/vouch/${path}`;
+
+const vouchPost = async (path: string, body: unknown) => {
+  const r = await fetch(vouchApi(path), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+    body: JSON.stringify(body)
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok || !d.success) {
+    throw new Error(d.error === 'RATE_LIMITED'
+      ? 'Too many attempts — try again in a few minutes.'
+      : (d.error || `HTTP ${r.status}`));
+  }
+  return d;
+};
+
+const finishVouch = () => {
+  vouchError.value = '';
+  vouchCodeInput.value = '';
+  sel.signature = 'verified-by-me';
+  $q.notify({ type: 'positive', message: 'Vouch verified — your identity is now “verified by me” to your voucher.' });
+};
+
+const redeemVouchCode = async () => {
+  const code = vouchCodeInput.value.trim().toUpperCase();
+  if (code.length !== 6 || vouchBusy.value || !props.group) return;
+  vouchBusy.value = true;
+  vouchError.value = '';
+  try {
+    const opts = await vouchPost('redeem-options', { code });
+    const attestation = await startRegistration({ optionsJSON: opts.options });
+    const done = await vouchPost('redeem-verify', { token: opts.token, response: attestation });
+    vouchToken.value = done.vouchToken;
+    finishVouch();
+  } catch (err) {
+    vouchError.value = err instanceof Error ? err.message : 'Could not redeem the code.';
+  } finally {
+    vouchBusy.value = false;
+  }
+};
+
+const assertVouch = async () => {
+  if (vouchBusy.value || !props.group) return;
+  vouchBusy.value = true;
+  vouchError.value = '';
+  try {
+    const opts = await vouchPost('assert-options', {});
+    const assertion = await startAuthentication({ optionsJSON: opts.options });
+    const done = await vouchPost('assert-verify', { token: opts.token, response: assertion });
+    vouchToken.value = done.vouchToken;
+    finishVouch();
+  } catch (err) {
+    vouchError.value = err instanceof Error ? err.message : 'Could not verify the passkey.';
+  } finally {
+    vouchBusy.value = false;
+  }
+};
 
 const paymentShortfall = computed(() => {
   const p = sel.payment;
@@ -313,7 +415,8 @@ const autoGrow = () => {
 
 const SIG_LABEL: Record<string, string> = {
   unverified: 'unverified', 'verified-email': 'a verified email', 'group-member': 'a group member',
-  npi: 'an NPI-verified provider', doximity: 'a Doximity-verified clinician'
+  npi: 'an NPI-verified provider', doximity: 'a Doximity-verified clinician',
+  'verified-by-me': 'an identity the patient personally vouched for'
 };
 const SCOPE_HUMAN: Record<string, string> = {
   'notification-only': 'to send you a message', 'meds-allergies': 'your current medications',
@@ -328,7 +431,7 @@ const PAY_HUMAN: Record<string, string> = {
   none: '', 'spam-deposit': ', with a returnable spam-evaluation deposit',
   'notification-deposit': ', with a request-evaluation payment', 'sharing-payment': ', offering to pay for the information'
 };
-const SIG_RANK: Record<string, number> = { unverified: 0, 'verified-email': 1, 'group-member': 2, npi: 3, doximity: 3 };
+const SIG_RANK: Record<string, number> = { unverified: 0, 'verified-email': 1, 'group-member': 2, npi: 3, doximity: 3, 'verified-by-me': 4 };
 
 const sentenceHtml = computed(() => {
   const who = SIG_LABEL[sel.signature || 'unverified'];
@@ -376,6 +479,9 @@ const sendRequest = async () => {
         // Attached payment (credits): held/charged by the registry BEFORE
         // delivery; deposits settle off the public tally.
         payment: sel.payment && sel.payment !== 'none' ? sel.payment : undefined,
+        // Proven vouch session: elevates to 'verified-by-me' — only in the
+        // envelope sealed to the member who vouched.
+        vouchToken: vouchToken.value || undefined,
         // Lets the registry prove 'verified-email' when evaluating the
         // members' policies at delivery time (autonomous demo responses).
         emailVerifyToken: verifiedEmail.token || undefined
@@ -539,6 +645,15 @@ const runTry = () => {
 }
 .rqb-credits a { font-weight: 600; }
 .rqb-credits-short { color: #b26a00; font-weight: 600; }
+.rqb-vouch {
+  margin-top: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--rqb-border, #d5dbe3);
+  border-radius: 8px;
+  background: rgba(21, 128, 61, 0.05);
+  font-size: 13px;
+}
+.rqb-vouch-head { font-weight: 600; margin-bottom: 6px; }
 
 /* Live request line */
 .rqb-card-stage { margin-top: 16px; }

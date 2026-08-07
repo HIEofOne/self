@@ -50,15 +50,22 @@ const props = withDefaults(defineProps<{
   modelValue: Record<string, string | null | undefined>;
   ahCategory?: string;
   ahCategories?: string[];
-}>(), { ahCategory: '', ahCategories: undefined });
+  /** Cells (as "colKey:value") whose context-disable is LIFTED because the
+   *  live page has proven what the static reason says is impossible —
+   *  e.g. "signature:verified-by-me" once a vouch passkey assertion
+   *  succeeded on this page. */
+  unlock?: string[];
+}>(), { ahCategory: '', ahCategories: undefined, unlock: () => [] });
 
 const emit = defineEmits<{ pick: [key: string, value: string]; 'update:ahCategory': [value: string] }>();
 
 const DEFAULT_AH = ['Lab Results', 'Clinical Vitals', 'Immunizations', 'Conditions', 'Procedures', 'Allergies'];
 const ahCategoryList = computed(() => (props.ahCategories?.length ? props.ahCategories : DEFAULT_AH));
 
-const disabledReason = (col: MatrixColumn, opt: MatrixCell): string =>
-  col.disabledIn?.[props.context] || opt.disabledIn?.[props.context] || '';
+const disabledReason = (col: MatrixColumn, opt: MatrixCell): string => {
+  if (props.unlock.includes(`${col.key}:${opt.v}`)) return '';
+  return col.disabledIn?.[props.context] || opt.disabledIn?.[props.context] || '';
+};
 const isDisabled = (col: MatrixColumn, opt: MatrixCell): boolean => !!disabledReason(col, opt);
 
 const onPick = (col: MatrixColumn, opt: MatrixCell) => {

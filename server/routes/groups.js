@@ -18,6 +18,11 @@ import { applyPseudonymMapping } from '../privacyFilter.js';
 import { isVerified as emailTokenVerified } from '../emailVerification.js';
 import { CREDIT_PRICES, holdCredits, chargeCredits, resolveHold, getAccount } from '../credits.js';
 import {
+  generateRegistrationOptions, verifyRegistrationResponse,
+  generateAuthenticationOptions, verifyAuthenticationResponse
+} from '@simplewebauthn/server';
+import { isoBase64URL } from '@simplewebauthn/server/helpers';
+import {
   generateKeyPairSync, createHash, createPrivateKey, createPublicKey,
   randomBytes, sign as edSign, verify as edVerify,
   diffieHellman, hkdfSync, createCipheriv, createDecipheriv
@@ -221,7 +226,7 @@ const publicGroupView = (doc) => ({
   activeMemberCount: memberCounts(doc).active
 });
 
-export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } = {}) {
+export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, webauthn } = {}) {
   // Same admin gate as GET /api/admin/users: localhost bypass for local
   // development; otherwise the session user must be the admin.
   const requireAdmin = (req, res) => {
@@ -434,6 +439,342 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     }
   });
 
+  // ── Vouch credentials (Phase 1): 'verified-by-me' made real ─────────
+  //
+  // A patient who has matched a requester out-of-band (voice or video —
+  // biometrics never enter MAIA; the code hand-off IS the trust event)
+  // mints a one-time registration code from their Workbook. The requester
+  // redeems it on this registry's welcome page and binds a PASSKEY; the
+  // vouch record {credential key ↔ voucher pairwiseId} lives here. At
+  // send time a passkey assertion proves possession, and the registry
+  // attests 'verified-by-me' ONLY in the envelope sealed to the vouching
+  // member — the same attestation trust seam member ASes already honor
+  // for 'verified-email'. Issuer == evaluator, so revocation is a local
+  // fact (the patient revokes; the record flips; sends re-check it).
+  //
+  // Forward-compatibility (UCAN roadmap): the record binds a SUBJECT KEY,
+  // never a bearer secret — the credential public key is the principal a
+  // future delegation chain would anchor to.
+  const VOUCH_CODE_TTL_MS = 24 * 60 * 60 * 1000; // code: single-use, 24 h
+  const VOUCH_TOKEN_TTL_MS = 10 * 60 * 1000;     // proven-possession session
+  const CHALLENGE_TTL_MS = 5 * 60 * 1000;
+  // Readable-aloud alphabet (no I/L/O/0/1): the patient SPEAKS this code.
+  const VOUCH_CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  const vouchCode = () =>
+    Array.from(randomBytes(6)).map((b) => VOUCH_CODE_ALPHABET[b % VOUCH_CODE_ALPHABET.length]).join('');
+
+  const vouchChallenges = new Map(); // token -> { type, groupId, vouchId?, challenge, expiresAt }
+  const vouchTokens = new Map();     // token -> { groupId, vouchId, voucherPairwiseId, expiresAt }
+  const vouchRate = new Map();       // ip -> { count, resetAt } (redeem/assert attempts)
+
+  const vouchRp = () => {
+    const u = new URL(process.env.PUBLIC_APP_URL || 'http://localhost:5173');
+    return { rpID: u.hostname, origin: u.origin, rpName: 'MAIA' };
+  };
+
+  // Injectable for the two-host simulation; real ceremonies otherwise.
+  const wa = webauthn || {
+    async registrationOptions({ rpID, rpName, userName }) {
+      return await generateRegistrationOptions({
+        rpName, rpID,
+        userID: randomBytes(16),
+        userName,
+        attestation: 'none',
+        // Discoverable credential so "I've been vouched on this device"
+        // works usernameless later; UV required like account passkeys.
+        authenticatorSelection: { residentKey: 'required', userVerification: 'required' }
+      });
+    },
+    async verifyRegistration({ response, expectedChallenge, expectedOrigin, expectedRPID }) {
+      const v = await verifyRegistrationResponse({
+        response, expectedChallenge, expectedOrigin, expectedRPID, requireUserVerification: true
+      });
+      if (!v.verified) return null;
+      return {
+        credentialId: v.registrationInfo.credential.id,
+        credentialPublicKey: isoBase64URL.fromBuffer(v.registrationInfo.credential.publicKey),
+        counter: v.registrationInfo.credential.counter || 0
+      };
+    },
+    async authenticationOptions({ rpID }) {
+      return await generateAuthenticationOptions({ rpID, userVerification: 'required', timeout: 60000 });
+    },
+    async verifyAuthentication({ response, expectedChallenge, expectedOrigin, expectedRPID, credentialPublicKey, counter }) {
+      const v = await verifyAuthenticationResponse({
+        response, expectedChallenge, expectedOrigin, expectedRPID,
+        credential: { id: response.id, publicKey: isoBase64URL.toBuffer(credentialPublicKey), counter: counter || 0 },
+        requireUserVerification: true
+      });
+      if (!v.verified) return null;
+      return { newCounter: v.authenticationInfo?.newCounter ?? counter ?? 0 };
+    }
+  };
+
+  const vouchRateOk = (ip) => {
+    const now = Date.now();
+    const rl = vouchRate.get(ip);
+    if (rl && now < rl.resetAt && rl.count >= 10) return false;
+    vouchRate.set(ip, (!rl || now >= rl.resetAt)
+      ? { count: 1, resetAt: now + 10 * 60 * 1000 }
+      : { count: rl.count + 1, resetAt: rl.resetAt });
+    if (vouchRate.size > 500) {
+      for (const [k, v] of vouchRate) if (now >= v.resetAt) vouchRate.delete(k);
+    }
+    return true;
+  };
+
+  const sweepVouchMaps = () => {
+    const now = Date.now();
+    if (vouchChallenges.size > 500) {
+      for (const [k, v] of vouchChallenges) if (now >= v.expiresAt) vouchChallenges.delete(k);
+    }
+    if (vouchTokens.size > 500) {
+      for (const [k, v] of vouchTokens) if (now >= v.expiresAt) vouchTokens.delete(k);
+    }
+  };
+
+  /** Resolve a send-time vouch token to its voucher, re-checking the
+   *  stored record (revocation wins over a still-live session token). */
+  const resolveVouch = async (vouchToken, groupId) => {
+    if (typeof vouchToken !== 'string' || !vouchToken) return null;
+    const vt = vouchTokens.get(vouchToken);
+    if (!vt || Date.now() >= vt.expiresAt || vt.groupId !== groupId) return null;
+    try {
+      const vd = await cloudant.getDocument(GROUPS_DB, vt.vouchId);
+      if (!vd || vd.type !== 'vouch' || !vd.redeemed || vd.revoked) return null;
+      return { voucherPairwiseId: vd.voucherPairwiseId };
+    } catch { return null; }
+  };
+
+  // POST /api/groups/:groupId/vouches — a MEMBER registers a vouch code
+  // (signed member claim, same seam as directory/member-key). The claim
+  // itself carries the code HASH — the registry never sees the code.
+  app.post('/api/groups/:groupId/vouches', async (req, res) => {
+    try {
+      const doc = await cloudant.getDocument(GROUPS_DB, req.params.groupId);
+      if (!doc || doc.type !== 'group') return res.status(404).json({ success: false, error: 'Group not found' });
+      const { caller, payload, signature } = req.body || {};
+      const member = findActiveMember(doc, caller);
+      if (!member || !member.signingPublicKeyJwk) {
+        return res.status(403).json({ success: false, error: 'Caller is not an active member' });
+      }
+      const claim = verifySignedClaim(payload, signature, member.signingPublicKeyJwk, {
+        action: 'vouch-create', groupId: doc._id, caller
+      });
+      if (!claim) return res.status(403).json({ success: false, error: 'Invalid signature' });
+      if (!/^[a-f0-9]{64}$/.test(String(claim.codeHash || ''))) {
+        return res.status(400).json({ success: false, error: 'Invalid code hash' });
+      }
+      const exp = new Date(claim.codeExpiresAt || 0).getTime();
+      if (!Number.isFinite(exp) || exp <= Date.now() || exp > Date.now() + VOUCH_CODE_TTL_MS + 60000) {
+        return res.status(400).json({ success: false, error: 'Invalid code expiry' });
+      }
+      const id = `vouch_${claim.codeHash}`;
+      if (await cloudant.getDocument(GROUPS_DB, id)) {
+        return res.status(409).json({ success: false, error: 'Code already registered' });
+      }
+      await cloudant.saveDocument(GROUPS_DB, {
+        _id: id, type: 'vouch', groupId: doc._id,
+        voucherPairwiseId: caller,
+        createdAt: new Date().toISOString(),
+        codeExpiresAt: claim.codeExpiresAt,
+        redeemed: false, revoked: false
+      });
+      auditLog.logEvent({
+        type: 'vouch_created', userId: 'member', ip: req.ip,
+        details: { groupId: doc._id, vouchId: id }
+      });
+      res.json({ success: true, vouchId: id });
+    } catch (error) {
+      console.error('[vouch] create failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to register vouch code' });
+    }
+  });
+
+  // POST /api/groups/:groupId/vouches/status — a member's own vouches
+  // (counts + lifecycle only; no credential material leaves).
+  app.post('/api/groups/:groupId/vouches/status', async (req, res) => {
+    try {
+      const doc = await cloudant.getDocument(GROUPS_DB, req.params.groupId);
+      if (!doc || doc.type !== 'group') return res.status(404).json({ success: false, error: 'Group not found' });
+      const { caller, payload, signature } = req.body || {};
+      const member = findActiveMember(doc, caller);
+      if (!member || !verifySignedClaim(payload, signature, member.signingPublicKeyJwk, {
+        action: 'vouch-status', groupId: doc._id, caller
+      })) {
+        return res.status(403).json({ success: false, error: 'Invalid signature' });
+      }
+      const all = await cloudant.getAllDocuments(GROUPS_DB);
+      const vouches = (all || [])
+        .filter((d) => d && d.type === 'vouch' && d.groupId === doc._id && d.voucherPairwiseId === caller)
+        .map((d) => ({
+          vouchId: d._id, redeemed: !!d.redeemed, redeemedAt: d.redeemedAt || null,
+          revoked: !!d.revoked, codeExpiresAt: d.codeExpiresAt
+        }));
+      res.json({ success: true, vouches });
+    } catch (error) {
+      console.error('[vouch] status failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to load vouches' });
+    }
+  });
+
+  // POST /api/groups/:groupId/vouches/revoke — the voucher (and only the
+  // voucher) kills the credential. Revocation beats live session tokens:
+  // every send re-reads the record.
+  app.post('/api/groups/:groupId/vouches/revoke', async (req, res) => {
+    try {
+      const doc = await cloudant.getDocument(GROUPS_DB, req.params.groupId);
+      if (!doc || doc.type !== 'group') return res.status(404).json({ success: false, error: 'Group not found' });
+      const { caller, payload, signature } = req.body || {};
+      const member = findActiveMember(doc, caller);
+      const claim = member && verifySignedClaim(payload, signature, member.signingPublicKeyJwk, {
+        action: 'vouch-revoke', groupId: doc._id, caller
+      });
+      if (!claim) return res.status(403).json({ success: false, error: 'Invalid signature' });
+      const vd = await cloudant.getDocument(GROUPS_DB, String(claim.vouchId || ''));
+      if (!vd || vd.type !== 'vouch' || vd.groupId !== doc._id || vd.voucherPairwiseId !== caller) {
+        return res.status(404).json({ success: false, error: 'Vouch not found' });
+      }
+      vd.revoked = true;
+      vd.revokedAt = new Date().toISOString();
+      await cloudant.saveDocument(GROUPS_DB, vd);
+      auditLog.logEvent({
+        type: 'vouch_revoked', userId: 'member', ip: req.ip,
+        details: { groupId: doc._id, vouchId: vd._id }
+      });
+      res.json({ success: true });
+    } catch (error) {
+      console.error('[vouch] revoke failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to revoke' });
+    }
+  });
+
+  // POST /api/groups/:groupId/vouch/redeem-options — public: the requester
+  // types the code the patient read to them; a passkey ceremony starts.
+  app.post('/api/groups/:groupId/vouch/redeem-options', async (req, res) => {
+    try {
+      if (!vouchRateOk(req.ip)) return res.status(429).json({ success: false, error: 'RATE_LIMITED' });
+      const code = String(req.body?.code || '').trim().toUpperCase();
+      if (!/^[A-Z2-9]{6}$/.test(code)) return res.status(400).json({ success: false, error: 'Invalid code' });
+      const vd = await cloudant.getDocument(GROUPS_DB, `vouch_${sha256hex(code)}`);
+      if (!vd || vd.type !== 'vouch' || vd.groupId !== req.params.groupId
+          || vd.redeemed || vd.revoked || new Date(vd.codeExpiresAt).getTime() <= Date.now()) {
+        return res.status(404).json({ success: false, error: 'Unknown or expired code' });
+      }
+      const rp = vouchRp();
+      const options = await wa.registrationOptions({
+        rpID: rp.rpID, rpName: rp.rpName,
+        userName: `vouched-requester-${vd._id.slice(6, 12)}`
+      });
+      const token = randomBytes(16).toString('hex');
+      sweepVouchMaps();
+      vouchChallenges.set(token, {
+        type: 'register', groupId: vd.groupId, vouchId: vd._id,
+        challenge: options.challenge, expiresAt: Date.now() + CHALLENGE_TTL_MS
+      });
+      res.json({ success: true, token, options });
+    } catch (error) {
+      console.error('[vouch] redeem-options failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to start redemption' });
+    }
+  });
+
+  // POST /api/groups/:groupId/vouch/redeem-verify — bind the new passkey
+  // to the vouch record; the code is consumed either way it ends.
+  app.post('/api/groups/:groupId/vouch/redeem-verify', async (req, res) => {
+    try {
+      const { token, response } = req.body || {};
+      const ch = vouchChallenges.get(String(token || ''));
+      vouchChallenges.delete(String(token || ''));
+      if (!ch || ch.type !== 'register' || ch.groupId !== req.params.groupId || Date.now() >= ch.expiresAt) {
+        return res.status(400).json({ success: false, error: 'Challenge expired — start over' });
+      }
+      const vd = await cloudant.getDocument(GROUPS_DB, ch.vouchId);
+      if (!vd || vd.type !== 'vouch' || vd.redeemed || vd.revoked) {
+        return res.status(404).json({ success: false, error: 'Code no longer valid' });
+      }
+      const rp = vouchRp();
+      const cred = await wa.verifyRegistration({
+        response, expectedChallenge: ch.challenge, expectedOrigin: rp.origin, expectedRPID: rp.rpID
+      });
+      if (!cred) return res.status(400).json({ success: false, error: 'Passkey verification failed' });
+      vd.redeemed = true;
+      vd.redeemedAt = new Date().toISOString();
+      vd.credentialId = cred.credentialId;
+      vd.credentialPublicKey = cred.credentialPublicKey;
+      vd.counter = cred.counter || 0;
+      await cloudant.saveDocument(GROUPS_DB, vd);
+      auditLog.logEvent({
+        type: 'vouch_redeemed', userId: 'public', ip: req.ip,
+        details: { groupId: vd.groupId, vouchId: vd._id }
+      });
+      const vt = randomBytes(16).toString('hex');
+      vouchTokens.set(vt, {
+        groupId: vd.groupId, vouchId: vd._id, voucherPairwiseId: vd.voucherPairwiseId,
+        expiresAt: Date.now() + VOUCH_TOKEN_TTL_MS
+      });
+      res.json({ success: true, vouchToken: vt });
+    } catch (error) {
+      console.error('[vouch] redeem-verify failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to complete redemption' });
+    }
+  });
+
+  // POST /api/groups/:groupId/vouch/assert-options — public: returning
+  // requester proves possession of an already-bound passkey.
+  app.post('/api/groups/:groupId/vouch/assert-options', async (req, res) => {
+    try {
+      if (!vouchRateOk(req.ip)) return res.status(429).json({ success: false, error: 'RATE_LIMITED' });
+      const rp = vouchRp();
+      const options = await wa.authenticationOptions({ rpID: rp.rpID });
+      const token = randomBytes(16).toString('hex');
+      sweepVouchMaps();
+      vouchChallenges.set(token, {
+        type: 'assert', groupId: req.params.groupId,
+        challenge: options.challenge, expiresAt: Date.now() + CHALLENGE_TTL_MS
+      });
+      res.json({ success: true, token, options });
+    } catch (error) {
+      console.error('[vouch] assert-options failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to start verification' });
+    }
+  });
+
+  // POST /api/groups/:groupId/vouch/assert-verify — verify the assertion
+  // against the stored credential; mint a short-lived send-session token.
+  app.post('/api/groups/:groupId/vouch/assert-verify', async (req, res) => {
+    try {
+      const { token, response } = req.body || {};
+      const ch = vouchChallenges.get(String(token || ''));
+      vouchChallenges.delete(String(token || ''));
+      if (!ch || ch.type !== 'assert' || ch.groupId !== req.params.groupId || Date.now() >= ch.expiresAt) {
+        return res.status(400).json({ success: false, error: 'Challenge expired — start over' });
+      }
+      const credId = String(response?.id || '');
+      const all = await cloudant.getAllDocuments(GROUPS_DB);
+      const vd = (all || []).find((d) => d && d.type === 'vouch' && d.groupId === ch.groupId
+        && d.redeemed && !d.revoked && d.credentialId === credId);
+      if (!vd) return res.status(404).json({ success: false, error: 'No active vouch for this passkey' });
+      const rp = vouchRp();
+      const ver = await wa.verifyAuthentication({
+        response, expectedChallenge: ch.challenge, expectedOrigin: rp.origin, expectedRPID: rp.rpID,
+        credentialPublicKey: vd.credentialPublicKey, counter: vd.counter || 0
+      });
+      if (!ver) return res.status(400).json({ success: false, error: 'Passkey verification failed' });
+      vd.counter = ver.newCounter ?? vd.counter ?? 0;
+      try { await cloudant.saveDocument(GROUPS_DB, vd); } catch { /* counter update is best-effort */ }
+      const vt = randomBytes(16).toString('hex');
+      vouchTokens.set(vt, {
+        groupId: vd.groupId, vouchId: vd._id, voucherPairwiseId: vd.voucherPairwiseId,
+        expiresAt: Date.now() + VOUCH_TOKEN_TTL_MS
+      });
+      res.json({ success: true, vouchToken: vt });
+    } catch (error) {
+      console.error('[vouch] assert-verify failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to verify' });
+    }
+  });
+
   /**
    * Settle an outside request's escrowed payment when its tally records a
    * real answer (mutates the tally in place; the caller saves it):
@@ -533,10 +874,19 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         }
       }
 
+      // A proven vouch elevates the signature to 'verified-by-me' — but
+      // ONLY for the member who issued the vouch. Everyone else's envelope
+      // keeps the base level; the per-member sealing makes that free.
+      // resolveVouch re-reads the stored record, so a revocation that
+      // happened after the passkey assertion still wins here.
+      const vouch = await resolveVouch(b.vouchToken, doc._id);
+
       let delivered = 0;
       let autoAccepted = 0;
       let autoDeclined = 0;
       for (const m of members) {
+        const memberSignature = (vouch && vouch.voucherPairwiseId === m.pairwiseId)
+          ? 'verified-by-me' : requestSignature;
         // Delivery-time evaluation (Phase 1, single deployment: this server IS
         // each member's authorization server). A member whose sharing-policy
         // cards decide the request gets an AUTONOMOUS outcome right now — the
@@ -554,7 +904,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
         let decision = { outcome: 'ask', decidedBy: null };
         if (ownerDoc) {
           decision = evaluatePolicies(ownerDoc.sharingPolicies || [], {
-            party: { type: 'anyone' }, purpose, scope, signature: requestSignature, payment: payment || 'none'
+            party: { type: 'anyone' }, purpose, scope, signature: memberSignature, payment: payment || 'none'
           });
         }
 
@@ -645,7 +995,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
             action: 'share',
             resource: scope,
             purpose,
-            signature: requestSignature,
+            signature: memberSignature,
             payment: payment || null,
             created: new Date(now).toISOString(),
             nonce: reqId,
@@ -2941,9 +3291,10 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
           nonce: envelope.nonce || null,
           created: envelope.created || null,
           // Verified signature strength the REGISTRY established at delivery
-          // (outside requests with a matching email-verify token), and any
-          // autonomous decision the member's own policies already made there.
-          signature: envelope.signature === 'verified-email' ? 'verified-email' : null,
+          // (email-verify token → 'verified-email'; passkey-proven vouch →
+          // 'verified-by-me'), and any autonomous decision the member's own
+          // policies already made there.
+          signature: ['verified-email', 'verified-by-me'].includes(envelope.signature) ? envelope.signature : null,
           autoDecision: (envelope.autoDecision && ['accepted', 'declined'].includes(envelope.autoDecision.outcome))
             ? { outcome: envelope.autoDecision.outcome, sentence: String(envelope.autoDecision.sentence || '') }
             : null,
@@ -3406,6 +3757,154 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
     }
   });
 
+  // ── Member-side vouch management ("People I vouch for") ─────────────
+  // The patient mints the one-time code HERE (their own host), registers
+  // only its HASH at the group registry via a signed member claim, and
+  // keeps the custodial list — label included — on their own userDoc.
+  // The registry never learns who the code is for.
+
+  // POST /api/user-groups/vouch — mint a code for someone the patient has
+  // personally matched out-of-band. Returns the code ONCE; never stored
+  // in plaintext anywhere.
+  app.post('/api/user-groups/vouch', async (req, res) => {
+    const userId = requireMatchingUser(req, res);
+    if (!userId) return;
+    try {
+      const { groupId, label } = req.body || {};
+      const cleanLabel = String(label || '').trim().slice(0, 80);
+      if (!groupId || !cleanLabel) {
+        return res.status(400).json({ success: false, error: 'A group and a label (who this is for) are required' });
+      }
+      const userDoc = await cloudant.getDocument(USERS_DB, userId);
+      const membership = (userDoc?.groupMemberships || []).find((m) => m.groupId === groupId);
+      if (!membership) return res.status(404).json({ success: false, error: 'Not a member of this group' });
+      if ((userDoc.vouchedParties || []).filter((v) => v.status !== 'revoked').length >= 100) {
+        return res.status(409).json({ success: false, error: 'Vouch list is full — revoke unused entries first' });
+      }
+      const code = vouchCode();
+      const codeHash = sha256hex(code);
+      const codeExpiresAt = new Date(Date.now() + VOUCH_CODE_TTL_MS).toISOString();
+      const { payload, signature } = signWithMembership(membership, {
+        action: 'vouch-create', groupId, caller: membership.pairwiseId,
+        codeHash, codeExpiresAt, ts: new Date().toISOString()
+      });
+      const r = await fetch(`${registryBase(membership)}/api/groups/${encodeURIComponent(groupId)}/vouches`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ caller: membership.pairwiseId, payload, signature })
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || !data.success) {
+        return res.status(502).json({ success: false, error: data.error || 'The group registry could not register the code' });
+      }
+      userDoc.vouchedParties = [...(userDoc.vouchedParties || []), {
+        vouchId: data.vouchId, label: cleanLabel,
+        groupId, groupName: membership.groupName || groupId,
+        createdAt: new Date().toISOString(), codeExpiresAt,
+        status: 'code-issued'
+      }];
+      userDoc.updatedAt = new Date().toISOString();
+      await cloudant.saveDocument(USERS_DB, userDoc);
+      auditLog.logEvent({
+        type: 'vouch_created', userId, ip: req.ip,
+        details: { groupId, vouchId: data.vouchId, label: cleanLabel }
+      });
+      res.json({ success: true, code, expiresAt: codeExpiresAt, vouchId: data.vouchId });
+    } catch (error) {
+      console.error('[user-groups] vouch mint failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to create vouch code' });
+    }
+  });
+
+  // GET /api/user-groups/vouches?userId= — the custodial list, refreshed
+  // best-effort against each group's registry (redeemed/revoked state).
+  app.get('/api/user-groups/vouches', async (req, res) => {
+    const userId = requireMatchingUser(req, res);
+    if (!userId) return;
+    try {
+      const userDoc = await cloudant.getDocument(USERS_DB, userId);
+      const entries = userDoc?.vouchedParties || [];
+      const byGroup = new Map();
+      for (const e of entries) {
+        if (!byGroup.has(e.groupId)) byGroup.set(e.groupId, []);
+        byGroup.get(e.groupId).push(e);
+      }
+      let changed = false;
+      for (const [groupId, groupEntries] of byGroup) {
+        const membership = (userDoc.groupMemberships || []).find((m) => m.groupId === groupId);
+        if (!membership) continue;
+        try {
+          const { payload, signature } = signWithMembership(membership, {
+            action: 'vouch-status', groupId, caller: membership.pairwiseId, ts: new Date().toISOString()
+          });
+          const r = await fetch(`${registryBase(membership)}/api/groups/${encodeURIComponent(groupId)}/vouches/status`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ caller: membership.pairwiseId, payload, signature })
+          });
+          const data = await r.json().catch(() => ({}));
+          if (!r.ok || !data.success) continue;
+          const remote = new Map((data.vouches || []).map((v) => [v.vouchId, v]));
+          for (const e of groupEntries) {
+            const rv = remote.get(e.vouchId);
+            const next = !rv ? e.status
+              : rv.revoked ? 'revoked'
+              : rv.redeemed ? 'redeemed'
+              : (new Date(e.codeExpiresAt).getTime() <= Date.now() ? 'code-expired' : 'code-issued');
+            if (next !== e.status) { e.status = next; changed = true; }
+            if (rv?.redeemedAt && !e.redeemedAt) { e.redeemedAt = rv.redeemedAt; changed = true; }
+          }
+        } catch { /* registry offline — show cached statuses */ }
+      }
+      if (changed) {
+        userDoc.updatedAt = new Date().toISOString();
+        try { await cloudant.saveDocument(USERS_DB, userDoc); } catch { /* best-effort cache */ }
+      }
+      res.json({ success: true, vouches: entries });
+    } catch (error) {
+      console.error('[user-groups] vouches failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to load vouches' });
+    }
+  });
+
+  // POST /api/user-groups/vouch-revoke — one click; the registry record
+  // flips and every later send re-check sees it (revocation beats any
+  // still-live session token).
+  app.post('/api/user-groups/vouch-revoke', async (req, res) => {
+    const userId = requireMatchingUser(req, res);
+    if (!userId) return;
+    try {
+      const { vouchId } = req.body || {};
+      const userDoc = await cloudant.getDocument(USERS_DB, userId);
+      const entry = (userDoc?.vouchedParties || []).find((v) => v.vouchId === vouchId);
+      if (!entry) return res.status(404).json({ success: false, error: 'Vouch not found' });
+      const membership = (userDoc.groupMemberships || []).find((m) => m.groupId === entry.groupId);
+      if (!membership) return res.status(404).json({ success: false, error: 'No longer a member of that group' });
+      const { payload, signature } = signWithMembership(membership, {
+        action: 'vouch-revoke', groupId: entry.groupId, caller: membership.pairwiseId,
+        vouchId, ts: new Date().toISOString()
+      });
+      const r = await fetch(`${registryBase(membership)}/api/groups/${encodeURIComponent(entry.groupId)}/vouches/revoke`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ caller: membership.pairwiseId, payload, signature })
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || !data.success) {
+        return res.status(502).json({ success: false, error: data.error || 'The group registry could not revoke' });
+      }
+      entry.status = 'revoked';
+      entry.revokedAt = new Date().toISOString();
+      userDoc.updatedAt = new Date().toISOString();
+      await cloudant.saveDocument(USERS_DB, userDoc);
+      auditLog.logEvent({
+        type: 'vouch_revoked', userId, ip: req.ip,
+        details: { groupId: entry.groupId, vouchId }
+      });
+      res.json({ success: true });
+    } catch (error) {
+      console.error('[user-groups] vouch revoke failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to revoke' });
+    }
+  });
+
   /**
    * Persist AS requests pulled during a refresh. Dispatch (PR-13): each
    * request is evaluated against the user's sharing-policy cards when its
@@ -3449,7 +3948,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail } 
           purpose: r.purpose || 'any',
           scope: r.resource,
           signature: r.fromOutsider
-            ? (r.signature === 'verified-email' ? 'verified-email' : 'unverified')
+            ? (['verified-email', 'verified-by-me'].includes(r.signature) ? r.signature : 'unverified')
             : 'group-member',
           payment: Object.prototype.hasOwnProperty.call(CREDIT_PRICES, r.payment) ? r.payment : 'none'
         });

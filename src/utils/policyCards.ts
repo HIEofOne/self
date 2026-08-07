@@ -189,9 +189,9 @@ export const POLICY_MATRIX: MatrixColumn[] = [
     { v: 'doximity', label: 'Doximity verified', sub: 'verified clinician',
       tip: 'Clinician identity verified through Doximity. (Not live yet — until it is, such claims evaluate as unverified.)' },
     { v: 'verified-by-me', label: 'Verified by me', sub: 'someone you vouched for',
-      tip: 'The patient personally vouched for this requester — the strongest level of all.',
+      tip: 'The patient personally vouched for this requester — the strongest level of all. A patient mints a one-time code after matching the person by voice or video; redeeming it binds a passkey that proves the vouch from then on.',
       disabledIn: {
-        request: 'A first-time visitor can’t have been vouched for by the patient yet.'
+        request: 'Unlocks when you redeem a vouch code (or verify a vouch passkey) below.'
       } }
   ]},
   { key: 'payment', head: 'Deposit or Payment', headTip: 'Money as a spam filter and a fairness tool, paid in credits (100 for $2, bought from the host; non-refundable). Credits cover the host’s real hosting and AI costs; any surplus goes to a charity the host names. One payment covers the whole request, however many members it reaches.', options: [
