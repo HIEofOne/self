@@ -154,6 +154,66 @@
       @click="showAllRequests = !showAllRequests"
     />
 
+    <!-- People I vouch for: verified-by-me registration codes. The patient
+         matches the person OUT-OF-BAND (voice or video — biometrics never
+         enter MAIA) and reads them a one-time code; redeeming it binds a
+         passkey on the requester's device. Cards at signature level
+         "verified by me" then answer that person — and only that person. -->
+    <q-separator class="q-my-md" />
+    <div class="text-subtitle2 q-mb-xs">People I vouch for</div>
+    <div class="text-caption text-grey-7 q-mb-sm">
+      Vouch for someone you have personally recognized by voice or video call.
+      You'll get a one-time code to read to them (expires in 24 hours); once
+      they redeem it, requests from them reach your MAIA as
+      <b>“verified by me”</b> — the strongest identity your cards can require.
+      Revoking removes that standing instantly.
+    </div>
+    <div class="row items-center q-col-gutter-sm q-mb-sm" style="flex-wrap: wrap;">
+      <div class="col-auto" style="min-width: 180px;">
+        <q-select
+          v-model="vouchGroup" dense outlined emit-value map-options
+          :options="memberships.map((m) => ({ label: m.groupName, value: m.groupId }))"
+          label="Through group" :disable="vouchMinting || !memberships.length"
+        />
+      </div>
+      <div class="col" style="min-width: 200px;">
+        <q-input
+          v-model="vouchLabel" dense outlined maxlength="80"
+          label="Who is this for? (e.g. Dr. Chen — my cardiologist)"
+          :disable="vouchMinting"
+        />
+      </div>
+      <div class="col-auto">
+        <q-btn
+          unelevated dense color="primary" label="Create code" :loading="vouchMinting"
+          :disable="!vouchGroup || !vouchLabel.trim()" @click="mintVouchCode"
+        />
+      </div>
+    </div>
+    <div v-if="!vouches.length" class="text-caption text-grey-6 q-mb-md">
+      You haven't vouched for anyone yet.
+    </div>
+    <div v-for="v in vouches" :key="v.vouchId" class="reqlog-row">
+      <div class="row items-center no-wrap q-gutter-sm">
+        <q-badge :color="vouchBadge(v).color" :label="vouchBadge(v).label" style="flex: 0 0 auto" />
+        <div class="col" style="min-width: 0">
+          <div class="text-body2"><strong>{{ v.label }}</strong>
+            <span class="text-caption text-grey-6"> · {{ v.groupName }}</span>
+          </div>
+          <div class="text-caption text-grey-6">
+            Created {{ reqWhen(v.createdAt) }}<template v-if="v.redeemedAt"> · redeemed {{ reqWhen(v.redeemedAt) }}</template>
+          </div>
+        </div>
+        <q-btn
+          v-if="v.status !== 'revoked'"
+          flat round dense size="sm" icon="delete_outline" color="negative"
+          :loading="vouchRevoking === v.vouchId" @click="revokeVouch(v)"
+        >
+          <q-tooltip>Revoke — requests from this person immediately lose “verified by me”.</q-tooltip>
+        </q-btn>
+      </div>
+    </div>
+
     <!-- Display name: member-signed rename, no leave-and-rejoin -->
     <q-separator class="q-my-md" />
     <div class="text-subtitle2 q-mb-xs">Your display name</div>
@@ -642,9 +702,93 @@ const loadRequestLog = async () => {
   } catch { /* section shows empty state */ }
 };
 
+// ── People I vouch for (verified-by-me) ──────────────────────────────
+interface VouchEntry {
+  vouchId: string; label: string; groupId: string; groupName: string;
+  createdAt: string; codeExpiresAt: string; redeemedAt?: string;
+  status: 'code-issued' | 'code-expired' | 'redeemed' | 'revoked';
+}
+const vouches = ref<VouchEntry[]>([]);
+const vouchGroup = ref<string | null>(null);
+const vouchLabel = ref('');
+const vouchMinting = ref(false);
+const vouchRevoking = ref<string | null>(null);
+
+const vouchBadge = (v: VouchEntry): { color: string; label: string } =>
+  v.status === 'redeemed' ? { color: 'positive', label: 'Active' }
+  : v.status === 'revoked' ? { color: 'grey-6', label: 'Revoked' }
+  : v.status === 'code-expired' ? { color: 'grey-6', label: 'Code expired' }
+  : { color: 'orange-8', label: 'Code issued' };
+
+const loadVouches = async () => {
+  try {
+    const res = await fetch(`/api/user-groups/vouches?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.success) vouches.value = data.vouches || [];
+  } catch { /* section shows empty state */ }
+};
+
+const mintVouchCode = async () => {
+  if (!vouchGroup.value || !vouchLabel.value.trim() || vouchMinting.value) return;
+  vouchMinting.value = true;
+  try {
+    const res = await fetch('/api/user-groups/vouch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+      body: JSON.stringify({ userId: props.userId, groupId: vouchGroup.value, label: vouchLabel.value.trim() })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+    // The code is shown ONCE — it is never stored in plaintext anywhere.
+    $q.dialog({
+      title: `Registration code for ${vouchLabel.value.trim()}`,
+      message: [
+        `<div style="font-size: 28px; letter-spacing: .35em; font-weight: 700; text-align: center; margin: 10px 0;">${data.code}</div>`,
+        '<div>Read this code to them <b>after</b> you have recognized them by voice or video.',
+        'They enter it on this host’s welcome page under “Did a member personally vouch for you?”,',
+        'which creates a passkey on their device.</div>',
+        '<div class="q-mt-sm">Single use · expires in 24 hours · shown only this once.</div>'
+      ].join(''),
+      html: true,
+      ok: { label: 'Done', color: 'primary' }
+    });
+    vouchLabel.value = '';
+    await loadVouches();
+  } catch (err) {
+    $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to create code' });
+  } finally {
+    vouchMinting.value = false;
+  }
+};
+
+const revokeVouch = (v: VouchEntry) => {
+  $q.dialog({
+    title: 'Revoke this vouch?',
+    message: `Requests from “${v.label}” will immediately stop counting as “verified by me”.`,
+    ok: { label: 'Revoke', color: 'negative' },
+    cancel: { label: 'Keep', flat: true }
+  }).onOk(async () => {
+    vouchRevoking.value = v.vouchId;
+    try {
+      const res = await fetch('/api/user-groups/vouch-revoke', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+        body: JSON.stringify({ userId: props.userId, vouchId: v.vouchId })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+      await loadVouches();
+      $q.notify({ type: 'positive', message: 'Vouch revoked.' });
+    } catch (err) {
+      $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to revoke' });
+    } finally {
+      vouchRevoking.value = null;
+    }
+  });
+};
+
 const loadAll = async () => {
   loading.value = true;
   void loadRequestLog();
+  void loadVouches();
   try {
     const [pRes, gRes] = await Promise.all([
       fetch(`/api/user-policies?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' }),
@@ -666,6 +810,7 @@ const loadAll = async () => {
       aliasSaved.value = Object.fromEntries(
         memberships.value.map((m) => [m.groupId, m.alias])
       );
+      if (!vouchGroup.value && memberships.value.length) vouchGroup.value = memberships.value[0].groupId;
     }
   } catch { /* empty panel */ } finally {
     loading.value = false;
