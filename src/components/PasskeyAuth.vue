@@ -521,7 +521,31 @@ const handleSignIn = async () => {
     const options = await optionsResponse.json();
 
     // Step 2: Authenticate with passkey
-    const assertion = await startAuthentication({ optionsJSON: options });
+    let assertion;
+    try {
+      assertion = await startAuthentication({ optionsJSON: options });
+    } catch (waErr: any) {
+      // NotAllowedError = the browser found no credential matching the
+      // server's allowCredentials (or the prompt was dismissed). The most
+      // common real cause here: a passkey created on ANOTHER host of the
+      // same domain replaced this one in the authenticator (one resident
+      // credential per rpID+user handle — fixed for new registrations by
+      // host-qualified handles, but pre-fix credentials can still be in
+      // this state). Steer the user to the recovery path instead of
+      // showing a raw DOMException.
+      if (waErr?.name === 'NotAllowedError') {
+        // Neutral wording: the same DOMException covers a deliberate
+        // cancel and a genuinely missing credential, and the visible
+        // "Create or replace" recovery button only works for the admin
+        // account — so explain the likely cause without steering
+        // non-admin users into that dead end.
+        throw new Error(
+          'No matching passkey was found on this device (or the prompt was dismissed). ' +
+          'Try again — if it keeps failing, a passkey created on another MAIA host may have replaced this one.'
+        );
+      }
+      throw waErr;
+    }
 
     // Step 3: Verify authentication
     const verifyResponse = await fetch('/api/passkey/authenticate-verify', {
