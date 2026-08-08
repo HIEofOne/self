@@ -1337,8 +1337,14 @@ const handleOpenPeerThread = (t: { groupId: string; peerId: string; alias: strin
   peerThread.value = t;
   railActiveKind.value = 'peer';
   showMyStuffDialog.value = false; // reveal the chat area under the Workbook
+  // Chat mode: shrink the Workbook rail to icons so the thread + the
+  // conversation rail get the width. No-op during setup; the chevron
+  // re-expands anytime (the persisted width preference is untouched).
+  myStuffDialogRef.value?.collapseRail();
 };
-// Back-arrow out of a peer thread returns to the live AI conversation.
+// Leaving a peer thread returns to the live AI conversation. Reached via
+// the thread's Block decision (emit('close')); the everyday exit is the
+// rail's "Current chat" row.
 const handlePeerThreadClose = () => {
   peerThread.value = null;
   railActiveKind.value = 'ai';
@@ -1357,8 +1363,19 @@ const aiRailEntries = computed(() =>
     kind: (isPrivateAiLabel(o.label) ? 'private' : 'public') as 'private' | 'public'
   }))
 );
+// alias + groupName ride along so the rail can synthesize a row for a
+// thread whose peer isn't in its polled list yet (e.g. "Reply privately"
+// to a broadcaster you've never messaged) — the identity badge lives on
+// the rail row now, so the active thread must ALWAYS have one.
 const activePeerKey = computed(() =>
-  peerThread.value ? { groupId: peerThread.value.groupId, peerId: peerThread.value.peerId } : null
+  peerThread.value
+    ? {
+        groupId: peerThread.value.groupId,
+        peerId: peerThread.value.peerId,
+        alias: peerThread.value.alias,
+        groupName: peerThread.value.groupName
+      }
+    : null
 );
 // The rail lists THREADS; the composer "To:" selector picks the
 // consultant (which AI answers next). Picking a consultant keeps you in

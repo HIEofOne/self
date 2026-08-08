@@ -1,33 +1,20 @@
 <template>
   <div class="peer-thread">
-    <!-- Header: who you're talking to (identity chips, Refinement 6) -->
-    <div class="peer-thread__header">
-      <q-btn flat dense round icon="arrow_back" @click="emit('close')">
-        <q-tooltip>Back to your AI chat</q-tooltip>
-      </q-btn>
-      <div class="peer-thread__avatar" :style="{ background: isEveryone ? '#00897b' : avatarColor(peerId) }">
-        <q-icon v-if="isEveryone" name="campaign" size="18px" />
-        <template v-else>{{ (peerAlias || '?').slice(0, 1).toUpperCase() }}</template>
-      </div>
-      <div style="min-width: 0">
-        <div class="text-subtitle2 row items-center q-gutter-xs no-wrap">
-          <span>{{ isEveryone ? 'Everyone' : (peerAlias || (isOutsider ? 'Outside requester' : 'Group member')) }}</span>
-          <q-badge v-if="isEveryone" color="teal" :label="`everyone in ${groupName}`" />
-          <q-badge v-else-if="isOutsider" color="deep-orange" outline label="outside the group" />
-          <q-badge v-else color="teal" outline :label="`member of ${groupName}`" />
-        </div>
-        <div v-if="isEveryone" class="text-caption text-grey-7">sealed individually to every member — all members of the group see this thread</div>
-        <div v-else-if="isOutsider" class="text-caption text-grey-7">not a member — no identity check · reply by email if you choose</div>
-        <div v-else class="text-caption text-grey-7">end-to-end encrypted · your AI is not part of this conversation</div>
-      </div>
+    <!-- The participant's identity now lives ONCE, on the selected rail row
+         (badge + hover tooltip) and in the composer's To: chip — no repeated
+         header block. Leaving the thread is the rail's "Current chat" row.
+         Member threads keep the request-records affordance as a slim
+         toolbar; the per-participant background tint below carries the
+         "which thread am I in" signal. -->
+    <div v-if="!isOutsider && !isEveryone" class="peer-thread__toolbar" :style="{ background: threadTint }">
       <q-space />
-      <q-btn v-if="!isOutsider && !isEveryone" flat dense round size="sm" icon="rule" color="primary" @click="openRequestDialog">
+      <q-btn flat dense round size="sm" icon="rule" color="primary" @click="openRequestDialog">
         <q-tooltip>Request records from {{ peerAlias || 'this member' }} — their sharing policies (or they themselves) decide</q-tooltip>
       </q-btn>
     </div>
 
     <!-- Thread -->
-    <div ref="scrollEl" class="peer-thread__scroll">
+    <div ref="scrollEl" class="peer-thread__scroll" :style="{ background: threadTint }">
       <div v-if="!threadItems.length && !pendingRequest" class="text-caption text-grey-6 text-center q-mt-lg">
         No messages yet. Say hello — your message is end-to-end encrypted to
         {{ peerAlias || 'this member' }}.
@@ -222,11 +209,21 @@ const bubbleTime = (iso: string): string => {
     return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
   } catch { return ''; }
 };
-const avatarColor = (peerId: string): string => {
+// Light per-participant tint for the whole thread background — the same
+// hue the participant's rail avatar uses (Everyone teal, outsiders
+// deep-orange, members their deterministic hash hue), washed nearly white
+// so the bubbles stay legible. This replaces the removed header block as
+// the at-a-glance "which thread am I in" signal.
+const threadTint = computed<string>(() => {
+  if (isEveryone.value) return '#e0f2f1';   // teal-50 — the Everyone identity
+  if (isOutsider.value) return '#fbe9e7';   // deep-orange-50 — outside the group
+  const pid = String(props.peerId || '');
   let h = 0;
-  for (let i = 0; i < peerId.length; i++) h = (h * 31 + peerId.charCodeAt(i)) % 360;
-  return `hsl(${h}, 45%, 55%)`;
-};
+  for (let i = 0; i < pid.length; i++) h = (h * 31 + pid.charCodeAt(i)) % 360;
+  // L=93%: light enough for black text everywhere, saturated enough that
+  // the hue is actually perceptible (96% was indistinguishable from white).
+  return `hsl(${h}, 45%, 93%)`;
+});
 
 const scrollToBottom = async () => {
   await nextTick();
@@ -412,19 +409,13 @@ onUnmounted(() => { if (pullTimer) clearInterval(pullTimer); });
   height: 100%;
   min-height: 320px;
 }
-.peer-thread__header {
+// Slim member-thread toolbar (request-records button only) — the identity
+// header it replaces now lives on the selected rail row.
+.peer-thread__toolbar {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 12px;
-  border-bottom: 1px solid #e0e0e0;
+  padding: 2px 8px 0;
   flex: 0 0 auto;
-}
-.peer-thread__avatar {
-  width: 34px; height: 34px; flex: 0 0 34px;
-  border-radius: 50%;
-  color: #fff; font-weight: 600; font-size: 15px;
-  display: flex; align-items: center; justify-content: center;
 }
 .peer-thread__scroll {
   flex: 1; min-height: 0;
@@ -442,7 +433,9 @@ onUnmounted(() => { if (pullTimer) clearInterval(pullTimer); });
   padding: 8px 12px;
   border-radius: 16px;
   font-size: 14px;
-  &--in { background: #f0f0f0; color: #222; border-bottom-left-radius: 4px; }
+  // White with a hairline ring so incoming bubbles read against the
+  // per-participant background tint.
+  &--in { background: #fff; color: #222; border-bottom-left-radius: 4px; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.06); }
   &--out { background: #1976d2; color: #fff; border-bottom-right-radius: 4px; }
   // Private AI consultation: dashed, muted — visually "only you see this".
   &--you-private { background: #ede7f6; color: #4527a0; border: 1px dashed #b39ddb; }

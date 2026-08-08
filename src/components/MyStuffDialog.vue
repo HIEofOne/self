@@ -2465,6 +2465,16 @@ const toggleRailLabeled = () => {
   try { window.localStorage.setItem(RAIL_LABEL_LS_KEY(), railLabeled.value ? '1' : '0'); } catch { /* ignore */ }
 };
 
+// Entering a chat mode (a group thread opened from anywhere) collapses the
+// rail to icons so the conversation gets the width. TRANSIENT, like the
+// showClosePrompt expand above — the user's PERSISTED width preference is
+// untouched, and the chevron re-expands at any time. During setup the rail
+// stays labeled: the wizard needs it visible.
+const collapseRail = () => {
+  if (props.wizardActive) return;
+  if (railLabeled.value) railLabeled.value = false;
+};
+
 // Context-aware chevron at the top of the rail.
 // - When the content panel is OPEN, the chevron's job is to
 //   "collapse the Workbook" → close the panel → show the chat.
@@ -7813,7 +7823,7 @@ const wizardGenerateSummary = (action: 'generate-summary' | 'update-summary-meds
   }
 };
 
-defineExpose({ wizardGenerateSummary });
+defineExpose({ wizardGenerateSummary, collapseRail });
 
 watch(isOpen, (newValue) => {
   emit('update:modelValue', newValue);
