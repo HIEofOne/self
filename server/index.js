@@ -24,6 +24,7 @@ import { moveObjectWithVerify } from './utils/spaces-move.js';
 import { deleteObjectWithLog , asciiSafeMetadata } from './utils/spaces-ops.js';
 import { applyPseudonymMapping, seedPseudonymMappingFromSummary, seedMissingNames, extractSummaryNames, looksLikePersonName, hashName } from './privacyFilter.js';
 import { setupCreditRoutes } from './credits.js';
+import { staticCacheControl } from './utils/static-cache.js';
 import { ChatClient } from '../lib/chat-client/index.js';
 import { findUserAgent, getOrCreateAgentApiKey } from './utils/agent-helper.js';
 import { getClinicalPrompt } from './utils/clinical-prompts.js';
@@ -14935,15 +14936,16 @@ if (isProduction) {
   // fallthrough: true allows requests to continue to the catch-all if file not found
   // Note: Privacy.md is handled above, so it won't be served by static middleware
   app.use(express.static(distPath, {
-    maxAge: '1y', // Cache static assets for 1 year (hashed filenames change on rebuild)
+    maxAge: '1y', // base value — setHeaders below overrides per file class
     etag: true,
     fallthrough: true, // Allow fallthrough to catch-all for SPA routes
     setHeaders: (res, filePath) => {
-      // index.html must always revalidate — it references hashed chunk filenames
-      // that change on every build. Stale index.html → 404 chunks → blank page.
-      if (filePath.endsWith('index.html')) {
-        res.setHeader('Cache-Control', 'no-cache');
-      }
+      // Per-file-class policy (server/utils/static-cache.js): 1y+immutable
+      // ONLY for content-hashed /assets/, no-cache for every .html, and a
+      // short TTL for unhashed public/ files (page.html-style documents,
+      // pdf.worker.min.js, posted PDFs) that previously cached for a year
+      // under never-changing names.
+      res.setHeader('Cache-Control', staticCacheControl(filePath));
     }
   }));
   
@@ -14969,7 +14971,10 @@ if (isProduction) {
       const filePath = path.join(distPath, req.path);
       if (existsSync(filePath)) {
         // File exists - serve it (should have been caught by static middleware, but handle it anyway)
+        // Same cache policy as the static middleware — this path previously
+        // sent NO Cache-Control at all.
         console.log(`📦 [CATCH-ALL] Serving static asset: ${req.path}`);
+        res.setHeader('Cache-Control', staticCacheControl(filePath));
         return res.sendFile(filePath);
       } else {
         // File doesn't exist - return 404 with text/plain so browsers don't treat it as HTML
