@@ -1,9 +1,9 @@
 <template>
   <div class="conv-rail">
-    <!-- Current conversation: the live AI chat, always present, labeled by
+    <!-- Current chat: the live AI conversation, always present, labeled by
          the last question. Which AI answers is chosen in the composer's
          "To:" selector — the rail is the THREAD list, not the AI picker. -->
-    <div class="conv-rail__header conv-rail__header--current">Current conversation</div>
+    <div class="conv-rail__header conv-rail__header--current">Current chat</div>
     <button
       type="button"
       class="conv-rail__item conv-rail__item--current"
@@ -51,9 +51,11 @@
     </button>
     <div v-if="!storedChats.length" class="conv-rail__empty">No saved chats yet</div>
 
-    <!-- One section per group -->
-    <template v-for="g in groups" :key="`g:${g.groupId}`">
-      <div class="conv-rail__header conv-rail__header--group">
+    <!-- Group chats: a category header like the two above, then one
+         sub-headed section per group -->
+    <div v-if="railGroups.length" class="conv-rail__header conv-rail__header--group">Group chats</div>
+    <template v-for="g in railGroups" :key="`g:${g.groupId}`">
+      <div class="conv-rail__subheader">
         <span class="conv-rail__label">{{ g.groupName }}</span>
         <q-btn flat dense round size="xs" icon="group_add" @click="emit('open-groups')">
           <q-tooltip>Find peers &amp; manage this group</q-tooltip>
@@ -63,7 +65,7 @@
         v-for="p in g.peers" :key="`p:${g.groupId}:${p.peerId}`"
         type="button"
         class="conv-rail__item conv-rail__item--group"
-        :class="{ 'is-active': props.activeKind === 'peer' && activePeer && activePeer.groupId === g.groupId && activePeer.peerId === p.peerId }"
+        :class="{ 'is-active': isActivePeer(g, p) }"
         @click="emit('open-peer', { groupId: g.groupId, peerId: p.peerId, alias: p.alias, groupName: g.groupName })"
       >
         <div class="conv-rail__avatar" :style="{ background: p.peerId === '@everyone' ? '#00897b' : avatarColor(p.peerId) }">
@@ -78,6 +80,18 @@
         <q-icon v-else-if="p.pending" name="person_add" size="13px" color="primary" style="flex: 0 0 auto">
           <q-tooltip>Wants to connect — a request is waiting</q-tooltip>
         </q-icon>
+        <!-- The SELECTED participant carries its identity badge here (the
+             chat header no longer repeats it); the mode explanation is the
+             badge's hover tooltip. -->
+        <div v-if="isActivePeer(g, p)" class="conv-rail__active-badge">
+          <q-badge
+            :color="isOutsiderPeer(p) ? 'deep-orange' : 'teal'"
+            :outline="p.peerId !== '@everyone'"
+            :label="peerBadgeLabel(g, p)"
+          >
+            <q-tooltip max-width="260px">{{ peerModeTip(p) }}</q-tooltip>
+          </q-badge>
+        </div>
       </button>
       <div v-if="!g.peers.length" class="conv-rail__empty">No conversations — tap ＋ to find peers</div>
     </template>
@@ -85,7 +99,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useQuasar } from 'quasar';
 
 const $q = useQuasar();
@@ -93,7 +107,7 @@ const $q = useQuasar();
 const props = defineProps<{
   userId: string;
   activeKind: 'ai' | 'stored' | 'peer';
-  activePeer: { groupId: string; peerId: string } | null;
+  activePeer: { groupId: string; peerId: string; alias?: string | null; groupName?: string } | null;
   activeStoredId: string | null;
   currentConversationLabel: string;
   canSaveLocally: boolean;
@@ -129,6 +143,25 @@ const avatarColor = (peerId: string): string => {
   for (let i = 0; i < peerId.length; i++) h = (h * 31 + peerId.charCodeAt(i)) % 360;
   return `hsl(${h}, 45%, 55%)`;
 };
+
+// ── Selected-participant identity (was the chat header's block) ──────
+const isActivePeer = (g: RailGroup, p: RailPeer): boolean =>
+  props.activeKind === 'peer' && !!props.activePeer
+  && props.activePeer.groupId === g.groupId && props.activePeer.peerId === p.peerId;
+const isOutsiderPeer = (p: RailPeer): boolean => String(p.peerId).startsWith('outsider:');
+// Same identity vocabulary PeerThreadView's header used to repeat; it now
+// lives once, on the selected rail row, with the mode explanation as the
+// badge's hover tooltip.
+const peerBadgeLabel = (g: RailGroup, p: RailPeer): string =>
+  p.peerId === '@everyone' ? `everyone in ${g.groupName}`
+    : isOutsiderPeer(p) ? 'outside the group'
+    : `member of ${g.groupName}`;
+const peerModeTip = (p: RailPeer): string =>
+  p.peerId === '@everyone'
+    ? 'sealed individually to every member — all members of the group see this thread'
+    : isOutsiderPeer(p)
+      ? 'not a member — no identity check · reply by email if you choose'
+      : 'end-to-end encrypted · your AI is not part of this conversation';
 
 // ── Stored chats ─────────────────────────────────────────────────────
 interface StoredChat { _id: string; title: string; isDeepLink: boolean; raw: any }
@@ -233,6 +266,30 @@ const loadGroups = async () => {
   } catch { /* keep prior */ }
 };
 
+// What the template renders: the polled groups, PLUS a synthesized row for
+// the ACTIVE thread when its peer isn't in the polled list yet — e.g.
+// "Reply privately" to an Everyone broadcaster you've never messaged. The
+// identity badge lives on the rail row now, so the open thread must always
+// have one; the 15s poll catches up with the real row (alias included)
+// after the first message lands.
+const railGroups = computed<RailGroup[]>(() => {
+  const ap = props.activePeer;
+  if (props.activeKind !== 'peer' || !ap) return groups.value;
+  const out = groups.value.map((g) => ({ ...g, peers: [...g.peers] }));
+  let g = out.find((x) => x.groupId === ap.groupId);
+  if (!g) {
+    if (!ap.groupName) return groups.value; // can't name a section we don't know
+    g = { groupId: ap.groupId, groupName: ap.groupName, peers: [] };
+    out.push(g);
+  }
+  if (!g.peers.some((p) => p.peerId === ap.peerId)) {
+    // After @everyone (pinned first) when present, else at the top.
+    const at = g.peers.length && g.peers[0]!.peerId === '@everyone' ? 1 : 0;
+    g.peers.splice(at, 0, { peerId: ap.peerId, alias: ap.alias || null, lastAt: '', unread: 0 });
+  }
+  return out;
+});
+
 const refresh = () => { void loadStoredChats(); void loadGroups(); };
 defineExpose({ refresh });
 
@@ -262,7 +319,7 @@ onUnmounted(() => { if (timer) clearInterval(timer); });
   position: sticky;
   top: 0;
   background: #fff;
-  z-index: 1;
+  z-index: 2; // above the sticky group-name sub-headers
 
   // Category accents — MUST match the message-chip colors in ChatInterface.
   &--current    { color: #5e35b1; }   // deep-purple (AI conversation)
@@ -274,6 +331,26 @@ onUnmounted(() => { if (timer) clearInterval(timer); });
   gap: 4px;
   padding: 2px 8px 8px;
   border-bottom: 1px solid #f0f0f0;
+}
+// Group-name sub-header under the GROUP CHATS category label — same
+// vocabulary, one visual step down. Sticky just below the category header
+// so long peer lists keep their group name pinned while scrolling (muted
+// via color alpha, NOT element opacity — the background must stay opaque
+// for rows sliding underneath).
+.conv-rail__subheader {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: rgba(0, 121, 107, 0.75);
+  padding: 6px 12px 2px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 28px; // just under the sticky category header
+  background: #fff;
+  z-index: 1;
 }
 .conv-rail__item {
   display: flex;
@@ -295,7 +372,16 @@ onUnmounted(() => { if (timer) clearInterval(timer); });
   // Shading per category (tint + active left-border), matching the chips.
   &--current    { &.is-active { background: #ede7f6; border-left-color: #5e35b1; } }
   &--stored     { &.is-active { background: #efebe9; border-left-color: #6d4c41; } }
-  &--group      { &.is-active { background: #e0f2f1; border-left-color: #00796b; } }
+  // row-gap 0: the base gap:8px must space columns only, not the wrapped
+  // badge line (which manages its own 3px margin-top).
+  &--group      { flex-wrap: wrap; row-gap: 0; &.is-active { background: #e0f2f1; border-left-color: #00796b; } }
+}
+// Second line of the ACTIVE group row: the identity badge, aligned under
+// the label (past the 24px avatar + gap).
+.conv-rail__active-badge {
+  flex: 1 0 100%;
+  padding-left: 32px;
+  margin-top: 3px;
 }
 .conv-rail__label {
   flex: 1;
