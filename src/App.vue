@@ -1,8 +1,11 @@
 <template>
   <q-layout view="hHh lpR fFf">
     <!-- Redeploy detector: this tab is running an older build than the
-         server. One click reloads; no user ever needs to know about
-         force-reload. Re-checked on focus, so a dismissed banner returns. -->
+         server. One click reloads; "Later" snoozes THAT version for every
+         tab of this origin (localStorage). ONE fixed banner at layout
+         level — it spans the welcome, chat, and admin views, so it never
+         renders twice; a mid-deploy stale reload gets one silent retry
+         before the banner may return (see checkAppVersion). -->
     <q-banner
       v-if="updateAvailable"
       dense
@@ -1023,6 +1026,7 @@ const checkRouteRef = ref<(() => void) | null>(null);
 onUnmounted(() => {
   document.removeEventListener('visibilitychange', onVisibleCheckVersion);
   window.removeEventListener('focus', onVisibleCheckVersion);
+  window.removeEventListener('storage', onSnoozeStorage);
   if (routeCheckInterval.value) {
     clearInterval(routeCheckInterval.value);
     routeCheckInterval.value = null;
@@ -1071,6 +1075,30 @@ let lastVersionCheck = 0;
 // mismatch anyway. Tabs running builds older than this feature keep
 // nagging until their one final reload — unavoidable from here.
 const UPDATE_SNOOZE_KEY = 'maiaUpdateSnoozedVersion';
+// "Reload now" was clicked for THIS server version (sessionStorage — the
+// marker only matters to the tab that reloaded). During a DigitalOcean
+// rolling deploy, /health can answer from the NEW container while the SPA
+// document still comes from the OLD one — so the reload the user just
+// asked for lands on a stale bundle and the banner used to pop right back
+// up ("the badge shows twice"). With the marker set, we retry the reload
+// ONCE, silently, after the roll has had time to finish; the banner only
+// returns if we are still stale after that.
+const UPDATE_PENDING_KEY = 'maiaUpdatePendingVersion';
+const UPDATE_RETRIED_KEY = 'maiaUpdateRetriedVersion';
+let pendingRetryTimer: ReturnType<typeof setTimeout> | null = null;
+/** True when semver-ish `a` is strictly newer than `b`. Unparsable input
+ *  falls back to plain inequality (never offer a same-version "update"). */
+const isNewerVersion = (a: string, b: string): boolean => {
+  const pa = String(a).split('.').map(Number);
+  const pb = String(b).split('.').map(Number);
+  if (pa.length !== 3 || pb.length !== 3 || pa.some(Number.isNaN) || pb.some(Number.isNaN)) {
+    return a !== b;
+  }
+  for (let i = 0; i < 3; i++) {
+    if (pa[i]! !== pb[i]!) return pa[i]! > pb[i]!;
+  }
+  return false;
+};
 const checkAppVersion = async () => {
   const now = Date.now();
   if (now - lastVersionCheck < 60_000) return;
@@ -1078,23 +1106,85 @@ const checkAppVersion = async () => {
   try {
     const r = await fetch('/health', { cache: 'no-store' });
     const j = await r.json().catch(() => ({}));
-    if (j?.version && j.version !== appVersion) {
+    // Only a strictly NEWER server version raises the banner. During a
+    // rolling deploy the containers answer inconsistently in BOTH
+    // directions — a fresh bundle can receive a stale /health (old
+    // container) — and offering that as an "update" would be a downgrade
+    // prompt, the mirror image of the stale-bundle race below.
+    if (j?.version && isNewerVersion(j.version, appVersion)) {
       let snoozed = '';
       try { snoozed = localStorage.getItem(UPDATE_SNOOZE_KEY) || ''; } catch { /* ignore */ }
-      if (snoozed === j.version) return;
+      if (snoozed === j.version) {
+        // Snoozed in SOME tab (maybe another one) — also lower the banner
+        // here rather than leaving it up until reload.
+        updateAvailable.value = false;
+        return;
+      }
+      let pending = '';
+      try { pending = sessionStorage.getItem(UPDATE_PENDING_KEY) || ''; } catch { /* ignore */ }
+      if (pending === j.version) {
+        let retried = '';
+        try { retried = sessionStorage.getItem(UPDATE_RETRIED_KEY) || ''; } catch { /* ignore */ }
+        if (retried !== j.version) {
+          // The user JUST chose to reload for this exact version and still
+          // got the old bundle (mid-deploy race). Honor their intent with
+          // one quiet delayed retry instead of re-raising the banner —
+          // but ONLY if the retried marker persists: without it the
+          // retry-once invariant is gone, and an invisible reload loop is
+          // worse than a visible banner.
+          let marked = false;
+          try {
+            sessionStorage.setItem(UPDATE_RETRIED_KEY, j.version);
+            marked = true;
+          } catch { /* fall through to the banner */ }
+          if (marked) {
+            if (pendingRetryTimer) clearTimeout(pendingRetryTimer);
+            pendingRetryTimer = setTimeout(() => window.location.reload(), 20_000);
+            return;
+          }
+        }
+        // Retry spent (or unmarkable) and still stale — show the banner,
+        // and disarm any straggling silent retry so "Later" is honored.
+        if (pendingRetryTimer) { clearTimeout(pendingRetryTimer); pendingRetryTimer = null; }
+      }
       serverVersion.value = j.version;
       updateAvailable.value = true;
-    } else if (updateAvailable.value) {
-      updateAvailable.value = false; // caught up (e.g. reloaded elsewhere)
+    } else {
+      if (updateAvailable.value) updateAvailable.value = false; // caught up
+      if (pendingRetryTimer) { clearTimeout(pendingRetryTimer); pendingRetryTimer = null; }
+      try {
+        // Clear the reload-intent markers only once they're truly moot. If
+        // the user asked to reload onto a version we STILL don't run (this
+        // page and this /health answer are both from old containers), keep
+        // the marker so the next check can complete the silent retry
+        // instead of re-raising the banner.
+        const pending = sessionStorage.getItem(UPDATE_PENDING_KEY) || '';
+        if (!pending || !isNewerVersion(pending, appVersion)) {
+          sessionStorage.removeItem(UPDATE_PENDING_KEY);
+          sessionStorage.removeItem(UPDATE_RETRIED_KEY);
+        }
+      } catch { /* ignore */ }
     }
   } catch { /* offline or transient — try again on next focus */ }
 };
 const snoozeUpdate = () => {
   updateAvailable.value = false;
+  // "Later" must also win against a still-armed silent retry.
+  if (pendingRetryTimer) { clearTimeout(pendingRetryTimer); pendingRetryTimer = null; }
   try { localStorage.setItem(UPDATE_SNOOZE_KEY, serverVersion.value); } catch { /* ignore */ }
 };
-const reloadForUpdate = () => window.location.reload();
+const reloadForUpdate = () => {
+  try { sessionStorage.setItem(UPDATE_PENDING_KEY, serverVersion.value); } catch { /* ignore */ }
+  window.location.reload();
+};
 const onVisibleCheckVersion = () => { if (!document.hidden) void checkAppVersion(); };
+// Cross-tab: when another tab snoozes this version, lower our banner
+// immediately (the storage event fires in every OTHER tab of the origin).
+const onSnoozeStorage = (e: StorageEvent) => {
+  if (e.key === UPDATE_SNOOZE_KEY && e.newValue && e.newValue === serverVersion.value) {
+    updateAvailable.value = false;
+  }
+};
 
 interface User {
   userId: string;
@@ -3900,6 +3990,7 @@ onMounted(async () => {
   void checkAppVersion();
   document.addEventListener('visibilitychange', onVisibleCheckVersion);
   window.addEventListener('focus', onVisibleCheckVersion);
+  window.addEventListener('storage', onSnoozeStorage);
 
   // Check for admin page route
   const isAdminPage = window.location.pathname === '/admin';
