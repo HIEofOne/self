@@ -4,6 +4,10 @@ Patients increasingly receive medical advice from both public AI and clinicians.
 
 MAIA introduces a patient-controlled Private AI agent that sits between a patient's complete health record and public AIs. Patients can see and edit chats, share them with clinicians, and manage current medications, a patient summary, a diary of symptoms and observations, relevant references, and a privacy filter that pseudonymizes names before sending anything to public AI.
 
+**Links:** [Live demo](https://maia.agropper.xyz/) · [Community forum](https://forum.agropper.xyz/) · [Security & privacy design](https://maia.agropper.xyz/MAIA_Request_Security_Privacy_Design.pdf) · [Trustee on Substack](https://trustee.substack.com/)
+
+The [forum](https://forum.agropper.xyz/) is the public place to discuss MAIA and patient-controlled health records — patients and domain experts as peers, no account needed to read. One rule: no personal health information (that belongs in your own MAIA, not a public forum).
+
 ### Trust Model
 
 Unlike Public AI agents, MAIA's trust model does not bundle the AI model policies with the AI hosting policies. The host running the service (DigitalOcean in this implementation) is to be trusted to run this open source code and open source Private AI without modification. The publisher of the open source code and any verifier also needs to be trusted for the integrity of the code they release. Independent verification of code and host is facilitated by the open source design of MAIA.
