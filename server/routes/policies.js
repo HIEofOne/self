@@ -18,6 +18,23 @@
 const USERS_DB = 'maia_users';
 const MAX_POLICIES = 200;
 
+/**
+ * ── Policy vocabulary editions ──────────────────────────────────────
+ * A stored card's meaning depends on vocabulary tables (signature ladder,
+ * scope lattice) that EVOLVE. Every card therefore stamps the edition its
+ * elements are expressed in; an ABSENT stamp means edition 1. The rule
+ * (design doc §15.6): a vocabulary change either provably preserves each
+ * affected card's semantics, or the card comes back to the patient — and
+ * until reviewed it fails closed to ask. Bumping this number REQUIRES a
+ * matching entry in Documentation/Policy_Vocab_Changelog.md classifying
+ * the change (compatible / narrowing / consent-affecting).
+ *
+ *   v1 (through 1.5.172): original vocabulary, including signature 'npi'.
+ *   v2 (1.5.173): 'npi' removed from the authorable vocabulary. Legacy
+ *      cards keep rank + validity (removal must never weaken a card).
+ */
+export const POLICY_VOCAB_VERSION = 2;
+
 const PURPOSES = ['any', 'peer-support', 'clinical', 'research', 'public-health', 'marketing'];
 const SCOPES = ['notification-only', 'meds-allergies', 'patient-summary', 'not-sensitive', 'everything', 'ah-category'];
 // 'npi' was removed from the AUTHORABLE vocabulary (v1.5.173) — no UI
@@ -76,6 +93,19 @@ export const normalizeCard = (raw) => {
   };
   if (card.elements.party.type === 'group' && !card.elements.party.groupId) return null;
   if (card.elements.party.type === 'peer' && !card.elements.party.pairwiseId) return null;
+  // Vocabulary-edition stamp (P0 of §15.6). Preserve a valid incoming
+  // stamp (a round-tripped card keeps its authored edition); stamp new or
+  // unstamped cards with the CURRENT edition — except a card using 'npi',
+  // which only edition 1 expresses.
+  const incomingVocab = Number.isInteger(raw.vocabVersion)
+    && raw.vocabVersion >= 1 && raw.vocabVersion <= POLICY_VOCAB_VERSION
+    ? raw.vocabVersion : null;
+  card.vocabVersion = card.elements.signature === 'npi' ? 1 : (incomingVocab ?? POLICY_VOCAB_VERSION);
+  // Consent-language snapshot: the sentence for these elements as rendered
+  // at last write. Request docs already snapshot the DECIDING sentence at
+  // decision time; this preserves what the card said when the patient
+  // saved it, even if sentence templates evolve later.
+  card.authoredSentence = policySentence(card);
   return card;
 };
 

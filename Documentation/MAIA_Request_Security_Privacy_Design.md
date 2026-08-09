@@ -1,6 +1,6 @@
 # MAIA Request Security and Privacy Design
 
-- **Date:** 2026-08-07 (revised 2026-08-09: NPI removed from the signature vocabulary, v1.5.173)
+- **Date:** 2026-08-07 (revised 2026-08-09: NPI removed from the signature vocabulary, v1.5.173; vocabulary editions + card stamping added, §15.6, v1.5.174)
 - **Status:** Comprehensive review — implemented behavior through **v1.5.169** (PRs #264–#301), plus the approved roadmap (VC/UCAN artifacts → federation → GNAP/MCP → external resource servers).
 - **Baseline:** `Groups_Design.md` (2026-07-05/06), the verbatim design conversation this document traces against.
 - **Audience:** MAIA maintainers; prospective **group administrators** evaluating whether to sponsor a group; **privacy and security experts** validating the design and its implementation.
@@ -397,6 +397,18 @@ The GNAP phase raises the complementary question: when the patient's records als
 
 **Regulatory rails:** the information-blocking rule and the right of access make refusing patient-directed automation progressively harder to defend; TEFCA IAS normalizes individual-mediated exchange; §170.315(g)(10) certification already mandates the API Mode 1 rides on. The standards for Mode 2 are complete (RFC 9635, RFC 9767, RFC 9421, FHIR) — what remains per hospital is governance, which is why Mode 1 exists as the unilateral wedge.
 
+### 15.6 Vocabulary evolution: versioned cards, group namespaces, and Cedar
+
+**The problem.** A stored card references vocabulary values (`signature: "group-member"`) whose *meaning* — rank in the identity ladder, position in the scope lattice — lives in the current build's tables. When the vocabulary evolves, stored cards can silently change meaning: removing a level makes its rank lookup undefined and a strict card **fails open** (the v1.5.173 `npi` removal surfaced exactly this — see §12.2-8 for the mitigation); adding a level inside an ordered ladder silently enters every old card's "or stronger"; editing the scope lattice changes what an old "everything not sensitive" card releases; splitting a purpose leaves no record of which meaning the patient consented to. Today cards are few and easily re-authored. As the matrix expands and groups differentiate, vocabulary evolution becomes a recurring **consent** event, not a code event.
+
+**The governing rule.** *A card never silently changes meaning. Every vocabulary change either proves it preserves each affected card's semantics, or the card comes back to the patient — and until reviewed, it fails closed to ask.* This is the standing "deterministic evaluator + explicit consent decide" invariant extended over time, with the safe failure direction built in: an unmigratable card is disabled, and everything it covered escalates as questions. Nothing leaks; the worst case is extra asks.
+
+**Shipped now (P0, v1.5.174):** the vocabulary is an *edition* — `POLICY_VOCAB_VERSION`, identical client and server (parity-tested) — and every card saved through `normalizeCard` stamps (a) the edition its elements are expressed in (absent stamp = edition 1; a card still using `npi` is stamped 1, the only edition that expresses it) and (b) its `authoredSentence`, the exact consent language rendered at save time. `Documentation/Policy_Vocab_Changelog.md` records every edition with each change classified **compatible / narrowing / consent-affecting** and a stated per-card migration rule. Stamping is deliberately first: no card authored from here on is unmigratable.
+
+**Planned (with the Cedar phase, §15.3):** Cedar policies validate against a *schema*, and the schema is the natural carrier of editions. Cards stay canonical; each compiles against its authored edition; a vocabulary bump becomes a recompilation pass that either **proves equivalence** (or strict narrowing) and re-stamps silently, or queues the card in the Sharing Policies tab — old sentence beside new, keep / edit / retire — reusing the existing confirm-a-card UI. The twin-evaluator collapse and the migration gate are one construction project, which is why versioning ships years of cards *before* Cedar rather than after.
+
+**Group namespaces (as groups differentiate).** One small, curated **core** vocabulary (the cross-deployment contract) plus per-group **extensions** — scopes and purposes only, namespaced `grp:<groupId>:<value>` and published as part of the group's signed public info, so any member's AS on any host can evaluate them. The parameterized Apple Health category cell is the in-repo precedent. Three deliberate rules: (1) **signature ladders are core-only** — groups extend *what* can be asked for, never *who counts as verified*, keeping the rank lattice small and centrally versioned; (2) **cross-namespace subsumption defaults to none** — a core "everything" card does not silently absorb a scope a group invents later; the group's suggested cards request it explicitly; (3) a patient in several groups sees core + their groups' sections in the one matrix, and namespacing makes collisions impossible.
+
 ---
 
 ## Appendix A. Numbered invariants
@@ -425,6 +437,7 @@ Testable claims. Suites that pin them are named in §14.1.
 - **I-20** Revocation beats possession: every send re-reads the vouch record, so a revoked credential fails even with an unexpired session token, and later assertions are refused.
 - **I-21** The registry never stores a vouch code (only its SHA-256, as the document id) nor the patient's label for the vouched person.
 - **I-22** A stronger identity buys automation, never more data: every autonomous release is privacy-filtered regardless of signature level.
+- **I-23** Every card records the vocabulary edition it was authored under and its consent sentence as rendered at save (absent stamp = edition 1); a vocabulary change either provably preserves a card's semantics or returns it to the patient, failing closed to ask in between.
 
 ## Appendix B. Glossary
 

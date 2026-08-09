@@ -12,6 +12,13 @@
  * otherwise."
  */
 
+/** Policy vocabulary edition — MUST equal the server's constant in
+ *  server/routes/policies.js (parity-tested). Cards stamp the edition
+ *  their elements are expressed in; absent = edition 1. Bumps require a
+ *  Documentation/Policy_Vocab_Changelog.md entry (design doc §15.6).
+ *  v1: original (incl. 'npi'); v2: 'npi' no longer authorable. */
+export const POLICY_VOCAB_VERSION = 2;
+
 export type PartyType = 'anyone' | 'group' | 'peer';
 export type Purpose = 'any' | 'peer-support' | 'clinical' | 'research' | 'public-health' | 'marketing';
 export type Scope = 'notification-only' | 'meds-allergies' | 'patient-summary' | 'not-sensitive' | 'everything' | 'ah-category';
@@ -43,6 +50,12 @@ export interface PolicyCard {
   createdFrom?: 'manual' | 'request';
   createdAt?: string;
   updatedAt?: string;
+  /** Vocabulary edition the elements are expressed in (server-stamped at
+   *  every save; absent = edition 1, pre-stamping). */
+  vocabVersion?: number;
+  /** The card's sentence as rendered at last save — the consent language
+   *  preserved even if sentence templates evolve. */
+  authoredSentence?: string;
 }
 
 /** A hypothetical (simulator) or real incoming request, reduced to the
