@@ -90,7 +90,6 @@ export const SIGNATURE_OPTIONS: Array<{ value: Signature; label: string }> = [
   { value: 'unverified', label: 'unverified' },
   { value: 'verified-email', label: 'verified-email' },
   { value: 'group-member', label: 'group-member' },
-  { value: 'npi', label: 'NPI-verified' },
   { value: 'doximity', label: 'Doximity-verified' },
   { value: 'verified-by-me', label: 'verified by me' }
 ];
@@ -184,8 +183,6 @@ export const POLICY_MATRIX: MatrixColumn[] = [
       tip: 'The requester proved control of an email address with a one-time code — exactly what this page’s request form does before sending.' },
     { v: 'group-member', label: 'Group member',
       tip: 'A signed membership credential proves they belong to the patient’s group. Members’ MAIAs present this automatically.' },
-    { v: 'npi', label: 'NPI verified', sub: 'licensed provider',
-      tip: 'A licensed provider verified against the NPI registry. (Verification is not live yet — until it is, such claims evaluate as unverified.)' },
     { v: 'doximity', label: 'Doximity verified', sub: 'verified clinician',
       tip: 'Clinician identity verified through Doximity. (Not live yet — until it is, such claims evaluate as unverified.)' },
     { v: 'verified-by-me', label: 'Verified by me', sub: 'someone you vouched for',
@@ -218,13 +215,18 @@ export const POLICY_MATRIX: MatrixColumn[] = [
   ]}
 ];
 
-/** Identity strength ladder for "minimum level" comparisons. NPI and
- *  Doximity are treated as equally strong professional verification. */
+/** Identity strength ladder for "minimum level" comparisons.
+ *  'npi' was REMOVED from the authorable vocabulary (v1.5.173) — no UI
+ *  offers it and the matrix no longer shows it — but it stays in the type
+ *  and this ladder so any legacy stored card requiring it keeps its
+ *  original strict meaning. Dropping it from the ladder would make
+ *  `SIGNATURE_RANK[e.signature]` undefined and the comparison would let
+ *  such a card match EVERY request — the exact opposite of its intent. */
 const SIGNATURE_RANK: Record<Signature, number> = {
   unverified: 0,
   'verified-email': 1,
   'group-member': 2,
-  npi: 3,
+  npi: 3, // legacy stored cards only
   doximity: 3,
   'verified-by-me': 4 // strongest: the patient personally vouched for them
 };

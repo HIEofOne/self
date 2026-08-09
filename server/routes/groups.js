@@ -841,7 +841,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
       // Honest signature strength: the welcome builder verifies the requester's
       // email through OUR code flow before allowing a real send, so a request
       // carrying a matching verify token evaluates as 'verified-email'.
-      // Claims of stronger identities (NPI/Doximity) still evaluate as
+      // Claims of stronger identities (Doximity) still evaluate as
       // unverified until real verification exists.
       const emailVerifyToken = typeof b.emailVerifyToken === 'string' ? b.emailVerifyToken : null;
       const requestSignature = (emailVerifyToken && emailTokenVerified(emailVerifyToken, email))
@@ -3924,7 +3924,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
 
       // Policy evaluation (deterministic; the AI is never in this path).
       // Signature: 'group-member' is what the relay PROVED (signed member
-      // claim); stronger levels (NPI/Doximity) arrive in a later phase.
+      // claim); stronger levels (Doximity) arrive in a later phase.
       // Payment: the envelope's §3.4 slot carries what the REGISTRY
       // attested it collected in credits before sealing — the registry is
       // the only writer of outsider envelopes, so a member's AS on any

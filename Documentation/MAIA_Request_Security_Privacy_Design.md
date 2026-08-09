@@ -1,6 +1,6 @@
 # MAIA Request Security and Privacy Design
 
-- **Date:** 2026-08-07
+- **Date:** 2026-08-07 (revised 2026-08-09: NPI removed from the signature vocabulary, v1.5.173)
 - **Status:** Comprehensive review — implemented behavior through **v1.5.169** (PRs #264–#301), plus the approved roadmap (VC/UCAN artifacts → federation → GNAP/MCP → external resource servers).
 - **Baseline:** `Groups_Design.md` (2026-07-05/06), the verbatim design conversation this document traces against.
 - **Audience:** MAIA maintainers; prospective **group administrators** evaluating whether to sponsor a group; **privacy and security experts** validating the design and its implementation.
@@ -121,10 +121,10 @@ A policy card states the **minimum** identity proof it requires; stronger always
 | `unverified` | none | floor |
 | `verified-email` | one-time 6-digit code (10-min TTL, 5 attempts, 30 s resend gap, in-memory token) | attested by the host that ran the code flow |
 | `group-member` | Ed25519-signed membership claim against a 24 h credential | proven cryptographically at the relay |
-| `npi`, `doximity` | **claims only** — no live verification exists | **evaluate as `unverified`** until real verification ships |
+| `doximity` | **claim only** — no live verification exists | **evaluates as `unverified`** until real verification ships. (An `npi` level existed through v1.5.172; it was removed from the authorable vocabulary as obsolete — legacy stored cards requiring it keep their strict rank and remain unsatisfiable) |
 | `verified-by-me` | patient-minted one-time code, redeemed into a **passkey binding**; a WebAuthn assertion proves possession at send time (v1.5.169) | attested **per member**: elevated only toward the patient who vouched; revocation re-checked on every send |
 
-The honest-evaluation rule is a standing invariant (I-6): **an identity claim never evaluates above what was actually proven.** The UI says so explicitly in the policy matrix tooltips, so patients authoring cards are not misled about what "NPI-verified" currently buys.
+The honest-evaluation rule is a standing invariant (I-6): **an identity claim never evaluates above what was actually proven.** The UI says so explicitly in the policy matrix tooltips, so patients authoring cards are not misled about what a "Doximity verified" claim currently buys.
 
 ### 4.1 The vouch flow (`verified-by-me`)
 
@@ -298,7 +298,7 @@ Prompt-injection exposure is bounded by construction: advisor outputs are parsed
 5. **Payment metadata at the registry.** A paid request links a payer email to a group and settlement state on the registry host. Disclosed in §11; minimal but nonzero.
 6. **Root-secret concentration.** The DO token derives the CouchDB password, session secret, and admin bootstrap passphrase. Rotation is documented but manual; compromise of the host environment is compromise of the deployment. (Single-admin-per-host is the current model.)
 7. **Silent-deny forfeiture can burn an honest requester's deposit** when every member simply ignores a legitimate request. Accepted deliberately (silence is what the deposit prices); the amounts are small by design.
-8. **NPI/Doximity remain claims.** Cards requiring them are currently unsatisfiable in practice; the UI says so, but a reviewer should confirm no code path scores them higher.
+8. **Doximity remains a claim.** Cards requiring it are currently unsatisfiable in practice; the UI says so, but a reviewer should confirm no code path scores it higher. (The former `npi` level was removed from the authorable vocabulary in v1.5.173; legacy stored cards requiring it stay ranked — a deliberate choice, since dropping a level from the rank map would make such cards match *everything*.)
 9. **A vouch is only as strong as the patient's out-of-band recognition.** Voice cloning and video deepfakes are practical today; a patient who vouches for a convincing impersonator has issued a genuine credential to the wrong person. No cryptography fixes this — the mitigations are procedural (the UI directs the patient to recognize the person on a *live* call, not from a recording or a forwarded message), plus one-click revocation, per-member confinement, and the standing rule that even a vouched requester receives only privacy-filtered artifacts (§7.2). This is the honest weak point of patient-issued credentials and should be stated to any group considering them.
 10. **Vouch passkeys are host-locked.** A WebAuthn credential is scoped to the registry's rpID, so a vouch proven at one host cannot be presented at another, and a lost device means re-vouching. Deliberate for Phase 1 (theft-proof beats portable); Phase 2's signed artifact adds portability without giving up key binding.
 11. **The registry learns the vouch graph.** It knows which member vouched, when the credential was redeemed, and each time it is asserted — not who the person is (no name, no email required) but the existence and use pattern of the relationship. This is the metadata cost of the registry-attested model; Phase 2/3 artifacts verified at ingest move it to the member's host.
@@ -408,7 +408,7 @@ Testable claims. Suites that pin them are named in §14.1.
 - **I-3** Only privacy-filtered artifacts leave autonomously; absent a filtered artifact, allow degrades to ask — never to sharing raw or empty content.
 - **I-4** Requester-visible outputs never disclose which policy card decided, in any outcome.
 - **I-5** Silent deny is observationally indistinguishable from absence to the requester.
-- **I-6** No identity claim evaluates above its actual proof (NPI/Doximity claims score as unverified today).
+- **I-6** No identity claim evaluates above its actual proof (Doximity claims score as unverified today; removing a signature level from the vocabulary never weakens a legacy card that required it).
 - **I-7** Members cannot forge outsider-attributed traffic; only the registry writes `outsider:` envelopes.
 - **I-8** Member-to-member content is end-to-end sealed; the registry relays ciphertext only.
 - **I-9** Member emails do not exist at the registry after join; invite tokens are stored only as hashes.
