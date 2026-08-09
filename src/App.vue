@@ -355,7 +355,9 @@
                         <span class="text-grey-5 q-mx-sm">|</span>
                         <a href="/page.html?doc=about" target="_blank" class="welcome-footer-link">About</a>
                         <div class="text-caption text-grey-6 q-mt-sm">
-                          See the <a href="/MAIA-overview.pdf" target="_blank" class="welcome-footer-link">slide show</a>
+                          Join the <a href="https://forum.agropper.xyz" target="_blank" class="welcome-footer-link">community forum</a>
+                          · See the <a href="/MAIA-overview.pdf" target="_blank" class="welcome-footer-link">slide show</a>
+                          · <a href="/MAIA_Request_Security_Privacy_Design.pdf" target="_blank" class="welcome-footer-link">security &amp; privacy design</a>
                           · <a href="https://trustee.substack.com" target="_blank" class="welcome-footer-link">Substack</a>
                           · <a href="https://github.com/HIEofOne/self#readme" target="_blank" class="welcome-footer-link">GitHub</a>
                         </div>
