@@ -20,6 +20,9 @@ const MAX_POLICIES = 200;
 
 const PURPOSES = ['any', 'peer-support', 'clinical', 'research', 'public-health', 'marketing'];
 const SCOPES = ['notification-only', 'meds-allergies', 'patient-summary', 'not-sensitive', 'everything', 'ah-category'];
+// 'npi' was removed from the AUTHORABLE vocabulary (v1.5.173) — no UI
+// offers it — but stays accepted here so legacy stored cards remain
+// editable/toggleable, and stays ranked so they keep their strict meaning.
 const SIGNATURES = ['unverified', 'verified-email', 'group-member', 'npi', 'doximity', 'verified-by-me'];
 const PAYMENTS = ['none', 'spam-deposit', 'notification-deposit', 'ai-prepay', 'sharing-payment'];
 const PARTY_TYPES = ['anyone', 'group', 'peer'];

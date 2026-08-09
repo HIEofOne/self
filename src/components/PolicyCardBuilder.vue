@@ -186,7 +186,7 @@ const badgeText = computed(() =>
   : sel.action === 'deny-respond' ? 'Deny · with reason'
   : 'Deny · silent');
 const sentenceHtml = computed(() => sentenceFor(builtCard.value)
-  .replace(/(Doximity-verified|NPI-verified|verified-email|group-member|verified by me)/g, '<b>$1</b>'));
+  .replace(/(Doximity-verified|verified-email|group-member|verified by me)/g, '<b>$1</b>'));
 
 const clearAll = () => {
   (Object.keys(sel) as ColKey[]).forEach((k) => { sel[k] = null; });

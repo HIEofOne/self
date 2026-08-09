@@ -415,7 +415,7 @@ const autoGrow = () => {
 
 const SIG_LABEL: Record<string, string> = {
   unverified: 'unverified', 'verified-email': 'a verified email', 'group-member': 'a group member',
-  npi: 'an NPI-verified provider', doximity: 'a Doximity-verified clinician',
+  doximity: 'a Doximity-verified clinician',
   'verified-by-me': 'an identity the patient personally vouched for'
 };
 const SCOPE_HUMAN: Record<string, string> = {
