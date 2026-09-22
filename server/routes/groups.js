@@ -2391,29 +2391,45 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
    *  cards (provenance 'group:<id>') on first join — the Sharing Policies
    *  tab already renders them in a "Suggested by <group>" section with
    *  enable/edit/delete. Skipped if any card with that provenance exists
-   *  (rejoin / re-import must not clobber the member's edits). */
+   *  (rejoin / re-import must not clobber the member's edits).
+   *
+   *  The cards come from the REGISTRY's response, which may be a remote
+   *  host trusted only for what it attests (security design doc §12.2-1),
+   *  so this is a policy write path like any other: every card passes
+   *  normalizeCard (vocabulary check + I-23 stamps) and anything that
+   *  fails is dropped. An out-of-vocabulary signature would otherwise
+   *  rank 0 in cardMatches and match ANY requester. */
   const importSuggestedPolicies = (userDoc, groupId, cards) => {
     if (!Array.isArray(cards) || cards.length === 0) return;
     const prov = `group:${groupId}`;
     const existing = userDoc.sharingPolicies || [];
     if (existing.some((c) => c.provenance === prov)) return;
     const now = new Date().toISOString();
-    const imported = cards.slice(0, 20).map((c, i) => ({
-      id: `pol_${Date.now()}_${i}_${randomBytes(3).toString('hex')}`,
-      outcome: c.outcome,
-      ...(c.outcome === 'deny' ? { denyMode: c.denyMode === 'respond' ? 'respond' : 'silent' } : {}),
-      enabled: c.enabled !== false,
-      provenance: prov,
-      // The card belongs to the group being JOINED — stamp its id so a stale
-      // embedded groupId (from a recreated group / imported policy file) can
-      // never make the card unmatchable.
-      elements: (c.elements?.party?.type === 'group')
-        ? { ...c.elements, party: { ...c.elements.party, groupId } }
-        : c.elements,
-      createdFrom: 'manual',
-      createdAt: now,
-      updatedAt: now
-    }));
+    const offered = cards.slice(0, 20);
+    const imported = offered
+      .map((c) => normalizeCard(c && typeof c === 'object' ? {
+        ...c,
+        provenance: prov,
+        // The card belongs to the group being JOINED — stamp its id BEFORE
+        // normalizing, so a stale embedded groupId (from a recreated group /
+        // imported policy file) is healed rather than rejected, and can
+        // never make the card unmatchable.
+        elements: (c.elements?.party?.type === 'group')
+          ? { ...c.elements, party: { ...c.elements.party, groupId } }
+          : c.elements
+      } : null))
+      .filter(Boolean)
+      .map((card, i) => ({
+        id: `pol_${Date.now()}_${i}_${randomBytes(3).toString('hex')}`,
+        ...card,
+        provenance: prov, // exact (normalizeCard caps length) — the skip check above matches on it
+        createdFrom: 'manual',
+        createdAt: now,
+        updatedAt: now
+      }));
+    if (imported.length < offered.length) {
+      console.warn(`[user-groups] dropped ${offered.length - imported.length} invalid suggested polic${offered.length - imported.length === 1 ? 'y' : 'ies'} from group ${groupId}`);
+    }
     userDoc.sharingPolicies = [...existing, ...imported];
   };
 
@@ -3060,7 +3076,9 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
       if (!tokenValid) {
         return res.status(410).json({ success: false, error: 'This invitation is no longer valid' });
       }
-      const cards = (data.group?.suggestedPolicies || []).map((c) => normalizeCard(c)).filter(Boolean);
+      // importSuggestedPolicies normalizes (after healing the groupId) — the
+      // same chokepoint every join path uses.
+      const cards = data.group?.suggestedPolicies || [];
       const userDoc = await cloudant.getDocument(USERS_DB, userId);
       if (!userDoc) return res.status(404).json({ success: false, error: 'User not found' });
       const before = (userDoc.sharingPolicies || []).length;
