@@ -14,6 +14,7 @@
  * PR-3 (relay/heartbeat), PR-4 (requests inbox), PR-5 (directory) follow.
  */
 import { evaluatePolicies, policySentence, normalizeCard, POLICY_SCOPES, POLICY_PURPOSES } from './policies.js';
+import { isLocalDevRequest } from '../utils/api-guard.js';
 import { applyPseudonymMapping } from '../privacyFilter.js';
 import { isVerified as emailTokenVerified } from '../emailVerification.js';
 import { CREDIT_PRICES, holdCredits, chargeCredits, resolveHold, getAccount } from '../credits.js';
@@ -230,8 +231,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
   // Same admin gate as GET /api/admin/users: localhost bypass for local
   // development; otherwise the session user must be the admin.
   const requireAdmin = (req, res) => {
-    const isLocalhost = req.hostname === 'localhost' || req.hostname === '127.0.0.1';
-    if (isLocalhost) return true;
+    if (isLocalDevRequest(req)) return true; // never from Host/X-Forwarded-Host
     const sessionUserId = req.session?.userId;
     const adminUsername = (process.env.ADMIN_USERNAME || 'admin');
     if (!sessionUserId) {
