@@ -75,16 +75,33 @@ second — GPT is the primary as of v1.4.0.
 - This is the agent used by the Setup/Restore wizard automation and the
   default chat selection.
 
-### Secondary — Private AI (Deepseek)
-- Profile key: `gpt` (historical key; the model it resolves was swapped
-  in v1.4.0 — see note above).
-- Model: **Deepseek V4 Pro** (`inference_name: deepseek-v4-pro`),
-  resolved from the DO catalog (never falls back to a non-Deepseek
-  model on this slot).
-- System Instructions: a **one-time copy** of the primary agent's
-  instruction at creation time; the two then diverge.
+### Secondary — user-chosen Private AI
+- Profile key: `gpt` (historical key — it holds whatever model the user
+  chose; see note above).
+- **Never created automatically** (not at Setup, not on first chat, not
+  by Restore unless the backup shows the user had one). The user picks
+  the model in **Workbook → AI Agents → secondary tab** from a live table
+  (`GET /api/secondary-models`, built by `server/utils/secondary-models.js`):
+  DO-hosted (catalog entry carries a DO inference endpoint — commercial
+  Anthropic/OpenAI models forwarded to the vendor never qualify),
+  agent-capable, active, non-preview chat models, excluding the primary's
+  model. **Qwen3.8-Max** is pre-selected. Prices shown are DO's, per 1M
+  tokens.
+- Created (or switched) by `POST /api/agents/ensure-secondary` with
+  `{ modelId }`; the same endpoint without a model only reports status
+  (`not_chosen` when there is none). `ready` means STATUS_RUNNING **and**
+  the user's knowledge base connected.
+- The chosen model is stored on the profile (`modelId`,
+  `modelDisplayName`); repairs/restores recreate with that model only. If
+  it has left the catalog, the profile is dropped and the table is offered
+  again.
+- Switching models creates a new agent that keeps this agent's System
+  Instructions, repoints the profile, then deletes the old agent.
+- A fresh secondary's System Instructions start as `Do not hallucinate.`
 - Agent name pattern: `{userId}-agent-gpt-{YYYYMMDDThhmmss}` (the
   `-gpt-` infix is historical, not a model indicator).
+- Note: DigitalOcean ignores `max_tokens` at agent creation and applies
+  the model's default; chat requests set `max_tokens` per call.
 
 ### Independent System Instructions
 After creation, each agent's System Instructions are stored per profile
@@ -95,8 +112,11 @@ seed, not a live link.
 
 ### Shared resources
 Both agents attach the same OpenSearch-backed knowledge base (DO KB →
-agent is many-to-many). Destroying the cloud account deletes both
-agents; Restore rebuilds both.
+agent is many-to-many); the secondary gets KB-1 unless the user
+disconnected it from that agent (`userDoc.kbConnections.gpt.kb1 === false`),
+including a KB created after the secondary was chosen. Destroying the cloud
+account deletes both agents; Restore rebuilds the primary, and the
+secondary only if the user had chosen one.
 
 ---
 

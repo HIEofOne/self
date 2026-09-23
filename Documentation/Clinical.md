@@ -400,17 +400,20 @@ Do not duplicate those values here — link to the sections instead.
   NOT in the system instructions; it lives in the per-request prompts
   in `clinical-prompts.md` (see §2, §2.5, §4). Per-agent instructions
   diverge after creation (editable in My Stuff → My AI Agent sub-tabs).
-- **`## Private AI Agents`** — two agents per user (since v1.4.0 the
-  primary is GPT, not Deepseek):
+- **`## Private AI Agents`** — a primary agent per user, plus an optional
+  secondary the user chooses (since v1.6.1):
   - **Primary**: Private AI (GPT) — `inference_name:
     openai-gpt-oss-120b`. Profile slot key `default`. The agent used
     by Setup/Restore wizard automation, by the medication-extraction
     and summary-draft endpoints, and selected by default in the chat
     dropdown.
-  - **Secondary**: Private AI (Deepseek) — `inference_name:
-    deepseek-v4-pro`. Profile slot key `gpt` (historical — see the
-    note in NEW-AGENT.txt § Private AI Agents). Provisioned at Setup
-    in parallel with the primary; Setup completion waits for both.
+  - **Secondary**: user-chosen (v1.6.1). Never provisioned
+    automatically; the user picks a DO-hosted, agent-capable model in
+    Workbook → AI Agents (Qwen3.8-Max pre-selected) and it is connected
+    to their knowledge base. Profile slot key `gpt` (historical — see
+    NEW-AGENT.txt § Secondary). Features that use both agents (PS
+    generate-pair, the second medications worksheet) report
+    `SECONDARY_NOT_CHOSEN` until one exists.
   - **UI labels derive from the actual stored model name**, not the
     slot key — for accounts created before the v1.4.0 swap, the
     `default` slot still holds a Deepseek agent, and the dropdown

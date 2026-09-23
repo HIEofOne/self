@@ -679,26 +679,6 @@
               </q-item-section>
             </q-item>
 
-            <!-- Deploy Secondary AI Agent -->
-            <q-item v-if="wizardStage1Complete" dense class="q-py-xs">
-              <q-item-section avatar style="min-width: 28px">
-                <q-spinner v-if="wizardSecondaryDeploying" size="sm" color="primary" />
-                <q-icon v-else-if="gptAgentReady" name="check_circle" color="green" size="sm" />
-                <q-icon v-else-if="wizardSecondaryFailed" name="warning" color="orange" size="sm" />
-                <q-icon v-else name="radio_button_unchecked" color="grey-4" size="sm" />
-              </q-item-section>
-              <q-item-section>
-                <q-item-label>
-                  Deploy {{ labelForProfileKey('gpt') || 'Secondary AI' }} Agent
-                  <span v-if="gptAgentReady" class="text-green text-caption q-ml-sm">Ready{{ wizardSecondaryElapsed ? ` (${wizardSecondaryElapsed}s)` : '' }}</span>
-                  <span v-else-if="wizardSecondaryDeploying" class="text-primary text-caption q-ml-sm">
-                    Deploying... {{ wizardSecondaryElapsed ? `(${wizardSecondaryElapsed}s)` : '' }}
-                    <span class="text-grey-6">(~30s)</span>
-                  </span>
-                  <span v-else-if="wizardSecondaryFailed" class="text-orange text-caption q-ml-sm">Failed</span>
-                </q-item-label>
-              </q-item-section>
-            </q-item>
 
             <!-- Index Knowledge Base -->
             <q-item v-if="setupChecklistFiles.length > 0 || stage3HasFiles" dense class="q-py-xs">
@@ -982,7 +962,7 @@
       @tab-opened="handleMyStuffTabOpened"
       @sign-out-requested="handleSignOut"
       @wizard-requested="handleWizardRequested"
-      @provisioning-event="(data: Record<string, any>) => logProvisioningEvent(data)"
+      @provisioning-event="(data: Record<string, any>) => { logProvisioningEvent(data); if (data?.event === 'secondary-provision-ready') void loadProviders(); }"
       v-if="canAccessMyStuff"
     />
 
@@ -1548,18 +1528,13 @@ const wizardCurrentMedications = ref(false);
 const wizardPatientSummary = ref(false);
 const wizardAgentReady = ref(false);
 const wizardStage1Complete = ref(false);
-// Secondary "Private AI (GPT)" provisioning state (variable kept as
-// `gptAgentReady` for historical reasons — profile key is 'gpt'). Setup
-// gates completion on this so BOTH Private AIs exist before the wizard
-// finishes.
+// Whether the SECONDARY Private AI is live (variable kept as
+// `gptAgentReady` for historical reasons — profile key is 'gpt'). Setup no
+// longer creates it: the user chooses its model in Workbook → AI Agents.
 const gptAgentReady = ref(false);
 const wizardPreparingStartedAt = ref<number | null>(null);
 // Detailed wizard sub-phase tracking for the preparation phase UI
 const wizardPrimaryModelName = ref<string | null>(null);   // e.g. "Kimi K2.5"
-const wizardSecondaryDeploying = ref(false);
-const wizardSecondaryElapsed = ref(0);
-const wizardSecondaryFailed = ref(false);
-let wizardSecondaryTimer: ReturnType<typeof setInterval> | null = null;
 const wizardDraftPsStatus = ref<'idle' | 'running' | 'done' | 'failed'>('idle');
 const wizardDraftPsStartedAt = ref<number | null>(null);
 // PS-drafting stages, mirroring SummaryProgress.vue (timed "pacing theater"),
@@ -2948,10 +2923,11 @@ const providerOptions = computed(() => {
   return opts;
 });
 
-// Re-derive each Private AI label from the actual model name and sort
-// Kimi first, GPT second. We do this client-side (it also happens
-// server-side) so the dropdown stays correctly ordered even if the
-// server response is cached/stale. The 'default' / 'gpt' profile keys
+// Re-derive each Private AI label ("Private AI Primary (…)" /
+// "Private AI Secondary (…)") and sort the primary first. The model name
+// comes from the server label's parenthetical — a user-chosen secondary
+// carries its catalog display name there, e.g. "Private AI (Qwen3.8-Max)" —
+// falling back to a family name derived from the model id. The 'default' / 'gpt' profile keys
 // are HISTORICAL slot names. Pure function — call it on the array we
 // just got from the server.
 const normalizePrivateAiProfiles = (
@@ -2967,7 +2943,8 @@ const normalizePrivateAiProfiles = (
   return [...raw]
     .map(pr => {
       const role = pr.key === 'default' ? 'Primary' : 'Secondary';
-      const model = modelShort(pr.model);
+      const fromServer = /\(([^)]+)\)\s*$/.exec(pr.label || '')?.[1] || '';
+      const model = fromServer || modelShort(pr.model);
       const label = model ? `Private AI ${role} (${model})` : `Private AI (${role.toLowerCase()})`;
       return { ...pr, label };
     })
@@ -2987,7 +2964,7 @@ const labelForProfileKey = (key: string): string => {
   const prof = privateAiProfiles.value.find(p => p.key === key);
   if (prof) return prof.label;
   if (key === 'default') return 'Private AI Primary (GPT)';
-  return 'Private AI Secondary (Kimi)';
+  return 'Private AI Secondary';
 };
 
 // The agentProfileKey for the current selection (null for non-Private
@@ -4136,10 +4113,6 @@ const refreshWizardState = async () => {
           // Refetch only on transition (keeps existing behavior)
           if (!wasReady) {
             loadProviders();
-          }
-          // Ensure secondary agent deploys after primary is ready
-          if (!gptAgentReady.value && !wizardSecondaryDeploying.value) {
-            wizardDeploySecondary();
           }
         }
       }
@@ -5329,7 +5302,7 @@ const generateSetupLogPdf = async (opts: { download?: boolean; returnBase64?: bo
     `Files uploaded: ${totalFiles}`,
     emailLine,
     `${labelForProfileKey('default')} ready: ${wizardStage1Complete.value ? 'Yes' : 'No'}`,
-    `${labelForProfileKey('gpt')} ready: ${gptAgentReady.value ? 'Yes' : 'Pending'}`,
+    `${labelForProfileKey('gpt')} ready: ${gptAgentReady.value ? 'Yes' : 'Not set up (optional — choose a model in AI Agents)'}`,
     `KB indexed: ${hasIndexing ? 'Yes' : 'Pending'} (${indexTokens} tokens)`,
     `Current Medications: ${wizardCurrentMedications.value ? 'Verified' : 'Pending verification'}`,
     `Medication Worksheets: see Lists (generate on demand)`,
@@ -5422,7 +5395,7 @@ const generateSetupLogPdf = async (opts: { download?: boolean; returnBase64?: bo
         if (evt.event === 'draft-summary-fallback-succeeded') return [0, 120, 0];
         if (evt.event === 'chat-error') return [200, 0, 0];
         if (evt.event === 'meds-worksheet-pending') return [180, 100, 0];
-        if (evt.event === 'gpt-agent-created' || evt.event === 'gpt-agent-deployed' || evt.event === 'gpt-agent-ready') return [0, 90, 160];
+        if (evt.event === 'gpt-agent-created' || evt.event === 'gpt-agent-model-switched' || evt.event === 'gpt-agent-deployed' || evt.event === 'gpt-agent-ready') return [0, 90, 160];
         return [0, 0, 0];
       };
 
@@ -5517,7 +5490,8 @@ const generateSetupLogPdf = async (opts: { download?: boolean; returnBase64?: bo
               : (evt.sourceMode === 'kb-retrieval' ? ', source: knowledge-base retrieval' : ''));
             return `[${t}] Current Medications Worksheet generated — ${agent}${model}${files}${src}`;
           }
-          case 'gpt-agent-created': return `[${t}] ${labelForProfileKey('gpt')} agent created — deploying`;
+          case 'gpt-agent-created': return `[${t}] Secondary Private AI created${evt.model ? ` with ${evt.model}` : ''} — deploying`;
+          case 'gpt-agent-model-switched': return `[${t}] Secondary Private AI switched${evt.previousModel ? ` from ${evt.previousModel}` : ''} to ${evt.model || 'a new model'} — deploying`;
           case 'gpt-agent-deployed':
           case 'gpt-agent-ready': return `[${t}] ${labelForProfileKey('gpt')} deployed and available`;
           case 'encounters-worksheet-generated':
@@ -8802,8 +8776,6 @@ const startSetupWizardPolling = () => {
         await loadProviders();
         // Populate model name for wizard UI
         wizardPrimaryModelName.value = labelForProfileKey('default');
-        // Deploy secondary agent right after primary completes
-        wizardDeploySecondary();
         return;
       }
 
@@ -8826,68 +8798,6 @@ const startSetupWizardPolling = () => {
   };
 
   poll();
-};
-
-// Deploy secondary agent from wizard (fire-and-forget after primary completes)
-const wizardDeploySecondary = async () => {
-  if (!props.user?.userId || wizardSecondaryDeploying.value || gptAgentReady.value) return;
-  wizardSecondaryDeploying.value = true;
-  wizardSecondaryFailed.value = false;
-  wizardSecondaryElapsed.value = 0;
-  const startedAt = Date.now();
-  wizardSecondaryTimer = setInterval(() => {
-    wizardSecondaryElapsed.value = Math.round((Date.now() - startedAt) / 1000);
-  }, 1000);
-  logProvisioningEvent({ event: 'secondary-provision-started' });
-
-  try {
-    const res = await fetch('/api/agents/ensure-secondary', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({ userId: props.user.userId })
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
-
-    if (data.ready) {
-      gptAgentReady.value = true;
-      if (wizardSecondaryTimer) { clearInterval(wizardSecondaryTimer); wizardSecondaryTimer = null; }
-      wizardSecondaryDeploying.value = false;
-      logProvisioningEvent({ event: 'secondary-provision-ready', elapsedSeconds: wizardSecondaryElapsed.value });
-      await loadProviders();
-      return;
-    }
-
-    // Poll until ready (max 3 min)
-    const maxMs = 180000;
-    while (Date.now() - startedAt < maxMs) {
-      await new Promise(r => setTimeout(r, 5000));
-      try {
-        const pollRes = await fetch('/api/agents/ensure-secondary', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify({ userId: props.user.userId })
-        });
-        const pollData = await pollRes.json().catch(() => ({}));
-        if (pollData.ready) {
-          gptAgentReady.value = true;
-          if (wizardSecondaryTimer) { clearInterval(wizardSecondaryTimer); wizardSecondaryTimer = null; }
-          wizardSecondaryDeploying.value = false;
-          logProvisioningEvent({ event: 'secondary-provision-ready', elapsedSeconds: wizardSecondaryElapsed.value });
-          await loadProviders();
-          return;
-        }
-      } catch { /* retry */ }
-    }
-    throw new Error('Timed out after 3 minutes');
-  } catch (e: any) {
-    if (wizardSecondaryTimer) { clearInterval(wizardSecondaryTimer); wizardSecondaryTimer = null; }
-    wizardSecondaryDeploying.value = false;
-    wizardSecondaryFailed.value = true;
-    logProvisioningEvent({ event: 'secondary-provision-failed', error: e.message });
-  }
 };
 
 // Indexing status tracking

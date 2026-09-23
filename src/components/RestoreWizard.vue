@@ -750,7 +750,8 @@ const executeRehydrate = async () => {
   try { await agentReadyPromise; } catch { /* non-fatal */ }
 
   // Also wait for the SECONDARY Private AI agent (the historical 'gpt'
-  // profile slot, now Deepseek). The rehydrate flow on the server kicks
+  // profile slot) — but only if the user had chosen one; the server
+  // answers status 'not_chosen' otherwise. The rehydrate flow on the server kicks
   // off ensureSecondaryAgent in the background, but if we declare Restore
   // complete before that finishes, the dropdown shows the secondary as
   // "Not available: AGENT_NOT_READY" and the first chat attempt 403s.
@@ -775,6 +776,9 @@ const executeRehydrate = async () => {
           logProvisioningEvent({ event: 'gpt-agent-ready', elapsedMs: Date.now() - secondaryStart });
           break;
         }
+        // The user never chose a secondary Private AI (or its model was
+        // retired): nothing to wait for — it is offered in AI Agents.
+        if (res.ok && (d.status === 'not_chosen' || d.status === 'model_unavailable')) break;
       } catch { /* keep polling */ }
       const secs = Math.round((Date.now() - secondaryStart) / 1000);
       setStatus(`Deploying secondary Private AI… (${Math.floor(secs / 60)}m ${secs % 60}s)`);
@@ -1434,6 +1438,8 @@ const executeRestore = async () => {
             logProvisioningEvent({ event: 'gpt-agent-ready', elapsedMs: Date.now() - secondaryStart });
             break;
           }
+          // No secondary chosen: nothing to wait for.
+          if (res.ok && (d.status === 'not_chosen' || d.status === 'model_unavailable')) break;
         } catch { /* keep polling */ }
         await new Promise(r => setTimeout(r, 6000));
       }

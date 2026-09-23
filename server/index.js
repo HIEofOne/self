@@ -6275,12 +6275,16 @@ app.post('/api/toggle-file-knowledge-base', async (req, res) => {
 });
 
 // Get agent instructions
-// Resolve which DO agent id an instructions/KB request targets. With
-// two Private AI agents the caller passes agentProfileKey ('default' =
-// Deepseek, 'gpt' = GPT). Falls back to the primary for legacy callers.
+// Resolve which DO agent id an instructions/KB request targets. The
+// caller passes agentProfileKey ('default' = primary, 'gpt' = the
+// optional, user-chosen secondary). Legacy callers without a key get the
+// primary. The secondary NEVER falls back to the primary: with no
+// secondary, an instructions edit or KB attach meant for it must not land
+// on the primary agent.
 function resolveAgentIdForProfile(userDoc, profileKey) {
   const profiles = (userDoc && typeof userDoc.agentProfiles === 'object') ? userDoc.agentProfiles : {};
   if (profileKey && profiles[profileKey]?.agentId) return profiles[profileKey].agentId;
+  if (profileKey === 'gpt') return null;
   return userDoc?.assignedAgentId || profiles.default?.agentId || null;
 }
 
@@ -10716,24 +10720,47 @@ app.put('/api/account/rehydrate', async (req, res) => {
       }
     }
 
-    // Rebuild the SECONDARY "Private AI (Deepseek)" agent too if its backed-up
-    // id no longer resolves (Destroy Cloud Account removed it). Its KB is
-    // re-attached by the post-restore /api/chat/providers poll once the
-    // KB exists. Best-effort — never fail the whole restore over it.
+    // Rebuild the SECONDARY Private AI only if the backup shows the user had
+    // chosen one, and only with the model they chose (never a default). If
+    // that model has left the catalog, drop the stale profile so Workbook →
+    // AI Agents offers the model list again. Its KB is re-attached by the
+    // ensure-secondary poll / /api/chat/providers once the KB exists.
+    // Best-effort — never fail the whole restore over it.
     try {
       const gptId = docToWrite.agentProfiles?.gpt?.agentId;
       let gptLive = false;
       if (gptId) {
         try { await doClient.agent.get(gptId); gptLive = true; } catch { gptLive = false; }
       }
-      if (!gptLive) {
+      if (!gptId) {
+        rebuilt.gptAgent = 'not_chosen';
+      } else if (gptLive) {
+        rebuilt.gptAgent = 'reused';
+      } else {
         const freshDoc = await cloudant.getDocument('maia_users', userId);
         const { ensureSecondaryAgent } = await import('./routes/auth.js');
-        const updated = await ensureSecondaryAgent(doClient, cloudant, freshDoc);
-        rebuilt.gptAgent = gptId ? 'recreated' : 'created';
-        if (updated?.agentProfiles?.gpt) docToWrite.agentProfiles = updated.agentProfiles;
-      } else {
-        rebuilt.gptAgent = 'reused';
+        try {
+          const updated = await ensureSecondaryAgent(doClient, cloudant, freshDoc);
+          rebuilt.gptAgent = 'recreated';
+          if (updated?.agentProfiles?.gpt) docToWrite.agentProfiles = updated.agentProfiles;
+        } catch (e) {
+          if (e?.code !== 'SECONDARY_MODEL_UNAVAILABLE' && e?.code !== 'SECONDARY_NOT_CHOSEN') throw e;
+          for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+              const doc = await cloudant.getDocument('maia_users', userId);
+              if (!doc?.agentProfiles?.gpt) break;
+              delete doc.agentProfiles.gpt;
+              doc.updatedAt = new Date().toISOString();
+              await cloudant.saveDocument('maia_users', doc);
+              break;
+            } catch (err) {
+              if (err?.statusCode === 409 && attempt < 2) continue;
+              throw err;
+            }
+          }
+          if (docToWrite.agentProfiles) delete docToWrite.agentProfiles.gpt;
+          rebuilt.gptAgent = 'model_unavailable';
+        }
       }
     } catch (e) {
       errors.push(`ensureSecondaryAgent: ${e.message || e}`);
@@ -12377,13 +12404,16 @@ app.post('/api/patient-summary/generate-pair', async (req, res) => {
     }
     await ensureAgentRetrieval(userDoc.assignedAgentId);
 
-    // GPT — resolve via the secondary-agent helper. Returns null when not ready.
+    // Secondary — only if the user has chosen one (it is never created
+    // here). A chosen-but-not-yet-live agent is repaired with its model.
     let gptAgentId = userDoc.agentProfiles?.gpt?.agentId || null;
     let gptEndpoint = userDoc.agentProfiles?.gpt?.endpoint || null;
     let gptModel = userDoc.agentProfiles?.gpt?.modelName || 'openai-gpt-oss-120b';
     let gptApiKey = userDoc.agentProfiles?.gpt?.apiKey || null;
     let gptError = null;
-    if (!gptAgentId || !gptEndpoint) {
+    if (!gptAgentId) {
+      gptError = 'SECONDARY_NOT_CHOSEN';
+    } else if (!gptEndpoint) {
       try {
         const { ensureSecondaryAgent } = await import('./routes/auth.js');
         const updated = await ensureSecondaryAgent(doClient, cloudant, userDoc);
@@ -12403,7 +12433,9 @@ app.post('/api/patient-summary/generate-pair', async (req, res) => {
       }
     }
     if (gptAgentId) {
-      try { if (userDoc.kbId) await doClient.agent.attachKB(gptAgentId, userDoc.kbId); } catch { /* may already be attached */ }
+      // Respect a KB the user disconnected from this agent in AI Agents.
+      const gptWantsKb = userDoc.kbConnections?.gpt?.kb1 !== false;
+      try { if (userDoc.kbId && gptWantsKb) await doClient.agent.attachKB(gptAgentId, userDoc.kbId); } catch { /* may already be attached */ }
       await ensureAgentRetrieval(gptAgentId);
     }
 
@@ -13127,8 +13159,12 @@ app.post('/api/medications/worksheet', async (req, res) => {
     let agentId, endpoint, model;
     if (profileKey === 'gpt') {
       let gpt = userDoc.agentProfiles?.gpt;
-      // Auto-provision GPT on demand if missing/not yet deployed.
-      if (!gpt?.agentId || !gpt?.endpoint) {
+      // The secondary is never created here — the user chooses its model
+      // in Workbook → AI Agents. A chosen-but-not-live one is repaired.
+      if (!gpt?.agentId) {
+        return res.status(409).json({ success: false, reason: 'SECONDARY_NOT_CHOSEN', message: 'Choose a secondary Private AI model in Workbook → AI Agents first.' });
+      }
+      if (!gpt?.endpoint) {
         try {
           const { ensureSecondaryAgent } = await import('./routes/auth.js');
           userDoc = await ensureSecondaryAgent(doClient, cloudant, userDoc);
@@ -13907,11 +13943,39 @@ app.get('/api/encounters/find', async (req, res) => {
   }
 });
 
-// Ensure the secondary "Private AI (Deepseek)" agent is provisioned and report
-// whether it has finished deploying (endpoint resolved). The Setup wizard
-// calls this and polls until ready:true so BOTH Private AIs exist before
-// Setup completes. Safe to call repeatedly (ensureSecondaryAgent is
-// idempotent and mutex-guarded).
+// Models the user may choose for the secondary Private AI: DO-hosted,
+// agent-capable, active open models (utils/secondary-models.js), with
+// prices from the live catalog. `current` is the model in use, if any.
+app.get('/api/secondary-models', async (req, res) => {
+  try {
+    const userId = resolveUserId(req, res);
+    if (!userId) return;
+    const { listSecondaryModels, DEFAULT_SECONDARY_MODEL_ID } = await import('./utils/secondary-models.js');
+    const models = await listSecondaryModels(doClient);
+    const doc = await cloudant.getDocument('maia_users', userId);
+    const prof = doc?.agentProfiles?.gpt || null;
+    res.json({
+      success: true,
+      models,
+      defaultId: models.some((m) => m.id === DEFAULT_SECONDARY_MODEL_ID) ? DEFAULT_SECONDARY_MODEL_ID : (models[0]?.id || null),
+      current: prof?.agentId
+        ? { id: prof.modelId || prof.modelName || null, name: prof.modelDisplayName || prof.modelName || null }
+        : null
+    });
+  } catch (error) {
+    console.error('[secondary-models] catalog lookup failed:', error?.message || error);
+    res.status(502).json({ success: false, error: 'CATALOG_UNAVAILABLE', message: 'Could not load the model list from DigitalOcean.' });
+  }
+});
+
+// The secondary Private AI (profile 'gpt'). It is created — or switched to
+// another model — ONLY when the caller names a model the user chose in
+// Workbook → AI Agents (validated against /api/secondary-models). Without
+// `modelId` this endpoint never creates anything: Setup and Restore poll
+// it, and status 'not_chosen' tells them there is nothing to wait for.
+// `ready` = the agent is STATUS_RUNNING AND the user's knowledge base is
+// connected (when there is one to connect), so a UI spinner covers the
+// whole process.
 app.post('/api/agents/ensure-secondary', async (req, res) => {
   try {
     const userId = resolveUserId(req, res);
@@ -13920,73 +13984,113 @@ app.post('/api/agents/ensure-secondary', async (req, res) => {
     if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
 
     const checkOnly = !!req.body?.checkOnly;
-    const existingAgentId = userDoc.agentProfiles?.gpt?.agentId;
+    const requestedModelId = typeof req.body?.modelId === 'string' ? req.body.modelId.trim() : '';
+    let prof = userDoc.agentProfiles?.gpt || {};
+    const currentModelId = prof.modelId || prof.modelName || null;
 
-    // Check-only mode: return current status without creating the agent
-    if (checkOnly && !existingAgentId) {
-      return res.json({ success: true, ready: false, status: 'not_created' });
-    }
-
-    // Fast path: agent already created — just check if it's running.
-    // Avoids redundant DO API calls, KB attaches, and DB writes on every poll.
-    if (existingAgentId) {
-      let endpoint = null;
-      let isRunning = false;
-      let status = 'unknown';
-      try {
-        const live = await doClient.agent.get(existingAgentId);
-        status = live?.deployment?.status || live?.deployment_status || 'unknown';
-        isRunning = status === 'STATUS_RUNNING';
-        endpoint = live?.deployment?.url ? `${live.deployment.url}/api/v1` : null;
-      } catch { /* still deploying */ }
-      const ready = !!endpoint && isRunning;
-
-      if (ready) {
-        const alreadyLogged = !!userDoc.agentProfiles?.gpt?.deployedLoggedAt;
-        if (!alreadyLogged) {
-          for (let attempt = 0; attempt < 3; attempt++) {
-            try {
-              const doc = await cloudant.getDocument('maia_users', userId);
-              if (!doc) break;
-              if (!doc.agentProfiles) doc.agentProfiles = {};
-              doc.agentProfiles.gpt = { ...(doc.agentProfiles.gpt || {}), endpoint, deployedLoggedAt: new Date().toISOString() };
-              doc.updatedAt = new Date().toISOString();
-              await cloudant.saveDocument('maia_users', doc);
-              break;
-            } catch (err) {
-              if (err?.statusCode === 409 && attempt < 2) continue;
-              break;
-            }
-          }
-          try {
-            await appendUserProvisioningEvent(userId, { event: 'gpt-agent-deployed', agentId: existingAgentId });
-          } catch { /* non-fatal */ }
-        }
+    // Create or switch — only on an explicit choice, from a signed-in session.
+    if (!checkOnly && requestedModelId && (!prof.agentId || requestedModelId !== currentModelId)) {
+      if (!req.session?.userId) {
+        return res.status(401).json({ success: false, error: 'NOT_AUTHENTICATED' });
       }
-      console.log(`[ensure-secondary] Poll for ${userId}: status=${status}, ready=${ready}`);
-      return res.json({ success: true, ready, agentId: existingAgentId, endpoint, status });
-    }
-
-    // Slow path: agent doesn't exist yet — create it.
-    const ensureStartedAt = Date.now();
-    const { ensureSecondaryAgent } = await import('./routes/auth.js');
-    try {
-      userDoc = await ensureSecondaryAgent(doClient, cloudant, userDoc);
-    } catch (e) {
-      return res.json({ success: true, ready: false, provisioning: true, reason: e?.message || 'provisioning' });
-    }
-
-    const ensureElapsed = ((Date.now() - ensureStartedAt) / 1000).toFixed(1);
-    const gpt = userDoc.agentProfiles?.gpt || {};
-    if (gpt.agentId) {
+      const { resolveSecondaryModel } = await import('./utils/secondary-models.js');
+      const model = await resolveSecondaryModel(doClient, requestedModelId);
+      if (!model) {
+        return res.status(400).json({ success: false, error: 'MODEL_NOT_ALLOWED', message: 'That model is not available as a secondary Private AI.' });
+      }
+      const switching = !!prof.agentId;
+      const startedAt = Date.now();
+      const { ensureSecondaryAgent } = await import('./routes/auth.js');
+      try {
+        userDoc = await ensureSecondaryAgent(doClient, cloudant, userDoc, { model });
+      } catch (e) {
+        console.error(`[ensure-secondary] ${switching ? 'switch' : 'create'} failed for ${userId}:`, e?.message || e);
+        return res.status(502).json({ success: false, error: e?.code || 'PROVISIONING_FAILED', message: e?.message || 'Could not create the agent' });
+      }
+      invalidateResourceCache(userId);
+      const gpt = userDoc.agentProfiles?.gpt || {};
       try {
         await appendUserProvisioningEvent(userId, {
-          event: 'gpt-agent-created', agentId: gpt.agentId, agentName: gpt.agentName || null, elapsedSeconds: Number(ensureElapsed)
+          event: switching ? 'gpt-agent-model-switched' : 'gpt-agent-created',
+          agentId: gpt.agentId,
+          agentName: gpt.agentName || null,
+          model: model.id,
+          ...(switching ? { previousModel: currentModelId } : {}),
+          elapsedSeconds: Number(((Date.now() - startedAt) / 1000).toFixed(1))
         });
       } catch { /* non-fatal */ }
+      console.log(`[ensure-secondary] ${switching ? 'Switched' : 'Created'} for ${userId}: model=${model.id} agentId=${gpt.agentId}`);
+      return res.json({
+        success: true, ready: false, status: switching ? 'switching' : 'created',
+        agentId: gpt.agentId || null, endpoint: null, model: { id: model.id, name: model.name }
+      });
     }
-    console.log(`[ensure-secondary] Created for ${userId} in ${ensureElapsed}s, agentId=${gpt.agentId}`);
-    res.json({ success: true, ready: false, agentId: gpt.agentId || null, endpoint: null, status: 'created' });
+
+    if (!prof.agentId) {
+      return res.json({ success: true, ready: false, status: 'not_chosen', model: null });
+    }
+
+    // Poll: is the agent running, and is the knowledge base connected?
+    let endpoint = null;
+    let isRunning = false;
+    let status = 'unknown';
+    try {
+      const live = await doClient.agent.get(prof.agentId);
+      status = live?.deployment?.status || live?.deployment_status || 'unknown';
+      isRunning = status === 'STATUS_RUNNING';
+      endpoint = live?.deployment?.url ? `${live.deployment.url}/api/v1` : null;
+    } catch { /* still deploying */ }
+
+    const conns = userDoc.kbConnections?.gpt || {};
+    const wantsKb = !!userDoc.kbId && conns.kb1 !== false;
+    let kbConnected = !wantsKb || prof.kbAttachedId === userDoc.kbId;
+    if (isRunning && !kbConnected) {
+      try {
+        await doClient.agent.attachKB(prof.agentId, userDoc.kbId);
+        kbConnected = true;
+      } catch (e) {
+        const msg = String(e?.message || '');
+        if (msg.includes('already') || msg.includes('409')) kbConnected = true;
+        else console.warn(`[ensure-secondary] KB attach for ${userId} failed (will retry): ${msg}`);
+      }
+    }
+    const ready = !!endpoint && isRunning && kbConnected;
+
+    const firstReady = ready && !prof.deployedLoggedAt;
+    const kbNewlyAttached = kbConnected && wantsKb && prof.kbAttachedId !== userDoc.kbId;
+    if (firstReady || kbNewlyAttached) {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const doc = await cloudant.getDocument('maia_users', userId);
+          if (!doc) break;
+          if (!doc.agentProfiles) doc.agentProfiles = {};
+          doc.agentProfiles.gpt = {
+            ...(doc.agentProfiles.gpt || {}),
+            ...(kbNewlyAttached ? { kbAttachedId: userDoc.kbId } : {}),
+            ...(firstReady ? { endpoint, deployedLoggedAt: new Date().toISOString() } : {})
+          };
+          doc.updatedAt = new Date().toISOString();
+          await cloudant.saveDocument('maia_users', doc);
+          prof = doc.agentProfiles.gpt;
+          break;
+        } catch (err) {
+          if (err?.statusCode === 409 && attempt < 2) continue;
+          break;
+        }
+      }
+      if (firstReady) {
+        invalidateResourceCache(userId);
+        try {
+          await appendUserProvisioningEvent(userId, { event: 'gpt-agent-deployed', agentId: prof.agentId, model: prof.modelId || prof.modelName || null, kbConnected: wantsKb });
+        } catch { /* non-fatal */ }
+      }
+    }
+    console.log(`[ensure-secondary] Poll for ${userId}: status=${status}, kbConnected=${kbConnected}, ready=${ready}`);
+    return res.json({
+      success: true, ready, status, agentId: prof.agentId, endpoint,
+      model: { id: prof.modelId || prof.modelName || null, name: prof.modelDisplayName || prof.modelName || null },
+      kbConnected, hasKb: !!userDoc.kbId
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
