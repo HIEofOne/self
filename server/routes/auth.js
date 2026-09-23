@@ -8,6 +8,7 @@ import { fileURLToPath } from 'url';
 import { findUserAgent } from '../utils/agent-helper.js';
 import { getProjectIdForGenAI } from '../utils/project-config.js';
 import { getDoRegion } from '../utils/new-agent-config.js';
+import { resolveSecondaryModel } from '../utils/secondary-models.js';
 import { isVerified as isEmailVerified } from '../emailVerification.js';
 
 // Wizard-done workflow stages (mirrors WIZARD_DONE_STAGES in
@@ -86,37 +87,30 @@ function isValidUUID(value) {
   return uuidRegex.test(value.trim());
 }
 
-// Model identifiers for the two Private AI agents. Matched against the
-// DO catalog by inference_name / name / id. The primary (GPT-OSS-120B)
-// is the default; the secondary (Kimi K2.5) backs the historical
-// 'gpt' profile slot. NOTE: profile keys 'default' and 'gpt' stay as
-// historical identifiers (kept to avoid migrating every existing
-// userDoc.agentProfiles[*].agentId).
+// Model identifier for the PRIMARY Private AI agent, matched against the
+// DO catalog by inference_name / name / id. The SECONDARY agent (the
+// historical 'gpt' profile slot) has no fixed model: the user chooses
+// one from the DO-hosted, agent-capable catalog (utils/secondary-models.js).
+// NOTE: profile keys 'default' and 'gpt' stay as historical identifiers
+// (kept to avoid migrating every existing userDoc.agentProfiles[*].agentId).
 export const MODEL_GPT = { inference_name: 'openai-gpt-oss-120b', name: 'OpenAI GPT-oss-120b', id: 'openai-gpt-oss-120b' };
-export const MODEL_KIMI = { inference_name: 'kimi-k2.5', name: 'Kimi K2.5', id: 'kimi-k2.5' };
 export const MODEL_PRIMARY = MODEL_GPT;
-export const MODEL_SECONDARY = MODEL_KIMI;
 
 const matchesModel = (m, spec) =>
   m.inference_name === spec.inference_name ||
   m.name === spec.name ||
   (spec.id && m.id === spec.id);
 
-// `modelSpec` selects which catalog model to resolve (default Kimi, the
-// primary). `process.env.DO_MODEL_ID` only applies to the primary agent —
-// the secondary must always resolve its own model from the catalog.
-async function resolveModelAndProject(doClient, modelSpec = MODEL_PRIMARY) {
-  const isPrimary = modelSpec === MODEL_PRIMARY;
-  let modelId = isPrimary ? process.env.DO_MODEL_ID : undefined;
+// DO project that new agents belong to: DO_PROJECT_ID, else an existing
+// agent's project, else the account's GenAI project.
+async function resolveProjectId(doClient) {
   let projectId = process.env.DO_PROJECT_ID;
-
-  // Project ID may still come from an existing agent
   if (!isValidUUID(projectId)) {
     try {
       const agents = await doClient.agent.list();
       if (agents.length > 0) {
         const existingAgent = await doClient.agent.get(agents[0].uuid || agents[0].id);
-        if (!isValidUUID(projectId) && existingAgent.project_id && isValidUUID(existingAgent.project_id)) {
+        if (existingAgent.project_id && isValidUUID(existingAgent.project_id)) {
           projectId = existingAgent.project_id;
         }
       }
@@ -124,6 +118,20 @@ async function resolveModelAndProject(doClient, modelSpec = MODEL_PRIMARY) {
       // Continue with fallback
     }
   }
+  if (!isValidUUID(projectId)) {
+    projectId = await getProjectIdForGenAI(doClient) || projectId;
+  }
+  return projectId;
+}
+
+// `modelSpec` selects which catalog model to resolve (the primary's by
+// default). `process.env.DO_MODEL_ID` only applies to the primary agent.
+// The secondary agent never comes through here: its model is the user's
+// explicit choice, and the fallbacks below could silently substitute one.
+async function resolveModelAndProject(doClient, modelSpec = MODEL_PRIMARY) {
+  const isPrimary = modelSpec === MODEL_PRIMARY;
+  let modelId = isPrimary ? process.env.DO_MODEL_ID : undefined;
+  const projectId = await resolveProjectId(doClient);
 
   // PREFERRED PATH: look up the requested model in the DO catalog FIRST.
   // Only fall back to an existing agent's model if the catalog lookup
@@ -170,10 +178,6 @@ async function resolveModelAndProject(doClient, modelSpec = MODEL_PRIMARY) {
     } catch (error) {
       // Continue
     }
-  }
-
-  if (!isValidUUID(projectId)) {
-    projectId = await getProjectIdForGenAI(doClient) || projectId;
   }
 
   return { modelId, projectId };
@@ -468,18 +472,48 @@ export async function ensureUserAgent(doClient, cloudant, userDoc) {
   return userDoc;
 }
 
-// Ensure the SECONDARY "Private AI (GPT)" agent exists, recorded
-// under userDoc.agentProfiles.gpt (profile key kept for historical
-// reasons — see MODEL_KIMI/MODEL_GPT comment above). Idempotent:
-// reuses the agent if its id still resolves in DO, otherwise creates
-// one. The secondary agent's initial system prompt is a ONE-TIME COPY
-// of the primary agent's current instruction (falling back to
-// NEW-AGENT.txt); the two then diverge.
-// The same user KB is attached (DO KB→agent is many-to-many). This is
-// called from the same places that ensure the primary agent (Setup
-// completion, rehydrate, sign-in backfill) so existing accounts get
-// the GPT agent the next time round.
-export async function ensureSecondaryAgent(doClient, cloudant, userDoc) {
+// The SECONDARY Private AI agent, recorded under userDoc.agentProfiles.gpt
+// (profile key kept for historical reasons — see MODEL_GPT comment above).
+//
+// It is NEVER created automatically. The model is the user's choice
+// (Workbook → AI Agents), validated against the DO-hosted, agent-capable
+// catalog in utils/secondary-models.js:
+//  - with `model`: create the agent with that model, or SWITCH an existing
+//    agent to it (a new agent is created with the old agent's instructions,
+//    the profile is repointed, then the old agent is deleted);
+//  - without `model`: REPAIR only — reuse the live agent, or recreate a
+//    destroyed one with the model the user chose before. Throws
+//    SECONDARY_NOT_CHOSEN when there is no choice to repair, and
+//    SECONDARY_MODEL_UNAVAILABLE when that model has left the catalog.
+// The user's knowledge base is attached: KB-1 unless the user disconnected
+// it from this agent, KB-2 when they connected it (userDoc.kbConnections).
+export class SecondaryAgentError extends Error {
+  constructor(code, message) {
+    super(message || code);
+    this.code = code;
+  }
+}
+
+async function attachSecondaryKbs(doClient, userDoc, agentId) {
+  const conns = userDoc.kbConnections?.[PROFILE_GPT] || {};
+  const attach = async (kbId) => {
+    try {
+      await doClient.agent.attachKB(agentId, kbId);
+      return true;
+    } catch (e) {
+      const msg = String(e?.message || '');
+      if (msg.includes('already') || msg.includes('409')) return true;
+      console.warn(`[secondary-agent] attachKB(${kbId}) to ${agentId} failed: ${msg}`);
+      return false;
+    }
+  };
+  let kbAttachedId = null;
+  if (userDoc.kbId && conns.kb1 !== false && await attach(userDoc.kbId)) kbAttachedId = userDoc.kbId;
+  if (userDoc.kb2?.kbId && conns.kb2 === true) await attach(userDoc.kb2.kbId);
+  return kbAttachedId;
+}
+
+export async function ensureSecondaryAgent(doClient, cloudant, userDoc, { model = null } = {}) {
   if (!userDoc) return userDoc;
   const userId = userDoc.userId;
   if (!userId) return userDoc;
@@ -488,20 +522,38 @@ export async function ensureSecondaryAgent(doClient, cloudant, userDoc) {
   if (agentCreationLocks.has(lockKey)) {
     try { await agentCreationLocks.get(lockKey); } catch { /* re-read below */ }
     const freshDoc = await cloudant.getDocument('maia_users', userId);
-    if (freshDoc?.agentProfiles?.[PROFILE_GPT]?.agentId) {
+    const fp = freshDoc?.agentProfiles?.[PROFILE_GPT];
+    if (fp?.agentId && (!model || fp.modelId === model.id)) {
       Object.assign(userDoc, freshDoc);
       return userDoc;
     }
+    if (freshDoc) Object.assign(userDoc, freshDoc);
   }
 
-  const existingGptId = userDoc.agentProfiles?.[PROFILE_GPT]?.agentId || null;
+  const prev = userDoc.agentProfiles?.[PROFILE_GPT] || {};
   let agent = null;
-  if (existingGptId) {
-    try { agent = await doClient.agent.get(existingGptId); } catch { agent = null; }
+  if (prev.agentId) {
+    try { agent = await doClient.agent.get(prev.agentId); } catch { agent = null; }
+  }
+  const currentModelId = prev.modelId || agent?.model?.inference_name || prev.modelName || null;
+  const switching = !!(agent && model && model.id !== currentModelId);
+
+  let target = model;
+  if (!agent && !target) {
+    const priorId = prev.modelId || prev.modelName;
+    if (!priorId) {
+      throw new SecondaryAgentError('SECONDARY_NOT_CHOSEN', 'No secondary Private AI model has been chosen');
+    }
+    target = await resolveSecondaryModel(doClient, priorId);
+    if (!target) {
+      throw new SecondaryAgentError('SECONDARY_MODEL_UNAVAILABLE',
+        `The secondary Private AI model chosen before (${priorId}) is no longer available`);
+    }
   }
 
+  const needsCreation = !agent || switching;
   let lockResolve = null;
-  const needsCreation = !agent;
+  let replacedAgentId = null;
   if (needsCreation) {
     let lockReject;
     const lockPromise = new Promise((resolve, reject) => { lockResolve = resolve; lockReject = reject; });
@@ -510,18 +562,24 @@ export async function ensureSecondaryAgent(doClient, cloudant, userDoc) {
     lockPromise.catch(() => {});
     agentCreationLocks.set(lockKey, lockPromise);
     try {
-      const { modelId, projectId } = await resolveModelAndProject(doClient, MODEL_SECONDARY);
-      if (!isValidUUID(modelId) || !isValidUUID(projectId)) {
+      const projectId = await resolveProjectId(doClient);
+      if (!isValidUUID(target?.uuid) || !isValidUUID(projectId)) {
         throw new Error('Unable to resolve secondary model or project ID for agent creation');
       }
-      const instruction = 'Do not hallucinate.';
+      // A model switch keeps the user's own instructions for this agent.
+      let instruction = 'Do not hallucinate.';
+      if (switching) {
+        replacedAgentId = agent.uuid || agent.id;
+        if (typeof agent.instruction === 'string' && agent.instruction.trim()) instruction = agent.instruction;
+      }
       agent = await doClient.agent.create({
         name: buildAgentName(userId, 'gpt'),
         instruction,
-        modelId: modelId.trim(),
+        modelId: target.uuid,
         projectId: projectId.trim(),
         region: getDoRegion(),
-        maxTokens: 32768,
+        // Most catalog models cap output at 8,192 tokens; never ask for more.
+        maxTokens: Math.min(32768, target.maxOutputTokens || 32768),
         topP: 1,
         temperature: 0.1,
         k: 15,
@@ -537,20 +595,25 @@ export async function ensureSecondaryAgent(doClient, cloudant, userDoc) {
   const resolved = await doClient.agent.get(agent.uuid || agent.id);
   const endpoint = resolved?.deployment?.url ? `${resolved.deployment.url}/api/v1` : null;
   const gptAgentId = resolved.uuid || resolved.id;
-
-  // Attach the same user KB to the GPT agent (best-effort, idempotent).
-  if (userDoc.kbId) {
-    try { await doClient.agent.attachKB(gptAgentId, userDoc.kbId); } catch { /* may already be attached */ }
-  }
+  const kbAttachedId = await attachSecondaryKbs(doClient, userDoc, gptAgentId);
 
   let saved = false;
   let retries = 3;
   while (!saved && retries > 0) {
+    if (needsCreation) {
+      // A new agent starts a fresh profile: the replaced agent's endpoint,
+      // API key and deploy markers must not carry over.
+      const keep = userDoc.agentProfiles?.[PROFILE_GPT]?.createdAt;
+      userDoc.agentProfiles = { ...(userDoc.agentProfiles || {}), [PROFILE_GPT]: keep ? { createdAt: keep } : {} };
+    }
     setAgentProfile(userDoc, PROFILE_GPT, {
       agentId: gptAgentId,
       agentName: resolved.name,
       endpoint,
-      modelName: resolved.model?.inference_name || resolved.model?.name || MODEL_SECONDARY.inference_name
+      modelName: resolved.model?.inference_name || target?.id || prev.modelName,
+      modelId: target?.id || prev.modelId || resolved.model?.inference_name,
+      modelDisplayName: target?.name || prev.modelDisplayName || resolved.model?.name,
+      kbAttachedId
     });
     userDoc.updatedAt = new Date().toISOString();
     try {
@@ -570,6 +633,15 @@ export async function ensureSecondaryAgent(doClient, cloudant, userDoc) {
   if (needsCreation && lockResolve) {
     agentCreationLocks.delete(lockKey);
     lockResolve();
+  }
+
+  // Only after the profile points at the new agent: remove the old one.
+  if (replacedAgentId) {
+    try {
+      await doClient.agent.delete(replacedAgentId);
+    } catch (e) {
+      console.warn(`[secondary-agent] could not delete replaced agent ${replacedAgentId}: ${e?.message || e}`);
+    }
   }
   return userDoc;
 }

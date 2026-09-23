@@ -856,21 +856,19 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient, app
   // `agentProfileKey` alongside provider 'digitalocean'.
   // Label is derived from the ACTUAL model behind each profile, not from
   // the profile key. Profile keys 'default' / 'gpt' are historical slots.
-  // The dropdown is sorted so Kimi comes first (primary), GPT second.
-  const labelForModel = (modelName) => {
+  // A user-chosen secondary carries the catalog's display name
+  // (modelDisplayName); older agents fall back to a family name.
+  const labelForModel = (modelName, displayName) => {
+    if (displayName) return `Private AI (${displayName})`;
     const m = String(modelName || '').toLowerCase();
     if (m.includes('kimi')) return 'Private AI (Kimi)';
     if (m.includes('gpt')) return 'Private AI (GPT)';
     if (m.includes('deepseek')) return 'Private AI (Deepseek)';
+    if (m.includes('qwen')) return 'Private AI (Qwen)';
     return 'Private AI';
   };
-  const sortKeyForModel = (modelName) => {
-    const m = String(modelName || '').toLowerCase();
-    if (m.includes('kimi')) return 0; // Kimi first (primary)
-    if (m.includes('gpt')) return 1;
-    if (m.includes('deepseek')) return 2;
-    return 3;
-  };
+  // Primary ('default') always first, then the secondary ('gpt').
+  const sortKeyForProfile = (key) => (key === 'default' ? 0 : 1);
 
   const buildPrivateAiProfiles = async (doc) => {
     if (!doc) return [];
@@ -892,12 +890,11 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient, app
     // 'gpt' slot (historical name — may hold GPT, Deepseek, or other model).
     const gpt = profiles.gpt || {};
     if (gpt.agentId && gpt.endpoint && await verifyAgentLive(gpt.agentId)) {
-      const model = gpt.modelName || 'deepseek-v4-pro';
-      out.push({ key: 'gpt', label: labelForModel(model), model });
+      const model = gpt.modelName || gpt.modelId || 'secondary';
+      out.push({ key: 'gpt', label: labelForModel(model, gpt.modelDisplayName), model });
     }
 
-    // Sort so the user always sees Kimi (primary) first.
-    out.sort((a, b) => sortKeyForModel(a.model) - sortKeyForModel(b.model));
+    out.sort((a, b) => sortKeyForProfile(a.key) - sortKeyForProfile(b.key));
     return out;
   };
 
@@ -975,6 +972,35 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient, app
                   if (newId) agentLiveCache.delete(newId);
                 } catch (gptErr) {
                   console.warn('[chat/providers] ensureSecondaryAgent repair failed:', gptErr?.message);
+                }
+              }
+            }
+            // Connect the user's KB to a secondary chosen before the KB
+            // existed (e.g. picked before the first indexing). Once per KB,
+            // and never when the user disconnected it from this agent.
+            const gp = userDoc?.agentProfiles?.gpt;
+            if (gp?.agentId && gp.endpoint && gp.kbAttachedId !== userDoc.kbId
+                && userDoc.kbConnections?.gpt?.kb1 !== false) {
+              let attached = false;
+              try {
+                await doClient.agent.attachKB(gp.agentId, userDoc.kbId);
+                attached = true;
+              } catch (e) {
+                const msg = String(e?.message || '');
+                attached = msg.includes('already') || msg.includes('409');
+                if (!attached) console.warn('[chat/providers] secondary KB attach failed (will retry):', msg);
+              }
+              for (let attempt = 0; attached && attempt < 3; attempt++) {
+                try {
+                  const doc = await cloudant.getDocument('maia_users', userId);
+                  if (!doc?.agentProfiles?.gpt) break;
+                  doc.agentProfiles.gpt.kbAttachedId = userDoc.kbId;
+                  doc.updatedAt = new Date().toISOString();
+                  await cloudant.saveDocument('maia_users', doc);
+                  userDoc = doc;
+                  break;
+                } catch (err) {
+                  if (err?.statusCode !== 409) break;
                 }
               }
             }

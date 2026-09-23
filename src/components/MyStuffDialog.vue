@@ -802,70 +802,97 @@
 
             <!-- Secondary agent tab -->
             <template v-else-if="activeAgentProfile === 'gpt'">
-              <!-- Deploy UI (when secondary not yet deployed) -->
+              <!-- Progress for creating the agent or switching its model
+                   (shared by both states below). -->
+              <div v-if="secondaryDeployStatus === 'deploying'" class="q-mb-md">
+                <q-banner class="bg-blue-1 text-blue-9 rounded-borders">
+                  <template v-slot:avatar><q-spinner color="primary" size="1.2em" /></template>
+                  <div>
+                    {{ secondaryDeployIsSwitch ? 'Switching to' : 'Setting up' }}
+                    <strong>{{ secondaryDeployModelName || 'your secondary Private AI' }}</strong>…
+                    <strong>{{ secondaryDeployElapsed }}s</strong>
+                    <span class="text-grey-7"> (usually 1–3 minutes)</span>
+                  </div>
+                  <div v-if="secondaryDeploySteps.length" class="q-mt-sm">
+                    <div v-for="(step, i) in secondaryDeploySteps" :key="i" class="text-caption" :class="step.ok === false ? 'text-red' : step.ok ? 'text-green-8' : 'text-grey-7'">
+                      {{ step.label }}{{ step.elapsed ? ` (${step.elapsed}s)` : '' }}
+                      <span v-if="step.ok === false"> — failed: {{ step.error }}</span>
+                    </div>
+                  </div>
+                </q-banner>
+                <q-btn
+                  flat
+                  label="Stop waiting"
+                  color="grey-8"
+                  icon="close"
+                  class="q-mt-sm"
+                  @click="cancelSecondaryDeploy"
+                />
+              </div>
+
+              <div v-else-if="secondaryDeployStatus === 'ready' && secondaryReadyNote" class="q-mb-md">
+                <q-banner class="bg-green-1 text-green-9 rounded-borders">
+                  <template v-slot:avatar><q-icon name="check_circle" color="green" /></template>
+                  {{ secondaryReadyNote }}
+                </q-banner>
+              </div>
+
+              <div v-else-if="secondaryDeployStatus === 'failed'" class="q-mb-md">
+                <q-banner class="bg-red-1 text-red-9 rounded-borders">
+                  <template v-slot:avatar><q-icon name="error" color="red" /></template>
+                  Setup did not finish{{ secondaryDeployError ? ': ' + secondaryDeployError : '' }}
+                </q-banner>
+              </div>
+
+              <div v-else-if="secondaryDeployStatus === 'timeout'" class="q-mb-md">
+                <q-banner class="bg-orange-1 text-orange-9 rounded-borders">
+                  <template v-slot:avatar><q-icon name="schedule" color="orange" /></template>
+                  Still deploying after 5 minutes. DigitalOcean keeps going in the background —
+                  reopen this tab in a few minutes to check.
+                </q-banner>
+              </div>
+
+              <!-- Not created yet: the user chooses the model -->
               <template v-if="!agentInstructions && !loadingAgent">
                 <div class="row items-center justify-between q-mb-md">
-                  <div class="text-h6">{{ profileLabel('gpt') }}</div>
+                  <div class="text-h6">Secondary Private AI</div>
                 </div>
-
-                <div v-if="secondaryDeployStatus === 'ready'" class="q-mb-md">
-                  <q-banner class="bg-green-1 text-green-9 rounded-borders">
-                    <template v-slot:avatar><q-icon name="check_circle" color="green" /></template>
-                    Agent deployed and ready.
-                  </q-banner>
-                </div>
-
-                <div v-else-if="secondaryDeployStatus === 'deploying'" class="q-mb-md">
-                  <q-banner class="bg-blue-1 text-blue-9 rounded-borders">
-                    <template v-slot:avatar><q-spinner color="primary" size="1.2em" /></template>
-                    <div>
-                      Deploying...
-                      <strong>{{ secondaryDeployElapsed }}s</strong>
-                      <span class="text-grey-7"> / 3 min max</span>
-                    </div>
-                    <div v-if="secondaryDeploySteps.length" class="q-mt-sm">
-                      <div v-for="(step, i) in secondaryDeploySteps" :key="i" class="text-caption" :class="step.ok === false ? 'text-red' : step.ok ? 'text-green-8' : 'text-grey-7'">
-                        {{ step.label }}{{ step.elapsed ? ` (${step.elapsed}s)` : '' }}
-                        <span v-if="step.ok === false"> — failed: {{ step.error }}</span>
-                      </div>
-                    </div>
-                  </q-banner>
-                  <q-btn
-                    flat
-                    label="Cancel"
-                    color="red"
-                    icon="cancel"
-                    class="q-mt-sm"
-                    @click="cancelSecondaryDeploy"
-                  />
-                </div>
-
-                <div v-else-if="secondaryDeployStatus === 'failed'" class="q-mb-md">
-                  <q-banner class="bg-red-1 text-red-9 rounded-borders">
-                    <template v-slot:avatar><q-icon name="error" color="red" /></template>
-                    Deployment failed{{ secondaryDeployError ? ': ' + secondaryDeployError : '' }}
-                  </q-banner>
-                </div>
-
-                <div v-else-if="secondaryDeployStatus === 'timeout'" class="q-mb-md">
-                  <q-banner class="bg-orange-1 text-orange-9 rounded-borders">
-                    <template v-slot:avatar><q-icon name="schedule" color="orange" /></template>
-                    Deployment timed out after 3 minutes.
-                  </q-banner>
-                </div>
-
-                <div v-if="secondaryDeployStatus === 'idle' || secondaryDeployStatus === 'failed' || secondaryDeployStatus === 'timeout'" class="q-mb-md">
-                  <q-btn
-                    :label="`Deploy ${profileLabel('gpt')}`"
-                    color="primary"
-                    icon="rocket_launch"
-                    @click="startSecondaryDeploy"
-                  />
-                </div>
+                <SecondaryModelChooser
+                  v-if="secondaryDeployStatus !== 'deploying' && secondaryDeployStatus !== 'ready'"
+                  :user-id="userId"
+                  action-label="Create secondary Private AI"
+                  @choose="startSecondaryDeploy"
+                />
               </template>
 
               <!-- Full agent controls (same as primary, shown when deployed) -->
               <template v-else>
+                <div class="row items-center q-mb-md">
+                  <div class="text-body2">
+                    Model: <strong>{{ secondaryModelName || profileLabel('gpt') }}</strong>
+                  </div>
+                  <q-btn
+                    v-if="!showSecondaryChooser && secondaryDeployStatus !== 'deploying'"
+                    flat
+                    dense
+                    no-caps
+                    color="primary"
+                    icon="swap_horiz"
+                    label="Change model"
+                    class="q-ml-sm"
+                    @click="showSecondaryChooser = true"
+                  />
+                </div>
+                <SecondaryModelChooser
+                  v-if="showSecondaryChooser && secondaryDeployStatus !== 'deploying'"
+                  :user-id="userId"
+                  :current-model-id="secondaryModelId"
+                  action-label="Switch to this model"
+                  cancellable
+                  class="q-mb-lg"
+                  @choose="startSecondaryDeploy"
+                  @cancel="showSecondaryChooser = false"
+                />
                 <div class="row items-center justify-between q-mb-md">
                   <div class="text-h6">Agent Instructions</div>
                   <q-btn
@@ -1977,6 +2004,7 @@ import TextViewerModal from './TextViewerModal.vue';
 import Lists from './Lists.vue';
 import GroupsPanel from './GroupsPanel.vue';
 import PoliciesPanel from './PoliciesPanel.vue';
+import SecondaryModelChooser from './SecondaryModelChooser.vue';
 import { useQuasar } from 'quasar';
 import { deleteChatById } from '../utils/chatApi';
 import { processFileNCitations } from '../utils/fileNCitations';
@@ -2569,7 +2597,7 @@ const profileLabel = (profileKey: string): string => {
   const prof = agentProfilesList.value.find(p => p.key === profileKey);
   if (prof) return prof.label;
   if (profileKey === 'default') return 'Private AI Primary (GPT)';
-  return 'Private AI Secondary (Kimi)';
+  return 'Secondary Private AI (choose a model)';
 };
 const instrTabLabel = (profileKey: string): string => {
   const label = profileLabel(profileKey);
@@ -2577,15 +2605,27 @@ const instrTabLabel = (profileKey: string): string => {
   return `Instructions for ${short}`;
 };
 
-// ── Secondary agent deployment ────────────────────────────────────
+// ── Secondary agent: user-chosen model ────────────────────────────
+// The secondary Private AI is never created automatically. The user picks
+// a model (SecondaryModelChooser → /api/secondary-models); we then ask the
+// server to create the agent — or switch the existing one — and poll
+// /api/agents/ensure-secondary until the agent is running AND connected
+// to the knowledge base. One spinner covers the whole process.
 type DeployStep = { label: string; ok?: boolean; elapsed?: number; error?: string };
 const secondaryDeployStatus = ref<'idle' | 'deploying' | 'ready' | 'failed' | 'timeout'>('idle');
 const secondaryDeployElapsed = ref(0);
 const secondaryDeployError = ref('');
 const secondaryDeploySteps = ref<DeployStep[]>([]);
+const secondaryDeployModelName = ref('');
+const secondaryDeployIsSwitch = ref(false);
+const secondaryReadyNote = ref('');
+const showSecondaryChooser = ref(false);
+// The model behind the existing secondary agent, if any.
+const secondaryModelId = ref<string | null>(null);
+const secondaryModelName = ref<string | null>(null);
 let secondaryDeployTimer: ReturnType<typeof setInterval> | null = null;
 let secondaryDeployAbort: AbortController | null = null;
-const SECONDARY_DEPLOY_TIMEOUT_MS = 180000; // 3 minutes
+const SECONDARY_DEPLOY_TIMEOUT_MS = 300000; // 5 minutes
 
 const addDeployStep = (label: string, ok?: boolean, elapsed?: number, error?: string) => {
   secondaryDeploySteps.value.push({ label, ok, elapsed, error });
@@ -2598,134 +2638,151 @@ const addDeployStep = (label: string, ok?: boolean, elapsed?: number, error?: st
   });
 };
 
-const cancelSecondaryDeploy = () => {
-  if (secondaryDeployAbort) secondaryDeployAbort.abort();
+const stopSecondaryTimer = () => {
   if (secondaryDeployTimer) { clearInterval(secondaryDeployTimer); secondaryDeployTimer = null; }
-  secondaryDeployStatus.value = 'failed';
-  secondaryDeployError.value = 'Cancelled by user';
-  addDeployStep('Cancelled by user', false);
 };
 
-const startSecondaryDeploy = async () => {
-  if (!props.userId) return;
+// "Stop waiting": stops the spinner only. An agent DigitalOcean has already
+// started keeps deploying; reopening the tab picks it up again.
+const cancelSecondaryDeploy = () => {
+  if (secondaryDeployAbort) secondaryDeployAbort.abort();
+  stopSecondaryTimer();
+  secondaryDeployStatus.value = 'failed';
+  secondaryDeployError.value = 'stopped waiting — if the agent was already started, it keeps deploying in the background';
+};
+
+const ensureSecondaryCall = async (body: Record<string, unknown>, signal?: AbortSignal) => {
+  const r = await fetch('/api/agents/ensure-secondary', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    signal,
+    body: JSON.stringify({ userId: props.userId, ...body })
+  });
+  const d = await r.json().catch(() => ({}));
+  return { ok: r.ok && d.success !== false, data: d as Record<string, any> };
+};
+
+const beginSecondarySpinner = () => {
   secondaryDeployStatus.value = 'deploying';
   secondaryDeployElapsed.value = 0;
   secondaryDeployError.value = '';
+  secondaryReadyNote.value = '';
   secondaryDeploySteps.value = [];
   secondaryDeployAbort = new AbortController();
-  const signal = secondaryDeployAbort.signal;
   const startedAt = Date.now();
-
+  stopSecondaryTimer();
   secondaryDeployTimer = setInterval(() => {
     secondaryDeployElapsed.value = Math.round((Date.now() - startedAt) / 1000);
     if (Date.now() - startedAt > SECONDARY_DEPLOY_TIMEOUT_MS) {
-      if (secondaryDeployTimer) { clearInterval(secondaryDeployTimer); secondaryDeployTimer = null; }
+      stopSecondaryTimer();
       if (secondaryDeployAbort) secondaryDeployAbort.abort();
       secondaryDeployStatus.value = 'timeout';
-      addDeployStep('Deployment timed out after 3 minutes', false);
       emit('provisioning-event', { event: 'secondary-provision-timeout', elapsedSeconds: secondaryDeployElapsed.value });
     }
   }, 1000);
+  return { startedAt, signal: secondaryDeployAbort.signal };
+};
 
-  emit('provisioning-event', { event: 'secondary-provision-started' });
-
-  try {
-    // Step 1: Create the agent via ensure-secondary
-    addDeployStep('Creating agent on DigitalOcean...');
-    const t1 = Date.now();
-    const createRes = await fetch('/api/agents/ensure-secondary', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      signal,
-      body: JSON.stringify({ userId: props.userId })
-    });
-    const createData = await createRes.json().catch(() => ({}));
-    const createElapsed = Number(((Date.now() - t1) / 1000).toFixed(1));
-
-    if (!createRes.ok || !createData.success) {
-      throw new Error(createData.error || `HTTP ${createRes.status}`);
+// Poll until running + KB connected (or timeout / stop).
+const pollSecondaryUntilReady = async (startedAt: number, signal: AbortSignal) => {
+  addDeployStep('Waiting for DigitalOcean to deploy the agent…');
+  let kbStepShown = false;
+  while (Date.now() - startedAt < SECONDARY_DEPLOY_TIMEOUT_MS) {
+    await new Promise(r => setTimeout(r, 5000));
+    if (signal.aborted) return;
+    let res;
+    try {
+      res = await ensureSecondaryCall({}, signal);
+    } catch (e: any) {
+      if (e?.name === 'AbortError') return;
+      continue;
     }
-
-    if (createData.ready) {
-      addDeployStep('Agent created and ready', true, createElapsed);
+    const d = res.data;
+    const secs = Math.round((Date.now() - startedAt) / 1000);
+    const running = d.status === 'STATUS_RUNNING';
+    const waitStep = secondaryDeploySteps.value.find(s => s.label.startsWith('Waiting for DigitalOcean'));
+    if (waitStep && !running) waitStep.label = `Waiting for DigitalOcean to deploy the agent… (${d.status || 'starting'})`;
+    if (running && waitStep && waitStep.ok === undefined) {
+      waitStep.label = 'Agent deployed';
+      waitStep.ok = true;
+      waitStep.elapsed = secs;
+    }
+    if (running && d.hasKb && !d.kbConnected && !kbStepShown) {
+      kbStepShown = true;
+      addDeployStep('Connecting your knowledge base…');
+    }
+    if (d.ready) {
+      const kbStep = secondaryDeploySteps.value.find(s => s.label.startsWith('Connecting your knowledge base'));
+      if (kbStep) { kbStep.label = 'Knowledge base connected'; kbStep.ok = true; kbStep.elapsed = secs; }
+      stopSecondaryTimer();
+      secondaryModelId.value = d.model?.id || secondaryModelId.value;
+      secondaryModelName.value = d.model?.name || secondaryModelName.value;
+      secondaryReadyNote.value = d.hasKb
+        ? `${secondaryModelName.value || 'Your secondary Private AI'} is ready and connected to your knowledge base.`
+        : `${secondaryModelName.value || 'Your secondary Private AI'} is ready. It will connect to your knowledge base once you index records.`;
       secondaryDeployStatus.value = 'ready';
-      if (secondaryDeployTimer) { clearInterval(secondaryDeployTimer); secondaryDeployTimer = null; }
-      emit('provisioning-event', { event: 'secondary-provision-ready', elapsedSeconds: createElapsed });
+      showSecondaryChooser.value = false;
+      emit('provisioning-event', {
+        event: 'secondary-provision-ready',
+        model: secondaryModelId.value,
+        elapsedSeconds: secs
+      });
+      await loadAgent();
       return;
     }
-
-    addDeployStep(`Agent created (${createData.status || 'deploying'})`, true, createElapsed);
-
-    // Step 2: Poll until STATUS_RUNNING or timeout
-    addDeployStep('Waiting for agent to reach STATUS_RUNNING...');
-    const pollStart = Date.now();
-    while (Date.now() - startedAt < SECONDARY_DEPLOY_TIMEOUT_MS) {
-      if (signal.aborted) return;
-      await new Promise(r => setTimeout(r, 5000));
-      if (signal.aborted) return;
-
-      try {
-        const pollRes = await fetch('/api/agents/ensure-secondary', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          signal,
-          body: JSON.stringify({ userId: props.userId })
-        });
-        const pollData = await pollRes.json().catch(() => ({}));
-        const pollElapsed = Number(((Date.now() - pollStart) / 1000).toFixed(1));
-        const status = pollData.status || 'unknown';
-
-        if (pollData.ready) {
-          addDeployStep(`Agent STATUS_RUNNING`, true, pollElapsed);
-          secondaryDeployStatus.value = 'ready';
-          if (secondaryDeployTimer) { clearInterval(secondaryDeployTimer); secondaryDeployTimer = null; }
-          emit('provisioning-event', {
-            event: 'secondary-provision-ready',
-            elapsedSeconds: Number(((Date.now() - startedAt) / 1000).toFixed(1))
-          });
-          return;
-        }
-        // Update the latest step with current status
-        const lastStep = secondaryDeploySteps.value[secondaryDeploySteps.value.length - 1];
-        if (lastStep && lastStep.label.startsWith('Waiting')) {
-          lastStep.label = `Waiting for STATUS_RUNNING... (currently: ${status}, ${pollElapsed}s)`;
-        }
-      } catch (e: any) {
-        if (e.name === 'AbortError') return;
-      }
-    }
-
-    // If we get here, we timed out (the interval handler handles it)
-  } catch (e: any) {
-    if (e.name === 'AbortError') return;
-    if (secondaryDeployTimer) { clearInterval(secondaryDeployTimer); secondaryDeployTimer = null; }
-    secondaryDeployStatus.value = 'failed';
-    secondaryDeployError.value = e.message || 'Unknown error';
-    addDeployStep(`Error: ${e.message}`, false);
-    emit('provisioning-event', { event: 'secondary-provision-failed', error: e.message });
   }
 };
 
-// Check if secondary is already deployed when switching to the tab
+const startSecondaryDeploy = async (model: { id: string; name: string }) => {
+  if (!props.userId || !model?.id) return;
+  secondaryDeployIsSwitch.value = !!agentInstructions.value;
+  secondaryDeployModelName.value = model.name;
+  const { startedAt, signal } = beginSecondarySpinner();
+  emit('provisioning-event', { event: 'secondary-provision-started', model: model.id, switching: secondaryDeployIsSwitch.value });
+
+  try {
+    addDeployStep(secondaryDeployIsSwitch.value ? `Creating a new agent with ${model.name}…` : `Creating the agent with ${model.name}…`);
+    const t1 = Date.now();
+    const { ok, data } = await ensureSecondaryCall({ modelId: model.id }, signal);
+    const createElapsed = Number(((Date.now() - t1) / 1000).toFixed(1));
+    if (!ok) throw new Error(data.message || data.error || 'Could not create the agent');
+    const step = secondaryDeploySteps.value[secondaryDeploySteps.value.length - 1];
+    step.label = secondaryDeployIsSwitch.value ? `New agent created with ${model.name}` : `Agent created with ${model.name}`;
+    step.ok = true;
+    step.elapsed = createElapsed;
+    secondaryModelId.value = model.id;
+    secondaryModelName.value = model.name;
+    await pollSecondaryUntilReady(startedAt, signal);
+  } catch (e: any) {
+    if (e?.name === 'AbortError') return;
+    stopSecondaryTimer();
+    secondaryDeployStatus.value = 'failed';
+    secondaryDeployError.value = e?.message || 'Unknown error';
+    addDeployStep(`Error: ${secondaryDeployError.value}`, false);
+    emit('provisioning-event', { event: 'secondary-provision-failed', error: secondaryDeployError.value });
+  }
+};
+
+// On opening the secondary tab: learn which model (if any) is in use, and
+// resume the spinner if an agent is still deploying from earlier.
 const checkSecondaryStatus = async () => {
   if (!props.userId || secondaryDeployStatus.value === 'deploying') return;
   try {
-    const r = await fetch('/api/agents/ensure-secondary', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({ userId: props.userId, checkOnly: true })
-    });
-    const d = await r.json().catch(() => ({}));
-    if (d.ready) {
-      secondaryDeployStatus.value = 'ready';
+    const { data: d } = await ensureSecondaryCall({ checkOnly: true });
+    secondaryModelId.value = d.model?.id || null;
+    secondaryModelName.value = d.model?.name || null;
+    if (d.agentId && !d.ready) {
+      secondaryDeployIsSwitch.value = false;
+      secondaryDeployModelName.value = d.model?.name || '';
+      const { startedAt, signal } = beginSecondarySpinner();
+      await pollSecondaryUntilReady(startedAt, signal);
     }
   } catch { /* ignore */ }
 };
 
 watch(activeAgentProfile, (tab) => {
+  showSecondaryChooser.value = false;
   if (tab === 'gpt') void checkSecondaryStatus();
 });
 
@@ -3407,6 +3464,13 @@ const loadAgent = async () => {
       { credentials: 'include' }
     );
     if (!response.ok) {
+      // No agent for this profile (e.g. no secondary chosen yet): drop the
+      // previous tab's instructions so the secondary tab shows the model
+      // table instead of another agent's settings.
+      agentInstructions.value = '';
+      editedInstructions.value = '';
+      kbInfo.value = null;
+      agentKbs.value = [];
       throw new Error(`Failed to fetch agent: ${response.statusText}`);
     }
     const result = await response.json();
