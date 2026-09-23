@@ -294,6 +294,30 @@ function getSetupWizardMessages() {
 const agentStatusCache = new Map();
 const TEMP_USER_COOKIE = 'maia_temp_user';
 const TEMP_USER_COOKIE_MAX_AGE = 1000 * 60 * 60 * 24 * 7; // 7 days
+
+// The temporary-account cookie is the ONLY credential of an account without
+// a passkey, so it is SIGNED (cookie-parser with the session secret — an
+// unsigned cookie could be set to any user id). A legacy unsigned cookie is
+// honoured only together with a live session for the same user, and is then
+// re-issued signed, so users signed in at upgrade time are not locked out.
+const setTempCookie = (res, userId) => {
+  res.cookie(TEMP_USER_COOKIE, userId, {
+    maxAge: TEMP_USER_COOKIE_MAX_AGE,
+    httpOnly: true,
+    sameSite: 'lax',
+    signed: true
+  });
+};
+const readTempCookie = (req, res) => {
+  const signed = req.signedCookies?.[TEMP_USER_COOKIE];
+  if (typeof signed === 'string' && signed) return signed;
+  const legacy = req.cookies?.[TEMP_USER_COOKIE];
+  if (typeof legacy === 'string' && legacy && req.session?.userId === legacy) {
+    if (res) setTempCookie(res, legacy);
+    return legacy;
+  }
+  return null;
+};
 let cachedTempUserNames = null;
 let tempUserNamesLoadFailed = false;
 
@@ -713,6 +737,15 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
           error: 'User already has a passkey',
           hasExistingPasskey: true
         });
+      }
+      // Adding a passkey to an EXISTING account (a temporary account without
+      // one) requires proof that the caller owns it — otherwise anyone could
+      // attach their own passkey to someone else's account and lock them out.
+      if (existingUser && !existingUser.credentialID && !adminSecretCheck.required) {
+        const proven = req.session?.userId === userId || readTempCookie(req, res) === userId;
+        if (!proven) {
+          return res.status(403).json({ error: 'Sign in to this account before adding a passkey', code: 'NOT_ACCOUNT_OWNER' });
+        }
       }
 
       // Generate registration options
@@ -1204,35 +1237,26 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       if (!userId || typeof userId !== 'string') {
         return res.status(400).json({ success: false, error: 'userId required' });
       }
+      if (userId.trim().toLowerCase() === String(process.env.ADMIN_USERNAME || 'admin').trim().toLowerCase()) {
+        return res.status(403).json({ success: false, error: 'RESERVED_USER_ID' });
+      }
 
-      // Check if user doc already exists (shouldn't, but be safe)
-      try {
-        const existing = await cloudant.getDocument('maia_users', userId);
-        if (existing) {
-          // User doc exists — just sign them in
-          req.session.userId = userId;
-          req.session.username = userId;
-          req.session.displayName = existing.displayName || userId;
-          req.session.isTemporary = true;
-          req.session.authenticatedAt = new Date().toISOString();
-          req.session.expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-          res.cookie(TEMP_USER_COOKIE, userId, {
-            maxAge: TEMP_USER_COOKIE_MAX_AGE,
-            httpOnly: true,
-            sameSite: 'lax'
-          });
-          return res.json({
-            success: true,
-            authenticated: true,
-            user: {
-              userId: existing.userId,
-              displayName: existing.displayName || userId,
-              isTemporary: true
-            }
-          });
-        }
-      } catch (e) {
-        // 404 expected — user was destroyed, proceed to recreate
+      // Only a DESTROYED account can be recreated (restore from the local
+      // folder backup). An existing account is never signed into from here:
+      // this route has no proof of ownership, so doing so let anyone take
+      // over any account by naming it. Existing accounts sign in with their
+      // passkey or their (signed) temporary-account cookie.
+      let existing = null;
+      try { existing = await cloudant.getDocument('maia_users', userId); } catch { existing = null; }
+      if (existing) {
+        return res.status(409).json({
+          success: false,
+          error: 'ACCOUNT_EXISTS',
+          hasPasskey: !!existing.credentialID,
+          message: existing.credentialID
+            ? 'This account still exists — sign in with its passkey.'
+            : 'This account still exists — sign in from the browser that created it.'
+        });
       }
 
       // Recreate the user doc with the same userId
@@ -1266,11 +1290,7 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       req.session.isTemporary = true;
       req.session.authenticatedAt = new Date().toISOString();
       req.session.expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-      res.cookie(TEMP_USER_COOKIE, userId, {
-        maxAge: TEMP_USER_COOKIE_MAX_AGE,
-        httpOnly: true,
-        sameSite: 'lax'
-      });
+      setTempCookie(res, userId);
 
       res.json({
         success: true,
@@ -1318,7 +1338,7 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
         && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(req.body.email.trim())) ? req.body.email.trim() : null;
       const emailVerifyToken = (typeof req.body?.emailVerifyToken === 'string'
         && /^[a-f0-9]{32}$/.test(req.body.emailVerifyToken)) ? req.body.emailVerifyToken : null;
-      const cookieUserId = req.cookies?.[TEMP_USER_COOKIE];
+      const cookieUserId = readTempCookie(req, res);
       if (cookieUserId && !forceNew) {
         try {
           const existingUser = await cloudant.getDocument('maia_users', cookieUserId);
@@ -1339,11 +1359,7 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
             req.session.isTemporary = true;
             req.session.authenticatedAt = new Date().toISOString();
             req.session.expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-            res.cookie(TEMP_USER_COOKIE, existingUser.userId, {
-              maxAge: TEMP_USER_COOKIE_MAX_AGE,
-              httpOnly: true,
-              sameSite: 'lax'
-            });
+            setTempCookie(res, existingUser.userId);
             return res.json({
               authenticated: true,
               user: {
@@ -1432,11 +1448,7 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       req.session.authenticatedAt = new Date().toISOString();
       req.session.expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
-      res.cookie(TEMP_USER_COOKIE, userId, {
-        maxAge: TEMP_USER_COOKIE_MAX_AGE,
-        httpOnly: true,
-        sameSite: 'lax'
-      });
+      setTempCookie(res, userId);
 
       return res.json({
         authenticated: true,
@@ -1487,17 +1499,28 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
         return res.status(404).json({ success: false, error: 'User not found — account may have been destroyed' });
       }
 
+      // Proof of ownership: this browser's signed temporary-account cookie,
+      // or a live session for the same user. Without it, anyone could sign
+      // in as any existing account by naming it.
+      const proven = req.session?.userId === userDoc.userId || readTempCookie(req, res) === userDoc.userId;
+      if (!proven) {
+        return res.status(401).json({
+          success: false,
+          error: 'SIGN_IN_REQUIRED',
+          hasPasskey: !!userDoc.credentialID,
+          message: userDoc.credentialID
+            ? 'Sign in with your passkey to open this account.'
+            : 'This account can only be opened from the browser that created it.'
+        });
+      }
+
       req.session.userId = userDoc.userId;
       req.session.username = userDoc.userId;
       req.session.displayName = userDoc.displayName || userDoc.userId;
       req.session.isTemporary = true;
       req.session.authenticatedAt = new Date().toISOString();
       req.session.expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-      res.cookie(TEMP_USER_COOKIE, userDoc.userId, {
-        maxAge: TEMP_USER_COOKIE_MAX_AGE,
-        httpOnly: true,
-        sameSite: 'lax'
-      });
+      setTempCookie(res, userDoc.userId);
 
       console.log('[SAVE-RESTORE] Temporary user restored', { userId: userDoc.userId });
       res.json({
@@ -1524,7 +1547,7 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
           isTemporary: !!req.session.isTemporary
         });
       }
-      const cookieUserId = req.cookies?.[TEMP_USER_COOKIE];
+      const cookieUserId = readTempCookie(req, res);
       if (cookieUserId && typeof cookieUserId === 'string') {
         try {
           const userDoc = await cloudant.getDocument('maia_users', cookieUserId);

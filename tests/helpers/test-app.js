@@ -11,7 +11,7 @@ import { getTestDbName } from './db.js';
 export function createTestApp(cloudant) {
   const app = express();
 
-  app.use(cookieParser());
+  app.use(cookieParser('test-secret')); // signed cookies (temporary-account cookie)
   app.use(express.json({ limit: '10mb' }));
   app.use(express.urlencoded({ extended: true }));
 

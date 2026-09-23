@@ -27,6 +27,7 @@
  */
 
 import { createHmac, timingSafeEqual } from 'crypto';
+import { isLocalDevRequest } from './utils/api-guard.js';
 
 export const CREDITS_DB = 'maia_credits';
 const CONFIG_DB = 'maia_config';
@@ -309,8 +310,7 @@ export async function handleStripeCheckoutEvent(cloudant, event) {
  */
 export function setupCreditRoutes(app, cloudant, { emailTokenVerified }) {
   const requireAdmin = (req, res) => {
-    const isLocalhost = req.hostname === 'localhost' || req.hostname === '127.0.0.1';
-    if (isLocalhost) return true;
+    if (isLocalDevRequest(req)) return true; // never from Host/X-Forwarded-Host
     const sessionUserId = req.session?.userId;
     const adminUsername = process.env.ADMIN_USERNAME || 'admin';
     if (!sessionUserId) {

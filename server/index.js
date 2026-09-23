@@ -36,6 +36,7 @@ import { getChunkingForDataSource, getChunkingForStrategy, getRerankingModelName
 import { getProjectIdForGenAI } from './utils/project-config.js';
 import setupAuthRoutes from './routes/auth.js';
 import setupChatRoutes, { getOwnerIdForDeepLinkSession } from './routes/chat.js';
+import { createApiGuard, isLocalDevRequest } from './utils/api-guard.js';
 import setupFileRoutes from './routes/files.js';
 import { getUserBucketSize } from './routes/files.js';
 import setupGroupRoutes from './routes/groups.js';
@@ -1531,7 +1532,11 @@ if ((process.env.PUBLIC_APP_URL || '').startsWith('https://')) {
   app.set('trust proxy', 1);
 }
 
-app.use(cookieParser());
+// One secret for express-session AND signed cookies (the temporary-account
+// cookie is the only credential of an account without a passkey, so it is
+// signed — see setTempCookie in routes/auth.js).
+const SESSION_SECRET = process.env.SESSION_SECRET || deriveSessionSecret();
+app.use(cookieParser(SESSION_SECRET));
 // Stripe webhook signatures are computed over the EXACT bytes Stripe sent,
 // so that one route needs the raw body preserved alongside the parsed JSON.
 app.use(express.json({
@@ -1543,7 +1548,7 @@ app.use(express.json({
 app.use(express.urlencoded({ extended: true }));
 
 app.use(session({
-  secret: process.env.SESSION_SECRET || deriveSessionSecret(),
+  secret: SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
   cookie: {
@@ -1556,6 +1561,10 @@ app.use(session({
     dbName: 'maia_sessions'
   })
 }));
+
+// Account-access guard: the session decides whose account a request acts
+// on (server/utils/api-guard.js). Must run before every route below.
+app.use('/api', createApiGuard({ getDeepLinkOwnerId: (req) => getOwnerIdForDeepLinkSession(req, cloudant) }));
 
 // Passkey routes
 setupAuthRoutes(app, passkeyService, cloudant, doClient, auditLog, { invalidateResourceCache });
@@ -1645,7 +1654,14 @@ function resolveUserId(req, res) {
     return null;
   }
 
-  return sessionUserId || requestUserId;
+  const userId = sessionUserId || requestUserId;
+  if (!userId) {
+    // Every caller does `if (!userId) return;` — so reply here, or the
+    // request would hang until the proxy times out.
+    res.status(401).json({ success: false, message: 'Sign in required', error: 'NOT_AUTHENTICATED' });
+    return null;
+  }
+  return userId;
 }
 
 const getChatByShareId = async (shareId) => {
@@ -8683,7 +8699,7 @@ async function sendNewUserNotification(userId, options = {}) {
 app.get('/api/admin/users', async (req, res) => {
   try {
     // Allow unauthenticated access when running locally (only check hostname, not NODE_ENV)
-    const isLocalhost = req.hostname === 'localhost' || req.hostname === '127.0.0.1';
+    const isLocalhost = isLocalDevRequest(req); // never from Host/X-Forwarded-Host
     
     // If not localhost, require authentication and check for ADMIN_USERNAME
     if (!isLocalhost) {
@@ -8893,7 +8909,7 @@ app.get('/api/admin/users', async (req, res) => {
 // instead. Individual sends — never CC/BCC — so addresses stay private.
 app.post('/api/admin/broadcast-email', async (req, res) => {
   try {
-    const isLocalhost = req.hostname === 'localhost' || req.hostname === '127.0.0.1';
+    const isLocalhost = isLocalDevRequest(req); // never from Host/X-Forwarded-Host
     if (!isLocalhost) {
       const sessionUserId = req.session?.userId;
       const adminUsername = (process.env.ADMIN_USERNAME || 'admin');
@@ -8969,7 +8985,7 @@ app.post('/api/admin/broadcast-email', async (req, res) => {
 app.post('/api/admin/users/:userId/recover', async (req, res) => {
   try {
     // Allow unauthenticated access when running locally (only check hostname, not NODE_ENV)
-    const isLocalhost = req.hostname === 'localhost' || req.hostname === '127.0.0.1';
+    const isLocalhost = isLocalDevRequest(req); // never from Host/X-Forwarded-Host
     
     // If not localhost, require authentication and check for ADMIN_USERNAME
     if (!isLocalhost) {
@@ -9611,7 +9627,7 @@ async function deleteUserAndResources(userId, options = {}) {
 app.delete('/api/admin/users/:userId', async (req, res) => {
   try {
     // Allow unauthenticated access when running locally (only check hostname, not NODE_ENV)
-    const isLocalhost = req.hostname === 'localhost' || req.hostname === '127.0.0.1';
+    const isLocalhost = isLocalDevRequest(req); // never from Host/X-Forwarded-Host
     
     // If not localhost, require authentication and check for ADMIN_USERNAME
     if (!isLocalhost) {
@@ -9940,7 +9956,7 @@ app.post('/api/wizard/quick-start-complete', async (req, res) => {
     if (!userId) {
       return res.status(400).json({ success: false, error: 'User ID is required' });
     }
-    const isLocalhost = req.hostname === 'localhost' || req.hostname === '127.0.0.1';
+    const isLocalhost = isLocalDevRequest(req); // never from Host/X-Forwarded-Host
     if (!isLocalhost && req.session?.userId !== userId) {
       return res.status(403).json({ success: false, error: 'Not authorized for this user' });
     }

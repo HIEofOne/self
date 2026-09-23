@@ -1867,7 +1867,7 @@ const handleUserCardRestore = async (du: DiscoveredUser) => {
     });
     const recreateData = await recreateResp.json();
     if (!recreateResp.ok || !recreateData.authenticated) {
-      throw new Error(recreateData.error || 'Failed to recreate account');
+      throw new Error(recreateData.message || recreateData.error || 'Failed to recreate account');
     }
     suppressWizard.value = true; // Prevent ChatInterface from polling agent-setup-status during restore
     restoreWizardKbName.value = recreateData.kbName || null;
@@ -2277,7 +2277,7 @@ const confirmDeleteCloudOnly = async () => {
         body: JSON.stringify({ userId: uid })
       });
       const data = await res.json();
-      if (!res.ok || !data.authenticated || !data.user) throw new Error(data.error || 'Could not restore session');
+      if (!res.ok || !data.authenticated || !data.user) throw new Error(data.message || data.error || 'Could not restore session');
       setAuthenticatedUser(data.user, null);
       // Save local snapshot before deleting cloud resources
       await saveLocalSnapshot(null);
@@ -2900,7 +2900,7 @@ const handleTestSetupComplete = async (payload: { verification: any; folderHandl
     });
     const recreateData = await recreateResp.json();
     if (!recreateResp.ok || !recreateData.authenticated) {
-      log(`Recreate failed: ${recreateData.error || 'unknown'}`, false);
+      log(`Recreate failed: ${recreateData.message || recreateData.error || 'unknown'}`, false);
       testModeActive.value = false;
       return;
     }
@@ -3535,7 +3535,7 @@ const handleDestroyedRestore = async () => {
     });
     const recreateData = await recreateResp.json();
     if (!recreateResp.ok || !recreateData.authenticated) {
-      throw new Error(recreateData.error || 'Failed to recreate account');
+      throw new Error(recreateData.message || recreateData.error || 'Failed to recreate account');
     }
     // Sign in with the recreated user
     restoreWizardKbName.value = recreateData.kbName || null;
@@ -3799,8 +3799,16 @@ const startTemporarySession = async () => {
         if (restoreData.authenticated && restoreData.user) {
           setAuthenticatedUser(restoreData.user, null);
         } else {
-          throw new Error(restoreData.error || 'Unable to restore temporary account');
+          throw new Error(restoreData.message || restoreData.error || 'Unable to restore temporary account');
         }
+      } else if (restoreResponse.status === 401) {
+        // The account exists but this browser can't prove it owns it (no
+        // signed temporary-account cookie, no session) — sign in with the
+        // passkey instead. Never treat this as a destroyed account.
+        const denied = await restoreResponse.json().catch(() => ({} as any));
+        tempStartLoading.value = false;
+        $q.notify({ type: 'warning', message: denied.message || 'Sign in to open this account.', timeout: 8000 });
+        return;
       } else {
         // User was destroyed or doesn't exist in cloud — delegate to restore wizard
         // which can re-request folder permission (user gesture) and recover local data
