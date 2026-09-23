@@ -1150,6 +1150,8 @@ import ConversationRail from './ConversationRail.vue';
 import { jsPDF } from 'jspdf';
 import MarkdownIt from 'markdown-it';
 import { processFileNCitations } from '../utils/fileNCitations';
+import { createSseParser } from '../utils/sseStream';
+import { citationFileMatches } from '../utils/citationFileMatch';
 import { advancePipeline, fetchPipeline, waitForStageDone, type PipelineNext } from '../utils/pipeline';
 import { logModalEvent } from '../utils/modalLog';
 import SummaryProgress from './SummaryProgress.vue';
@@ -1633,6 +1635,17 @@ const wizardStage3IndexingStartedKey = (userId: string | undefined) => userId ? 
 const wizardQuickStart = ref(false);
 /** Survives reloads mid-quick-start (e.g. agent still deploying). */
 const wizardQuickStartKey = (userId: string | undefined) => userId ? `wizard_quickstart_${userId}` : null;
+// Records setup finished: the quick-start tier no longer applies. An invitee
+// is auto-routed to quick start, so the flag is often set even when the user
+// then adds records — left behind, it later fired "quick start complete"
+// on a finished account and its toast reopened the Setup Wizard.
+const clearQuickStartFlag = () => {
+  try {
+    const k = wizardQuickStartKey(props.user?.userId);
+    if (k) localStorage.removeItem(k);
+  } catch { /* storage unavailable */ }
+  wizardQuickStart.value = false;
+};
 /** Dismissed state for the "add your records" upgrade banner (per session). */
 const upgradeBannerDismissed = ref(false);
 /** Dismissed state for the add-a-passkey nudge (per session). */
@@ -3843,6 +3856,7 @@ const sendMessage = async () => {
 
     const reader = response.body?.getReader();
     const decoder = new TextDecoder();
+    const sseParser = createSseParser();
     const assistantMessage: Message = {
       role: 'assistant',
       content: '',
@@ -3878,16 +3892,16 @@ const sendMessage = async () => {
       }
       const { done, value } = result;
 
-      if (done) break;
+      // Events are buffered across reads (utils/sseStream.ts): one split
+      // across two network reads used to be dropped silently. At `done`,
+      // flush — a final event may arrive without its trailing blank line.
+      const events = (done
+        ? sseParser.push(decoder.decode()).concat(sseParser.flush())
+        : sseParser.push(decoder.decode(value, { stream: true }))) as any[];
 
-      const chunk = decoder.decode(value, { stream: true });
-      const lines = chunk.split('\n\n');
-
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
+      for (const data of events) {
+        {
           try {
-            const data = JSON.parse(line.slice(6));
-            
             if (data.reasoning) {
               streamingReasoning.value += data.reasoning;
               assistantMessage.reasoningContent = streamingReasoning.value;
@@ -3901,6 +3915,12 @@ const sendMessage = async () => {
             }
 
             if (data.isComplete) {
+              // The final event carries the complete text — authoritative
+              // over the deltas assembled so far (error events carry only
+              // a delta, already appended above).
+              if (typeof data.content === 'string' && data.content && !data.error) {
+                assistantMessage.content = data.content;
+              }
               if (data.reasoningContent) {
                 assistantMessage.reasoningContent = data.reasoningContent;
               }
@@ -3932,10 +3952,11 @@ const sendMessage = async () => {
               return;
             }
           } catch (e) {
-            // Skip malformed JSON
+            // Skip an event that fails to apply
           }
         }
       }
+      if (done) break;
     }
 
     isStreaming.value = false;
@@ -6935,11 +6956,7 @@ const processPageReferences = (content: string): string => {
       // If not found in uploadedFiles, check availableUserFiles (if already loaded)
       if (!matchedFile && matchedFilename && availableUserFiles.value.length > 0) {
         const matchedUserFile = availableUserFiles.value.find(f => {
-          const fileUpper = f.fileName?.toUpperCase();
-          const filenameUpper = matchedFilename!.toUpperCase();
-          return fileUpper === filenameUpper || 
-                 fileUpper?.includes(filenameUpper.replace(/\.(PDF|pdf)$/, '')) ||
-                 filenameUpper.includes(fileUpper?.replace(/\.(PDF|pdf)$/, '') || '');
+          return citationFileMatches(f.fileName || '', matchedFilename!);
         });
         
         if (matchedUserFile) {
@@ -6979,11 +6996,7 @@ const processPageReferences = (content: string): string => {
       let matchedUserFile: { fileName: string; bucketKey: string } | null = null;
       if (matchedFilename) {
         matchedUserFile = availableUserFiles.value.find(f => {
-          const fileUpper = f.fileName?.toUpperCase();
-          const filenameUpper = matchedFilename!.toUpperCase();
-          return fileUpper === filenameUpper || 
-                 fileUpper?.includes(filenameUpper.replace(/\.(PDF|pdf)$/, '')) ||
-                 filenameUpper.includes(fileUpper?.replace(/\.(PDF|pdf)$/, '') || '');
+          return citationFileMatches(f.fileName || '', matchedFilename!);
         }) || null;
       }
       
@@ -7128,11 +7141,7 @@ const handlePageLinkClick = async (event: Event) => {
         
         // After loading, try to match the filename
         const matchedUserFile = availableUserFiles.value.find(f => {
-          const fileUpper = f.fileName?.toUpperCase();
-          const filenameUpper = filename.toUpperCase();
-          return fileUpper === filenameUpper || 
-                 fileUpper?.includes(filenameUpper.replace(/\.(PDF|pdf)$/, '')) ||
-                 filenameUpper.includes(fileUpper?.replace(/\.(PDF|pdf)$/, '') || '');
+          return citationFileMatches(f.fileName || '', filename);
         });
         
         if (matchedUserFile) {
@@ -7158,11 +7167,7 @@ const handlePageLinkClick = async (event: Event) => {
       
       // Check availableUserFiles if already loaded
       const matchedUserFile = availableUserFiles.value.find(f => {
-        const fileUpper = f.fileName?.toUpperCase();
-        const filenameUpper = filename.toUpperCase();
-        return fileUpper === filenameUpper || 
-               fileUpper?.includes(filenameUpper.replace(/\.(PDF|pdf)$/, '')) ||
-               filenameUpper.includes(fileUpper?.replace(/\.(PDF|pdf)$/, '') || '');
+        return citationFileMatches(f.fileName || '', filename);
       });
       
       if (matchedUserFile) {
@@ -8963,12 +8968,20 @@ watch(
       flagPresent = !!(k && localStorage.getItem(k) === 'true');
     } catch { /* ignore */ }
     if (!flagPresent) return; // already completed (or upgrade started)
+    // A finished records setup means the flag is stale — never run the
+    // quick-start landing (or its wizard-opening toast) on such an account.
+    const RECORDS_DONE_STAGES = ['patient_summary', 'link_stored'];
+    if (RECORDS_DONE_STAGES.includes(userResourceStatus.value?.workflowStage || '')) {
+      clearQuickStartFlag();
+      return;
+    }
     quickStartCompleting.value = true;
     wizardFlowPhase.value = 'done';
     if (wizardTimeoutTimer) {
       clearTimeout(wizardTimeoutTimer);
       wizardTimeoutTimer = null;
     }
+    let serverStage: string | null = null;
     try {
       const res = await fetch('/api/wizard/quick-start-complete', {
         method: 'POST',
@@ -8977,8 +8990,18 @@ watch(
         body: JSON.stringify({ userId: props.user?.userId })
       });
       if (!res.ok) console.warn('[Wizard] quick-start-complete HTTP', res.status);
+      else serverStage = (await res.json().catch(() => ({})))?.workflowStage || null;
     } catch (e) {
       console.warn('[Wizard] quick-start-complete failed:', e);
+    }
+    // The server never downgrades a finished account and reports its real
+    // stage: if records setup already completed, the flag was stale — stop
+    // here, with no quick-start landing and no wizard-opening toast.
+    if (serverStage && RECORDS_DONE_STAGES.includes(serverStage)) {
+      clearQuickStartFlag();
+      quickStartCompleting.value = false;
+      logProvisioningEvent({ event: 'quick-start-flag-cleared', stage: serverStage });
+      return;
     }
     try {
       const k = wizardQuickStartKey(props.user?.userId);
@@ -9691,6 +9714,7 @@ const handlePatientSummaryVerified = async (payload?: { userId?: string; summary
     wizardFlowPhase.value = 'done';
     try { sessionStorage.setItem('wizardSetupCompleted', 'true'); } catch { /* ignore */ }
     logProvisioningEvent({ event: 'setup-complete' });
+    clearQuickStartFlag();
     void generateSetupLogPdf();
     setTimeout(() => void generateSetupLogPdf(), 15000);
     emit('wizard-complete');
@@ -9915,6 +9939,7 @@ onMounted(async () => {
           if (guidedFlowDismissCount.value >= 2) {
             // User dismissed Patient Summary twice — complete wizard
             logProvisioningEvent({ event: 'setup-complete' });
+            clearQuickStartFlag();
             guidedFlowDismissCount.value = 0;
             wizardFlowPhase.value = 'done';
             try { sessionStorage.setItem('wizardSetupCompleted', 'true'); } catch { /* ignore */ }

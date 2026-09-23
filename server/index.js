@@ -12479,7 +12479,7 @@ app.post('/api/patient-summary/generate-pair', async (req, res) => {
     const results = settled.map(s => s.status === 'fulfilled' ? s.value : { ok: false, error: String(s.reason?.message || s.reason) });
     const defaultResult = results.find(r => r.profileKey === 'default') || null;
     const gptResult = results.find(r => r.profileKey === 'gpt')
-      || (gptError ? { ok: false, profileKey: 'gpt', model: gptModel, error: gptError, reason: 'GPT_NOT_READY' } : null);
+      || (gptError ? { ok: false, profileKey: 'gpt', model: gptModel, error: gptError, reason: gptError === 'SECONDARY_NOT_CHOSEN' ? 'SECONDARY_NOT_CHOSEN' : 'GPT_NOT_READY' } : null);
 
     try {
       await appendUserProvisioningEvent(userId, {

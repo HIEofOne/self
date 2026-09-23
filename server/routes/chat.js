@@ -103,6 +103,21 @@ async function buildPolicyAdvisorContext(cloudant, userDoc) {
   ].join('\n');
 }
 
+// One SSE event per streaming update. Intermediate updates carry only the
+// new delta: the provider's running totals (content / reasoningContent)
+// grow with every token, so repeating them made the stream O(n²) in size
+// and made events ever more likely to straddle network reads. The final
+// isComplete event keeps the full text so the client can use it as the
+// authoritative answer.
+const sseEvent = (update) => {
+  let payload = update;
+  if (update && !update.isComplete) {
+    const { content, reasoningContent, ...rest } = update;
+    payload = rest;
+  }
+  return `data: ${JSON.stringify(payload)}\n\n`;
+};
+
 const isPlainObject = (value) => value && typeof value === 'object' && !Array.isArray(value);
 
 const findChatByShareId = async (cloudant, shareId) => {
@@ -407,7 +422,7 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient, app
         let completedFromProvider = false;
         const writeUpdate = (update) => {
           try {
-            res.write(`data: ${JSON.stringify(update)}\n\n`);
+            res.write(sseEvent(update));
           } catch { /* connection already closed */ }
           if (update.isComplete) {
             completedFromProvider = true;
@@ -532,7 +547,7 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient, app
                 res.setHeader('Cache-Control', 'no-cache');
                 res.setHeader('Connection', 'keep-alive');
                 await freshProvider.chat(reqMessages, { ...reqOptions, stream: true }, (update) => {
-                  res.write(`data: ${JSON.stringify(update)}\n\n`);
+                  res.write(sseEvent(update));
                   if (update.isComplete) res.end();
                 });
               } else {
