@@ -1569,6 +1569,10 @@
                       v-html="renderPsHtml(cand.text)"
                       @click="handlePsCitationClick"
                     ></div>
+                    <div v-else-if="cand.reason === 'SECONDARY_NOT_CHOSEN'" class="text-caption text-grey-8">
+                      No secondary Private AI yet. To compare two drafts, choose a model in
+                      <strong>AI Agents</strong> → secondary tab, then request a new summary.
+                    </div>
                     <div v-else class="text-caption text-orange-9">
                       Not available: {{ cand.reason || cand.error || 'unknown' }}.
                       <span v-if="cand.reason === 'AGENT_NOT_READY' || cand.reason === 'GPT_NOT_READY'">

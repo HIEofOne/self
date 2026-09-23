@@ -48,7 +48,7 @@ Most of the pieces are already built. The work is mainly about *subtraction, gat
 | New users pick a private folder | Optional ("Just run the wizard without a local folder"). Deliberately deferred for adoption (Groups.md, PR-6.5) | Make it required in the edition. This intentionally reverses the adoption-funnel choice (§16) |
 | Urged to create PS + Current Medications, saved to folder as PDF | The PS/CM pipeline exists with consent-gated verification stamps (PRs #264–#267, #296). The folder currently receives only `maia-state.json`, `maia-log.pdf`, `maia.webloc` | **No PS PDF in the folder.** PS drafting needs an agent, and without Apple Health it relies on KB/RAG |
 | Confirm (and test) policies before sharing | "Try it" simulator in `PoliciesPanel.vue` (PR-12) | **No gate.** Cards act as soon as they are stored |
-| Private AI to verify and edit policies | Policy Advisor (`server/routes/chat.js:24`, PR #297): server-assembled cards + last 15 requests + record profile; fenced `policy-card` proposals saved only by the user | Needs folder context, feature-unlock proposals, and a single lazily provisioned agent |
+| Private AI to verify and edit policies | Policy Advisor (`server/routes/chat.js:24`, PR #297): server-assembled cards + last 15 requests + record profile; fenced `policy-card` proposals saved only by the user | Needs folder context, feature-unlock proposals, and a single agent (no secondary) started at email verification |
 | Email on some requests | Ask-escalations are emailed at ingest. Send-time nudges are debounced (6 h). Hourly mail pull bounds cross-host latency | Notification rules need to be explicit (§8.2) |
 | Weekly summary email | **None** | New |
 | Request log in folder | Requests live only in `maia_as_requests` (server) | New |
@@ -137,7 +137,7 @@ Two design disciplines (not invariants):
 | `policies` | Sharing Policies tab: cards, simulator, group test requests, confirm, AS on/pause | **Core** |
 | `requests` | New Requests tab: log, decisions, "stop sharing" (token revocation) | **Core** |
 | `summary` | PS + Current Medications (verify flows), Privacy Filtered view + mapping review, PDFs to folder | **Core** |
-| `advisor` | Private AI chat scoped to policies, PS, and requests | **Core** (agent provisioned lazily) |
+| `advisor` | Private AI chat scoped to policies, PS, and requests | **Core** (one agent, started after email verification) |
 | `notifications` | Immediate emails + weekly digest | **Core** |
 | `gnap` | Personal AS endpoint + co-located RS | **Core** (answers "ask" until sharing is on) |
 | `records-index` | KB + OpenSearch indexing, "ask about my whole record" | Unlockable (largest cost) |
@@ -298,7 +298,7 @@ This replaces the message-request cards in the conversation rail for edition use
 
 ## 9. Private AI in the edition
 
-- **One agent, provisioned lazily.** No agent is created at signup. The first action that needs one (PS draft, interview, or the first advisor question) provisions it, with visible progress (≈30–60 s). No secondary agent (`second-ai`) and no KB (`records-index`). In the edition, `/api/agent-setup-status` must not auto-provision (it does today at `auth.js:1544`).
+- **One agent, started in the background once the email is verified** (D2). The ≈30–60 s deploy then overlaps the passkey, folder and join steps, so the agent is usually ready by the Patient Summary step. Waiting for verified email means an unverified visitor (or a bot) never creates a DO resource. There is no secondary agent (`second-ai`) and no KB (`records-index`). In the edition, `/api/agent-setup-status` must not auto-provision before the email is verified (today it provisions for any session, `auth.js:1544`), and must never create the secondary agent. Agents cost nothing while idle (§12), so starting one early has no cost downside.
 - **Context.**
   - Server-assembled and authoritative: the existing `buildPolicyAdvisorContext`, extended with AS state and confirmed/unconfirmed status per card.
   - Folder-derived: PS text, the medication list, and a request-log excerpt that the client reads from the folder and attaches as "the patient's own files".
@@ -310,7 +310,7 @@ This replaces the message-request cards in the conversation rail for edition use
   - "you want to give your sister's requests stronger standing → vouch"
 
   The group's pack can also carry a short "what members usually turn on" note that the advisor may cite.
-- **D2 alternative (cost).** Use DO Serverless Inference with a DO-hosted open-weights model for the advisor, with no per-user agent at all. It is faster to start and has less to clean up, but drafting the PS needs a non-agent path, and per-user key isolation is lost. Recommendation: ship v1 with the lazy single agent (reuses the proven PS path), then measure.
+- **D2 alternative: no per-user agent.** Use DO Serverless Inference with a DO-hosted open-weights model for the advisor. **Cost is not a reason to choose this:** per-user agents are free to create, free while idle, and bill the same token rates (§12). What it would gain is zero deploy wait and one fewer DO resource per member. What it would lose is per-user API-key isolation and the proven agent-based Patient Summary path, which would need a new non-agent draft path. Recommendation: one per-user agent for v1.
 
 ---
 
@@ -469,17 +469,62 @@ The self-asserted `client.display.name` is shown to the patient labeled "not ver
 
 ## 12. Operating cost
 
-| Resource | Full edition today | Personal-AS edition |
-|---|---|---|
-| DO GenAI agents | **2 per user at signup** (primary via `agent-setup-status` auto-provision + secondary in parallel) | **0 at signup; 1 when first needed; the second only if turned on**. A member who never uses AI costs no agent |
-| Knowledge base + OpenSearch | One KB per user at first indexing; the account's OpenSearch cluster is created at the first KB | **None unless `records-index` is turned on.** A fresh trustee.ai deployment may never create the cluster, a fixed monthly cost avoided |
-| Public-AI inference | Available to everyone | Off unless turned on |
-| Spaces objects | Uploaded records persist (root / archived / KB) | Same in v1. Later: transient upload → parse → delete, with the folder as the only persistent copy |
-| Server chats (`maia_chats`) | Yes | Off unless `saved-chats` is on |
-| Email (Resend) | Requests, invites, nudges | + weekly digests (small volume) |
-| Fixed per deployment | App Platform + CouchDB droplet + Spaces subscription (README: about $10–40/month total) | Same fixed base; OpenSearch avoided until needed |
+Verified 2026-09-22 against DigitalOcean's published pricing (last verified by DO the same day) and the account's own August 2026 invoice, read through the DO billing API.
 
-The biggest per-member saving comes from not provisioning two agents and a KB for members who only need their AS to answer requests. The biggest fixed saving is never creating OpenSearch on an edition host.
+### 12.1 How DO bills the AI pieces
+
+- **Agents are limited per DO account** (checked 2026-09-22): 15 at Tier 1, 60 at Tiers 2–4, 120 at Tier 5 (support can raise it), plus a daily creation limit; knowledge bases have the same caps. Both current apps share one account (17 agents that day). **With per-user agents, the agent quota — not money — caps membership**: about 60 members per Tier 2–4 account at one agent each, and a new DO account for trustee.ai starts at 15. This reopens D2.
+- **Agents: free to create, and free while idle.** DO charges only for the input and output tokens an agent processes, at the same rates as serverless inference. There is no per-agent, per-hour or per-month fee.
+- **Token prices, per 1 million tokens:**
+
+  | Model or service | Price |
+  |---|---|
+  | gpt-oss-120b (primary agent) | $0.10 input / $0.70 output |
+  | DeepSeek V4 Pro (secondary agent) | $1.74 input / $3.48 output |
+  | Knowledge-base embedding, gte-large-en-v1.5 | $0.09 |
+  | BGE reranker | $0.01 |
+
+- **Knowledge bases** store their embeddings in a managed **OpenSearch cluster**. That cluster is a fixed monthly cost, and one cluster serves every KB on the DO account. The smallest size (1 vCPU, 2 GB, one node, 40 GiB) costs **$19.60/month**, and it is the size this account runs (`genai1-driftwood`).
+
+### 12.2 What the current deployments cost (August 2026 invoice: $55.71)
+
+| Line | $/month |
+|---|---|
+| OpenSearch cluster (shared by both apps' KBs) | **19.60** |
+| App Platform: maia-self 10.00 + claude-self 5.00 | 15.00 |
+| Discourse forum droplet (not MAIA) | 9.49 |
+| CouchDB droplet (shared, prefix-separated) | 6.00 |
+| Spaces subscription | 5.00 |
+| Serverless inference (public AIs, group advisor) | 0.19 |
+| All per-user agents together (each $0.01–0.06) | < 0.25 |
+| All per-user knowledge bases together (each $0.01–0.11) | < 0.25 |
+
+Everything AI-related came to **under $1**. The OpenSearch cluster alone was **35%** of the bill.
+
+### 12.3 Per-member AI cost (estimates from token counts, gpt-oss-120b)
+
+| Use | Tokens (in / out) | Cost |
+|---|---|---|
+| Policy-advisor question | ~5k / ~600 | ≈ $0.001 |
+| Question answered from the patient's indexed records (retrieval k=15) | ~15–20k / ~600 | ≈ $0.002–0.003 |
+| Patient Summary draft | ~40k / ~4k | ≈ $0.007 |
+
+A member who asks 1,000 advisor questions costs about $1. The secondary DeepSeek agent costs roughly 5–17× more per token, which is still only cents per member per month. At 100 credits = $2, credits easily cover AI use. They mainly exist to price requesters' attention (§8 of the security design doc), not to recover AI costs.
+
+### 12.4 What the edition actually changes
+
+| Resource | Full edition today | Personal-AS edition | Effect on cost |
+|---|---|---|---|
+| Per-user agents | 2 per user at setup (primary auto-provisioned by `agent-setup-status`, secondary in parallel) | **1 per member**, started once the email is verified (D2). No secondary unless `second-ai` is turned on | **Negligible either way.** Dropping the secondary agent is about fewer DO resources to create, clean up on deletion, and explain, not about money |
+| Knowledge base + OpenSearch | One KB per user at first indexing. The account's OpenSearch cluster is created at the first KB | **None unless `records-index` is turned on** | **The real lever: $19.60/month fixed.** A new edition host on its own DO account (e.g. trustee.ai) never creates the cluster until a member indexes. On the existing shared account the cluster already exists, so the test app saves nothing |
+| Public-AI inference | Available to everyone | Off unless turned on | Small, but it's the only AI spend that isn't on DO-hosted open models |
+| Spaces objects | Uploaded records persist (root / archived / KB) | Same in v1. Later: transient upload → parse → delete, with the folder as the only persistent copy | None (flat $5 subscription up to 250 GiB). This is a privacy change, not a cost change |
+| Server chats (`maia_chats`) | Yes | Off unless `saved-chats` is on | None (CouchDB is a fixed droplet) |
+| Email (Resend) | Requests, invites, nudges | + weekly digests | Small volume |
+
+**What a minimal edition host costs:** App Platform $5–10 + CouchDB droplet $6 + Spaces $5 ≈ **$16–21/month**, plus **$19.60** only once someone turns on indexing (≈ $36–41). Both figures are inside the README's "$10–40/month" range. Member count barely moves the bill: what scales with members is tokens (cents) and email.
+
+**Conclusion for the design:** make choices about agents on latency, privacy and cleanup grounds, not cost (see D2). Make choices about indexing (`records-index`) with cost in mind, because indexing is what brings in the only large fixed cost.
 
 ---
 
@@ -501,8 +546,8 @@ Each row is one PR (or two small ones) into HIEofOne/self and references this do
 | Phase | Delivers | Key tests / acceptance |
 |---|---|---|
 | **P0 — Groundwork** (no visible change) | ~~Demo tag~~ (done: `demo-v1.5.176`) + promotion freeze. `server/edition.js` registry, `GET /api/edition`, `requireFeature`, `useEdition()`. (The §1.4 import bypass, I-25, already shipped in #309.) Refresh CLAUDE.md (counts, tests exist) | `full` edition: every existing test passes unchanged |
-| **P1 — Edition shell** | Chrome capability gate. Edition welcome page. Workbook rail filtered to core tabs. Conversation rail = Private AI only. Server gates on unlockable routes (I-26). Stop auto-provisioning in `agent-setup-status` for the edition | Hidden routes return 403 `FEATURE_OFF` in the edition and 200 in `full`. Signup creates no DO agent |
-| **P2 — Setup checklist** | `SetupChecklist.vue` + derived `GET /api/setup-status`. Server-enforced verified email. Required passkey (D3) + folder. Join. Lazy single agent | Fresh user reaches "joined" with 0 agents. Reload at any step resumes correctly (derived state) |
+| **P1 — Edition shell** | Chrome capability gate. Edition welcome page. Workbook rail filtered to core tabs. Conversation rail = Private AI only. Server gates on unlockable routes (I-26). In the edition, `agent-setup-status` provisions only after email verification and never the secondary agent | Hidden routes return 403 `FEATURE_OFF` in the edition and 200 in `full`. An unverified signup creates no DO agent; a verified one creates exactly one |
+| **P2 — Setup checklist** | `SetupChecklist.vue` + derived `GET /api/setup-status`. Server-enforced verified email. Required passkey (D3) + folder. Join. One agent started in the background at email verification | Fresh user reaches "joined" with exactly 1 agent (no secondary), usually already running. Reload at any step resumes correctly (derived state) |
 | **P3 — Confirmed policies + AS state** | `confirmedAt`, `asState` (setup / active / paused) in both twin evaluators + parity test. Confirm screen with pack test requests + simulator. Turn on / pause. `Sharing Policies.pdf` | Two-host suite extended: an unconfirmed allow card never releases. `setup` → everything asks. Pause → asks again. Parity holds |
 | **P4 — PS/CM to folder** | Verify writes `Patient Summary.pdf` + privacy-filtered PDF. PS interview route. Apple Health route with one agent | Verify → both PDFs in the folder. Edit clears stamp → PDFs regenerated only on re-verify |
 | **P5 — Requests, notifications, log** | `RequestsPanel.vue` (decide, stop sharing, "always handle like this"). Notification rules. Weekly digest + monthly heartbeat. `requests.jsonl` + HTML sync. Retention | Digest idempotent across cron re-runs. No PHI in any email (template test). Log dedup across tabs |
@@ -539,7 +584,7 @@ Each row is one PR (or two small ones) into HIEofOne/self and references this do
 | # | Decision | Recommendation |
 |---|---|---|
 | D1 | Edition name (env value and UI name) | `personal-as` / "Personal AS" (placeholder) |
-| D2 | Private AI hosting in the edition | v1: **one lazily provisioned per-user agent, no KB**. Revisit serverless open-weights later for cost |
+| D2 | Private AI hosting in the edition | **Reopened (2026-09-23).** Per-user agents cost almost nothing (§12) but are quota-limited per DO account (§12.1), which caps members. Options: (a) one per-user agent started at email verification, with a quota raise from DO support; (b) DO Serverless Inference on a DO-hosted open-weights model for the private AI — no per-member resource, same privacy statement from DO, but no per-user API key and a new non-agent path for drafting the Patient Summary. Per-user agents + KB stay behind `records-index`. Since v1.6.1 the full edition's *secondary* agent is user-chosen (Qwen3.8-Max suggested), so only members who want one use a quota slot |
 | D3 | Passkey required at setup? | **Yes.** An AS the patient returns to after a digest email must survive a cleared cookie |
 | D4 | Where the edition is tested | Switch claude-self (test.agropper.xyz) to `personal-as` at P1 |
 | D5 | Notification rules (§8.2), digest cadence | Immediate for ask (debounced) + every automatic share. Weekly digest. Monthly heartbeat when quiet |
