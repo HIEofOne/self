@@ -199,10 +199,12 @@
                       <div class="row no-wrap q-gutter-xs">
                         <q-btn
                           v-if="welcomeUserCloudStatus[du.userId] === 'ready'"
-                          flat dense size="xs" color="green-8" label="GET STARTED"
+                          :flat="!isPersonalAs" :unelevated="isPersonalAs" dense
+                          :size="isPersonalAs ? 'md' : 'xs'" color="green-8"
+                          :label="isPersonalAs ? 'CONTINUE' : 'GET STARTED'"
                           @click="handleGetStartedForUser(du)"
                         >
-                          <q-tooltip>Sign in and continue</q-tooltip>
+                          <q-tooltip>Sign in and continue where you left off</q-tooltip>
                         </q-btn>
                         <q-btn
                           v-else-if="welcomeUserCloudStatus[du.userId] === 'restore'"
@@ -221,7 +223,7 @@
                     </div>
                   </div>
                   <div class="text-center q-mt-xs">
-                    <q-btn flat dense size="sm" color="grey-6" icon="person_add" label="Add family member" @click="handleAddFamilyMember" />
+                    <q-btn flat dense size="sm" color="grey-6" icon="person_add" :label="isPersonalAs ? 'Start another MAIA on this computer' : 'Add family member'" @click="handleAddFamilyMember" />
                   </div>
                 </div>
                 <!-- No discovered users: passkey link -->
@@ -294,6 +296,8 @@
                        each with an (i) explanation. The setup checklist (P2)
                        adds the passkey and the folder after GET STARTED. -->
                   <div v-if="isPersonalAs" class="edition-start">
+                    <template v-if="!discoveredUsers.length || addingFamilyMember">
+                    <div v-if="addingFamilyMember" class="text-body2 text-weight-medium q-mb-sm">A new MAIA</div>
                     <div class="edition-start__row">
                       <q-checkbox v-model="wf.privateComputer" dense label="This is my own computer" />
                       <q-icon name="info_outline" size="18px" color="grey-7" class="edition-start__info" tabindex="0" aria-label="Why your own computer">
@@ -318,6 +322,10 @@
                       :disable="!wf.privateComputer || !verifiedEmail.verified" :loading="tempStartLoading" @click="welcomeFormStart"
                     />
                     <div v-if="tempStartError" class="text-negative q-mt-sm">{{ tempStartError }}</div>
+                    <div v-if="addingFamilyMember" class="text-center q-mt-sm">
+                      <a href="#" class="welcome-footer-link text-caption" @click.prevent="addingFamilyMember = false">Back to my MAIA</a>
+                    </div>
+                    </template>
                     <div class="text-center text-caption text-grey-6 q-mt-lg">
                       <a href="/page.html?doc=Privacy" target="_blank" class="welcome-footer-link">Privacy</a>
                       · MAIA v{{ appVersion }}
@@ -1484,7 +1492,7 @@ const welcomeSetupFiles = ref<File[]>([]);
 // email" cell share ONE address (composable state). Mirror it into wf.email so
 // GET STARTED sends it; if it gets verified anywhere, surface it in the setup
 // block (auto-open the notification-email row).
-const { state: verifiedEmail, hydrate: hydrateVerifiedEmail } = useVerifiedEmail();
+const { state: verifiedEmail, hydrate: hydrateVerifiedEmail, beginEdit: beginEditVerifiedEmail } = useVerifiedEmail();
 watch(() => verifiedEmail.email, (v) => { wf.value.email = v; });
 watch(() => verifiedEmail.verified, (ok) => { if (ok) wf.value.emailOptIn = true; });
 
@@ -1610,6 +1618,7 @@ const welcomeFormStart = async () => {
       } catch { /* best-effort */ }
     }
     const user = await createTemporarySession({
+      forceNew: isPersonalAs.value && addingFamilyMember.value,
       desiredUserId: wf.value.joinTrustee ? (wfSuggestedId.value || undefined) : undefined,
       email: wf.value.emailOptIn ? (wf.value.email.trim() || undefined) : undefined,
       emailVerifyToken: (wf.value.emailOptIn && verifiedEmail.verified) ? (verifiedEmail.token || undefined) : undefined
@@ -1635,6 +1644,12 @@ const welcomeFormStart = async () => {
   } catch (error) {
     try { sessionStorage.removeItem('maiaWelcomeSetup'); } catch { /* cleanup */ }
     tempStartError.value = error instanceof Error ? error.message : 'Unable to start';
+    // The server no longer holds this verification (it expired, or the
+    // server restarted). Drop the stale badge so a new code can be sent.
+    if ((error as { code?: string })?.code === 'EMAIL_VERIFICATION_REQUIRED' && verifiedEmail.verified) {
+      beginEditVerifiedEmail();
+      tempStartError.value = 'Your email verification expired. Send a new code to verify it again.';
+    }
   } finally {
     tempStartLoading.value = false;
   }
@@ -1838,6 +1853,7 @@ const welcomeUserCloudStatus = ref<Record<string, 'loading' | 'ready' | 'restore
 const checkAllUserCloudStatus = async () => {
   const users = discoveredUsers.value;
   if (users.length === 0) return;
+  await loadEdition(); // readiness depends on the edition (below)
   // Set all to loading initially
   const statusMap: Record<string, 'loading' | 'ready' | 'restore'> = {};
   for (const u of users) statusMap[u.userId] = 'loading';
@@ -1848,9 +1864,14 @@ const checkAllUserCloudStatus = async () => {
       const resp = await fetch(`/api/agent-exists?userId=${encodeURIComponent(u.userId)}`);
       if (resp.ok) {
         const data = await resp.json();
-        // wizardComplete is derived from data presence on the server
-        // (has agent + KB + endpoint + patientSummary + currentMedications)
-        statusMap[u.userId] = data.wizardComplete ? 'ready' : 'restore';
+        // Full edition: ready once the agent + endpoint exist (anything else
+        // is wizard continuation). Personal AS edition: ready whenever the
+        // cloud account exists — the setup checklist covers what's missing,
+        // including an agent that isn't ready yet.
+        const ready = isPersonalAs.value && typeof data.accountExists === 'boolean'
+          ? data.accountExists
+          : data.wizardComplete;
+        statusMap[u.userId] = ready ? 'ready' : 'restore';
       } else {
         statusMap[u.userId] = 'restore';
       }
@@ -2207,6 +2228,15 @@ const loadWelcomeStatus = async () => {
       cloudFileCount: data.cloudFileCount,
       cloudIndexedCount: data.cloudIndexedCount
     };
+    // Personal AS edition: this browser's own account (its signed cookie)
+    // is always offered as the way back, even when no local snapshot or
+    // folder remembers it.
+    await loadEdition();
+    const cookieId = data.tempCookieUserId;
+    if (isPersonalAs.value && cookieId && !discoveredUsers.value.some((u) => u.userId === cookieId)) {
+      discoveredUsers.value = [...discoveredUsers.value, { userId: cookieId, displayName: cookieId, folderName: '', hasPermission: false }];
+      void checkAllUserCloudStatus();
+    }
   } catch (e) {
     if (typeof console !== 'undefined' && console.warn) {
       console.warn('[AUTH] welcome-status failed:', e);
@@ -3818,7 +3848,7 @@ const handleDestroyedStartFresh = async () => {
   }
 };
 
-const createTemporarySession = async (opts?: { desiredUserId?: string; email?: string; emailVerifyToken?: string }) => {
+const createTemporarySession = async (opts?: { desiredUserId?: string; email?: string; emailVerifyToken?: string; forceNew?: boolean }) => {
   // Clear stale wizard flags from any previous session (e.g. destroyed user)
   try {
     sessionStorage.removeItem('autoProcessInitialFile');
@@ -3830,6 +3860,7 @@ const createTemporarySession = async (opts?: { desiredUserId?: string; email?: s
     headers: { 'Content-Type': 'application/json' },
     credentials: 'include',
     body: JSON.stringify({
+      ...(opts?.forceNew ? { forceNew: true } : {}),
       ...(opts?.desiredUserId ? { desiredUserId: opts.desiredUserId } : {}),
       ...(opts?.email ? { email: opts.email } : {}),
       ...(opts?.emailVerifyToken ? { emailVerifyToken: opts.emailVerifyToken } : {})
@@ -3837,7 +3868,9 @@ const createTemporarySession = async (opts?: { desiredUserId?: string; email?: s
   });
   const data = await response.json();
   if (!response.ok) {
-    throw new Error(data.error || 'Unable to create temporary account');
+    const err = new Error(data.message || data.error || 'Unable to create temporary account') as Error & { code?: string };
+    err.code = data.error;
+    throw err;
   }
   if (data.requiresPasskey && data.user) {
     tempStartError.value = `A passkey already exists for ${data.user.userId}. Please use Passkey instead.`;
