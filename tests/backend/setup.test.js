@@ -53,14 +53,15 @@ describe('deriveSetupStatus', () => {
     emailVerified: true, credentialID: 'cred', folderConnectedAt: '2026-09-25T00:00:00Z',
     groupMemberships: [{ groupId: 'g1', groupName: 'Trustee' }],
     currentMedicationsVerifiedAt: 'x', patientSummaryVerifiedAt: 'y',
-    assignedAgentId: 'a1', agentEndpoint: 'https://agent'
+    assignedAgentId: 'a1', agentEndpoint: 'https://agent',
+    asState: 'active'
   };
 
   it('derives every row from the account alone', () => {
     setEditionForTests('personal-as');
     const s = deriveSetupStatus(full, { groupRequired: true });
     expect(s.steps.map((x) => [x.key, x.done])).toEqual([
-      ['email', true], ['passkey', true], ['folder', true], ['group', true], ['summary', true]
+      ['email', true], ['passkey', true], ['folder', true], ['group', true], ['summary', true], ['sharing', true]
     ]);
     expect(s.requiredDone).toBe(true);
     expect(s.agent).toBe('ready');

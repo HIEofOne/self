@@ -11,6 +11,7 @@
  * a timestamp is kept — never the folder's name or contents.
  */
 import { getEdition } from '../edition.js';
+import { asStateOf } from './policies.js';
 import { requestedUserId } from '../utils/api-guard.js';
 
 const USERS_DB = 'maia_users';
@@ -49,6 +50,16 @@ export const deriveSetupStatus = (doc, { groupRequired = false } = {}) => {
       done: !!(doc?.currentMedicationsVerifiedAt && doc?.patientSummaryVerifiedAt),
       medicationsVerified: !!doc?.currentMedicationsVerifiedAt,
       summaryVerified: !!doc?.patientSummaryVerifiedAt
+    },
+    {
+      // Row 6 (§5): confirm the rules, then turn sharing on. Not needed to
+      // close the checklist, but nothing is shared until it's done.
+      key: 'sharing',
+      required: false,
+      done: asStateOf(doc) === 'active',
+      asState: asStateOf(doc),
+      unconfirmed: (Array.isArray(doc?.sharingPolicies) ? doc.sharingPolicies : [])
+        .filter((p) => p && p.enabled !== false && !p.confirmedAt).length
     }
   ];
   return {

@@ -13,7 +13,7 @@
  *       and the patient-side /api/user-groups endpoints.
  * PR-3 (relay/heartbeat), PR-4 (requests inbox), PR-5 (directory) follow.
  */
-import { evaluatePolicies, policySentence, normalizeCard, POLICY_SCOPES, POLICY_PURPOSES } from './policies.js';
+import { evaluatePolicies, evaluationOptionsFor, policySentence, normalizeCard, POLICY_SCOPES, POLICY_PURPOSES } from './policies.js';
 import { isLocalDevRequest } from '../utils/api-guard.js';
 import { applyPseudonymMapping } from '../privacyFilter.js';
 import { isVerified as emailTokenVerified } from '../emailVerification.js';
@@ -905,7 +905,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
         if (ownerDoc) {
           decision = evaluatePolicies(ownerDoc.sharingPolicies || [], {
             party: { type: 'anyone' }, purpose, scope, signature: memberSignature, payment: payment || 'none'
-          });
+          }, evaluationOptionsFor(ownerDoc));
         }
 
         // autoDecision rides inside the sealed envelope so the member's MAIA
@@ -3969,7 +3969,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
             ? (['verified-email', 'verified-by-me'].includes(r.signature) ? r.signature : 'unverified')
             : 'group-member',
           payment: Object.prototype.hasOwnProperty.call(CREDIT_PRICES, r.payment) ? r.payment : 'none'
-        });
+        }, evaluationOptionsFor(userDoc));
       }
       // The outside requester's stated (registry-validated when signature is
       // 'verified-email') reply address, from the sealed envelope.

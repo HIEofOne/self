@@ -24,7 +24,7 @@
             <div class="setup-row__body">
               <div class="setup-row__title">
                 <span :class="{ 'text-grey-7': row.done }">{{ row.title }}</span>
-                <span v-if="!row.required && !row.done" class="text-caption text-grey-7">(recommended)</span>
+                <span v-if="row.key === 'summary' && !row.done" class="text-caption text-grey-7">(recommended)</span>
                 <q-icon name="info_outline" size="18px" color="grey-7" class="setup-row__info" tabindex="0" :aria-label="`About: ${row.title}`">
                   <q-tooltip max-width="300px">{{ row.info }}</q-tooltip>
                 </q-icon>
@@ -63,6 +63,14 @@
                   </template>
                 </div>
                 <!-- 5. Patient Summary + Current Medications -->
+                <!-- 6. Confirm the rules, then turn on sharing -->
+                <div v-else-if="row.key === 'sharing'" class="q-mt-xs">
+                  <q-btn
+                    outline dense no-caps color="primary" label="Open Sharing Policies"
+                    :disable="!requiredDone" @click="emit('open-policies')"
+                  />
+                  <div v-if="!requiredDone" class="text-caption text-grey-7 q-mt-xs">Finish the steps above first.</div>
+                </div>
                 <div v-else-if="row.key === 'summary'" class="q-mt-xs">
                   <q-btn
                     outline dense no-caps color="primary" label="Open Patient Summary"
@@ -119,6 +127,7 @@ const emit = defineEmits<{
   'add-passkey': [];
   'choose-folder': [];
   'open-summary': [];
+  'open-policies': [];
   'sign-out': [];
 }>();
 
@@ -147,6 +156,10 @@ const TEXT: Record<SetupStepKey, { title: () => string; info: () => string }> = 
     title: () => `Join ${groupName.value}`,
     info: () => `${groupName.value} suggests starting rules for who may see your information. You review every rule before anything is shared.`
   },
+  sharing: {
+    title: () => 'Confirm your rules and turn on sharing',
+    info: () => 'Your group suggested these rules. Nothing is shared until you confirm each one and turn sharing on, and you can pause sharing at any time.'
+  },
   summary: {
     title: () => 'Create your Patient Summary',
     info: () => 'Your Patient Summary, with your current medications, is what your MAIA can share when your rules allow it, always as a privacy-filtered copy. MAIA helps you write it.'
@@ -160,6 +173,10 @@ const rows = computed(() => (status.value?.steps || [])
     if (s.key === 'group' && s.done && s.groups?.length) detail = `Member of ${s.groups.join(', ')}`;
     if (s.key === 'summary' && !s.done && (s.medicationsVerified || s.summaryVerified)) {
       detail = s.medicationsVerified ? 'Current Medications verified' : 'Patient Summary verified';
+    }
+    if (s.key === 'sharing' && !s.done) {
+      if (s.asState === 'paused') detail = 'Sharing is paused.';
+      else if (s.unconfirmed) detail = `${s.unconfirmed} ${s.unconfirmed === 1 ? 'rule' : 'rules'} to confirm`;
     }
     return { ...s, title: TEXT[s.key].title(), info: TEXT[s.key].info(), detail };
   }));

@@ -13,6 +13,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import setupGroupRoutes from '../../server/routes/groups.js';
 import { issueCode, checkCode } from '../../server/emailVerification.js';
 import { grantCredits, getAccount } from '../../server/credits.js';
+import { getEdition, setEditionForTests } from '../../server/edition.js';
 
 const clone = (o) => (o == null ? o : JSON.parse(JSON.stringify(o)));
 
@@ -542,5 +543,63 @@ describe('cross-host autonomous responses (registry on Host A, member AS on Host
       token: opts2.body.token, response: { fake: 'auth', id: 'cred_dr_vouched' }
     });
     expect(dead.status).toBe(404);
+  });
+});
+
+// ── Personal AS edition (group_requests.md §6.1–6.2, I-24) ──────────────
+// Same two hosts and the same allow card on jessica's MAIA (Host B): the
+// card acts only once confirmed, and only while sharing is on.
+describe('Personal AS edition: only confirmed cards act, and only while sharing is on (I-24)', () => {
+  let originalEdition;
+  beforeAll(() => { originalEdition = getEdition(); setEditionForTests('personal-as'); });
+  afterAll(() => setEditionForTests(originalEdition));
+
+  const updateJessica = async (mutate) => {
+    const d = await B.cloudant.getDocument('maia_users', 'jessica76');
+    mutate(d);
+    await B.cloudant.saveDocument('maia_users', d);
+  };
+  // A verified visitor asks the group for medications; jessica's MAIA ingests it.
+  const visitorAsks = async (email) => {
+    const issued = issueCode(email);
+    checkCode(issued.token, issued.code);
+    const out = await A.app.request('hosta.test', 'POST', `/api/groups/${groupId}/outside-request`, {
+      name: 'Dr PA', email, message: 'Consult', scope: 'meds-allergies', purpose: 'clinical', emailVerifyToken: issued.token
+    });
+    expect(out.body?.success).toBe(true);
+    await B.app.request('hostb.test', 'POST', '/api/user-groups/refresh', { userId: 'jessica76' });
+    const reqs = await B.app.request('hostb.test', 'GET', '/api/user-groups/requests?userId=jessica76');
+    const mine = reqs.body.requests.find((r) => r.requester?.email === email);
+    return { status: mine?.status, emailed: B.emails.some((e) => e.to === email) };
+  };
+  const CONFIRMED = '2026-09-24T12:00:00Z';
+
+  it('sharing not turned on yet: even a confirmed matching allow card only asks', async () => {
+    await updateJessica((d) => {
+      delete d.asState;
+      d.sharingPolicies = d.sharingPolicies.map((c) => ({ ...c, confirmedAt: CONFIRMED }));
+    });
+    expect(await visitorAsks('pa-setup@example.com')).toEqual({ status: 'pending', emailed: false });
+  });
+
+  it('sharing on, but the allow card is unconfirmed (as a group suggests it): asks', async () => {
+    await updateJessica((d) => {
+      d.asState = 'active';
+      d.sharingPolicies = d.sharingPolicies.map(({ confirmedAt, ...c }) => c);
+    });
+    expect(await visitorAsks('pa-unconfirmed@example.com')).toEqual({ status: 'pending', emailed: false });
+  });
+
+  it('confirmed and sharing on: answers automatically, with the privacy-filtered copy', async () => {
+    await updateJessica((d) => {
+      d.asState = 'active';
+      d.sharingPolicies = d.sharingPolicies.map((c) => ({ ...c, confirmedAt: CONFIRMED }));
+    });
+    expect(await visitorAsks('pa-active@example.com')).toEqual({ status: 'accepted', emailed: true });
+  });
+
+  it('paused: asks again', async () => {
+    await updateJessica((d) => { d.asState = 'paused'; });
+    expect(await visitorAsks('pa-paused@example.com')).toEqual({ status: 'pending', emailed: false });
   });
 });

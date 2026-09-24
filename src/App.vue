@@ -784,6 +784,7 @@
       @add-passkey="startPasskeyRegistration"
       @choose-folder="checklistChooseFolder"
       @open-summary="checklistOpenSummary"
+      @open-policies="checklistOpenPolicies"
       @sign-out="handleSignOut"
     />
 
@@ -2965,6 +2966,12 @@ const checklistChooseFolder = async () => {
 const checklistOpenSummary = () => {
   setupChecklist.hide();
   chatInterfaceRef.value?.openMyStuffTab?.('summary');
+};
+
+/** Row 6: confirm the rules and turn on sharing, in Sharing Policies. */
+const checklistOpenPolicies = () => {
+  setupChecklist.hide();
+  chatInterfaceRef.value?.openMyStuffTab?.('policies');
 };
 
 /** [WIZARD] Save state to local folder when wizard completes (so maia-state.json is current). */

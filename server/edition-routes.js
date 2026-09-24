@@ -170,6 +170,8 @@ export const ROUTE_FEATURES = Object.freeze({
   'POST /api/user-policies': 'policies',
   'PUT /api/user-policies/:id': 'policies',
   'DELETE /api/user-policies/:id': 'policies',
+  'POST /api/user-policies/:id/confirm': 'policies',
+  'POST /api/as-state': 'policies',
   'POST /api/user-groups/import-suggested-policies': 'policies',
   'POST /api/user-groups/remove-suggested-policies': 'policies',
 
