@@ -41,6 +41,8 @@ import setupFileRoutes from './routes/files.js';
 import { getUserBucketSize } from './routes/files.js';
 import setupGroupRoutes from './routes/groups.js';
 import setupPolicyRoutes from './routes/policies.js';
+import setupEditionRoutes from './routes/edition.js';
+import { getEdition } from './edition.js';
 import {
   S3Client,
   HeadBucketCommand,
@@ -800,8 +802,8 @@ let deployedVersion = '';
 try {
   deployedVersion = JSON.parse(readFileSync(path.join(__dirname, '../package.json'), 'utf8')).version || '';
 } catch { /* version stays blank; the client then never prompts */ }
-app.get('/health', (req, res) => res.json({ status: 'ok', app: 'maia-cloud-user-app', version: deployedVersion }));
-app.listen(PORT, () => console.log(`User app server listening on port ${PORT} (startup in progress)`));
+app.get('/health', (req, res) => res.json({ status: 'ok', app: 'maia-cloud-user-app', version: deployedVersion, edition: getEdition() }));
+app.listen(PORT, () => console.log(`User app server listening on port ${PORT} (startup in progress, edition: ${getEdition()})`));
 
 // Auto-provision CouchDB droplet for cloud deployments (any non-localhost URL = cloud)
 const appUrl = process.env.PUBLIC_APP_URL || '';
@@ -955,10 +957,15 @@ const doClient = new DigitalOceanClient(doToken, {
   region: getDoRegion()
 });
 
-// Resolve OpenSearch database_id at startup (for KB creation) — async, warms the cache
-getOrCreateOpenSearchDatabaseId(doClient, cloudant).catch(err =>
-  console.warn(`[OpenSearch] Startup resolution failed: ${err.message}`)
-);
+// Resolve OpenSearch database_id at startup (for KB creation) — async, warms the cache.
+// This CREATES the account's cluster ($19.60/month) when none exists, so the
+// Personal AS edition skips it: there the cluster is resolved only when a
+// member first indexes (I-26; group_requests.md §12.4).
+if (getEdition() === 'full') {
+  getOrCreateOpenSearchDatabaseId(doClient, cloudant).catch(err =>
+    console.warn(`[OpenSearch] Startup resolution failed: ${err.message}`)
+  );
+}
 
 // Simple in-memory caches to reduce repeated DO API calls
 const RESOURCE_CACHE_TTL = 30 * 1000; // 30 seconds
@@ -1565,6 +1572,9 @@ app.use(session({
 // Account-access guard: the session decides whose account a request acts
 // on (server/utils/api-guard.js). Must run before every route below.
 app.use('/api', createApiGuard({ getDeepLinkOwnerId: (req) => getOwnerIdForDeepLinkSession(req, cloudant) }));
+
+// Edition + feature registry (server/edition.js; group_requests.md §4).
+setupEditionRoutes(app, cloudant);
 
 // Passkey routes
 setupAuthRoutes(app, passkeyService, cloudant, doClient, auditLog, { invalidateResourceCache });

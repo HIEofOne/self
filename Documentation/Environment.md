@@ -79,6 +79,10 @@ docker run -d --name couchdb -p 5984:5984 \
 | `maia_audit_log` | Audit trail |
 | `maia_chats` | Saved chat conversations |
 | `maia_config` | Server configuration (cached DO Inference key, OpenSearch database ID) |
+| `maia_groups` | Group registry: groups, members, suggested policies, the group's private signing key (back up, see above) |
+| `maia_relay` | Sealed relay messages between members, and outside-request tallies |
+| `maia_as_requests` | Requests to each member's authorization server, and their decisions |
+| `maia_credits` | Credits ledger: balances keyed by verified email, holds, and settlements |
 
 ---
 
@@ -86,7 +90,7 @@ docker run -d --name couchdb -p 5984:5984 \
 
 A managed **DigitalOcean OpenSearch** cluster provides vector search for knowledge base queries:
 
-- **Provisioning:** Automatically discovered or created via the DO API at first KB creation. One cluster per account — the server enforces this by checking existing clusters before creating.
+- **Provisioning:** Discovered, or created if the DO account has none, via the DO API. In the `full` edition this happens at server startup, so a new DO account starts paying for the cluster ($19.60/month) as soon as the app boots. In the `personal-as` edition it happens only at the first KB creation, when a member turns on record search and indexes. One cluster per account: the server checks for existing clusters before creating.
 - **Access:** The database UUID is resolved via the DO API (`GET /v2/databases?engine=opensearch`), cached in CouchDB (`maia_config/opensearch_database_id`), and used for KB creation via the DO GenAI endpoints.
 - **Usage:** Agents query the OpenSearch-backed knowledge base when answering user questions
 - **Legacy:** The `OPENSEARCH_URL` env var is still supported as a fallback but is no longer required.
@@ -189,9 +193,15 @@ second app sets both:
 | `COUCHDB_DB_PREFIX` | `test_` | Namespaces every CouchDB database (`test_maia_users`, `test_maia_groups`, …) inside the shared instance. Applied inside `lib/cloudant`; the code's database names never change. |
 | `SPACES_BUCKET` | `maia-test` | Separate bucket under the same $5/mo Spaces subscription (which covers 250 GiB across all buckets). Default is `maia`. |
 
-The OpenSearch cluster needs no variable: startup auto-discovery enforces
+The OpenSearch cluster needs no variable: auto-discovery enforces
 one cluster per DO account, and Knowledge Bases are per-user resources, so
 both apps share the cluster safely.
+
+#### Optional — edition
+
+| Variable | Values | Purpose |
+|---|---|---|
+| `MAIA_EDITION` | `full` (default) \| `personal-as` | Which edition this app runs (`server/edition.js`; design in `Documentation/group_requests.md` §4). Read once at startup; `/health` and `GET /api/edition` report it. `personal-as` keeps unlockable features off until a user turns them on, and skips the startup OpenSearch step (see Vector Database). An unknown value falls back to `full`. |
 
 ### Local Development
 
