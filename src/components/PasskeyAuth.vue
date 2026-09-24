@@ -19,6 +19,8 @@
       <p class="text-caption text-grey-7 q-mt-sm q-mb-none">
         No Touch ID? You can create or sign in with a passkey on your smartphone when prompted.
       </p>
+      <!-- A way out of the (persistent) "Add a Passkey" dialog from here too -->
+      <q-btn flat dense no-caps color="grey-8" label="Cancel" class="q-mt-sm" @click="cancelFlow" />
     </div>
 
     <!-- Step 2: User ID Input -->

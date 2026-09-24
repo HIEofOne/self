@@ -61,26 +61,26 @@
         <button
           type="button"
           class="my-stuff-rail__btn my-stuff-rail__btn--wizard"
-          :class="{ 'is-wizard-active': props.wizardActive }"
-          :title="props.wizardActive ? 'Setup Wizard — setup incomplete, click to continue' : 'Setup Wizard'"
-          aria-label="Setup Wizard"
+          :class="{ 'is-wizard-active': setupIncomplete }"
+          :title="setupIncomplete ? `${setupLabel} — setup incomplete, click to continue` : setupLabel"
+          :aria-label="setupLabel"
           @click="handleWizardClick"
         >
           <span class="my-stuff-rail__wizard-icon-wrap">
             <q-icon name="auto_fix_high" size="22px" class="my-stuff-rail__icon" />
-            <span v-if="props.wizardActive" class="my-stuff-rail__wizard-ring" aria-hidden="true"></span>
+            <span v-if="setupIncomplete" class="my-stuff-rail__wizard-ring" aria-hidden="true"></span>
           </span>
-          <span class="my-stuff-rail__label">Setup Wizard</span>
+          <span class="my-stuff-rail__label">{{ setupLabel }}</span>
           <!-- Blue "setup incomplete" triangle: the wizard never auto-opens
                on reload; this is the passive signal that there is wizard
                work to finish. Same visual language as the Groups alert. -->
           <span
-            v-if="props.wizardActive"
+            v-if="setupIncomplete"
             class="my-stuff-rail__info-triangle"
             aria-hidden="true"
           ></span>
-          <q-tooltip v-if="props.wizardActive" anchor="center right" self="center left">
-            Setup incomplete — click to continue the Setup Wizard
+          <q-tooltip v-if="setupIncomplete" anchor="center right" self="center left">
+            Setup incomplete — click to continue {{ isPersonalAs ? 'setting up' : 'the Setup Wizard' }}
           </q-tooltip>
         </button>
 
@@ -2017,6 +2017,7 @@ import { applyPseudonymsClient } from '../utils/pseudonyms';
 import { advancePipeline, waitForStageDone } from '../utils/pipeline';
 import { logModalEvent } from '../utils/modalLog';
 import { useEdition } from '../composables/useEdition';
+import { useSetupChecklist } from '../composables/useSetupChecklist';
 
 // Local markdown-it with html: true so the <a class="page-link"> anchors
 // emitted by processFileNCitations survive rendering. vue-markdown-render
@@ -2412,7 +2413,7 @@ const TAB_FEATURES: Record<string, string> = {
   diary: 'diary', references: 'references'
   // lists: always shown; without `lists-full` it is Current Medications only
 };
-const { has } = useEdition();
+const { has, isPersonalAs } = useEdition();
 const tabVisible = (name: string) => !TAB_FEATURES[name] || has(TAB_FEATURES[name]);
 
 const railTabs = computed(() => [
@@ -2552,7 +2553,15 @@ const handleSignOutClick = () => {
   emit('sign-out-requested');
 };
 
+// Personal AS edition: the rail's setup button opens the setup checklist
+// (the full edition's wizard never runs there).
+const setupChecklist = useSetupChecklist();
+const setupLabel = computed(() => (isPersonalAs.value ? 'Setup' : 'Setup Wizard'));
+const setupIncomplete = computed(() => (isPersonalAs.value
+  ? !!setupChecklist.state.status && !setupChecklist.state.status.steps.every((s) => s.done)
+  : props.wizardActive));
 const handleWizardClick = () => {
+  if (isPersonalAs.value) { setupChecklist.show(); return; }
   emit('wizard-requested');
 };
 

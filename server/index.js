@@ -42,6 +42,7 @@ import { getUserBucketSize } from './routes/files.js';
 import setupGroupRoutes from './routes/groups.js';
 import setupPolicyRoutes from './routes/policies.js';
 import setupEditionRoutes from './routes/edition.js';
+import setupSetupRoutes from './routes/setup.js';
 import { getEdition } from './edition.js';
 import { createFeatureGuard } from './edition-routes.js';
 import {
@@ -1584,6 +1585,8 @@ app.use('/api', createFeatureGuard({
 
 // Edition + feature registry (server/edition.js; group_requests.md §4).
 setupEditionRoutes(app, cloudant, auditLog);
+// Personal AS setup checklist state (derived; group_requests.md §5).
+setupSetupRoutes(app, cloudant);
 
 // Passkey routes
 setupAuthRoutes(app, passkeyService, cloudant, doClient, auditLog, { invalidateResourceCache });
@@ -10349,6 +10352,13 @@ app.post('/api/user/notification-email', async (req, res) => {
         // Record a fresh verification in the persistent log (surfaces in maia-log).
         if (verified) {
           appendUserProvisioningEvent(userId, { event: 'email-verified', email: doc.email }).catch(() => {});
+          // Personal AS edition: the private AI waits for a verified email;
+          // start it now, in the background (§9).
+          if (getEdition() === 'personal-as' && !doc.assignedAgentId) {
+            import('./routes/auth.js')
+              .then(({ ensureUserAgent }) => ensureUserAgent(doClient, cloudant, doc))
+              .catch((e) => console.warn(`[AGENT] Background start for ${userId} failed:`, e?.message || e));
+          }
         }
         return res.json({ success: true, email: doc.email, verified: !!doc.emailVerified });
       } catch (e) {

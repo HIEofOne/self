@@ -10,7 +10,7 @@ import { getProjectIdForGenAI } from '../utils/project-config.js';
 import { getDoRegion } from '../utils/new-agent-config.js';
 import { resolveSecondaryModel } from '../utils/secondary-models.js';
 import { isVerified as isEmailVerified } from '../emailVerification.js';
-import { mayCreatePrimaryAgent } from '../edition.js';
+import { mayCreatePrimaryAgent, getEdition } from '../edition.js';
 
 // Wizard-done workflow stages (mirrors WIZARD_DONE_STAGES in
 // ChatInterface.vue): agent-status writers must never downgrade these.
@@ -739,6 +739,14 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
 
       // Check if user already exists
       const existingUser = await cloudant.getDocument('maia_users', userId);
+      // Personal AS edition: accounts are created only by GET STARTED, with a
+      // verified email; a passkey is then added to that account.
+      if (!existingUser && !adminSecretCheck.required && getEdition() === 'personal-as') {
+        return res.status(403).json({
+          error: 'Create your MAIA with GET STARTED first, then add a passkey.',
+          code: 'START_WITH_EMAIL'
+        });
+      }
       if (existingUser && existingUser.credentialID && !adminSecretCheck.required) {
         return res.status(400).json({ 
           error: 'User already has a passkey',
@@ -1391,6 +1399,17 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
         }
       }
 
+      // Personal AS edition: a new account needs a verified email (§5 row 1,
+      // closing the §1.2 gap). Returning to an existing temporary account
+      // (the cookie path above) is unaffected.
+      if (getEdition() === 'personal-as' && !(notifyEmail && isEmailVerified(emailVerifyToken, notifyEmail))) {
+        return res.status(400).json({
+          authenticated: false,
+          error: 'EMAIL_VERIFICATION_REQUIRED',
+          message: 'Verify your email address to create your MAIA.'
+        });
+      }
+
       let userId = null;
       let displayName = null;
       let userDoc = null;
@@ -1456,6 +1475,14 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       req.session.expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
       setTempCookie(res, userId);
+
+      // Personal AS edition: the email is verified, so start the private AI
+      // now, in the background; its deploy overlaps the passkey, folder and
+      // join steps (§9). The setup checklist watches it finish.
+      if (getEdition() === 'personal-as' && userDoc.emailVerified) {
+        ensureUserAgent(doClient, cloudant, userDoc).catch((e) =>
+          console.warn(`[AGENT] Background start for ${userId} failed:`, e?.message || e));
+      }
 
       return res.json({
         authenticated: true,
