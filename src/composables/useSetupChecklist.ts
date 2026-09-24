@@ -16,6 +16,10 @@ export interface SetupStep {
   done: boolean;
   groups?: string[];
   pending?: string[];
+  /** The host's group that can be joined directly (open or approval link). */
+  joinable?: { groupId: string; name: string; joinLink: string } | null;
+  /** A listed group that joins only by invitation (offered, not required). */
+  inviteOnly?: { groupId: string; name: string } | null;
   medicationsVerified?: boolean;
   summaryVerified?: boolean;
   asState?: 'setup' | 'active' | 'paused';

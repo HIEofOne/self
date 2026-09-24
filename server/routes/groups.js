@@ -170,7 +170,8 @@ const memberCounts = (doc) => {
  *  admin-rotatable URL — printable as a QR code. Anyone who opens it can
  *  REQUEST to join; the admin approves each request, so a leaked link
  *  never grants membership by itself. */
-const joinLinkFor = (doc) => {
+/** A group's open join link (open or approval mode), or null (invite-only). */
+export const joinLinkFor = (doc) => {
   if (!['link-approval', 'open'].includes(doc.joinMode) || !doc.joinLinkToken) return null;
   const appUrl = (process.env.PUBLIC_APP_URL || 'http://localhost:5173').replace(/\/$/, '');
   return `${appUrl}/?groupJoin=${doc.joinLinkToken}&groupId=${encodeURIComponent(doc._id)}&registry=${encodeURIComponent(appUrl)}`;

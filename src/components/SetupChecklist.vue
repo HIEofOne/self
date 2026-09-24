@@ -53,13 +53,19 @@
                   <div v-if="groupPending.length" class="text-caption text-grey-8">
                     Waiting for {{ groupPending.join(', ') }} to approve your request.
                   </div>
-                  <template v-else>
+                  <template v-else-if="joinTarget">
                     <q-btn
                       outline dense no-caps color="primary" :label="`Join ${groupName}`"
-                      :loading="joining" :disable="!emailDone || !group?.joinLink" @click="joinGroup"
+                      :loading="joining" :disable="!emailDone" @click="joinGroup"
                     />
                     <div v-if="!emailDone" class="text-caption text-grey-7 q-mt-xs">Verify your email first.</div>
                     <div v-if="joinError" class="text-caption text-negative q-mt-xs">{{ joinError }}</div>
+                  </template>
+                  <!-- Invite-only: offered, never blocking — without an
+                       invitation nobody could finish setup. -->
+                  <template v-else>
+                    <div class="text-caption text-grey-8">{{ groupName }} joins by invitation. If you have one, use its link.</div>
+                    <q-btn outline dense no-caps color="primary" class="q-mt-xs" label="Use an invitation" @click="emit('open-groups')" />
                   </template>
                 </div>
                 <!-- 5. Patient Summary + Current Medications -->
@@ -128,6 +134,7 @@ const emit = defineEmits<{
   'choose-folder': [];
   'open-summary': [];
   'open-policies': [];
+  'open-groups': [];
   'sign-out': [];
 }>();
 
@@ -136,7 +143,14 @@ const status = computed(() => state.status);
 const requiredDone = computed(() => !!status.value?.requiredDone);
 const step = (key: SetupStepKey) => status.value?.steps.find((s) => s.key === key);
 const emailDone = computed(() => !!step('email')?.done);
-const groupName = computed(() => props.group?.name || 'your group');
+// The group to join comes from the server (the host's group with an open
+// join link); the page's own guess is only a fallback.
+const joinTarget = computed(() => {
+  const g = step('group');
+  if (g?.joinable?.joinLink) return g.joinable;
+  return props.group?.joinLink ? props.group : null;
+});
+const groupName = computed(() => joinTarget.value?.name || step('group')?.inviteOnly?.name || props.group?.name || 'your group');
 const groupPending = computed(() => step('group')?.pending || []);
 
 const TEXT: Record<SetupStepKey, { title: () => string; info: () => string }> = {
@@ -167,7 +181,7 @@ const TEXT: Record<SetupStepKey, { title: () => string; info: () => string }> = 
 };
 
 const rows = computed(() => (status.value?.steps || [])
-  .filter((s) => s.key !== 'group' || s.required || s.done)
+  .filter((s) => s.key !== 'group' || s.required || s.done || !!s.inviteOnly)
   .map((s) => {
     let detail = '';
     if (s.key === 'group' && s.done && s.groups?.length) detail = `Member of ${s.groups.join(', ')}`;
@@ -216,7 +230,7 @@ const joining = ref(false);
 const joinError = ref('');
 let autoJoinTried = false;
 const joinGroup = async () => {
-  const g = props.group;
+  const g = joinTarget.value;
   if (!g?.joinLink || !props.userId || joining.value) return;
   let token: string | null = null;
   let groupId = g.groupId;
@@ -271,7 +285,7 @@ watch(status, async (s) => {
     if (lastPoll !== before) await refresh();
     return;
   }
-  if (g.required && emailDone.value && props.group?.joinLink && !autoJoinTried) {
+  if (g.required && emailDone.value && joinTarget.value && !autoJoinTried) {
     autoJoinTried = true;
     await joinGroup();
   }

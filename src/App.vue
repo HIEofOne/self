@@ -91,9 +91,9 @@
                 style="flex: 1; overflow-y: auto; display: flex; flex-direction: column;"
               >
                 <template v-if="isPersonalAs">
-                  <div class="text-h6 text-center q-mb-xs">{{ trusteeGroup?.name || 'MAIA' }}</div>
-                  <div v-if="trusteeGroup?.description" class="text-body2 text-grey-8 text-center q-mb-md" style="max-width: 560px; margin-left: auto; margin-right: auto;">
-                    {{ trusteeGroup.description }}
+                  <div class="text-h6 text-center q-mb-xs">{{ hostGroup?.name || 'MAIA' }}</div>
+                  <div v-if="hostGroup?.description" class="text-body2 text-grey-8 text-center q-mb-md" style="max-width: 560px; margin-left: auto; margin-right: auto;">
+                    {{ hostGroup.description }}
                   </div>
                 </template>
                 <div v-else-if="editionReady" class="text-h6 text-center q-mb-sm">
@@ -785,6 +785,7 @@
       @choose-folder="checklistChooseFolder"
       @open-summary="checklistOpenSummary"
       @open-policies="checklistOpenPolicies"
+      @open-groups="checklistOpenGroups"
       @sign-out="handleSignOut"
     />
 
@@ -1498,6 +1499,12 @@ watch(() => verifiedEmail.verified, (ok) => { if (ok) wf.value.emailOptIn = true
 
 const trusteeGroup = computed(() =>
   (publicGroups.value || []).find((g) => /trustee/i.test(g.name || '') && g.joinLink) || null);
+// Personal AS edition: the host's group names the welcome page even when it
+// joins by invitation only (joining itself still needs a link).
+const hostGroup = computed(() => {
+  const gs = publicGroups.value || [];
+  return gs.find((g) => /trustee/i.test(g.name || '')) || gs[0] || null;
+});
 
 // The RequestBuilder's real-submit target: the Trustee group + its registry
 // origin (derived from the join link, falling back to this host).
@@ -2966,6 +2973,12 @@ const checklistChooseFolder = async () => {
 const checklistOpenSummary = () => {
   setupChecklist.hide();
   chatInterfaceRef.value?.openMyStuffTab?.('summary');
+};
+
+/** Row 4, invite-only group: the Groups tab takes an invitation link. */
+const checklistOpenGroups = () => {
+  setupChecklist.hide();
+  chatInterfaceRef.value?.openMyStuffTab?.('groups');
 };
 
 /** Row 6: confirm the rules and turn on sharing, in Sharing Policies. */
