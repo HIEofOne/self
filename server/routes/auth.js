@@ -10,6 +10,7 @@ import { getProjectIdForGenAI } from '../utils/project-config.js';
 import { getDoRegion } from '../utils/new-agent-config.js';
 import { resolveSecondaryModel } from '../utils/secondary-models.js';
 import { isVerified as isEmailVerified } from '../emailVerification.js';
+import { mayCreatePrimaryAgent } from '../edition.js';
 
 // Wizard-done workflow stages (mirrors WIZARD_DONE_STAGES in
 // ChatInterface.vue): agent-status writers must never downgrade these.
@@ -398,6 +399,12 @@ export async function ensureUserAgent(doClient, cloudant, userDoc) {
 
   // If no agent exists, create one while holding a per-user lock
   let needsCreation = !agent;
+  if (needsCreation && !mayCreatePrimaryAgent(userDoc)) {
+    // Personal AS edition: no agent before the email is verified. Callers
+    // see a user without an agent, exactly as before the first creation.
+    console.log(`[AGENT] Not creating an agent for ${userId} yet: email not verified (personal-as edition)`);
+    return userDoc;
+  }
   let lockResolve = null;
   if (needsCreation) {
     let lockReject;
@@ -1680,7 +1687,8 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
           success: true,
           status: 'not_started',
           endpointReady: false,
-          provisionAttempted
+          provisionAttempted,
+          ...(mayCreatePrimaryAgent(userDoc) ? {} : { waitingFor: 'email-verification' })
         });
       }
       const deploymentStatus = agent?.deployment?.status || agent?.deployment_status || agent?.status || 'unknown';
