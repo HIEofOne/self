@@ -20,8 +20,30 @@
     </q-banner>
     <q-page-container class="full-width">
       <q-page>
+        <!-- Personal AS edition: hard Chrome gate (group_requests.md §5 row 0).
+             A patient's MAIA keeps their records in a folder, which needs
+             Chrome (or another Chromium browser) on a computer. Checked by
+             capability, not user agent. No "continue anyway". -->
+        <div v-if="editionChromeGate" class="flex flex-center" style="height: 100vh">
+          <q-card style="max-width: 520px" class="q-pa-md">
+            <q-card-section>
+              <div class="text-h6 q-mb-sm">Open this page in Chrome on a computer</div>
+              <div class="text-body2 q-mb-md">
+                MAIA keeps your own copy of your health records in a folder on
+                your computer. Only Chrome (or Microsoft Edge) on a computer can
+                do that, so MAIA can't start in this browser.
+              </div>
+              <div class="text-caption text-grey-8 q-mb-xs">Copy this link and open it in Chrome:</div>
+              <div class="row items-center q-gutter-sm">
+                <div class="text-caption" style="flex: 1 1 auto; min-width: 0; word-break: break-all;">{{ pageLink }}</div>
+                <q-btn flat dense size="sm" icon="content_copy" label="Copy" style="flex: 0 0 auto;" @click="copyPageLink" />
+              </div>
+            </q-card-section>
+          </q-card>
+        </div>
+
         <!-- Not authenticated - show auth dialog -->
-        <div v-if="!authenticated" class="flex flex-center" style="height: 100vh">
+        <div v-else-if="!authenticated" class="flex flex-center" style="height: 100vh">
           <template v-if="deepLinkShareId">
             <q-card style="min-width: 420px; max-width: 520px">
               <q-card-section>
@@ -262,7 +284,12 @@
                        editable without touching Vue. The three live pieces —
                        Get Started checkboxes, the policy editor, and the
                        footer — slot into their marked positions. -->
-                  <WelcomeContent @sign-in="handlePasskeySignInLink">
+                  <!-- Personal AS edition: the welcome page is the group's page -->
+                  <div v-if="isPersonalAs && trusteeGroup" class="text-center q-mb-md" style="max-width: 680px; margin: 0 auto;">
+                    <div class="text-h5 text-weight-medium">{{ trusteeGroup.name }}</div>
+                    <div v-if="trusteeGroup.description" class="text-body2 text-grey-8 q-mt-xs">{{ trusteeGroup.description }}</div>
+                  </div>
+                  <WelcomeContent :variant="isPersonalAs ? 'personal-as' : 'default'" @sign-in="handlePasskeySignInLink">
                     <!-- Get Started setup form (New_User_Flows.md §5 step 4):
                          every decision the arrival dialogs used to ask is a
                          checkbox HERE, so setup runs with zero dialogs. -->
@@ -1045,6 +1072,7 @@ import ChatInterface from './components/ChatInterface.vue';
 import PolicyCardBuilder from './components/PolicyCardBuilder.vue';
 import RequestBuilder from './components/RequestBuilder.vue';
 import WelcomeContent from './components/WelcomeContent.vue';
+import { useEdition } from './composables/useEdition';
 import EmailVerifyBox from './components/EmailVerifyBox.vue';
 import { useVerifiedEmail } from './composables/verifiedEmail';
 import DeepLinkAccess from './components/DeepLinkAccess.vue';
@@ -1304,6 +1332,7 @@ const adminInviteNoticeDismissed = ref(false);
 // File System Access API is MAIA's storage requirement (Chrome 122+).
 const isChromeCapable = typeof (window as unknown as { showDirectoryPicker?: unknown }).showDirectoryPicker === 'function';
 
+
 const loadPendingGroupInvite = async () => {
   try {
     const raw = localStorage.getItem('maiaGroupInvite');
@@ -1363,6 +1392,22 @@ const showDeepLinkAccess = ref(false);
 const deepLinkLoading = ref(false);
 const deepLinkError = ref('');
 const showAdminPage = ref(false);
+
+// Edition (server/edition.js). Loaded once at startup and again whenever
+// the signed-in user changes, so per-user unlocks are current.
+const { load: loadEdition, isPersonalAs } = useEdition();
+void loadEdition();
+watch(() => user.value?.userId, () => { void loadEdition(true); });
+// Shared-chat guests (clinicians) and admin pages don't need a folder.
+const editionChromeGate = computed(() =>
+  isPersonalAs.value && !isChromeCapable && !deepLinkShareId.value && !isDeepLinkUser.value
+  && !showAdminPage.value && window.location.pathname !== '/admin');
+const pageLink = window.location.href;
+const copyPageLink = () => {
+  navigator.clipboard.writeText(pageLink)
+    .then(() => $q.notify({ type: 'positive', message: 'Link copied', position: 'top', timeout: 2000 }))
+    .catch(() => $q.notify({ type: 'negative', message: 'Could not copy the link', position: 'top', timeout: 2000 }));
+};
 
 // ── Organizer-first welcome (Refinement 8) ─────────────────────────
 /** Publicly-listed groups on this deployment (admin opt-in per group). */

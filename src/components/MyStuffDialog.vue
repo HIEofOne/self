@@ -618,7 +618,7 @@
               indicator-color="primary"
             >
               <q-tab name="default" :label="profileLabel('default')" />
-              <q-tab name="gpt" :label="profileLabel('gpt')" />
+              <q-tab v-if="has('second-ai')" name="gpt" :label="profileLabel('gpt')" />
             </q-tabs>
 
             <!-- Primary agent tab -->
@@ -1118,6 +1118,7 @@
             <Lists
               ref="listsComponentRef"
               :userId="userId"
+              :medications-only="!has('lists-full')"
               :profile-labels="agentProfileLabelsMap"
               :draft-ps-meds="draftPsMeds"
               :user-files="userFiles"
@@ -1441,7 +1442,7 @@
                    after SUMMARY — the default for sharing-request responses. -->
               <q-tab name="filtered" label="Privacy Filtered" />
               <q-tab name="inst-default" :label="instrTabLabel('default')" />
-              <q-tab name="inst-gpt" :label="instrTabLabel('gpt')" />
+              <q-tab v-if="has('second-ai')" name="inst-gpt" :label="instrTabLabel('gpt')" />
             </q-tabs>
 
             <!-- Instruction editor (per-agent Patient Summary prompt override) -->
@@ -2015,6 +2016,7 @@ import { processFileNCitations } from '../utils/fileNCitations';
 import { applyPseudonymsClient } from '../utils/pseudonyms';
 import { advancePipeline, waitForStageDone } from '../utils/pipeline';
 import { logModalEvent } from '../utils/modalLog';
+import { useEdition } from '../composables/useEdition';
 
 // Local markdown-it with html: true so the <a class="page-link"> anchors
 // emitted by processFileNCitations survive rendering. vue-markdown-render
@@ -2402,18 +2404,29 @@ onMounted(() => {
 onUnmounted(() => { if (groupsAlertTimer) clearInterval(groupsAlertTimer); });
 watch(() => props.userId, () => refreshGroupsAlert());
 
+// Each tab's feature (server/edition.js). In the Personal AS edition a tab
+// shows only when its feature is on; the server gates the routes too.
+const TAB_FEATURES: Record<string, string> = {
+  files: 'summary', agent: 'advisor', chats: 'saved-chats', summary: 'summary',
+  groups: 'groups-core', policies: 'policies', privacy: 'privacy-filter-editor',
+  diary: 'diary', references: 'references'
+  // lists: always shown; without `lists-full` it is Current Medications only
+};
+const { has } = useEdition();
+const tabVisible = (name: string) => !TAB_FEATURES[name] || has(TAB_FEATURES[name]);
+
 const railTabs = computed(() => [
   { name: 'files',      icon: 'description',  label: 'Saved Files',     alertCount: 0, alertOutline: false, infoAlert: false,             infoTitle: '' },
   { name: 'agent',      icon: 'smart_toy',    label: 'AI Agents',       alertCount: 0, alertOutline: false, infoAlert: false,             infoTitle: '' },
   { name: 'chats',      icon: 'chat',         label: 'Saved Chats',     alertCount: props.savedChatCount || 0, alertOutline: false, infoAlert: false, infoTitle: '' },
   { name: 'summary',    icon: 'description',  label: 'Patient Summary', alertCount: 0, alertOutline: summaryNeedsVerify.value, infoAlert: false, infoTitle: '' },
-  { name: 'lists',      icon: 'list',         label: 'Lists',           alertCount: 0, alertOutline: !!props.medsNeedsVerify, infoAlert: false, infoTitle: '' },
+  { name: 'lists',      icon: 'list',         label: has('lists-full') ? 'Lists' : 'Current Medications', alertCount: 0, alertOutline: !!props.medsNeedsVerify, infoAlert: false, infoTitle: '' },
   { name: 'groups',     icon: 'groups',       label: 'Groups',          alertCount: 0, alertOutline: false, infoAlert: groupsAlert.value, infoTitle: groupsAlertTitle.value },
   { name: 'policies',   icon: 'policy',       label: 'Sharing Policies', alertCount: 0, alertOutline: false, infoAlert: false,            infoTitle: '' },
   { name: 'privacy',    icon: 'privacy_tip',  label: 'Privacy Filter',  alertCount: 0, alertOutline: false, infoAlert: false,             infoTitle: '' },
   { name: 'diary',      icon: 'book',         label: 'Patient Diary',   alertCount: 0, alertOutline: false, infoAlert: false,             infoTitle: '' },
   { name: 'references', icon: 'link',         label: 'References',      alertCount: 0, alertOutline: false, infoAlert: false,             infoTitle: '' }
-]);
+].filter((t) => tabVisible(t.name)));
 
 // Click a rail icon: open the content panel AND jump to that section.
 // If the panel is already open AND showing this tab, close it
@@ -6853,6 +6866,16 @@ const pairError = ref('');
  * clear the override and revert to the Layer-2 default.
  */
 const summarySubTab = ref<'summary' | 'filtered' | 'inst-default' | 'inst-gpt'>('summary');
+
+// Tabs can also be opened programmatically (e.g. a parent's initialTab);
+// never land on one whose feature is off in this edition.
+watch([currentTab, activeAgentProfile, summarySubTab, () => has('second-ai')], () => {
+  if (!tabVisible(currentTab.value)) currentTab.value = 'summary';
+  if (!has('second-ai')) {
+    if (activeAgentProfile.value === 'gpt') activeAgentProfile.value = 'default';
+    if (summarySubTab.value === 'inst-gpt') summarySubTab.value = 'summary';
+  }
+}, { immediate: true });
 // Phase 4: the auto-generated privacy-filtered copy of the current summary
 // (from GET /api/patient-summary.privacyFiltered).
 const privacyFilteredSummary = ref<{ text: string; mappingCount: number; createdAt: string | null; mapping?: Array<{ original: string; pseudonym: string }> } | null>(null);

@@ -14,7 +14,7 @@
       <span class="conv-rail__label">{{ currentConversationLabel }}</span>
     </button>
     <div class="conv-rail__save-row">
-      <q-btn flat dense size="sm" color="primary" icon="save" label="SAVE"
+      <q-btn v-if="has('saved-chats')" flat dense size="sm" color="primary" icon="save" label="SAVE"
              :disable="!canSaveToGroup || savingDisabled" @click.stop="emit('save-group')">
         <q-tooltip>Save this conversation into your Stored Chats</q-tooltip>
       </q-btn>
@@ -24,7 +24,8 @@
       </q-btn>
     </div>
 
-    <!-- Stored Chats (including deep links) -->
+    <!-- Stored Chats (including deep links); `saved-chats` in the Personal AS edition -->
+    <template v-if="has('saved-chats')">
     <div class="conv-rail__header conv-rail__header--stored">Stored Chats</div>
     <button
       v-for="c in storedChats" :key="`sc:${c._id}`"
@@ -50,11 +51,13 @@
       </q-badge>
     </button>
     <div v-if="!storedChats.length" class="conv-rail__empty">No saved chats yet</div>
+    </template>
 
     <!-- Group chats: a category header like the two above, then one
          sub-headed section per group -->
-    <div v-if="railGroups.length" class="conv-rail__header conv-rail__header--group">Group chats</div>
-    <template v-for="g in railGroups" :key="`g:${g.groupId}`">
+    <!-- `peer-messaging` in the Personal AS edition -->
+    <div v-if="has('peer-messaging') && railGroups.length" class="conv-rail__header conv-rail__header--group">Group chats</div>
+    <template v-for="g in (has('peer-messaging') ? railGroups : [])" :key="`g:${g.groupId}`">
       <div class="conv-rail__subheader">
         <span class="conv-rail__label">{{ g.groupName }}</span>
         <q-btn flat dense round size="xs" icon="group_add" @click="emit('open-groups')">
@@ -101,6 +104,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useQuasar } from 'quasar';
+import { useEdition } from '../composables/useEdition';
 
 const $q = useQuasar();
 
@@ -290,7 +294,13 @@ const railGroups = computed<RailGroup[]>(() => {
   return out;
 });
 
-const refresh = () => { void loadStoredChats(); void loadGroups(); };
+// Personal AS edition: only the private AI conversation, unless the user
+// turned on saved chats or member messages (their routes are gated too).
+const { has } = useEdition();
+const refresh = () => {
+  if (has('saved-chats')) void loadStoredChats();
+  if (has('peer-messaging')) void loadGroups();
+};
 defineExpose({ refresh });
 
 let timer: ReturnType<typeof setInterval> | null = null;

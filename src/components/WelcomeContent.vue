@@ -42,8 +42,11 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue';
 import MarkdownIt from 'markdown-it';
-import raw from '../content/welcome_A.md?raw';
+import welcomeDefault from '../content/welcome_A.md?raw';
+import welcomePersonalAs from '../content/welcome_personal_as.md?raw';
 
+// 'personal-as': the Personal AS edition's welcome (group_requests.md §11).
+const props = withDefaults(defineProps<{ variant?: 'default' | 'personal-as' }>(), { variant: 'default' });
 const emit = defineEmits<{ 'sign-in': [] }>();
 
 const md = new MarkdownIt({ html: false, linkify: true, breaks: false });
@@ -89,6 +92,7 @@ const markerKind = (text: string): 'header' | 'faq' | 'policies' | 'request' | '
  *  sentence are rendered by the LIVE badges component slotted above, so
  *  they're dropped here to avoid a duplicate. */
 const nodes = computed<Node[]>(() => {
+  const raw = props.variant === 'personal-as' ? welcomePersonalAs : welcomeDefault;
   const body = raw.replace(/<!--[\s\S]*?-->/g, '').trim();
   const lines = body.split('\n');
   const out: Node[] = [];
