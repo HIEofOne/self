@@ -496,7 +496,7 @@
             :rehydration-files="rehydrationFiles"
             :rehydration-active="rehydrationActive"
             :restore-active="showRestoreWizard"
-            :suppress-wizard="suppressWizard"
+            :suppress-wizard="suppressWizard || isPersonalAs"
             :folder-access-tier="folderAccessTier"
             :passkey-without-folder="passkeyWithoutFolder"
             :welcome-setup-files="welcomeSetupFiles"
@@ -765,6 +765,19 @@
       </q-card>
     </q-dialog>
 
+
+    <!-- Personal AS setup checklist (group_requests.md §5) -->
+    <SetupChecklist
+      v-if="showSetupChecklist"
+      :user-id="user?.userId || ''"
+      :group="trusteeGroup ? { groupId: trusteeGroup.groupId, name: trusteeGroup.name, joinLink: trusteeGroup.joinLink } : null"
+      :folder-busy="checklistFolderBusy"
+      :folder-error="checklistFolderError"
+      @add-passkey="startPasskeyRegistration"
+      @choose-folder="checklistChooseFolder"
+      @open-summary="checklistOpenSummary"
+      @sign-out="handleSignOut"
+    />
 
     <!-- Passkey dialog for authenticated users -->
     <q-dialog v-model="showPasskeyDialog" persistent>
@@ -1107,6 +1120,8 @@ import PolicyCardBuilder from './components/PolicyCardBuilder.vue';
 import RequestBuilder from './components/RequestBuilder.vue';
 import WelcomeContent from './components/WelcomeContent.vue';
 import { useEdition } from './composables/useEdition';
+import SetupChecklist from './components/SetupChecklist.vue';
+import { useSetupChecklist } from './composables/useSetupChecklist';
 import EmailVerifyBox from './components/EmailVerifyBox.vue';
 import { useVerifiedEmail } from './composables/verifiedEmail';
 import DeepLinkAccess from './components/DeepLinkAccess.vue';
@@ -1118,7 +1133,7 @@ import {
   getActiveUserId, setActiveUserId, discoverUsers,
   readStateFileByUserId, storeDirectoryHandle,
   setRestoreActive, clearRestoreActive, getRestoreActive,
-  bufferLogEvent,
+  bufferLogEvent, pickLocalFolder, readStateFile, writeWeblocFile,
   type MaiaState, type DiscoveredUser
 } from './utils/localFolder';
 import packageJson from '../package.json';
@@ -1580,15 +1595,19 @@ const welcomeFormStart = async () => {
     if (wf.value.haveFile && wfFile.value) files.push(wfFile.value);
     if (wf.value.haveFolder) files.push(...wfFolderFiles);
     welcomeSetupFiles.value = files;
-    try {
-      sessionStorage.setItem('maiaWelcomeSetup', JSON.stringify({
-        join, // alias defaults to the final userId in the runner
-        fileCount: files.length,
-        // Tells the runner to schedule the welcome email (server has the
-        // actual address). Only when the box was checked AND filled.
-        hasEmail: !!(wf.value.emailOptIn && wf.value.email.trim())
-      }));
-    } catch { /* best-effort */ }
+    // Personal AS edition: the setup checklist joins the group and there is
+    // nothing to upload, so the full edition's welcome runner doesn't run.
+    if (!isPersonalAs.value) {
+      try {
+        sessionStorage.setItem('maiaWelcomeSetup', JSON.stringify({
+          join, // alias defaults to the final userId in the runner
+          fileCount: files.length,
+          // Tells the runner to schedule the welcome email (server has the
+          // actual address). Only when the box was checked AND filled.
+          hasEmail: !!(wf.value.emailOptIn && wf.value.email.trim())
+        }));
+      } catch { /* best-effort */ }
+    }
     const user = await createTemporarySession({
       desiredUserId: wf.value.joinTrustee ? (wfSuggestedId.value || undefined) : undefined,
       email: wf.value.emailOptIn ? (wf.value.email.trim() || undefined) : undefined,
@@ -2842,6 +2861,80 @@ const handleLocalFolderConnected = async (payload: { handle: FileSystemDirectory
   if (user.value?.userId) {
     setActiveUserId(user.value.userId);
   }
+};
+
+// ── Personal AS setup checklist (group_requests.md §5) ───────────────
+// Replaces the full edition's setup wizard for patients in this edition.
+// Every row is derived on the server (GET /api/setup-status), so a reload
+// at any step resumes where the patient is.
+const setupChecklist = useSetupChecklist();
+const showSetupChecklist = computed(() =>
+  isPersonalAs.value && authenticated.value && !!user.value?.userId
+  && !user.value?.isDeepLink && !user.value?.isAdmin && !showAdminPage.value);
+
+// Open the checklist after sign-in while a required step is missing.
+watch([showSetupChecklist, () => user.value?.userId], async ([show]) => {
+  if (!show) { setupChecklist.reset(); return; }
+  const status = await setupChecklist.refresh();
+  if (status && !status.requiredDone) setupChecklist.show();
+}, { immediate: true });
+
+// A passkey was just added (or the dialog was closed): re-derive.
+watch(showPasskeyDialog, (open) => { if (!open && showSetupChecklist.value) void setupChecklist.refresh(); });
+
+// The private AI finished deploying: let the chat composer offer it.
+watch(() => setupChecklist.state.status?.agent, (agent, prev) => {
+  if (agent === 'ready' && prev && prev !== 'ready') void chatInterfaceRef.value?.loadProviders?.();
+});
+
+const checklistFolderBusy = ref(false);
+const checklistFolderError = ref('');
+/** Row 3: choose the MAIA folder. Done once maia-state.json is written. */
+const checklistChooseFolder = async () => {
+  const uid = user.value?.userId;
+  if (!uid || checklistFolderBusy.value) return;
+  checklistFolderError.value = '';
+  checklistFolderBusy.value = true;
+  try {
+    const picked = await pickLocalFolder(uid);
+    if (!picked) return; // picker cancelled
+    if (picked.conflict?.severity === 'block') {
+      checklistFolderError.value = picked.conflict.message;
+      return;
+    }
+    await handleLocalFolderConnected({ handle: picked.handle, folderName: picked.folderName });
+    if (localFolderHandle.value !== picked.handle) {
+      checklistFolderError.value = 'That folder belongs to another MAIA account. Choose a different folder.';
+      return;
+    }
+    try { await writeWeblocFile(picked.handle, window.location.origin, { userId: uid }); } catch { /* shortcut is optional */ }
+    await saveLocalSnapshot(null);
+    if (!(await readStateFile(picked.handle))) {
+      checklistFolderError.value = "MAIA couldn't write to that folder. Choose another one.";
+      return;
+    }
+    await fetch('/api/setup/folder-connected', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: uid })
+    });
+    await setupChecklist.refresh();
+    if (picked.conflict?.severity === 'warn') {
+      $q.notify({ type: 'warning', message: picked.conflict.message, timeout: 8000 });
+    }
+  } catch (e) {
+    console.warn('[setup] folder step failed:', e);
+    checklistFolderError.value = 'Could not use that folder. Try again.';
+  } finally {
+    checklistFolderBusy.value = false;
+  }
+};
+
+/** Row 5: open the Patient Summary in the Workbook. */
+const checklistOpenSummary = () => {
+  setupChecklist.hide();
+  chatInterfaceRef.value?.openMyStuffTab?.('summary');
 };
 
 /** [WIZARD] Save state to local folder when wizard completes (so maia-state.json is current). */

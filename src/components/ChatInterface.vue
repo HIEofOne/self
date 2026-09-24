@@ -10182,6 +10182,13 @@ const closeMyStuff = () => {
   showMyStuffDialog.value = false;
 };
 
+// For the Personal AS setup checklist (App.vue): open the Workbook at a
+// tab, and pick up the private AI once its deploy finishes.
+const openMyStuffTab = (tab: string) => {
+  myStuffInitialTab.value = tab;
+  showMyStuffDialog.value = true;
+};
+
 defineExpose({
   generateSetupLogPdf,
   markIndexingAlreadyCompleted,
@@ -10190,7 +10197,9 @@ defineExpose({
   testMode,
   addTestLog,
   setTestFinalOutput,
-  closeMyStuff
+  closeMyStuff,
+  openMyStuffTab,
+  loadProviders
 });
 </script>
 
