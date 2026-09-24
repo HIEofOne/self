@@ -8,7 +8,7 @@ import { reactive, readonly } from 'vue';
  * the user is. Shared by the checklist dialog (App.vue) and the Workbook
  * rail's Setup button.
  */
-export type SetupStepKey = 'email' | 'passkey' | 'folder' | 'group' | 'summary';
+export type SetupStepKey = 'email' | 'passkey' | 'folder' | 'group' | 'summary' | 'sharing';
 
 export interface SetupStep {
   key: SetupStepKey;
@@ -18,6 +18,8 @@ export interface SetupStep {
   pending?: string[];
   medicationsVerified?: boolean;
   summaryVerified?: boolean;
+  asState?: 'setup' | 'active' | 'paused';
+  unconfirmed?: number;
 }
 
 export type AgentState = 'waiting-for-email' | 'none' | 'creating' | 'ready';

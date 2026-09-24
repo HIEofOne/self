@@ -15,8 +15,23 @@
  * enforcement path ("AI assists, never grants", Refinement 7a).
  */
 
+import { getEdition } from '../edition.js';
+
 const USERS_DB = 'maia_users';
 const MAX_POLICIES = 200;
+
+// Personal AS edition (group_requests.md §6.1–6.2): a card acts only once
+// the patient has confirmed it (I-24), and nothing is decided
+// automatically until the patient turns sharing on.
+export const AS_STATES = Object.freeze(['setup', 'active', 'paused']);
+export const asStateOf = (userDoc) =>
+  (getEdition() === 'personal-as' ? (AS_STATES.includes(userDoc?.asState) ? userDoc.asState : 'setup') : 'active');
+
+/** Options for evaluatePolicies() for this account (both are no-ops in `full`). */
+export const evaluationOptionsFor = (userDoc) => ({
+  requireConfirmed: getEdition() === 'personal-as',
+  asState: asStateOf(userDoc)
+});
 
 /**
  * ── Policy vocabulary editions ──────────────────────────────────────
@@ -186,9 +201,15 @@ const cardMatches = (card, req) => {
 
 /** Deterministic, Cedar-style: enabled DENY wins, then an explicit ASK
  *  ("ask me first" — beats allow so it can carve an approval requirement
- *  out of a broader Respond card), then ALLOW, else default ASK. */
-export const evaluatePolicies = (cards, req) => {
-  const active = (cards || []).filter((c) => c && c.enabled !== false);
+ *  out of a broader Respond card), then ALLOW, else default ASK.
+ *
+ *  opts.requireConfirmed: only cards with a confirmedAt stamp take part
+ *  (I-24). opts.asState: anything but 'active' decides nothing — every
+ *  request comes to the patient as a question (§6.2). Defaults keep the
+ *  full edition's behavior. Mirrors evaluate() in src/utils/policyCards.ts. */
+export const evaluatePolicies = (cards, req, { requireConfirmed = false, asState = 'active' } = {}) => {
+  if (asState !== 'active') return { outcome: 'ask', decidedBy: null, reason: 'sharing-off' };
+  const active = (cards || []).filter((c) => c && c.enabled !== false && (!requireConfirmed || !!c.confirmedAt));
   const deny = active.find((c) => c.outcome === 'deny' && cardMatches(c, req));
   if (deny) return { outcome: 'deny', decidedBy: deny };
   const ask = active.find((c) => c.outcome === 'ask' && cardMatches(c, req));
@@ -220,7 +241,7 @@ export default function setupPolicyRoutes(app, cloudant, auditLog) {
     try {
       const userDoc = await cloudant.getDocument(USERS_DB, userId);
       if (!userDoc) return res.status(404).json({ success: false, error: 'User not found' });
-      res.json({ success: true, policies: userDoc.sharingPolicies || [] });
+      res.json({ success: true, policies: userDoc.sharingPolicies || [], asState: asStateOf(userDoc), edition: getEdition() });
     } catch (error) {
       console.error('[policies] list failed:', error);
       res.status(500).json({ success: false, error: 'Failed to list policies' });
@@ -241,7 +262,8 @@ export default function setupPolicyRoutes(app, cloudant, auditLog) {
         return res.status(400).json({ success: false, error: `Policy limit reached (${MAX_POLICIES})` });
       }
       const now = new Date().toISOString();
-      const stored = { id: `pol_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, ...card, createdAt: now, updatedAt: now };
+      // Writing a card is confirming it (§6.1).
+      const stored = { id: `pol_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, ...card, createdAt: now, updatedAt: now, confirmedAt: now };
       userDoc.sharingPolicies = [...policies, stored];
       userDoc.updatedAt = now;
       await cloudant.saveDocument(USERS_DB, userDoc);
@@ -270,7 +292,9 @@ export default function setupPolicyRoutes(app, cloudant, auditLog) {
       const idx = policies.findIndex((p) => p.id === req.params.id);
       if (idx === -1) return res.status(404).json({ success: false, error: 'Policy not found' });
       const now = new Date().toISOString();
-      policies[idx] = { ...policies[idx], ...card, id: policies[idx].id, createdAt: policies[idx].createdAt, updatedAt: now };
+      // Saving an edit (including enable/disable) is the patient's own act,
+      // so it confirms the card (§6.1).
+      policies[idx] = { ...policies[idx], ...card, id: policies[idx].id, createdAt: policies[idx].createdAt, updatedAt: now, confirmedAt: now };
       userDoc.sharingPolicies = policies;
       userDoc.updatedAt = now;
       await cloudant.saveDocument(USERS_DB, userDoc);
@@ -279,6 +303,87 @@ export default function setupPolicyRoutes(app, cloudant, auditLog) {
     } catch (error) {
       console.error('[policies] update failed:', error);
       res.status(500).json({ success: false, error: 'Failed to update policy' });
+    }
+  });
+
+  // POST /api/user-policies/:id/confirm — the patient confirms a card as it
+  // is (typically one their group suggested). Only a confirmed card acts
+  // in the Personal AS edition (I-24).
+  app.post('/api/user-policies/:id/confirm', async (req, res) => {
+    const userId = requireMatchingUser(req, res);
+    if (!userId) return;
+    try {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const userDoc = await cloudant.getDocument(USERS_DB, userId);
+        const policies = userDoc?.sharingPolicies || [];
+        const idx = policies.findIndex((p) => p.id === req.params.id);
+        if (idx === -1) return res.status(404).json({ success: false, error: 'Policy not found' });
+        const now = new Date().toISOString();
+        policies[idx] = { ...policies[idx], confirmedAt: now, updatedAt: now };
+        userDoc.sharingPolicies = policies;
+        userDoc.updatedAt = now;
+        try {
+          await cloudant.saveDocument(USERS_DB, userDoc);
+        } catch (e) {
+          if (e?.statusCode === 409 && attempt < 2) continue;
+          throw e;
+        }
+        auditLog.logEvent({ type: 'sharing_policy_confirmed', userId, ip: req.ip, details: { policyId: req.params.id } });
+        return res.json({ success: true, policy: policies[idx] });
+      }
+      return res.status(409).json({ success: false, error: 'CONFLICT' });
+    } catch (error) {
+      console.error('[policies] confirm failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to confirm policy' });
+    }
+  });
+
+  // POST /api/as-state { state: 'active' | 'paused' } — turn sharing on, or
+  // pause it (Personal AS edition, §6.2). Turning it on needs every enabled
+  // card confirmed; pausing is always allowed and takes effect at once.
+  app.post('/api/as-state', async (req, res) => {
+    const userId = requireMatchingUser(req, res);
+    if (!userId) return;
+    const state = req.body?.state;
+    if (getEdition() !== 'personal-as') {
+      return res.status(400).json({ success: false, error: 'NOT_IN_THIS_EDITION' });
+    }
+    if (state !== 'active' && state !== 'paused') {
+      return res.status(400).json({ success: false, error: 'INVALID_STATE' });
+    }
+    try {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const userDoc = await cloudant.getDocument(USERS_DB, userId);
+        if (!userDoc) return res.status(404).json({ success: false, error: 'User not found' });
+        if (state === 'active') {
+          const unconfirmed = (userDoc.sharingPolicies || []).filter((p) => p.enabled !== false && !p.confirmedAt);
+          if (unconfirmed.length) {
+            return res.status(409).json({
+              success: false,
+              error: 'UNCONFIRMED_POLICIES',
+              message: 'Confirm or turn off every rule before turning on sharing.',
+              policyIds: unconfirmed.map((p) => p.id)
+            });
+          }
+        }
+        const now = new Date().toISOString();
+        const previous = asStateOf(userDoc);
+        userDoc.asState = state;
+        userDoc.asStateChangedAt = now;
+        userDoc.updatedAt = now;
+        try {
+          await cloudant.saveDocument(USERS_DB, userDoc);
+        } catch (e) {
+          if (e?.statusCode === 409 && attempt < 2) continue;
+          throw e;
+        }
+        auditLog.logEvent({ type: 'as_state_changed', userId, ip: req.ip, details: { from: previous, to: state } });
+        return res.json({ success: true, asState: state });
+      }
+      return res.status(409).json({ success: false, error: 'CONFLICT' });
+    } catch (error) {
+      console.error('[policies] as-state failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to change sharing state' });
     }
   });
 

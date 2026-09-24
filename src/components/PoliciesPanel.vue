@@ -16,8 +16,49 @@
       @pending-info="pendingGroup = $event"
     />
 
+    <!-- Personal AS edition (§6.2): sharing stays off until every rule is
+         confirmed and the patient turns it on; pausing is one click. -->
+    <div v-if="isPersonalAs" class="pp-sharing q-mb-md" :class="`pp-sharing--${asState}`">
+      <div class="row items-center no-wrap q-gutter-sm">
+        <q-icon :name="asState === 'active' ? 'toggle_on' : 'toggle_off'" size="30px" :color="asState === 'active' ? 'green-7' : 'grey-7'" />
+        <div class="col" style="min-width: 0">
+          <div class="text-body2 text-weight-medium">{{ sharingTitle }}</div>
+          <div class="text-caption text-grey-8">{{ sharingNote }}</div>
+        </div>
+        <q-btn
+          v-if="asState !== 'active'"
+          unelevated no-caps color="primary" :label="asState === 'paused' ? 'Turn sharing back on' : 'Turn on sharing'"
+          :disable="unconfirmedCount > 0" :loading="asStateSaving" @click="setAsState('active')"
+        />
+        <q-btn v-else outline no-caps color="primary" label="Pause sharing" :loading="asStateSaving" @click="setAsState('paused')" />
+      </div>
+    </div>
+
+    <!-- Personal AS edition (§6.3): what the rules would do with typical
+         requests, before anything is shared. -->
+    <div v-if="isPersonalAs && testRows.length" class="q-mb-md">
+      <div class="row items-center q-gutter-xs q-mb-xs">
+        <div class="text-subtitle2">Test your rules</div>
+        <q-icon name="info_outline" size="18px" color="grey-7" tabindex="0" aria-label="About testing your rules" style="cursor: help">
+          <q-tooltip max-width="300px">What your MAIA would do with these requests once sharing is on. A rule you haven't confirmed yet decides nothing until you confirm it.</q-tooltip>
+        </q-icon>
+      </div>
+      <q-markup-table flat bordered dense wrap-cells>
+        <thead>
+          <tr><th class="text-left">Request</th><th class="text-left">Your MAIA would</th><th class="text-left">Because of</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="t in testRows" :key="t.label">
+            <td class="text-body2">{{ t.label }}</td>
+            <td><q-badge :color="t.color" :label="t.action" /></td>
+            <td class="text-caption text-grey-8">{{ t.because }}</td>
+          </tr>
+        </tbody>
+      </q-markup-table>
+    </div>
+
     <!-- The default mental model, stated up front -->
-    <q-banner dense rounded class="bg-blue-1 text-blue-10 q-mb-md">
+    <q-banner v-else-if="!isPersonalAs" dense rounded class="bg-blue-1 text-blue-10 q-mb-md">
       <template #avatar><q-icon name="shield" color="blue-8" /></template>
       MAIA asks you about everything unless you've told it otherwise.
       Policies are answers MAIA remembers: an <strong>allow</strong> card lets a
@@ -103,8 +144,12 @@
             <div class="col text-body2" :class="{ 'text-grey-5': card.enabled === false }" style="min-width: 0">
               {{ sentenceFor(card) }}
               <span v-if="card.createdFrom === 'request'" class="text-caption text-grey-6">(from a request you answered)</span>
+              <q-badge v-if="needsConfirm(card)" outline color="orange-9" label="not confirmed" class="q-ml-xs">
+                <q-tooltip>This rule decides nothing until you confirm it (or edit and save it).</q-tooltip>
+              </q-badge>
             </div>
             <div class="row no-wrap items-center" style="flex: 0 0 auto">
+              <q-btn v-if="needsConfirm(card)" dense unelevated no-caps size="sm" color="primary" label="Confirm" class="q-mr-xs" :loading="confirmingId === card.id" @click="confirmCard(card)" />
               <q-toggle :model-value="card.enabled !== false" dense size="sm" @update:model-value="(v: boolean) => toggleCard(card, v)">
                 <q-tooltip>{{ card.enabled !== false ? 'On — participates in decisions' : 'Off — kept but ignored' }}</q-tooltip>
               </q-toggle>
@@ -154,6 +199,7 @@
       @click="showAllRequests = !showAllRequests"
     />
 
+    <template v-if="has('vouch')">
     <!-- People I vouch for: verified-by-me registration codes. The patient
          matches the person OUT-OF-BAND (voice or video — biometrics never
          enter MAIA) and reads them a one-time code; redeeming it binds a
@@ -214,6 +260,8 @@
       </div>
     </div>
 
+    </template>
+
     <!-- Display name: member-signed rename, no leave-and-rejoin -->
     <q-separator class="q-my-md" />
     <div class="text-subtitle2 q-mb-xs">Your display name</div>
@@ -236,6 +284,7 @@
       list; messages they already received may keep the old name.
     </div>
 
+    <template v-if="has('peer-messaging')">
     <!-- Group messages: the "Everyone" switch (delivery-level muting;
          may become a policy card with finer muting later) -->
     <q-separator class="q-my-md" />
@@ -304,6 +353,8 @@
       </div>
     </div>
 
+    </template>
+
     <!-- Editor: the sentence IS the policy; chips fill the slots -->
     <q-dialog v-model="showEditor">
       <q-card style="min-width: 720px; max-width: 940px">
@@ -338,6 +389,8 @@ import { useQuasar } from 'quasar';
 import MarkdownIt from 'markdown-it';
 import { processFileNCitations } from '../utils/fileNCitations';
 import { applyPseudonymsClient } from '../utils/pseudonyms';
+import { useEdition } from '../composables/useEdition';
+import { useSetupChecklist } from '../composables/useSetupChecklist';
 
 // Same renderer setup as the Patient Summary tab (MyStuffDialog.psMarkdown):
 // html:true so the <a class="page-link"> citation anchors survive; ordinary
@@ -354,7 +407,7 @@ const previewMarkdown = new MarkdownIt({ html: true, linkify: true, breaks: fals
 }
 import {
   sentenceFor, evaluate, SCOPE_OPTIONS,
-  type PolicyCard, type PolicyRequest, type Purpose, type Scope, type Signature, type Payment
+  type PolicyCard, type PolicyRequest, type Purpose, type Scope, type Signature, type Payment, type AsState
 } from '../utils/policyCards';
 
 const $q = useQuasar();
@@ -394,6 +447,94 @@ const handleJoined = () => {
 
 const policies = ref<PolicyCard[]>([]);
 const loading = ref(false);
+
+// ── Personal AS edition: confirmed rules and the sharing switch (§6.1–6.3)
+const { isPersonalAs, has } = useEdition();
+const setupChecklist = useSetupChecklist();
+const asState = ref<AsState>('setup');
+const asStateSaving = ref(false);
+const confirmingId = ref<string | null>(null);
+const needsConfirm = (card: PolicyCard) => isPersonalAs.value && card.enabled !== false && !card.confirmedAt;
+const unconfirmedCount = computed(() => policies.value.filter(needsConfirm).length);
+const sharingTitle = computed(() =>
+  asState.value === 'active' ? 'Sharing is on' : asState.value === 'paused' ? 'Sharing is paused' : 'Sharing is off');
+const sharingNote = computed(() => {
+  if (asState.value === 'active') return "Your confirmed rules answer requests automatically. Anything they don't cover still comes to you.";
+  const n = unconfirmedCount.value;
+  return n
+    ? `Confirm ${n === 1 ? 'the rule' : `the ${n} rules`} marked below, then turn on sharing. Until then, every request comes to you as a question.`
+    : 'Every request comes to you as a question until you turn sharing on.';
+});
+
+const confirmCard = async (card: PolicyCard) => {
+  confirmingId.value = card.id;
+  try {
+    const res = await fetch(`/api/user-policies/${encodeURIComponent(card.id)}/confirm`, {
+      method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: props.userId })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) throw new Error(data.error || 'Could not confirm');
+    policies.value = policies.value.map((c) => (c.id === card.id ? data.policy : c));
+    void setupChecklist.refresh();
+  } catch (e) {
+    $q.notify({ type: 'negative', message: e instanceof Error ? e.message : 'Could not confirm the rule' });
+  } finally {
+    confirmingId.value = null;
+  }
+};
+
+const setAsState = async (state: 'active' | 'paused') => {
+  asStateSaving.value = true;
+  try {
+    const res = await fetch('/api/as-state', {
+      method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: props.userId, state })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) throw new Error(data.message || data.error || 'Could not change sharing');
+    asState.value = data.asState;
+    void setupChecklist.refresh();
+    $q.notify({ type: 'positive', message: state === 'active' ? 'Sharing is on.' : 'Sharing is paused. Every request will come to you.' });
+  } catch (e) {
+    $q.notify({ type: 'negative', message: e instanceof Error ? e.message : 'Could not change sharing' });
+  } finally {
+    asStateSaving.value = false;
+  }
+};
+
+// Typical requests, run through the same evaluator the server uses — with
+// unconfirmed rules included, so the patient sees what confirming them does.
+const testRows = computed(() => {
+  const base = { party: { type: 'anyone' as const }, payment: 'none' as Payment };
+  const tests: Array<{ label: string; req: PolicyRequest }> = [
+    { label: "Someone who hasn't verified an email asks for your Patient Summary, for research",
+      req: { ...base, purpose: 'research', scope: 'patient-summary', signature: 'unverified' } },
+    { label: 'A clinician with a verified email asks for your medications, for treatment',
+      req: { ...base, purpose: 'clinical', scope: 'meds-allergies', signature: 'verified-email' } },
+    { label: 'A company asks for everything, for marketing',
+      req: { ...base, purpose: 'marketing', scope: 'everything', signature: 'unverified' } }
+  ];
+  const g = memberships.value[0];
+  if (g) {
+    const member = { party: { type: 'group' as const, groupId: g.groupId }, signature: 'group-member' as Signature, payment: 'none' as Payment };
+    tests.push(
+      { label: `A member of ${g.groupName} asks for your medications, for treatment`,
+        req: { ...member, purpose: 'clinical', scope: 'meds-allergies' } },
+      { label: `A member of ${g.groupName} asks for your Patient Summary, for peer support`,
+        req: { ...member, purpose: 'peer-support', scope: 'patient-summary' } }
+    );
+  }
+  return tests.map(({ label, req }) => {
+    const d = evaluate(policies.value, req);
+    const action = d.outcome === 'allow' ? 'Share (privacy-filtered)' : d.outcome === 'deny' ? 'Decline' : 'Ask you';
+    const color = d.outcome === 'allow' ? 'green' : d.outcome === 'deny' ? 'negative' : 'orange';
+    const because = d.decidedBy
+      ? `“${sentenceFor(d.decidedBy)}”${needsConfirm(d.decidedBy) ? ' — once you confirm it' : ''}`
+      : 'No rule covers it, so MAIA asks you';
+    return { label, action, color, because };
+  });
+});
 const memberships = ref<Array<{ groupId: string; groupName: string; alias: string; mentor: boolean; mentorTag: string; broadcastMessages: boolean }>>([]);
 
 // ── Display-name change (member-signed; no leave-and-rejoin) ────────
@@ -788,14 +929,17 @@ const revokeVouch = (v: VouchEntry) => {
 const loadAll = async () => {
   loading.value = true;
   void loadRequestLog();
-  void loadVouches();
+  if (has('vouch')) void loadVouches();
   try {
     const [pRes, gRes] = await Promise.all([
       fetch(`/api/user-policies?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' }),
       fetch(`/api/user-groups?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' })
     ]);
     const pData = await pRes.json();
-    if (pRes.ok && pData.success) policies.value = pData.policies || [];
+    if (pRes.ok && pData.success) {
+      policies.value = pData.policies || [];
+      if (pData.asState) asState.value = pData.asState;
+    }
     const gData = await gRes.json();
     if (gRes.ok && gData.success) {
       memberships.value = (gData.memberships || []).map(
@@ -897,6 +1041,23 @@ onMounted(loadAll);
   border-bottom: 1px solid #eee;
   padding: 8px 2px;
   &:last-of-type { border-bottom: none; }
+}
+</style>
+
+<style scoped>
+.pp-sharing {
+  border: 1px solid #e0e0e0;
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #fafafa;
+}
+.pp-sharing--active {
+  border-color: #c8e6c9;
+  background: #f1f8e9;
+}
+.pp-sharing--paused {
+  border-color: #ffe0b2;
+  background: #fff8e1;
 }
 </style>
 

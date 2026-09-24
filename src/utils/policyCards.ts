@@ -56,7 +56,14 @@ export interface PolicyCard {
   /** The card's sentence as rendered at last save — the consent language
    *  preserved even if sentence templates evolve. */
   authoredSentence?: string;
+  /** When the patient confirmed this card (Personal AS edition: only a
+   *  confirmed card acts, I-24). Absent on cards a group suggested until
+   *  the patient confirms or edits them. */
+  confirmedAt?: string;
 }
+
+/** Personal AS edition: whether sharing is on (§6.2). */
+export type AsState = 'setup' | 'active' | 'paused';
 
 /** A hypothetical (simulator) or real incoming request, reduced to the
  *  attributes policies can see. */
@@ -322,14 +329,26 @@ export interface PolicyDecision {
   outcome: 'allow' | 'deny' | 'ask';
   decidedBy: PolicyCard | null;
   filtered: boolean;
+  /** Set when nothing was decided because sharing is off. */
+  reason?: 'sharing-off';
+}
+
+export interface EvaluateOptions {
+  /** Only confirmed cards take part (Personal AS edition, I-24). */
+  requireConfirmed?: boolean;
+  /** Anything but 'active' decides nothing: every request asks (§6.2). */
+  asState?: AsState;
 }
 
 /** Deterministic evaluation, Cedar-style: forbid wins, then an explicit
  *  ASK ("ask me first" — beats permit so it can carve an approval
  *  requirement out of a broader Respond card), then permit, else ASK
- *  (the default). Disabled cards never participate. */
-export const evaluate = (cards: PolicyCard[], req: PolicyRequest): PolicyDecision => {
-  const active = cards.filter((c) => c.enabled !== false);
+ *  (the default). Disabled cards never participate. Mirrors
+ *  evaluatePolicies() in server/routes/policies.js, options included. */
+export const evaluate = (cards: PolicyCard[], req: PolicyRequest, opts: EvaluateOptions = {}): PolicyDecision => {
+  const { requireConfirmed = false, asState = 'active' } = opts;
+  if (asState !== 'active') return { outcome: 'ask', decidedBy: null, filtered: true, reason: 'sharing-off' };
+  const active = cards.filter((c) => c.enabled !== false && (!requireConfirmed || !!c.confirmedAt));
   const deny = active.find((c) => c.outcome === 'deny' && matches(c, req));
   if (deny) return { outcome: 'deny', decidedBy: deny, filtered: true };
   const ask = active.find((c) => c.outcome === 'ask' && matches(c, req));
