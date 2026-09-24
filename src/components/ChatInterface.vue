@@ -4880,15 +4880,7 @@ const handleWizardCta = () => {
       dismissWizard();
   }
 };
-// Recompute the next step when the wizard opens (incl. after reload) and on the
-// signals that move the flow forward.
-watch(
-  [() => showAgentSetupDialog.value, () => indexingStatus.value?.phase,
-   () => wizardDraftPsStatus.value, () => wizardCurrentMedications.value,
-   () => wizardPatientSummary.value, () => wizardFlowPhase.value],
-  () => { if (showAgentSetupDialog.value) void refreshWizardNextStep(); },
-  { immediate: true }
-);
+
 
 /** Upgrade a quick-start ('chat_ready') account to the full tier: re-run
  *  the standard wizard over the connected folder. Agents are already
@@ -8813,6 +8805,19 @@ const indexingStatus = ref<{
   filesIndexed: number;
   progress: number;
 } | null>(null);
+
+// Recompute the next step when the wizard opens (incl. after reload) and on the
+// signals that move the flow forward. Declared AFTER indexingStatus: an
+// immediate watcher evaluates its sources at once, so reading indexingStatus
+// before its `const` ran threw a TDZ ReferenceError and left the signed-in
+// page blank.
+watch(
+  [() => showAgentSetupDialog.value, () => indexingStatus.value?.phase,
+   () => wizardDraftPsStatus.value, () => wizardCurrentMedications.value,
+   () => wizardPatientSummary.value, () => wizardFlowPhase.value],
+  () => { if (showAgentSetupDialog.value) void refreshWizardNextStep(); },
+  { immediate: true }
+);
 const stage3IndexingActive = computed(() =>
   stage3IndexingPending.value ||
   indexingStatus.value?.phase === 'indexing' ||

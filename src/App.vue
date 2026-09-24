@@ -20,8 +20,30 @@
     </q-banner>
     <q-page-container class="full-width">
       <q-page>
+        <!-- Personal AS edition: hard Chrome gate (group_requests.md §5 row 0).
+             A patient's MAIA keeps their records in a folder, which needs
+             Chrome (or another Chromium browser) on a computer. Checked by
+             capability, not user agent. No "continue anyway". -->
+        <div v-if="editionChromeGate" class="flex flex-center" style="height: 100vh">
+          <q-card style="max-width: 520px" class="q-pa-md">
+            <q-card-section>
+              <div class="text-h6 q-mb-sm">Open this page in Chrome on a computer</div>
+              <div class="text-body2 q-mb-md">
+                MAIA keeps your own copy of your health records in a folder on
+                your computer. Only Chrome (or Microsoft Edge) on a computer can
+                do that, so MAIA can't start in this browser.
+              </div>
+              <div class="text-caption text-grey-8 q-mb-xs">Copy this link and open it in Chrome:</div>
+              <div class="row items-center q-gutter-sm">
+                <div class="text-caption" style="flex: 1 1 auto; min-width: 0; word-break: break-all;">{{ pageLink }}</div>
+                <q-btn flat dense size="sm" icon="content_copy" label="Copy" style="flex: 0 0 auto;" @click="copyPageLink" />
+              </div>
+            </q-card-section>
+          </q-card>
+        </div>
+
         <!-- Not authenticated - show auth dialog -->
-        <div v-if="!authenticated" class="flex flex-center" style="height: 100vh">
+        <div v-else-if="!authenticated" class="flex flex-center" style="height: 100vh">
           <template v-if="deepLinkShareId">
             <q-card style="min-width: 420px; max-width: 520px">
               <q-card-section>
@@ -68,7 +90,13 @@
                 aria-label="Welcome to MAIA"
                 style="flex: 1; overflow-y: auto; display: flex; flex-direction: column;"
               >
-                <div class="text-h6 text-center q-mb-sm">
+                <template v-if="isPersonalAs">
+                  <div class="text-h6 text-center q-mb-xs">{{ trusteeGroup?.name || 'MAIA' }}</div>
+                  <div v-if="trusteeGroup?.description" class="text-body2 text-grey-8 text-center q-mb-md" style="max-width: 560px; margin-left: auto; margin-right: auto;">
+                    {{ trusteeGroup.description }}
+                  </div>
+                </template>
+                <div v-else-if="editionReady" class="text-h6 text-center q-mb-sm">
                   Welcome to MAIA
                 </div>
 
@@ -256,13 +284,46 @@
                   />
                 </div>
 
-                <div v-if="!showAuth && !inviteLandingActive">
+                <div v-if="!showAuth && !inviteLandingActive && editionReady">
                   <!-- Content-driven welcome (redesign): all prose + the FAQ
                        come from src/content/welcome_A.md so the copy is
                        editable without touching Vue. The three live pieces —
                        Get Started checkboxes, the policy editor, and the
                        footer — slot into their marked positions. -->
-                  <WelcomeContent @sign-in="handlePasskeySignInLink">
+                  <!-- Personal AS edition: only what this configuration needs,
+                       each with an (i) explanation. The setup checklist (P2)
+                       adds the passkey and the folder after GET STARTED. -->
+                  <div v-if="isPersonalAs" class="edition-start">
+                    <div class="edition-start__row">
+                      <q-checkbox v-model="wf.privateComputer" dense label="This is my own computer" />
+                      <q-icon name="info_outline" size="18px" color="grey-7" class="edition-start__info" tabindex="0" aria-label="Why your own computer">
+                        <q-tooltip max-width="300px">MAIA keeps your passkey and your folder on this computer, so it should be one that only you use.</q-tooltip>
+                      </q-icon>
+                    </div>
+                    <div class="edition-start__row q-mt-md">
+                      <span class="text-body2">Your email address</span>
+                      <q-icon name="info_outline" size="18px" color="grey-7" class="edition-start__info" tabindex="0" aria-label="Why your email">
+                        <q-tooltip max-width="300px">MAIA emails you when a request needs your decision or when something was shared, plus a weekly summary. It never emails your health information.</q-tooltip>
+                      </q-icon>
+                    </div>
+                    <EmailVerifyBox label="Email address" />
+                    <div v-if="trusteeGroup" class="edition-start__row q-mt-md">
+                      <span class="text-body2">You'll join {{ trusteeGroup.name }} as <strong>{{ wfSuggestedId || '…' }}</strong></span>
+                      <q-icon name="info_outline" size="18px" color="grey-7" class="edition-start__info" tabindex="0" aria-label="About the group">
+                        <q-tooltip max-width="300px">{{ trusteeGroup.name }} suggests starting rules for who may see your information. You review every rule before anything is shared.</q-tooltip>
+                      </q-icon>
+                    </div>
+                    <q-btn
+                      unelevated color="primary" class="full-width q-mt-lg" size="lg" label="GET STARTED"
+                      :disable="!wf.privateComputer || !verifiedEmail.verified" :loading="tempStartLoading" @click="welcomeFormStart"
+                    />
+                    <div v-if="tempStartError" class="text-negative q-mt-sm">{{ tempStartError }}</div>
+                    <div class="text-center text-caption text-grey-6 q-mt-lg">
+                      <a href="/page.html?doc=Privacy" target="_blank" class="welcome-footer-link">Privacy</a>
+                      · MAIA v{{ appVersion }}
+                    </div>
+                  </div>
+                  <WelcomeContent v-else @sign-in="handlePasskeySignInLink">
                     <!-- Get Started setup form (New_User_Flows.md §5 step 4):
                          every decision the arrival dialogs used to ask is a
                          checkbox HERE, so setup runs with zero dialogs. -->
@@ -1045,6 +1106,7 @@ import ChatInterface from './components/ChatInterface.vue';
 import PolicyCardBuilder from './components/PolicyCardBuilder.vue';
 import RequestBuilder from './components/RequestBuilder.vue';
 import WelcomeContent from './components/WelcomeContent.vue';
+import { useEdition } from './composables/useEdition';
 import EmailVerifyBox from './components/EmailVerifyBox.vue';
 import { useVerifiedEmail } from './composables/verifiedEmail';
 import DeepLinkAccess from './components/DeepLinkAccess.vue';
@@ -1304,6 +1366,7 @@ const adminInviteNoticeDismissed = ref(false);
 // File System Access API is MAIA's storage requirement (Chrome 122+).
 const isChromeCapable = typeof (window as unknown as { showDirectoryPicker?: unknown }).showDirectoryPicker === 'function';
 
+
 const loadPendingGroupInvite = async () => {
   try {
     const raw = localStorage.getItem('maiaGroupInvite');
@@ -1364,6 +1427,25 @@ const deepLinkLoading = ref(false);
 const deepLinkError = ref('');
 const showAdminPage = ref(false);
 
+// Edition (server/edition.js). Loaded once at startup and again whenever
+// the signed-in user changes, so per-user unlocks are current.
+const { load: loadEdition, isPersonalAs, state: editionState } = useEdition();
+void loadEdition();
+// Until the edition is known, the welcome body waits, so neither edition
+// flashes the other's page. If the request fails, the full welcome shows.
+const editionReady = computed(() => editionState.loaded || !!editionState.error);
+watch(() => user.value?.userId, () => { void loadEdition(true); });
+// Shared-chat guests (clinicians) and admin pages don't need a folder.
+const editionChromeGate = computed(() =>
+  isPersonalAs.value && !isChromeCapable && !deepLinkShareId.value && !isDeepLinkUser.value
+  && !showAdminPage.value && window.location.pathname !== '/admin');
+const pageLink = window.location.href;
+const copyPageLink = () => {
+  navigator.clipboard.writeText(pageLink)
+    .then(() => $q.notify({ type: 'positive', message: 'Link copied', position: 'top', timeout: 2000 }))
+    .catch(() => $q.notify({ type: 'negative', message: 'Could not copy the link', position: 'top', timeout: 2000 }));
+};
+
 // ── Organizer-first welcome (Refinement 8) ─────────────────────────
 /** Publicly-listed groups on this deployment (admin opt-in per group). */
 const publicGroups = ref<Array<{ groupId: string; name: string; description: string; postingPolicy: string; activeMemberCount: number; mentors?: Array<{ alias: string; tag: string }>; joinLink: string | null; joinMode?: string; origin?: string | null; originHost?: string | null }>>([]);
@@ -1417,6 +1499,10 @@ watch(() => wf.value.joinTrustee, async (on) => {
     if (j?.userId) wfSuggestedId.value = j.userId;
   } catch { /* shown as … until it loads */ }
 });
+
+// Personal AS edition: this page IS the group's page, so joining it is
+// part of getting started, not a separate choice.
+watch([isPersonalAs, trusteeGroup], ([pa, g]) => { if (pa && g) wf.value.joinTrustee = true; }, { immediate: true });
 
 // File and folder are mutually exclusive: a folder already contains
 // records, so checking it clears any single-file pick (and vice versa).
@@ -4322,6 +4408,18 @@ onMounted(async () => {
   td:nth-child(3) { color: #777; }
 }
 
+.edition-start {
+  max-width: 460px;
+  margin: 8px auto 0;
+}
+.edition-start__row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.edition-start__info {
+  cursor: help;
+}
 .welcome-footer-link {
   color: #1976d2;
   text-decoration: none;

@@ -2,8 +2,8 @@
   <div class="lists-container q-pa-md">
     <div class="row items-center q-mb-md">
       <div class="col">
-        <div class="text-h4">Lists</div>
-        <div class="text-caption text-grey">Extract structured lists from your PDF files</div>
+        <div class="text-h4">{{ medicationsOnly ? 'Current Medications' : 'Lists' }}</div>
+        <div v-if="!medicationsOnly" class="text-caption text-grey">Extract structured lists from your PDF files</div>
       </div>
       <div class="col-auto">
         <q-btn
@@ -245,6 +245,9 @@
       {{ error }}
     </q-banner>
 
+    <!-- Everything below Current Medications is `lists-full` in the Personal
+         AS edition; with it off, this tab shows Current Medications only. -->
+    <template v-if="!medicationsOnly">
     <!-- Current Medications Worksheets (one per Private AI agent).
          Rendered independently of the Apple Health PDF output below, so
          patients with no Apple Health file (KB-only) still see them. -->
@@ -627,6 +630,7 @@
         </q-card-section>
       </q-card>
     </div>
+    </template>
   </div>
 
   <!-- PDF Viewer Modal -->
@@ -652,6 +656,8 @@ interface Props {
   profileLabels?: Record<string, string>;
   draftPsMeds?: string[];
   userFiles?: FileNFile[];
+  /** Personal AS edition without `lists-full`: Current Medications only. */
+  medicationsOnly?: boolean;
 }
 
 const props = defineProps<Props>();
@@ -791,7 +797,7 @@ const worksheetSpecsOrdered = computed(() => {
 });
 
 const loadWorksheets = async () => {
-  if (!props.userId) return;
+  if (!props.userId || props.medicationsOnly) return;
   try {
     const r = await fetch(`/api/medications/worksheet?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
     if (r.ok) {
@@ -862,7 +868,7 @@ const encountersWorksheet = ref<EncountersEntry | null>(null);
 const encountersBusy = ref(false);
 
 const loadEncounters = async () => {
-  if (!props.userId) return;
+  if (!props.userId || props.medicationsOnly) return;
   try {
     const r = await fetch(`/api/encounters/worksheet?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
     if (r.ok) {
@@ -923,7 +929,7 @@ const oorLabsWorksheet = ref<OorLabsEntry | null>(null);
 const oorLabsBusy = ref(false);
 
 const loadOorLabs = async () => {
-  if (!props.userId) return;
+  if (!props.userId || props.medicationsOnly) return;
   try {
     const r = await fetch(`/api/labs/oor-worksheet?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
     if (r.ok) {
@@ -1101,6 +1107,7 @@ let selfHealAttempted = false;
 // The deterministic worksheets that ride along with a fresh build
 // (no agent, no KB needed).
 const fireCompanionWorksheets = () => {
+  if (props.medicationsOnly) return;
   void fetch('/api/encounters/worksheet', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
     body: JSON.stringify({ userId: props.userId })
