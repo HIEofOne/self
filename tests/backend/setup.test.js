@@ -48,7 +48,18 @@ const recordingDoClient = (calls) => new Proxy({}, {
 
 const settle = () => new Promise((r) => setTimeout(r, 20));
 
+const OPEN = { groupId: 'g1', name: 'Trustee', joinLink: 'https://host/?groupJoin=t&groupId=g1' };
+
 describe('deriveSetupStatus', () => {
+  it('an invite-only group is offered but never required (nobody could finish setup without an invitation)', () => {
+    const s = deriveSetupStatus({}, { inviteOnlyGroup: { groupId: 'g2', name: 'Trustee Test' } });
+    const g = s.steps.find((x) => x.key === 'group');
+    expect(g).toMatchObject({ required: false, done: false, joinable: null, inviteOnly: { name: 'Trustee Test' } });
+    // A joinable group wins over an invite-only one.
+    const both = deriveSetupStatus({}, { joinableGroup: OPEN, inviteOnlyGroup: { groupId: 'g2', name: 'x' } });
+    expect(both.steps.find((x) => x.key === 'group')).toMatchObject({ required: true, inviteOnly: null });
+  });
+
   const full = {
     emailVerified: true, credentialID: 'cred', folderConnectedAt: '2026-09-25T00:00:00Z',
     groupMemberships: [{ groupId: 'g1', groupName: 'Trustee' }],
@@ -59,7 +70,7 @@ describe('deriveSetupStatus', () => {
 
   it('derives every row from the account alone', () => {
     setEditionForTests('personal-as');
-    const s = deriveSetupStatus(full, { groupRequired: true });
+    const s = deriveSetupStatus(full, { joinableGroup: OPEN });
     expect(s.steps.map((x) => [x.key, x.done])).toEqual([
       ['email', true], ['passkey', true], ['folder', true], ['group', true], ['summary', true], ['sharing', true]
     ]);
@@ -68,20 +79,20 @@ describe('deriveSetupStatus', () => {
     expect(s.steps.find((x) => x.key === 'group').groups).toEqual(['Trustee']);
   });
 
-  it('required: email, passkey, folder, and the group when the host lists one; the summary is urged', () => {
+  it('required: email, passkey, folder, and the group when it can be joined directly; the summary is urged', () => {
     setEditionForTests('personal-as');
-    const fresh = deriveSetupStatus({}, { groupRequired: true });
+    const fresh = deriveSetupStatus({}, { joinableGroup: OPEN });
     expect(fresh.steps.filter((x) => x.required).map((x) => x.key)).toEqual(['email', 'passkey', 'folder', 'group']);
     expect(fresh.requiredDone).toBe(false);
-    const noGroupHost = deriveSetupStatus({ ...full, groupMemberships: [] }, { groupRequired: false });
+    const noGroupHost = deriveSetupStatus({ ...full, groupMemberships: [] }, {});
     expect(noGroupHost.requiredDone).toBe(true);
-    const noSummary = deriveSetupStatus({ ...full, patientSummaryVerifiedAt: null }, { groupRequired: true });
+    const noSummary = deriveSetupStatus({ ...full, patientSummaryVerifiedAt: null }, { joinableGroup: OPEN });
     expect(noSummary.requiredDone).toBe(true);
     expect(noSummary.steps.find((x) => x.key === 'summary')).toMatchObject({ done: false, medicationsVerified: true });
   });
 
   it('reports a join waiting for approval', () => {
-    const s = deriveSetupStatus({ pendingGroupJoins: [{ groupId: 'g1', groupName: 'Trustee' }] }, { groupRequired: true });
+    const s = deriveSetupStatus({ pendingGroupJoins: [{ groupId: 'g1', groupName: 'Trustee' }] }, { joinableGroup: OPEN });
     expect(s.steps.find((x) => x.key === 'group')).toMatchObject({ done: false, pending: ['Trustee'] });
   });
 
@@ -101,7 +112,7 @@ describe.each(EDITIONS)('setup routes, edition "%s"', (edition) => {
     setEditionForTests(edition);
     cloudant = new FakeCloudant(
       { carol03: { _id: 'carol03', userId: 'carol03', emailVerified: true } },
-      [{ type: 'group', publiclyListed: true, groupId: 'g1' }]
+      [{ _id: 'g1', type: 'group', name: 'Trustee Local', publiclyListed: true, joinMode: 'open', joinLinkToken: 'tok1' }]
     );
     app = express();
     app.use(express.json());
@@ -116,6 +127,17 @@ describe.each(EDITIONS)('setup routes, edition "%s"', (edition) => {
     expect(r.body.steps.find((s) => s.key === 'email').done).toBe(true);
     expect(r.body.steps.find((s) => s.key === 'group').required).toBe(true);
     expect(r.body.requiredDone).toBe(false);
+  });
+
+  it('names the joinable group and its link; an invite-only host group is offered, not required', async () => {
+    const r = await request(app).get('/api/setup-status').set('x-test-user', 'carol03');
+    const g = r.body.steps.find((s) => s.key === 'group');
+    expect(g.joinable).toMatchObject({ groupId: 'g1', name: 'Trustee Local' });
+    expect(g.joinable.joinLink).toContain('groupJoin=tok1');
+    cloudant.groups = [{ _id: 'g2', type: 'group', name: 'Trustee Test', publiclyListed: true, joinMode: 'invite-only' }];
+    const r2 = await request(app).get('/api/setup-status').set('x-test-user', 'carol03');
+    const g2 = r2.body.steps.find((s) => s.key === 'group');
+    expect(g2).toMatchObject({ required: false, joinable: null, inviteOnly: { groupId: 'g2', name: 'Trustee Test' } });
   });
 
   it('POST /api/setup/folder-connected records only a timestamp, once', async () => {

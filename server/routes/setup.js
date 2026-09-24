@@ -12,6 +12,7 @@
  */
 import { getEdition } from '../edition.js';
 import { asStateOf } from './policies.js';
+import { joinLinkFor } from './groups.js';
 import { requestedUserId } from '../utils/api-guard.js';
 
 const USERS_DB = 'maia_users';
@@ -25,11 +26,16 @@ const agentState = (doc) => {
 };
 
 /**
- * @param {object} doc          the user document
+ * @param {object} doc  the user document
  * @param {object} opts
- * @param {boolean} opts.groupRequired  this host lists a group to join
+ * @param {{groupId: string, name: string, joinLink: string}|null} opts.joinableGroup
+ *        the host's group that can be joined directly (open or approval
+ *        join link). Only then is joining required.
+ * @param {{groupId: string, name: string}|null} opts.inviteOnlyGroup
+ *        a listed group that joins only by invitation — offered, never
+ *        required (without an invitation nobody could finish setup).
  */
-export const deriveSetupStatus = (doc, { groupRequired = false } = {}) => {
+export const deriveSetupStatus = (doc, { joinableGroup = null, inviteOnlyGroup = null } = {}) => {
   const memberships = Array.isArray(doc?.groupMemberships) ? doc.groupMemberships : [];
   const steps = [
     { key: 'email', required: true, done: !!doc?.emailVerified },
@@ -37,8 +43,10 @@ export const deriveSetupStatus = (doc, { groupRequired = false } = {}) => {
     { key: 'folder', required: true, done: !!doc?.folderConnectedAt },
     {
       key: 'group',
-      required: groupRequired,
+      required: !!joinableGroup,
       done: memberships.length > 0,
+      joinable: joinableGroup,
+      inviteOnly: joinableGroup ? null : inviteOnlyGroup,
       groups: memberships.map((m) => m.groupName || m.groupId).filter(Boolean),
       // Join requests waiting for a group's approval (finished by poll-joins)
       pending: (Array.isArray(doc?.pendingGroupJoins) ? doc.pendingGroupJoins : [])
@@ -71,12 +79,21 @@ export const deriveSetupStatus = (doc, { groupRequired = false } = {}) => {
 };
 
 export default function setupSetupRoutes(app, cloudant) {
-  const hostListsGroup = async () => {
+  // The host's group(s), as the welcome page sees them: publicly listed.
+  // A "Trustee" group is preferred, as on the welcome page.
+  const hostGroups = async () => {
     try {
       const all = await cloudant.getAllDocuments(GROUPS_DB);
-      return (all || []).some((d) => d && d.type === 'group' && d.publiclyListed === true);
+      const listed = (all || [])
+        .filter((d) => d && d.type === 'group' && d.publiclyListed === true)
+        .sort((a, b) => Number(!/trustee/i.test(a.name || '')) - Number(!/trustee/i.test(b.name || '')));
+      const open = listed.find((d) => joinLinkFor(d));
+      return {
+        joinableGroup: open ? { groupId: open._id, name: open.name, joinLink: joinLinkFor(open) } : null,
+        inviteOnlyGroup: listed[0] ? { groupId: listed[0]._id, name: listed[0].name } : null
+      };
     } catch {
-      return false;
+      return { joinableGroup: null, inviteOnlyGroup: null };
     }
   };
 
@@ -98,7 +115,7 @@ export default function setupSetupRoutes(app, cloudant) {
     try {
       const doc = await loadUser(req, res);
       if (!doc) return;
-      res.json({ success: true, ...deriveSetupStatus(doc, { groupRequired: await hostListsGroup() }) });
+      res.json({ success: true, ...deriveSetupStatus(doc, await hostGroups()) });
     } catch (e) {
       console.error('[setup] status failed:', e?.message || e);
       res.status(500).json({ success: false, error: 'SETUP_STATUS_FAILED' });
@@ -118,7 +135,7 @@ export default function setupSetupRoutes(app, cloudant) {
           if (e?.statusCode === 409 && attempt < 2) continue;
           throw e;
         }
-        return res.json({ success: true, ...deriveSetupStatus(doc, { groupRequired: await hostListsGroup() }) });
+        return res.json({ success: true, ...deriveSetupStatus(doc, await hostGroups()) });
       }
       return res.status(409).json({ success: false, error: 'CONFLICT' });
     } catch (e) {
