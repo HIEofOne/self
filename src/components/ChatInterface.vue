@@ -1155,6 +1155,7 @@ import { citationFileMatches } from '../utils/citationFileMatch';
 import { advancePipeline, fetchPipeline, waitForStageDone, type PipelineNext } from '../utils/pipeline';
 import { logModalEvent } from '../utils/modalLog';
 import SummaryProgress from './SummaryProgress.vue';
+import { useEdition } from '../composables/useEdition';
 import {
   isFileSystemAccessSupported,
   pickLocalFolder,
@@ -1455,6 +1456,8 @@ const wizardSuspendedByJoin = ref(false);
  *  indexed KB): close the Workbook so the wizard is visible, and start
  *  indexing immediately — the gate acts, never loops. */
 const handleWorkbookIndexNow = async () => {
+  // Personal AS edition: no record indexing (records-index is off).
+  if (isPersonalAs.value) return;
   showMyStuffDialog.value = false;
   wizardDismissed.value = false;
   showAgentSetupDialog.value = true;
@@ -1501,6 +1504,13 @@ const pendingPageLink = ref<{ pageNum: number; bucketKey?: string } | null>(null
 const availableUserFiles = ref<Array<{ fileName: string; bucketKey: string; fileType?: string }>>([]);
 const loadingUserFiles = ref(false);
 const showAgentSetupDialog = ref(false);
+// Personal AS edition: the setup checklist (SetupChecklist.vue) replaces
+// this wizard, which must never open there — whichever of its many paths
+// asks for it (group_requests.md §4.4).
+const { isPersonalAs } = useEdition();
+watch(showAgentSetupDialog, (open) => {
+  if (open && isPersonalAs.value) showAgentSetupDialog.value = false;
+}, { flush: 'sync' });
 const showNeedsIndexingPrompt = ref(false);
 const showPostIndexingSummaryPrompt = ref(false);
 // Shown after a MANUAL "patient summary" chat request completes (not
