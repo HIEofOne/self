@@ -137,6 +137,18 @@ describe('no session without proof of ownership', () => {
     expect(own.body.authenticated).toBe(true);
   });
 
+  it('after sign-out, this browser can reopen its account; another browser still cannot', async () => {
+    const { agent, userId } = await signedInAs();
+    expect((await agent.post('/api/sign-out')).status).toBe(200);
+    // Session gone, signed cookie kept: the same browser comes back.
+    const back = await agent.post('/api/temporary/restore').send({ userId });
+    expect(back.status).toBe(200);
+    expect(back.body.authenticated).toBe(true);
+    // A different browser (no cookie) is refused.
+    const other = await request(app).post('/api/temporary/restore').send({ userId });
+    expect(other.status).toBe(401);
+  });
+
   it('a forged, unsigned temporary-account cookie is not a credential', async () => {
     const r = await request(app).post('/api/temporary/start').set('Cookie', 'maia_temp_user=victim01').send({});
     expect(r.body.authenticated).toBe(true);
