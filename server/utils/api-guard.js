@@ -55,7 +55,8 @@ export const DEEPLINK_OWNER_READS = new Set([
   '/api/encounters/find'
 ]);
 
-const requestedUserId = (req) => {
+/** The account a request names (`userId` in the query, else the JSON body). */
+export const requestedUserId = (req) => {
   const q = req.query?.userId;
   if (typeof q === 'string' && q) return q;
   const b = req.body?.userId;

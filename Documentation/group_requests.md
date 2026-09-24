@@ -868,7 +868,7 @@ Each row is one PR (or two small ones) into HIEofOne/self and references this do
 
 | Phase | Delivers | Key tests / acceptance |
 |---|---|---|
-| **P0 — Groundwork** (no visible change) | ~~Demo tag~~ (done: `demo-v1.5.176`) + promotion freeze. `server/edition.js` registry, `GET /api/edition`, `requireFeature`, `useEdition()`. (The §1.4 import bypass, I-25, already shipped in #309.) Refresh CLAUDE.md (counts, tests exist) | `full` edition: every existing test passes unchanged |
+| **P0 — Groundwork** (no visible change) | ~~Demo tag~~ (done: `demo-v1.5.176`) + promotion freeze. `server/edition.js` registry, `GET /api/edition`, `requireFeature`, `useEdition()`. (The §1.4 import bypass, I-25, already shipped in #309.) Refresh CLAUDE.md (counts, tests exist) + Environment.md. Found while building P0: startup *created* the OpenSearch cluster when none existed, so `personal-as` now skips that startup step (§12.4) | `full` edition: every existing test passes unchanged. Registry tests run under both editions |
 | **P1 — Edition shell** | Chrome capability gate. Edition welcome page. Workbook rail filtered to core tabs. Conversation rail = Private AI only. Server gates on unlockable routes (I-26). In the edition, `agent-setup-status` provisions only after email verification and never the secondary agent | Hidden routes return 403 `FEATURE_OFF` in the edition and 200 in `full`. An unverified signup creates no DO agent; a verified one creates exactly one |
 | **P2 — Setup checklist** | `SetupChecklist.vue` + derived `GET /api/setup-status`. Server-enforced verified email. Required passkey (D3) + folder. Join. One agent started in the background at email verification | Fresh user reaches "joined" with exactly 1 agent (no secondary), usually already running. Reload at any step resumes correctly (derived state) |
 | **P3 — Confirmed policies + AS state** | `confirmedAt`, `asState` (setup / active / paused) in both twin evaluators + parity test. Confirm screen with pack test requests + simulator. Turn on / pause. `Sharing Policies.pdf` | Two-host suite extended: an unconfirmed allow card never releases. `setup` → everything asks. Pause → asks again. Parity holds |
@@ -937,10 +937,10 @@ Each row is one PR (or two small ones) into HIEofOne/self and references this do
 
 ## 18. Documentation follow-ups (small, can ride P0)
 
-- CLAUDE.md: current line counts; the test suite exists (`npm run test:backend`); add `policies.js`, `credits.js`, `records-pipeline.js` to key files; note the edition switch once it lands.
+- ~~CLAUDE.md: current line counts; the test suite exists; key files; the edition switch.~~ Done in P0.
 - Security design doc: correct §5's `normalizeCard` claim after the P0 fix; update the §14.1 test count; add I-24…I-31 and a GNAP section when P6 ships, including group routing and the §1.5 finding, then I-32 and inbound documents when P9 ships, then I-33 and MAIA symmetry when P11 ships (and regenerate the posted PDF, per the standing rule).
 - Groups.md: update the status header; point to the security design doc for work after July.
-- Environment.md: current database list; add `MAIA_EDITION`; note that OpenSearch is only created on first indexing.
+- ~~Environment.md: current database list; add `MAIA_EDITION`; when OpenSearch is created.~~ Done in P0.
 - Policy_Vocab_Changelog.md: the v3 entry (`action`, scope `document`), classified compatible, when P9 ships.
 - Fix_Backlog.md: tick the shipped items.
 - README: an edition section and a short feature list for the Personal AS edition.
