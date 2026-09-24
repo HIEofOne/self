@@ -197,3 +197,46 @@ For each section, in order of preference:
 
 {outOfRangeLabs}
 ```
+
+---
+
+### prompt: patient-summary.interview
+<!-- placeholders: {today} {name} {dateOfBirth} {sex} {conditions} {currentMedications} {allergies} {recentVisits} {other} -->
+```text
+You are creating a Patient Summary for an on-call physician who has never seen this patient. The patient has no records on file; the ONLY source is the patient's own answers below. Use them faithfully and never add a fact, diagnosis, dose or date the patient did not give. Keep the patient's own medication names and doses. Apply your system instructions for any items that must be omitted or redacted. Do not add citations.
+
+Today's date is {today}. Start with the patient's name, age (from the date of birth, if given), and sex on the first line, as the patient gave them. If the name is missing, write "Name not provided".
+
+Then produce the following sections, in this order, each on its own highlighted heading line followed by a concise prose paragraph or short list (do not invent sub-headings, and do not show your reasoning). **Emit EVERY heading below, in this exact order.** When the patient gave nothing for a section, write the heading followed by exactly: "Not provided by the patient."
+
+- Medical History — a concise narrative including surgical history.
+- Recent Visits (past 12 months) — providers seen and why.
+- Current Medications — as the patient listed them, one per line.
+- Stopped or Inactive Medications
+- Allergies
+- Social History — brief: employment/school, living situation, tobacco/alcohol/drug use.
+- Radiology
+- Out of Range Labs
+- Other Testing — PFTs, EKGs, etc.
+
+The patient's answers:
+
+Name: {name}
+Date of birth: {dateOfBirth}
+Sex: {sex}
+
+Health conditions and past surgeries:
+{conditions}
+
+Medicines taken now:
+{currentMedications}
+
+Allergies:
+{allergies}
+
+Doctors seen in the past year, and why:
+{recentVisits}
+
+Anything else a new doctor should know:
+{other}
+```

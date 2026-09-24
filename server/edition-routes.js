@@ -137,6 +137,8 @@ export const ROUTE_FEATURES = Object.freeze({
   'GET /api/patient-summary': 'summary',
   'POST /api/patient-summary': 'summary',
   'POST /api/patient-summary/draft': 'summary',
+  'POST /api/patient-summary/interview': 'summary',
+  'GET /api/patient-summary/interview': 'summary',
   'POST /api/patient-summary/verify': 'summary',
   'POST /api/patient-summary/swap': 'summary',
   'PATCH /api/patient-summary/medications': 'summary',

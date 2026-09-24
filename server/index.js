@@ -43,6 +43,7 @@ import setupGroupRoutes from './routes/groups.js';
 import setupPolicyRoutes from './routes/policies.js';
 import setupEditionRoutes from './routes/edition.js';
 import setupSetupRoutes from './routes/setup.js';
+import setupInterviewRoutes from './routes/interview.js';
 import { getEdition } from './edition.js';
 import { createFeatureGuard } from './edition-routes.js';
 import {
@@ -1587,6 +1588,14 @@ app.use('/api', createFeatureGuard({
 setupEditionRoutes(app, cloudant, auditLog);
 // Personal AS setup checklist state (derived; group_requests.md §5).
 setupSetupRoutes(app, cloudant);
+// Patient Summary by interview (Personal AS edition, §5 D11). The helpers
+// are declared further down this file, so they are looked up at call time.
+setupInterviewRoutes(app, {
+  cloudant,
+  chatWithPrimaryAgent: (userDoc, messages) => chatWithPrimaryAgent(userDoc, messages),
+  setDraftJob: (userId, patch) => setDraftJob(userId, patch),
+  logEvent: (userId, event) => appendUserProvisioningEvent(userId, event)
+});
 
 // Passkey routes
 setupAuthRoutes(app, passkeyService, cloudant, doClient, auditLog, { invalidateResourceCache });
@@ -12635,6 +12644,25 @@ const setDraftJob = async (userId, patch) => {
     } catch (e) {
       if (e?.statusCode !== 409) return;
     }
+  }
+};
+
+/** One non-streaming chat with the user's primary private AI (no KB
+ *  needed). Recreates the agent's API key once on 401/403, as the draft
+ *  worker does. Used by the Patient Summary interview. */
+const chatWithPrimaryAgent = async (userDoc, messages) => {
+  const { DigitalOceanProvider } = await import('../lib/chat-client/providers/digitalocean.js');
+  const model = userDoc.agentModelName || 'openai-gpt-oss-120b';
+  const run = (apiKey) => new DigitalOceanProvider(apiKey, { baseURL: userDoc.agentEndpoint }).chat(messages, { model, stream: false });
+  const apiKey = userDoc.agentApiKey
+    || await getOrCreateAgentApiKey(doClient, cloudant, userDoc.userId, userDoc.assignedAgentId);
+  try {
+    return await run(apiKey);
+  } catch (e) {
+    const status = e?.status || e?.statusCode || 0;
+    if (status !== 401 && status !== 403) throw e;
+    const { recreateAgentApiKey } = await import('./utils/agent-helper.js');
+    return run(await recreateAgentApiKey(doClient, cloudant, userDoc.userId, userDoc.assignedAgentId));
   }
 };
 
