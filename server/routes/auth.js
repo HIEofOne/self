@@ -1073,7 +1073,11 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       }
       try {
         res.clearCookie('maia_deep_link_user');
-        res.clearCookie(TEMP_USER_COOKIE);
+        // The signed temp cookie is KEPT: for an account without a passkey it
+        // is the only proof that lets this browser reopen the account later
+        // ("keeps your account for later — you can restore it on this
+        // device"). Forgetting the device or deleting the account clears it
+        // (/api/auth/clear-temp-cookie); a passkey replaces it.
       } catch (cookieError) {
         console.warn('Unable to clear deep-link cookie on sign-out:', cookieError);
       }
@@ -1147,6 +1151,10 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       res.json({
         success: true,
         exists: agentExists,
+        // The cloud account itself (the Personal AS welcome card uses this:
+        // an account without a ready agent continues into the setup
+        // checklist; it doesn't need restoring).
+        accountExists: !!userDoc,
         agentName: agent?.name || null,
         agentId: agent?.uuid || agent?.id || null,
         savedFileCount,
