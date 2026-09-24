@@ -9,6 +9,7 @@ import { ensureUserAgent, ensureSecondaryAgent } from './auth.js';
 import { policySentence, POLICY_SCOPES, POLICY_PURPOSES } from './policies.js';
 import { isVerified as emailTokenVerified } from '../emailVerification.js';
 import { chargeCredits, ADVISOR_QUESTION_CREDITS } from '../credits.js';
+import { isFeatureEnabled } from '../edition.js';
 
 /**
  * Policy Advisor context (Phase 1): a server-assembled system block that
@@ -178,6 +179,13 @@ const resolveAgentOwnerId = (chatDoc) => {
 export async function getOwnerIdForDeepLinkSession(req, cloudant) {
   if (!req.session?.isDeepLink || !req.session?.deepLinkShareId) return null;
   const chat = await findChatByShareId(cloudant, req.session.deepLinkShareId);
+  return chat ? resolveAgentOwnerId(chat) : null;
+}
+
+/** The patient who shared the chat behind `shareId`, or null. */
+export async function getShareOwnerId(cloudant, shareId) {
+  if (!shareId || typeof shareId !== 'string') return null;
+  const chat = await findChatByShareId(cloudant, shareId);
   return chat ? resolveAgentOwnerId(chat) : null;
 }
 
@@ -913,8 +921,17 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient, app
     return out;
   };
 
+  // Personal AS edition: public AIs and the secondary Private AI appear
+  // only when the account has them turned on (the feature guard refuses
+  // the chat calls too). No-op in the full edition.
+  const editionFiltered = (providers, profiles, doc) => ({
+    providers: isFeatureEnabled('public-ai', doc) ? providers : providers.filter((p) => p === 'digitalocean'),
+    privateAiProfiles: isFeatureEnabled('second-ai', doc) ? profiles : profiles.filter((p) => p.key !== 'gpt')
+  });
+
   app.get('/api/chat/providers', async (req, res) => {
     let providers = chatClient.getAvailableProviders();
+    let featureDoc = null;
     let privateAiProfiles = [];
     const userId = req.session?.userId;
     const isDeepLink = !!req.session?.isDeepLink;
@@ -937,8 +954,9 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient, app
             const ownerHasAgent = ownerDoc?.workflowStage === 'agent_deployed' ||
               !!(ownerDoc?.assignedAgentId && ownerDoc?.agentEndpoint);
             const ownerAllows = ownerDoc?.allowDeepLinkPrivateAI !== false;
+            featureDoc = ownerDoc;
             if (ownerHasAgent && ownerAllows) {
-              res.json({ providers, privateAiProfiles: await buildPrivateAiProfiles(ownerDoc) });
+              res.json(editionFiltered(providers, await buildPrivateAiProfiles(ownerDoc), ownerDoc));
               return;
             }
           }
@@ -950,6 +968,7 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient, app
     } else if (userId && cloudant && doClient) {
       try {
         let userDoc = await cloudant.getDocument('maia_users', userId);
+        featureDoc = userDoc;
         let hasAgentDeployed = userDoc?.workflowStage === 'agent_deployed' ||
           (userDoc?.assignedAgentId && userDoc?.agentEndpoint);
         // If user has a KB (or active workflow) but no agent yet, create agent so it can become ready
@@ -976,7 +995,7 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient, app
           // after Restore). Only repair when agentProfiles.gpt.agentId
           // already exists — first creation is the user's action via the
           // Deploy button in My AI Agent.
-          if (userDoc?.kbId) {
+          if (userDoc?.kbId && isFeatureEnabled('second-ai', userDoc)) {
             const gptProf = userDoc?.agentProfiles?.gpt;
             if (gptProf?.agentId) {
               const gptLive = await verifyAgentLive(gptProf.agentId);
@@ -1029,6 +1048,6 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient, app
     } else {
       providers = providers.filter((p) => p !== 'digitalocean');
     }
-    res.json({ providers, privateAiProfiles, providerModels: chatClient.getProviderModels() });
+    res.json({ ...editionFiltered(providers, privateAiProfiles, featureDoc), providerModels: chatClient.getProviderModels() });
   });
 }

@@ -35,14 +35,15 @@ import { getEmbeddingModelIdForKb, getEmbeddingModelNameFromNewAgent } from './u
 import { getChunkingForDataSource, getChunkingForStrategy, getRerankingModelName } from './utils/kb-config.js';
 import { getProjectIdForGenAI } from './utils/project-config.js';
 import setupAuthRoutes from './routes/auth.js';
-import setupChatRoutes, { getOwnerIdForDeepLinkSession } from './routes/chat.js';
-import { createApiGuard, isLocalDevRequest } from './utils/api-guard.js';
+import setupChatRoutes, { getOwnerIdForDeepLinkSession, getShareOwnerId } from './routes/chat.js';
+import { createApiGuard, isLocalDevRequest, isAdminUserId } from './utils/api-guard.js';
 import setupFileRoutes from './routes/files.js';
 import { getUserBucketSize } from './routes/files.js';
 import setupGroupRoutes from './routes/groups.js';
 import setupPolicyRoutes from './routes/policies.js';
 import setupEditionRoutes from './routes/edition.js';
 import { getEdition } from './edition.js';
+import { createFeatureGuard } from './edition-routes.js';
 import {
   S3Client,
   HeadBucketCommand,
@@ -1573,8 +1574,16 @@ app.use(session({
 // on (server/utils/api-guard.js). Must run before every route below.
 app.use('/api', createApiGuard({ getDeepLinkOwnerId: (req) => getOwnerIdForDeepLinkSession(req, cloudant) }));
 
+// Edition feature gate (I-26): every route belongs to a feature
+// (server/edition-routes.js); a feature that is off answers 403 FEATURE_OFF.
+// Runs after the account guard, which has already checked any named userId.
+app.use('/api', createFeatureGuard({
+  loadUserDoc: (userId) => cloudant.getDocument('maia_users', userId),
+  getShareOwnerId: (shareId) => getShareOwnerId(cloudant, shareId)
+}));
+
 // Edition + feature registry (server/edition.js; group_requests.md §4).
-setupEditionRoutes(app, cloudant);
+setupEditionRoutes(app, cloudant, auditLog);
 
 // Passkey routes
 setupAuthRoutes(app, passkeyService, cloudant, doClient, auditLog, { invalidateResourceCache });
@@ -11120,8 +11129,12 @@ app.post('/api/restore', async (req, res) => {
   }
 });
 
-// Get customer balance from DigitalOcean
-app.get('/api/billing/balance', async (_req, res) => {
+// Get customer balance from DigitalOcean (admin only: it is the hosting
+// account's balance).
+app.get('/api/billing/balance', async (req, res) => {
+  if (!isAdminUserId(req.session?.userId)) {
+    return res.status(403).json({ error: 'Admin only' });
+  }
   try {
     const token = process.env.DIGITALOCEAN_TOKEN;
     if (!token) {

@@ -6,16 +6,13 @@
  *  - 'personal-as': the Personal AS edition. Core features are on; the
  *    rest stay off until the user turns them on.
  *
- * The server enforces this (I-26): a route behind a feature that is off
- * answers 403 FEATURE_OFF, whatever the UI shows. The registry is also
- * the only source of the text that describes a feature: when the private
- * AI suggests turning one on, the confirm card quotes this text, never
- * the AI's (I-27).
- *
- * P0 defines the registry, GET /api/edition and the gate. Routes are put
- * behind `requireFeature` in P1.
+ * The server enforces this (I-26): server/edition-routes.js maps every
+ * route to a feature, and its /api guard answers 403 FEATURE_OFF for a
+ * feature that is off, whatever the UI shows. The registry is also the
+ * only source of the text that describes a feature: when the private AI
+ * suggests turning one on, the confirm card quotes this text, never the
+ * AI's (I-27).
  */
-import { requestedUserId } from './utils/api-guard.js';
 
 export const EDITIONS = Object.freeze(['full', 'personal-as']);
 export const DEFAULT_EDITION = 'full';
@@ -158,32 +155,9 @@ export const describeEdition = (userDoc = null, edition = currentEdition) => ({
 });
 
 /**
- * Build the `requireFeature(key)` middleware factory.
- *
- * Runs after the /api guard, so a userId named in the request has already
- * been checked against the session. Unlockable features are judged on that
- * user's own unlocks; with no user at all, an unlockable feature is off.
- *
- * @param {(userId: string) => Promise<object|null>} loadUserDoc
+ * May the server create this user's primary private AI agent now?
+ * Personal AS edition: only once the email is verified, so an unverified
+ * visitor (or a bot) never creates a DO resource (§9, I-26).
  */
-export function createRequireFeature(loadUserDoc) {
-  return (key) => {
-    if (!FEATURES[key]) throw new Error(`requireFeature: unknown feature "${key}"`);
-    return async function featureGate(req, res, next) {
-      const mode = featureMode(key);
-      if (mode === 'on') return next();
-      const off = () => res.status(403).json({ success: false, error: 'FEATURE_OFF', feature: key });
-      if (mode !== 'unlockable') return off();
-      const userId = requestedUserId(req) || req.session?.userId || null;
-      if (!userId) return off();
-      let userDoc;
-      try {
-        userDoc = await loadUserDoc(userId);
-      } catch (e) {
-        console.warn(`[edition] feature check for "${key}" failed:`, e?.message || e);
-        return res.status(503).json({ success: false, error: 'FEATURE_CHECK_FAILED', feature: key });
-      }
-      return isFeatureEnabled(key, userDoc) ? next() : off();
-    };
-  };
-}
+export const mayCreatePrimaryAgent = (userDoc, edition = currentEdition) =>
+  edition !== 'personal-as' || !!userDoc?.emailVerified;

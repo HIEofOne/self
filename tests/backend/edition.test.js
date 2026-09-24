@@ -8,9 +8,11 @@ import express from 'express';
 import request from 'supertest';
 import {
   EDITIONS, FEATURES, FEATURE_MODES, resolveEdition, getEdition, setEditionForTests,
-  featureMode, isFeatureEnabled, createRequireFeature
+  featureMode, isFeatureEnabled, mayCreatePrimaryAgent
 } from '../../server/edition.js';
 import setupEditionRoutes from '../../server/routes/edition.js';
+import setupChatRoutes from '../../server/routes/chat.js';
+import { ensureUserAgent } from '../../server/routes/auth.js';
 
 const originalEdition = getEdition();
 afterAll(() => setEditionForTests(originalEdition));
@@ -77,7 +79,9 @@ describe('feature registry', () => {
 
 class FakeCloudant {
   constructor(docs = {}) { this.docs = new Map(Object.entries(docs)); }
-  async getDocument(_db, id) { return this.docs.get(id) ?? null; }
+  async getDocument(_db, id) { const d = this.docs.get(id); return d ? JSON.parse(JSON.stringify(d)) : null; }
+  async saveDocument(_db, doc) { this.docs.set(doc._id, JSON.parse(JSON.stringify(doc))); return { ok: true }; }
+  async findDocuments() { return { docs: [] }; }
 }
 
 const UNLOCKED_AT = '2026-09-24T12:00:00Z';
@@ -87,25 +91,25 @@ const makeCloudant = () => new FakeCloudant({
 });
 
 // A signed-in user is simulated with the x-test-user header.
-const makeApp = (cloudant, gates = {}) => {
+const withSession = (app) => app.use((req, _res, next) => {
+  const user = req.get('x-test-user');
+  req.session = user ? { userId: user } : {};
+  next();
+});
+const makeApp = (cloudant, auditLog = null) => {
   const app = express();
-  app.use((req, _res, next) => {
-    const user = req.get('x-test-user');
-    req.session = user ? { userId: user } : {};
-    next();
-  });
-  setupEditionRoutes(app, cloudant);
-  for (const [path, gate] of Object.entries(gates)) app.get(path, gate, (_req, res) => res.json({ success: true }));
+  app.use(express.json());
+  withSession(app);
+  setupEditionRoutes(app, cloudant, auditLog);
   return app;
 };
 
 describe.each(EDITIONS)('edition "%s"', (edition) => {
   const full = edition === 'full';
-  let cloudant, requireFeature;
+  let cloudant;
   beforeEach(() => {
     setEditionForTests(edition);
     cloudant = makeCloudant();
-    requireFeature = createRequireFeature((id) => cloudant.getDocument('maia_users', id));
   });
 
   it('GET /api/edition answers before sign-in and describes every feature', async () => {
@@ -134,45 +138,103 @@ describe.each(EDITIONS)('edition "%s"', (edition) => {
     expect(bob.body.features['records-index'].enabled).toBe(full);
   });
 
-  it('requireFeature: a core feature passes for anyone', async () => {
-    const app = makeApp(cloudant, { '/api/core': requireFeature('account') });
-    expect((await request(app).get('/api/core')).status).toBe(200);
+  it('POST /api/user-features turns an unlockable feature on and off, and logs it', async () => {
+    const events = [];
+    const app = makeApp(cloudant, { logEvent: (e) => events.push(e) });
+    const turnOn = await request(app).post('/api/user-features').set('x-test-user', 'bob02')
+      .send({ feature: 'diary', on: true });
+    if (full) {
+      // Nothing is unlockable in the full edition: every feature is simply on.
+      expect(turnOn.status).toBe(400);
+      expect(turnOn.body.error).toBe('NOT_UNLOCKABLE');
+      return;
+    }
+    expect(turnOn.status).toBe(200);
+    expect(turnOn.body.features.diary.enabled).toBe(true);
+    expect(cloudant.docs.get('bob02').features.diary).toMatchObject({ via: 'settings' });
+    const turnOff = await request(app).post('/api/user-features').set('x-test-user', 'bob02')
+      .send({ feature: 'diary', on: false, via: 'advisor' });
+    expect(turnOff.body.features.diary.enabled).toBe(false);
+    expect(cloudant.docs.get('bob02').features.diary).toMatchObject({ enabledAt: null, via: 'advisor' });
+    expect(events.map((e) => e.type)).toEqual(['feature_turned_on', 'feature_turned_off']);
   });
 
-  it("requireFeature: an unlockable feature needs the user's own unlock", async () => {
-    const app = makeApp(cloudant, { '/api/index': requireFeature('records-index') });
-    const anonymous = await request(app).get('/api/index');
-    const bob = await request(app).get('/api/index').set('x-test-user', 'bob02');
-    const alice = await request(app).get('/api/index').set('x-test-user', 'alice01');
-    const aliceByQuery = await request(app).get('/api/index?userId=alice01').set('x-test-user', 'admin');
-    expect(anonymous.status).toBe(full ? 200 : 403);
-    expect(bob.status).toBe(full ? 200 : 403);
-    if (!full) expect(bob.body).toEqual({ success: false, error: 'FEATURE_OFF', feature: 'records-index' });
-    expect(alice.status).toBe(200);
-    expect(aliceByQuery.status).toBe(200); // judged on the named account's unlocks
-  });
-
-  it('requireFeature: a feature that is off stays off, even with a stored unlock', async () => {
-    cloudant.docs.get('alice01').features['legacy-requests'] = { enabledAt: UNLOCKED_AT };
-    const app = makeApp(cloudant, {
-      '/api/legacy': requireFeature('legacy-requests'),
-      '/api/gnap': requireFeature('gnap')
-    });
-    expect((await request(app).get('/api/legacy').set('x-test-user', 'alice01')).status).toBe(full ? 200 : 403);
-    expect((await request(app).get('/api/gnap').set('x-test-user', 'alice01')).status).toBe(full ? 403 : 200);
-  });
-
-  it('requireFeature fails closed (503) when the account cannot be read', async () => {
-    const failing = createRequireFeature(async () => { throw new Error('db down'); });
-    const app = makeApp(cloudant, { '/api/index': failing('records-index') });
-    const res = await request(app).get('/api/index').set('x-test-user', 'alice01');
-    // In `full` the feature is simply on, so no account read is needed.
-    expect(res.status).toBe(full ? 200 : 503);
+  it('POST /api/user-features refuses core, off and unknown features, and anonymous callers', async () => {
+    const app = makeApp(cloudant);
+    const as = (body) => request(app).post('/api/user-features').set('x-test-user', 'bob02').send(body);
+    expect((await as({ feature: 'account', on: true })).body.error).toBe('NOT_UNLOCKABLE');
+    expect((await as({ feature: 'legacy-requests', on: true })).body.error).toBe('NOT_UNLOCKABLE');
+    expect((await as({ feature: 'no-such-feature', on: true })).status).toBe(400);
+    expect((await as({ feature: 'diary', on: 'yes' })).body.error).toBe('INVALID_REQUEST');
+    expect((await request(app).post('/api/user-features').send({ feature: 'diary', on: true })).status).toBe(401);
   });
 });
 
-describe('requireFeature setup', () => {
-  it('rejects an unknown feature key when the route is defined', () => {
-    expect(() => createRequireFeature(async () => null)('no-such-feature')).toThrow(/unknown feature/);
+describe('creating the private AI agent', () => {
+  // A DO client that records every call and fails it, so no test can
+  // create a real resource.
+  const recordingDoClient = (calls) => new Proxy({}, {
+    get: (_t, prop) => {
+      if (prop === 'agent') {
+        return new Proxy({}, { get: (_a, method) => async () => { calls.push(`agent.${String(method)}`); throw new Error('DO_CALLED'); } });
+      }
+      return async () => { calls.push(String(prop)); throw new Error('DO_CALLED'); };
+    }
+  });
+  const attempt = async (edition, userDoc) => {
+    setEditionForTests(edition);
+    const calls = [];
+    try { await ensureUserAgent(recordingDoClient(calls), makeCloudant(), userDoc); } catch { /* DO_CALLED */ }
+    return calls;
+  };
+
+  it('mayCreatePrimaryAgent: personal-as waits for a verified email; full never waits', () => {
+    expect(mayCreatePrimaryAgent({}, 'full')).toBe(true);
+    expect(mayCreatePrimaryAgent({}, 'personal-as')).toBe(false);
+    expect(mayCreatePrimaryAgent({ emailVerified: true }, 'personal-as')).toBe(true);
+  });
+
+  it('personal-as: an unverified account creates nothing and calls DO not at all', async () => {
+    expect(await attempt('personal-as', { _id: 'carol03', userId: 'carol03' })).toEqual([]);
+  });
+
+  it('once the email is verified (or in full), creation goes ahead as before', async () => {
+    expect((await attempt('personal-as', { _id: 'dave04', userId: 'dave04', emailVerified: true })).length).toBeGreaterThan(0);
+    expect((await attempt('full', { _id: 'erin05', userId: 'erin05' })).length).toBeGreaterThan(0);
+  });
+});
+
+describe.each(EDITIONS)('GET /api/chat/providers, edition "%s"', (edition) => {
+  const full = edition === 'full';
+  const running = { deployment: { status: 'STATUS_RUNNING', url: 'https://agent.example' } };
+  const doClient = { agent: { get: async () => running } };
+  const chatClient = {
+    getAvailableProviders: () => ['digitalocean', 'anthropic', 'gemini'],
+    getProviderModels: () => ({}),
+    isProviderAvailable: () => true
+  };
+  const userWith = (features = {}) => ({
+    _id: 'frank06', userId: 'frank06', features,
+    assignedAgentId: 'agent-default', agentEndpoint: 'https://agent.example/api/v1',
+    agentProfiles: { gpt: { agentId: 'agent-gpt', endpoint: 'https://gpt.example/api/v1', modelName: 'qwen3.8-max' } }
+  });
+  const providersFor = async (doc) => {
+    setEditionForTests(edition);
+    const app = express();
+    withSession(app);
+    setupChatRoutes(app, chatClient, new FakeCloudant({ frank06: doc }), doClient);
+    return (await request(app).get('/api/chat/providers').set('x-test-user', 'frank06')).body;
+  };
+
+  it('hides public AIs and the secondary unless the account has them on', async () => {
+    const body = await providersFor(userWith());
+    expect(body.providers).toEqual(full ? ['digitalocean', 'anthropic', 'gemini'] : ['digitalocean']);
+    expect(body.privateAiProfiles.map((p) => p.key)).toEqual(full ? ['default', 'gpt'] : ['default']);
+  });
+
+  it('shows them once the account turned them on', async () => {
+    const body = await providersFor(userWith({ 'public-ai': { enabledAt: UNLOCKED_AT }, 'second-ai': { enabledAt: UNLOCKED_AT } }));
+    expect(body.providers).toEqual(['digitalocean', 'anthropic', 'gemini']);
+    expect(body.privateAiProfiles.map((p) => p.key)).toEqual(['default', 'gpt']);
   });
 });
