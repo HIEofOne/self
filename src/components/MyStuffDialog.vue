@@ -7120,6 +7120,17 @@ const requestNewSummary = async (opts?: { skipCmGate?: boolean }) => {
       case 'add-records':
       case 'start-indexing':
       case 'indexing-running':
+        // Personal AS edition: records aren't indexed there. The edition's
+        // own summary routes (an interview, or an Apple Health export)
+        // replace this path (group_requests.md §5, P7).
+        if (isPersonalAs.value) {
+          $q.notify({
+            type: 'info',
+            message: 'Creating your Patient Summary here is coming next: an interview with your private AI, or your Apple Health export.',
+            timeout: 12000
+          });
+          return;
+        }
         $q.notify({
           type: 'warning',
           message: 'Your records aren\'t indexed yet — starting the Setup Wizard indexing now. The summary is one click away once it finishes.',
