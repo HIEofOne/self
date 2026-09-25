@@ -125,13 +125,18 @@ const suppressedSet = (userDoc) =>
  *   - providers with a credential ANYWHERE: "Theodor Sauer, MD (ORG)",
  *     "– Sharon Chou, MD, PARTNERS HEALTHCARE"
  *   - providers, parenthesized: "(Wei Lien, MD)", "(Harshal Patil)"
- *   - providers, prose: "by Wei Lien, MD", "by Prasanna Gaonkar"          */
+ *   - providers, prose: "by Wei Lien, MD", "by Prasanna Gaonkar"
+ *   - people after a title: "Dr. Jane Smith", "Doctor Omar Haddad"
+ *  Markdown around any of these ("**Pat Doe**, 66, F", "## Pat Doe, 66, F",
+ *  "by **Wei Lien**, MD") and a "Name:" / "Patient:" label are ignored.   */
 export function extractSummaryNames(summaryText) {
-  const text = String(summaryText || '');
+  // Match on a copy without markdown bold and heading marks. A name found
+  // there is contiguous in the original too, so the mapping applies to it.
+  const text = String(summaryText || '').replace(/\*\*|__/g, '').replace(/^[ \t]*#{1,6}[ \t]+/gm, '');
   const names = new Set();
   // Patient header: allow a SINGLE name ("Margarita, 68, Female") — the
   // age anchor keeps single capitalized words from false-matching.
-  const patient = text.match(/^\s*([A-Z][A-Za-z'’-]+(?:\s+[A-Z][A-Za-z'’-]+)*),\s*\d{1,3}\s*(?:y|,|$)/m);
+  const patient = text.match(/^\s*(?:(?:Patient|Name)\s*:\s*)?([A-Z][A-Za-z'’-]+(?:\s+[A-Z][A-Za-z'’-]+)*),\s*\d{1,3}\s*(?:y|,|$)/m);
   if (patient) {
     const nm = patient[1].replace(/\s+/g, ' ').trim();
     if (!/\d/.test(nm) && !NOT_A_NAME.test(nm) && (nm.split(' ').length === 1 || looksLikePersonName(nm))) names.add(nm);
@@ -158,6 +163,11 @@ export function extractSummaryNames(summaryText) {
   }
   const byRe = /\bby\s+([A-Z][A-Za-z'’-]+(?:\s+[A-Z][A-Za-z'’.-]+){1,3})/g;
   while ((m = byRe.exec(text)) !== null) consider(m[1]);
+  // Title-anchored. Words stay on one line and stop at a sentence's end
+  // ("Dr. Jane Smith. Hypertension…" → "Jane Smith"); an initial ("Q.") is
+  // kept.
+  const titleRe = /\b(?:Dr|Doctor|Mr|Mrs|Ms|Mx|Prof)\.?[ \t]+([A-Z][A-Za-z'’-]+(?:[ \t]+(?:[A-Z]\.|[A-Z][A-Za-z'’-]+)){1,3})/g;
+  while ((m = titleRe.exec(text)) !== null) consider(m[1]);
   return [...names];
 }
 

@@ -187,3 +187,37 @@ describe('single-name patients + credential-anchored providers (Margarita regres
     expect(seedMissingNames(userDoc, FORMAT_C)).toBe(0);
   });
 });
+
+// Markdown summaries (a private AI often bolds the name line) and titled
+// providers seeded NOTHING, so the "privacy-filtered" copy — the one that
+// leaves automatically — still named the patient and the doctor. Found by
+// the folder's "MAIA Patient Summary - privacy filtered.pdf" (P7b).
+const FORMAT_D = [
+  '**Pat Doe**, 66, F',
+  '',
+  '**Medical History**',
+  '- Type 2 diabetes, followed by Dr. Jane Q. Smith. Hypertension is stable.',
+  '',
+  '## Recent Visits (past 12 months)',
+  '- 2026-03-02 Follow-up by **Wei Lien**, MD',
+  '- Dr Omar Haddad adjusted metformin.'
+].join('\n');
+
+describe('markdown headers and titled providers', () => {
+  it('finds the patient behind bold or a heading, and people after a title', () => {
+    const names = extractSummaryNames(FORMAT_D);
+    for (const n of ['Pat Doe', 'Jane Q. Smith', 'Wei Lien', 'Omar Haddad']) expect(names).toContain(n);
+    // A title-anchored name stops at the end of its sentence.
+    expect(names.some((n) => /Hypertension/.test(n))).toBe(false);
+    expect(extractSummaryNames('## Pat Doe, 66, F')).toEqual(['Pat Doe']);
+    expect(extractSummaryNames('**Name:** Pat Doe, 66, F')).toEqual(['Pat Doe']);
+  });
+
+  it('the filtered copy of a markdown summary names no one', () => {
+    const userDoc = { userId: 'pat01' };
+    expect(seedPseudonymMappingFromSummary(userDoc, FORMAT_D)).toBe(true);
+    const filtered = applyPseudonymMapping(userDoc.privacyFilter.pseudonymMapping, FORMAT_D);
+    for (const real of ['Pat Doe', 'Jane', 'Smith', 'Wei Lien', 'Omar Haddad']) expect(filtered).not.toContain(real);
+    expect(filtered).toMatch(/^\*\*\w+\d{2} \w+\d{2}\*\*, 66, F/); // markdown kept
+  });
+});
