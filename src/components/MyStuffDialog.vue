@@ -2015,6 +2015,7 @@ import PoliciesPanel from './PoliciesPanel.vue';
 import SecondaryModelChooser from './SecondaryModelChooser.vue';
 import PatientInterview from './PatientInterview.vue';
 import { useQuasar } from 'quasar';
+import { useFolderPdfs } from '../composables/useFolderPdfs';
 import { deleteChatById } from '../utils/chatApi';
 import { processFileNCitations } from '../utils/fileNCitations';
 import { applyPseudonymsClient } from '../utils/pseudonyms';
@@ -4761,6 +4762,7 @@ const handleReplaceSummaryByIndex = async (indexToReplace: number) => {
     // Reload summaries to get updated list
     await loadPatientSummary();
     summaryNeedsVerify.value = false; // verified save (stamped server-side)
+    saveVerifiedPdfs();
     emit('patient-summary-saved', { userId: props.userId, summary: patientSummary.value || '' });
     emit('patient-summary-verified', { userId: props.userId! });
     
@@ -4831,6 +4833,7 @@ const handleReplaceSummary = async (replaceStrategy: 'keep' | 'oldest' | 'newest
     // Reload summaries to get updated list
     await loadPatientSummary();
     summaryNeedsVerify.value = false; // verified save (stamped server-side)
+    saveVerifiedPdfs();
     emit('patient-summary-saved', { userId: props.userId, summary: patientSummary.value || '' });
     emit('patient-summary-verified', { userId: props.userId! });
     
@@ -6996,6 +6999,14 @@ const dismissSummaryPair = () => {
   pairError.value = '';
 };
 
+// Personal AS edition (§7): Verify also writes the summary PDFs to the
+// patient's folder. Every stamped save calls this; it re-reads the server,
+// so it writes only a summary that is actually verified.
+const folderPdfs = useFolderPdfs();
+const saveVerifiedPdfs = () => {
+  if (isPersonalAs.value && props.userId) void folderPdfs.saveSummaryPdfs(props.userId);
+};
+
 // Personal AS edition: a new summary comes from an interview (D11); its
 // draft opens the same review dialog — the only way to save and verify.
 const showInterview = ref(false);
@@ -7599,6 +7610,7 @@ const saveSummaryFromTab = async () => {
     summaryEditText.value = summaryToSave;
     isEditingSummaryTab.value = false;
     summaryNeedsVerify.value = false; // edited = reviewed (stamped server-side)
+    saveVerifiedPdfs();
     emit('patient-summary-saved', { userId: props.userId, summary: patientSummary.value || '' });
 
     // Extract Current Medications from Patient Summary and save — but only if
@@ -7739,6 +7751,7 @@ const finishVerifySummary = () => {
       credentials: 'include',
       body: JSON.stringify({ userId: uid })
     }).then(async () => {
+      saveVerifiedPdfs();
       try {
         const r = await fetch(`/api/patient-summary?userId=${encodeURIComponent(uid)}`, { credentials: 'include' });
         if (r.ok) {

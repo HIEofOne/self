@@ -24,6 +24,9 @@
         <div class="col" style="min-width: 0">
           <div class="text-body2 text-weight-medium">{{ sharingTitle }}</div>
           <div class="text-caption text-grey-8">{{ sharingNote }}</div>
+          <div v-if="policiesPdfSaved" class="text-caption text-grey-7">
+            <q-icon name="folder" size="14px" /> A copy is in your MAIA folder: {{ MAIA_FOLDER_PDFS.policies }}
+          </div>
         </div>
         <q-btn
           v-if="asState !== 'active'"
@@ -391,6 +394,8 @@ import { processFileNCitations } from '../utils/fileNCitations';
 import { applyPseudonymsClient } from '../utils/pseudonyms';
 import { useEdition } from '../composables/useEdition';
 import { useSetupChecklist } from '../composables/useSetupChecklist';
+import { useFolderPdfs } from '../composables/useFolderPdfs';
+import { MAIA_FOLDER_PDFS } from '../utils/localFolder';
 
 // Same renderer setup as the Patient Summary tab (MyStuffDialog.psMarkdown):
 // html:true so the <a class="page-link"> citation anchors survive; ordinary
@@ -455,6 +460,16 @@ const asState = ref<AsState>('setup');
 const asStateSaving = ref(false);
 const confirmingId = ref<string | null>(null);
 const needsConfirm = (card: PolicyCard) => isPersonalAs.value && card.enabled !== false && !card.confirmedAt;
+
+// §7: the folder keeps "MAIA Sharing Policies.pdf" in step with every change
+// to the rules or the sharing switch.
+const folderPdfs = useFolderPdfs();
+const policiesPdfSaved = ref(false);
+const savePoliciesPdf = async () => {
+  if (!isPersonalAs.value || !props.userId) return;
+  const result = await folderPdfs.saveSharingPoliciesPdf(props.userId, { cards: policies.value, asState: asState.value });
+  if (result === 'written') policiesPdfSaved.value = true;
+};
 const unconfirmedCount = computed(() => policies.value.filter(needsConfirm).length);
 const sharingTitle = computed(() =>
   asState.value === 'active' ? 'Sharing is on' : asState.value === 'paused' ? 'Sharing is paused' : 'Sharing is off');
@@ -477,6 +492,7 @@ const confirmCard = async (card: PolicyCard) => {
     if (!res.ok || !data.success) throw new Error(data.error || 'Could not confirm');
     policies.value = policies.value.map((c) => (c.id === card.id ? data.policy : c));
     void setupChecklist.refresh();
+    void savePoliciesPdf();
   } catch (e) {
     $q.notify({ type: 'negative', message: e instanceof Error ? e.message : 'Could not confirm the rule' });
   } finally {
@@ -495,6 +511,7 @@ const setAsState = async (state: 'active' | 'paused') => {
     if (!res.ok || !data.success) throw new Error(data.message || data.error || 'Could not change sharing');
     asState.value = data.asState;
     void setupChecklist.refresh();
+    void savePoliciesPdf();
     $q.notify({ type: 'positive', message: state === 'active' ? 'Sharing is on.' : 'Sharing is paused. Every request will come to you.' });
   } catch (e) {
     $q.notify({ type: 'negative', message: e instanceof Error ? e.message : 'Could not change sharing' });
@@ -976,6 +993,7 @@ const saveBuiltCard = async (card: PolicyCard) => {
     if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
     showEditor.value = false;
     await loadAll();
+    void savePoliciesPdf();
     $q.notify({ type: 'positive', message: editingId.value ? 'Policy updated.' : 'Policy created.' });
   } catch (err) {
     $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to save policy' });
@@ -995,6 +1013,7 @@ const toggleCard = async (card: PolicyCard, enabled: boolean) => {
     const data = await res.json();
     if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
     await loadAll();
+    void savePoliciesPdf();
   } catch (err) {
     $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to update policy' });
   }
@@ -1015,6 +1034,7 @@ const confirmDelete = (card: PolicyCard) => {
       const data = await res.json();
       if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
       await loadAll();
+      void savePoliciesPdf();
       $q.notify({ type: 'positive', message: 'Policy deleted.' });
     } catch (err) {
       $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to delete policy' });
