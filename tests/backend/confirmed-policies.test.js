@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import express from 'express';
 import request from 'supertest';
+import { serve } from '../helpers/serve.js';
 import {
   evaluatePolicies, evaluationOptionsFor, asStateOf
 } from '../../server/routes/policies.js';
@@ -75,9 +76,9 @@ class FakeCloudant {
 
 describe.each(EDITIONS)('policy routes, edition "%s"', (edition) => {
   const pa = edition === 'personal-as';
-  let cloudant, app, audits;
-  const as = (method, url) => request(app)[method](url).set('x-test-user', 'carol03');
-  beforeEach(() => {
+  let cloudant, server, audits;
+  const as = (method, url) => request(server)[method](url).set('x-test-user', 'carol03');
+  beforeEach(async () => {
     setEditionForTests(edition);
     audits = [];
     cloudant = new FakeCloudant({
@@ -86,10 +87,11 @@ describe.each(EDITIONS)('policy routes, edition "%s"', (edition) => {
         sharingPolicies: [card('pol_suggested', 'allow', { provenance: 'group:g1' })] // imported, unconfirmed
       }
     });
-    app = express();
+    const app = express();
     app.use(express.json());
     app.use((req, _res, next) => { const u = req.get('x-test-user'); req.session = u ? { userId: u } : {}; next(); });
     setupPolicyRoutes(app, cloudant, { logEvent: (e) => audits.push(e) });
+    server = await serve(app);
   });
 
   it('GET reports the AS state (always active in full)', async () => {

@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import express from 'express';
 import request from 'supertest';
+import { serve } from '../helpers/serve.js';
 import setupInterviewRoutes, {
   normalizeInterview, hasSubstance, buildInterviewPrompt, INTERVIEW_FIELDS
 } from '../../server/routes/interview.js';
@@ -56,12 +57,12 @@ const ANSWERS = { conditions: 'Hypertension', medications: 'Lisinopril 10 mg dai
 
 describe.each(EDITIONS)('interview route, edition "%s"', (edition) => {
   const pa = edition === 'personal-as';
-  let cloudant, app, prompts, agentReply, events;
+  let cloudant, server, prompts, agentReply, events;
   const setDraftJob = async (userId, patch) => {
     const d = cloudant.docs.get(userId);
     d.draftJob = { ...(d.draftJob || {}), ...patch };
   };
-  beforeEach(() => {
+  beforeEach(async () => {
     setEditionForTests(edition);
     prompts = [];
     events = [];
@@ -73,7 +74,7 @@ describe.each(EDITIONS)('interview route, edition "%s"', (edition) => {
       },
       dave04: { _id: 'dave04', userId: 'dave04' } // private AI not ready
     });
-    app = express();
+    const app = express();
     app.use(express.json());
     app.use((req, _res, next) => { const u = req.get('x-test-user'); req.session = u ? { userId: u } : {}; next(); });
     setupInterviewRoutes(app, {
@@ -82,10 +83,11 @@ describe.each(EDITIONS)('interview route, edition "%s"', (edition) => {
       setDraftJob,
       logEvent: async (_u, e) => { events.push(e.event); }
     });
+    server = await serve(app);
   });
 
   const start = (user, answers = ANSWERS) =>
-    request(app).post('/api/patient-summary/interview').set('x-test-user', user).send({ userId: user, answers });
+    request(server).post('/api/patient-summary/interview').set('x-test-user', user).send({ userId: user, answers });
 
   it('is part of the Personal AS edition only', async () => {
     const r = await start('carol03');
@@ -98,7 +100,7 @@ describe.each(EDITIONS)('interview route, edition "%s"', (edition) => {
 
   it('refuses without a sign-in, without enough answers, or before the private AI is ready', async () => {
     if (!pa) return;
-    expect((await request(app).post('/api/patient-summary/interview').send({ answers: ANSWERS })).status).toBe(401);
+    expect((await request(server).post('/api/patient-summary/interview').send({ answers: ANSWERS })).status).toBe(401);
     expect((await start('carol03', { name: 'Pat' })).body.error).toBe('NOT_ENOUGH_ANSWERS');
     expect((await start('dave04')).body.error).toBe('AGENT_NOT_READY');
     expect(prompts).toEqual([]);
@@ -118,7 +120,7 @@ describe.each(EDITIONS)('interview route, edition "%s"', (edition) => {
     expect(d.patientSummaries).toEqual([{ text: 'old verified summary' }]);
     expect(d.patientSummaryVerifiedAt).toBe('2026-09-01T00:00:00Z');
     expect(events).toEqual(['summary-interview-started', 'summary-interview-drafted']);
-    const g = await request(app).get('/api/patient-summary/interview').set('x-test-user', 'carol03');
+    const g = await request(server).get('/api/patient-summary/interview').set('x-test-user', 'carol03');
     expect(g.body.answers.medications).toBe('Lisinopril 10 mg daily');
   });
 

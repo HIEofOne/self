@@ -10,6 +10,7 @@ import express from 'express';
 import session from 'express-session';
 import cookieParser from 'cookie-parser';
 import request from 'supertest';
+import { serve } from '../helpers/serve.js';
 import { EDITIONS, getEdition, setEditionForTests } from '../../server/edition.js';
 import setupSetupRoutes, { deriveSetupStatus } from '../../server/routes/setup.js';
 import setupAuthRoutes from '../../server/routes/auth.js';
@@ -107,22 +108,23 @@ describe('deriveSetupStatus', () => {
 });
 
 describe.each(EDITIONS)('setup routes, edition "%s"', (edition) => {
-  let cloudant, app;
-  beforeEach(() => {
+  let cloudant, server;
+  beforeEach(async () => {
     setEditionForTests(edition);
     cloudant = new FakeCloudant(
       { carol03: { _id: 'carol03', userId: 'carol03', emailVerified: true } },
       [{ _id: 'g1', type: 'group', name: 'Trustee Local', publiclyListed: true, joinMode: 'open', joinLinkToken: 'tok1' }]
     );
-    app = express();
+    const app = express();
     app.use(express.json());
     app.use((req, _res, next) => { const u = req.get('x-test-user'); req.session = u ? { userId: u } : {}; next(); });
     setupSetupRoutes(app, cloudant);
+    server = await serve(app);
   });
 
   it('GET /api/setup-status needs a user, and derives the rows', async () => {
-    expect((await request(app).get('/api/setup-status')).status).toBe(401);
-    const r = await request(app).get('/api/setup-status').set('x-test-user', 'carol03');
+    expect((await request(server).get('/api/setup-status')).status).toBe(401);
+    const r = await request(server).get('/api/setup-status').set('x-test-user', 'carol03');
     expect(r.status).toBe(200);
     expect(r.body.steps.find((s) => s.key === 'email').done).toBe(true);
     expect(r.body.steps.find((s) => s.key === 'group').required).toBe(true);
@@ -130,36 +132,36 @@ describe.each(EDITIONS)('setup routes, edition "%s"', (edition) => {
   });
 
   it('names the joinable group and its link; an invite-only host group is offered, not required', async () => {
-    const r = await request(app).get('/api/setup-status').set('x-test-user', 'carol03');
+    const r = await request(server).get('/api/setup-status').set('x-test-user', 'carol03');
     const g = r.body.steps.find((s) => s.key === 'group');
     expect(g.joinable).toMatchObject({ groupId: 'g1', name: 'Trustee Local' });
     expect(g.joinable.joinLink).toContain('groupJoin=tok1');
     cloudant.groups = [{ _id: 'g2', type: 'group', name: 'Trustee Test', publiclyListed: true, joinMode: 'invite-only' }];
-    const r2 = await request(app).get('/api/setup-status').set('x-test-user', 'carol03');
+    const r2 = await request(server).get('/api/setup-status').set('x-test-user', 'carol03');
     const g2 = r2.body.steps.find((s) => s.key === 'group');
     expect(g2).toMatchObject({ required: false, joinable: null, inviteOnly: { groupId: 'g2', name: 'Trustee Test' } });
   });
 
   it('POST /api/setup/folder-connected records only a timestamp, once', async () => {
-    const r = await request(app).post('/api/setup/folder-connected').set('x-test-user', 'carol03').send({ folderName: 'secret name' });
+    const r = await request(server).post('/api/setup/folder-connected').set('x-test-user', 'carol03').send({ folderName: 'secret name' });
     expect(r.status).toBe(200);
     expect(r.body.steps.find((s) => s.key === 'folder').done).toBe(true);
     const first = cloudant.docs.get('carol03').folderConnectedAt;
     expect(first).toBeTruthy();
     expect(JSON.stringify(cloudant.docs.get('carol03'))).not.toContain('secret name');
-    await request(app).post('/api/setup/folder-connected').set('x-test-user', 'carol03');
+    await request(server).post('/api/setup/folder-connected').set('x-test-user', 'carol03');
     expect(cloudant.docs.get('carol03').folderConnectedAt).toBe(first);
   });
 });
 
 describe.each(EDITIONS)('account rules, edition "%s"', (edition) => {
   const pa = edition === 'personal-as';
-  let cloudant, app, doCalls;
-  beforeEach(() => {
+  let cloudant, server, doCalls;
+  beforeEach(async () => {
     setEditionForTests(edition);
     cloudant = new FakeCloudant();
     doCalls = [];
-    app = express();
+    const app = express();
     app.use(cookieParser('test-secret'));
     app.use(express.json());
     app.use(session({ secret: 'test-secret', resave: false, saveUninitialized: false }));
@@ -170,10 +172,11 @@ describe.each(EDITIONS)('account rules, edition "%s"', (edition) => {
       resolveExpectedOrigin: () => 'http://localhost'
     };
     setupAuthRoutes(app, passkeyService, cloudant, recordingDoClient(doCalls), { logEvent: () => {} }, {});
+    server = await serve(app);
   });
 
   it('a new account needs a verified email in personal-as', async () => {
-    const r = await request(app).post('/api/temporary/start').send({ forceNew: true });
+    const r = await request(server).post('/api/temporary/start').send({ forceNew: true });
     if (pa) {
       expect(r.status).toBe(400);
       expect(r.body.error).toBe('EMAIL_VERIFICATION_REQUIRED');
@@ -181,14 +184,14 @@ describe.each(EDITIONS)('account rules, edition "%s"', (edition) => {
     } else {
       expect(r.body.authenticated).toBe(true);
     }
-    const unverified = await request(app).post('/api/temporary/start')
+    const unverified = await request(server).post('/api/temporary/start')
       .send({ forceNew: true, email: 'dan@example.org', emailVerifyToken: 'a'.repeat(32) });
     expect(unverified.status).toBe(pa ? 400 : 200);
   });
 
   it('with a verified email the account is created verified, and personal-as starts the private AI', async () => {
     const email = `erin-${edition}@example.org`;
-    const r = await request(app).post('/api/temporary/start')
+    const r = await request(server).post('/api/temporary/start')
       .send({ forceNew: true, email, emailVerifyToken: verifiedToken(email) });
     expect(r.body.authenticated).toBe(true);
     expect(cloudant.docs.get(r.body.user.userId).emailVerified).toBe(true);
@@ -198,7 +201,7 @@ describe.each(EDITIONS)('account rules, edition "%s"', (edition) => {
   });
 
   it('personal-as refuses a brand-new account made from a bare passkey', async () => {
-    const r = await request(app).post('/api/passkey/register').send({ userId: 'newbie07', displayName: 'newbie07' });
+    const r = await request(server).post('/api/passkey/register').send({ userId: 'newbie07', displayName: 'newbie07' });
     if (pa) {
       expect(r.status).toBe(403);
       expect(r.body.code).toBe('START_WITH_EMAIL');

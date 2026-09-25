@@ -87,5 +87,6 @@ If the DO token is rotated, the derived CouchDB password changes but the CouchDB
 ## Testing
 - `npm test` runs every vitest suite; `npm run test:backend` runs `tests/backend/`. Most suites use in-memory fakes. `auth`, `cloudant` and `health` need a local CouchDB (Docker, `admin`/`adminpass` at `localhost:5984`).
 - Edition work: new backend tests run under both editions (`describe.each(EDITIONS)` with `setEditionForTests`), and `full` must behave exactly as before.
+- supertest: pass `await serve(app)` (`tests/helpers/serve.js`), not the bare app. `request(app)` listens on `[::]` but connects to `127.0.0.1`, and on macOS another program's `127.0.0.1` listener can answer instead (intermittent 404s).
 - UI flows still need manual testing in the running app.
 - Build check: `npm run build` — the DO deploy runs `vue-tsc && vite build`, and `vue-tsc` fails on things vite tolerates (e.g. TS6133 unused declarations). `npx vite build` alone is NOT sufficient.

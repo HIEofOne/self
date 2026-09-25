@@ -12,6 +12,7 @@ import cookieParser from 'cookie-parser';
 import request from 'supertest';
 import { createApiGuard, isLocalDevRequest } from '../../server/utils/api-guard.js';
 import setupAuthRoutes from '../../server/routes/auth.js';
+import { serve } from '../helpers/serve.js';
 
 // ── Guard unit tests ────────────────────────────────────────────────────
 const run = async (guard, req) => {
@@ -71,12 +72,12 @@ class FakeCloudant {
   async findDocuments() { return { docs: [] }; }
 }
 
-let app, cloudant;
-beforeEach(() => {
+let server, cloudant;
+beforeEach(async () => {
   cloudant = new FakeCloudant();
   cloudant.docs.set('victim01', { _id: 'victim01', userId: 'victim01', type: 'user', temporaryAccount: true, displayName: 'victim01' });
   cloudant.docs.set('keyholder01', { _id: 'keyholder01', userId: 'keyholder01', type: 'user', credentialID: 'cred', displayName: 'keyholder01' });
-  app = express();
+  const app = express();
   app.use(cookieParser('test-secret'));
   app.use(express.json());
   app.use(session({ secret: 'test-secret', resave: false, saveUninitialized: false }));
@@ -90,10 +91,11 @@ beforeEach(() => {
   setupAuthRoutes(app, passkeyService, cloudant, doClient, { logEvent: () => {} }, {});
   // A stand-in account endpoint behind the guard.
   app.get('/api/patient-summary', (req, res) => res.json({ ok: true, userId: req.query.userId }));
+  server = await serve(app);
 });
 
 const signedInAs = async () => {
-  const agent = request.agent(app);
+  const agent = request.agent(server);
   const r = await agent.post('/api/temporary/start').send({});
   expect(r.body.authenticated).toBe(true);
   return { agent, userId: r.body.user.userId };
@@ -101,7 +103,7 @@ const signedInAs = async () => {
 
 describe('account data needs a session for that account', () => {
   it('anonymous → 401; another signed-in user → 403; the owner → 200', async () => {
-    expect((await request(app).get('/api/patient-summary?userId=victim01')).status).toBe(401);
+    expect((await request(server).get('/api/patient-summary?userId=victim01')).status).toBe(401);
     const { agent, userId } = await signedInAs();
     expect((await agent.get('/api/patient-summary?userId=victim01')).status).toBe(403);
     expect((await agent.get(`/api/patient-summary?userId=${userId}`)).status).toBe(200);
@@ -110,24 +112,24 @@ describe('account data needs a session for that account', () => {
 
 describe('no session without proof of ownership', () => {
   it('account/recreate refuses an existing account and signs nobody in', async () => {
-    const agent = request.agent(app);
+    const agent = request.agent(server);
     for (const id of ['victim01', 'keyholder01']) {
       const r = await agent.post('/api/account/recreate').send({ userId: id });
       expect(r.status).toBe(409);
       expect(r.body.error).toBe('ACCOUNT_EXISTS');
     }
     expect((await agent.get('/api/current-user')).body.authenticated).toBe(false);
-    expect((await request(app).post('/api/account/recreate').send({ userId: 'admin' })).status).toBe(403);
+    expect((await request(server).post('/api/account/recreate').send({ userId: 'admin' })).status).toBe(403);
   });
 
   it('account/recreate still restores a destroyed account', async () => {
-    const r = await request(app).post('/api/account/recreate').send({ userId: 'ghost01' });
+    const r = await request(server).post('/api/account/recreate').send({ userId: 'ghost01' });
     expect(r.status).toBe(200);
     expect(r.body.recreated).toBe(true);
   });
 
   it('temporary/restore needs this browser\'s signed cookie (or a session)', async () => {
-    const anon = await request(app).post('/api/temporary/restore').send({ userId: 'victim01' });
+    const anon = await request(server).post('/api/temporary/restore').send({ userId: 'victim01' });
     expect(anon.status).toBe(401);
     expect(anon.body.error).toBe('SIGN_IN_REQUIRED');
 
@@ -145,18 +147,18 @@ describe('no session without proof of ownership', () => {
     expect(back.status).toBe(200);
     expect(back.body.authenticated).toBe(true);
     // A different browser (no cookie) is refused.
-    const other = await request(app).post('/api/temporary/restore').send({ userId });
+    const other = await request(server).post('/api/temporary/restore').send({ userId });
     expect(other.status).toBe(401);
   });
 
   it('a forged, unsigned temporary-account cookie is not a credential', async () => {
-    const r = await request(app).post('/api/temporary/start').set('Cookie', 'maia_temp_user=victim01').send({});
+    const r = await request(server).post('/api/temporary/start').set('Cookie', 'maia_temp_user=victim01').send({});
     expect(r.body.authenticated).toBe(true);
     expect(r.body.user.userId).not.toBe('victim01');
   });
 
   it('adding a passkey to an existing account requires being signed in to it', async () => {
-    const anon = await request(app).post('/api/passkey/register').send({ userId: 'victim01', displayName: 'x' });
+    const anon = await request(server).post('/api/passkey/register').send({ userId: 'victim01', displayName: 'x' });
     expect(anon.status).toBe(403);
     expect(anon.body.code).toBe('NOT_ACCOUNT_OWNER');
 

@@ -6,6 +6,7 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import express from 'express';
 import request from 'supertest';
+import { serve } from '../helpers/serve.js';
 import {
   EDITIONS, FEATURES, FEATURE_MODES, resolveEdition, getEdition, setEditionForTests,
   featureMode, isFeatureEnabled, mayCreatePrimaryAgent
@@ -113,7 +114,7 @@ describe.each(EDITIONS)('edition "%s"', (edition) => {
   });
 
   it('GET /api/edition answers before sign-in and describes every feature', async () => {
-    const res = await request(makeApp(cloudant)).get('/api/edition');
+    const res = await request(await serve(makeApp(cloudant))).get('/api/edition');
     expect(res.status).toBe(200);
     expect(res.body.edition).toBe(edition);
     expect(Object.keys(res.body.features).sort()).toEqual(Object.keys(FEATURES).sort());
@@ -130,18 +131,18 @@ describe.each(EDITIONS)('edition "%s"', (edition) => {
   });
 
   it("GET /api/edition reflects the signed-in user's own unlocks", async () => {
-    const app = makeApp(cloudant);
-    const alice = await request(app).get('/api/edition').set('x-test-user', 'alice01');
+    const server = await serve(makeApp(cloudant));
+    const alice = await request(server).get('/api/edition').set('x-test-user', 'alice01');
     expect(alice.body.features['records-index'].enabled).toBe(true);
     expect(alice.body.features['second-ai'].enabled).toBe(full);
-    const bob = await request(app).get('/api/edition').set('x-test-user', 'bob02');
+    const bob = await request(server).get('/api/edition').set('x-test-user', 'bob02');
     expect(bob.body.features['records-index'].enabled).toBe(full);
   });
 
   it('POST /api/user-features turns an unlockable feature on and off, and logs it', async () => {
     const events = [];
-    const app = makeApp(cloudant, { logEvent: (e) => events.push(e) });
-    const turnOn = await request(app).post('/api/user-features').set('x-test-user', 'bob02')
+    const server = await serve(makeApp(cloudant, { logEvent: (e) => events.push(e) }));
+    const turnOn = await request(server).post('/api/user-features').set('x-test-user', 'bob02')
       .send({ feature: 'diary', on: true });
     if (full) {
       // Nothing is unlockable in the full edition: every feature is simply on.
@@ -152,7 +153,7 @@ describe.each(EDITIONS)('edition "%s"', (edition) => {
     expect(turnOn.status).toBe(200);
     expect(turnOn.body.features.diary.enabled).toBe(true);
     expect(cloudant.docs.get('bob02').features.diary).toMatchObject({ via: 'settings' });
-    const turnOff = await request(app).post('/api/user-features').set('x-test-user', 'bob02')
+    const turnOff = await request(server).post('/api/user-features').set('x-test-user', 'bob02')
       .send({ feature: 'diary', on: false, via: 'advisor' });
     expect(turnOff.body.features.diary.enabled).toBe(false);
     expect(cloudant.docs.get('bob02').features.diary).toMatchObject({ enabledAt: null, via: 'advisor' });
@@ -160,13 +161,13 @@ describe.each(EDITIONS)('edition "%s"', (edition) => {
   });
 
   it('POST /api/user-features refuses core, off and unknown features, and anonymous callers', async () => {
-    const app = makeApp(cloudant);
-    const as = (body) => request(app).post('/api/user-features').set('x-test-user', 'bob02').send(body);
+    const server = await serve(makeApp(cloudant));
+    const as = (body) => request(server).post('/api/user-features').set('x-test-user', 'bob02').send(body);
     expect((await as({ feature: 'account', on: true })).body.error).toBe('NOT_UNLOCKABLE');
     expect((await as({ feature: 'legacy-requests', on: true })).body.error).toBe('NOT_UNLOCKABLE');
     expect((await as({ feature: 'no-such-feature', on: true })).status).toBe(400);
     expect((await as({ feature: 'diary', on: 'yes' })).body.error).toBe('INVALID_REQUEST');
-    expect((await request(app).post('/api/user-features').send({ feature: 'diary', on: true })).status).toBe(401);
+    expect((await request(server).post('/api/user-features').send({ feature: 'diary', on: true })).status).toBe(401);
   });
 });
 
@@ -223,7 +224,7 @@ describe.each(EDITIONS)('GET /api/chat/providers, edition "%s"', (edition) => {
     const app = express();
     withSession(app);
     setupChatRoutes(app, chatClient, new FakeCloudant({ frank06: doc }), doClient);
-    return (await request(app).get('/api/chat/providers').set('x-test-user', 'frank06')).body;
+    return (await request(await serve(app)).get('/api/chat/providers').set('x-test-user', 'frank06')).body;
   };
 
   it('hides public AIs and the secondary unless the account has them on', async () => {

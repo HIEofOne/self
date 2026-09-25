@@ -9,6 +9,7 @@ import { readFileSync, readdirSync, statSync } from 'fs';
 import path from 'path';
 import express from 'express';
 import request from 'supertest';
+import { serve } from '../helpers/serve.js';
 import { EDITIONS, FEATURES, getEdition, setEditionForTests } from '../../server/edition.js';
 import {
   ROUTE_FEATURES, NON_FEATURE_CLASSES, matchRoute, routeFeature, createFeatureGuard
@@ -145,71 +146,71 @@ const makeApp = (guardDeps) => {
 describe.each(EDITIONS)('feature guard, edition "%s"', (edition) => {
   const full = edition === 'full';
   const gated = (status) => (full ? 200 : status);
-  let app;
-  beforeEach(() => {
+  let server;
+  beforeEach(async () => {
     setEditionForTests(edition);
     const cloudant = new FakeCloudant({
       alice01: { _id: 'alice01', userId: 'alice01', features: { 'records-index': ON, 'deep-links': ON } },
       bob02: { _id: 'bob02', userId: 'bob02' }
     });
-    app = makeApp({
+    server = await serve(makeApp({
       loadUserDoc: (id) => cloudant.getDocument('maia_users', id),
       getShareOwnerId: async (shareId) => SHARES[shareId] || null
-    });
+    }));
   });
 
   it('lets core, public, admin and registry routes through for anyone', async () => {
-    expect((await request(app).get('/api/user-settings')).status).toBe(200);
-    expect((await request(app).get('/health')).status).toBe(404); // not under /api: never reaches the guard
-    expect((await request(app).get('/api/edition')).status).toBe(200);
-    expect((await request(app).get('/api/admin/users')).status).toBe(200);
-    expect((await request(app).get('/api/groups/g1/info')).status).toBe(200);
-    expect((await request(app).post('/api/user-policies').send({})).status).toBe(200);
+    expect((await request(server).get('/api/user-settings')).status).toBe(200);
+    expect((await request(server).get('/health')).status).toBe(404); // not under /api: never reaches the guard
+    expect((await request(server).get('/api/edition')).status).toBe(200);
+    expect((await request(server).get('/api/admin/users')).status).toBe(200);
+    expect((await request(server).get('/api/groups/g1/info')).status).toBe(200);
+    expect((await request(server).post('/api/user-policies').send({})).status).toBe(200);
   });
 
   it("judges an unlockable route on the user's own unlocks", async () => {
-    expect((await request(app).post('/api/update-knowledge-base')).status).toBe(gated(403));
-    expect((await request(app).post('/api/update-knowledge-base').set('x-test-user', 'bob02')).status).toBe(gated(403));
-    expect((await request(app).post('/api/update-knowledge-base').set('x-test-user', 'alice01')).status).toBe(200);
-    const off = await request(app).post('/api/patient-diary').set('x-test-user', 'alice01');
+    expect((await request(server).post('/api/update-knowledge-base')).status).toBe(gated(403));
+    expect((await request(server).post('/api/update-knowledge-base').set('x-test-user', 'bob02')).status).toBe(gated(403));
+    expect((await request(server).post('/api/update-knowledge-base').set('x-test-user', 'alice01')).status).toBe(200);
+    const off = await request(server).post('/api/patient-diary').set('x-test-user', 'alice01');
     expect(off.status).toBe(gated(403));
     if (!full) expect(off.body).toEqual({ success: false, error: 'FEATURE_OFF', feature: 'diary' });
   });
 
   it('uses the account a request names (checked by the account guard first)', async () => {
-    const res = await request(app).get('/api/kb2-indexing-status?userId=alice01').set('x-test-user', 'admin');
+    const res = await request(server).get('/api/kb2-indexing-status?userId=alice01').set('x-test-user', 'admin');
     expect(res.status).toBe(200);
   });
 
   it('turns the old request path off in personal-as, for everyone', async () => {
-    expect((await request(app).post('/api/groups/g1/outside-request').send({})).status).toBe(gated(403));
-    expect((await request(app).post('/api/user-groups/request').set('x-test-user', 'alice01')).status).toBe(gated(403));
+    expect((await request(server).post('/api/groups/g1/outside-request').send({})).status).toBe(gated(403));
+    expect((await request(server).post('/api/user-groups/request').set('x-test-user', 'alice01')).status).toBe(gated(403));
   });
 
   it('gates public AIs and the secondary Private AI, not the private AI', async () => {
     const as = (req) => req.set('x-test-user', 'alice01');
-    expect((await as(request(app).post('/api/chat/digitalocean')).send({})).status).toBe(200);
-    expect((await as(request(app).post('/api/chat/anthropic')).send({})).status).toBe(gated(403));
-    expect((await as(request(app).post('/api/chat/digitalocean')).send({ options: { agentProfileKey: 'gpt' } })).status).toBe(gated(403));
-    expect((await as(request(app).post('/api/agents/ensure-secondary')).send({})).status).toBe(gated(403));
+    expect((await as(request(server).post('/api/chat/digitalocean')).send({})).status).toBe(200);
+    expect((await as(request(server).post('/api/chat/anthropic')).send({})).status).toBe(gated(403));
+    expect((await as(request(server).post('/api/chat/digitalocean')).send({ options: { agentProfileKey: 'gpt' } })).status).toBe(gated(403));
+    expect((await as(request(server).post('/api/agents/ensure-secondary')).send({})).status).toBe(gated(403));
   });
 
   it('judges a clinician guest on the unlocks of the patient who shared', async () => {
-    expect((await request(app).post('/api/deep-link/login').send({ shareId: 'share-alice' })).status).toBe(200);
-    expect((await request(app).post('/api/deep-link/login').send({ shareId: 'share-bob' })).status).toBe(gated(403));
-    expect((await request(app).get('/api/load-chat-by-share/share-bob')).status).toBe(gated(403));
-    expect((await request(app).get('/api/deep-link/session?shareId=share-alice')).status).toBe(200);
+    expect((await request(server).post('/api/deep-link/login').send({ shareId: 'share-alice' })).status).toBe(200);
+    expect((await request(server).post('/api/deep-link/login').send({ shareId: 'share-bob' })).status).toBe(gated(403));
+    expect((await request(server).get('/api/load-chat-by-share/share-bob')).status).toBe(gated(403));
+    expect((await request(server).get('/api/deep-link/session?shareId=share-alice')).status).toBe(200);
     // A guest session reading the patient's lists: lists-full is not on for alice.
-    expect((await request(app).get('/api/labs/history').set('x-test-share', 'share-alice')).status).toBe(gated(403));
-    expect((await request(app).post('/api/deep-link/login').send({ shareId: 'no-such-share' })).status).toBe(gated(403));
+    expect((await request(server).get('/api/labs/history').set('x-test-share', 'share-alice')).status).toBe(gated(403));
+    expect((await request(server).post('/api/deep-link/login').send({ shareId: 'no-such-share' })).status).toBe(gated(403));
   });
 
   it('passes unknown routes through (they 404 later)', async () => {
-    expect((await request(app).get('/api/no-such-route')).status).toBe(200);
+    expect((await request(server).get('/api/no-such-route')).status).toBe(200);
   });
 
   it('fails closed (503) when the account cannot be read', async () => {
-    const failing = makeApp({ loadUserDoc: async () => { throw new Error('db down'); }, getShareOwnerId: async () => null });
+    const failing = await serve(makeApp({ loadUserDoc: async () => { throw new Error('db down'); }, getShareOwnerId: async () => null }));
     const res = await request(failing).post('/api/update-knowledge-base').set('x-test-user', 'alice01');
     expect(res.status).toBe(full ? 200 : 503);
   });
