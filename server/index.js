@@ -36,7 +36,7 @@ import { getChunkingForDataSource, getChunkingForStrategy, getRerankingModelName
 import { getProjectIdForGenAI } from './utils/project-config.js';
 import setupAuthRoutes from './routes/auth.js';
 import setupChatRoutes, { getOwnerIdForDeepLinkSession, getShareOwnerId } from './routes/chat.js';
-import { createApiGuard, isLocalDevRequest, isAdminUserId } from './utils/api-guard.js';
+import { createApiGuard, isLocalDevRequest, isAdminUserId, provesAccount } from './utils/api-guard.js';
 import setupFileRoutes from './routes/files.js';
 import { getUserBucketSize } from './routes/files.js';
 import setupGroupRoutes from './routes/groups.js';
@@ -9247,10 +9247,13 @@ async function deleteUserAndResources(userId, options = {}) {
   const { deleteAgent = true } = options;
   console.log(`[DESTROY] Starting deletion for ${userId}`);
   // Get user document first to collect information
-  let userDoc;
+  let userDoc = null;
   try {
     userDoc = await cloudant.getDocument('maia_users', userId);
-  } catch (error) {
+  } catch { /* treated as not found below */ }
+  // getDocument answers null for a missing account (it doesn't throw):
+  // already deleted → 404, which callers report as done.
+  if (!userDoc) {
     const notFound = new Error('User not found');
     notFound.statusCode = 404;
     throw notFound;
@@ -9814,7 +9817,14 @@ app.post('/api/local/delete', async (req, res) => {
     if (adminUsername && userId.trim().toLowerCase() === adminUsername.toLowerCase()) {
       return res.status(403).json({ success: false, error: 'Forbidden' });
     }
-    console.log(`[LOCAL-DELETE] Unauthenticated deletion requested for ${userId}`);
+    // The welcome page deletes while signed out, so the /api guard lets this
+    // route through; the proof is checked here: a session for the account,
+    // or this browser's signed temporary-account cookie for it. Without
+    // one, nothing is deleted (the page asks the patient to sign in).
+    if (!provesAccount(req, userId.trim())) {
+      return res.status(401).json({ success: false, error: 'SIGN_IN_REQUIRED', message: 'Sign in to this MAIA to delete it.' });
+    }
+    console.log(`[LOCAL-DELETE] Deletion requested for ${userId}`);
     // Capture user doc before deletion for the notification email
     let preDeleteUserDoc = null;
     try { preDeleteUserDoc = await cloudant.getDocument('maia_users', userId); } catch { /* ok */ }

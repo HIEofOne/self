@@ -111,6 +111,12 @@
   </q-dialog>
 </template>
 
+<script lang="ts">
+// One automatic join per account per page load, even if the checklist is
+// mounted again while the first join is still on its way.
+const autoJoinTriedFor = new Set<string>();
+</script>
+
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import EmailVerifyBox from './EmailVerifyBox.vue';
@@ -225,7 +231,6 @@ watch(() => verifiedEmail.verified, async (ok) => {
 // ── Group: join (automatically once, when the email is verified) ────────
 const joining = ref(false);
 const joinError = ref('');
-let autoJoinTried = false;
 const joinGroup = async () => {
   const g = joinTarget.value;
   if (!g?.joinLink || !props.userId || joining.value) return;
@@ -249,6 +254,8 @@ const joinGroup = async () => {
       body: JSON.stringify({ userId: props.userId, groupId, token, alias: props.userId, registryUrl })
     });
     const d = await r.json().catch(() => ({}));
+    // Another join for this group is already under way: it finishes it.
+    if (!r.ok && d.error === 'JOIN_IN_PROGRESS') return;
     if (!r.ok || !d.success) joinError.value = d.message || d.error || 'Could not join the group.';
   } catch {
     joinError.value = 'Could not reach the group. Try again.';
@@ -282,8 +289,8 @@ watch(status, async (s) => {
     if (lastPoll !== before) await refresh();
     return;
   }
-  if (g.required && emailDone.value && joinTarget.value && !autoJoinTried) {
-    autoJoinTried = true;
+  if (g.required && emailDone.value && joinTarget.value && props.userId && !autoJoinTriedFor.has(props.userId)) {
+    autoJoinTriedFor.add(props.userId);
     await joinGroup();
   }
 });

@@ -3384,15 +3384,32 @@ const confirmDeleteLocalUser = async () => {
   if (!localId) return;
   deleteLocalUserLoading.value = true;
   try {
-    // Best-effort server-side delete (user may have no cloud account)
+    // Server-side delete (the account, its private AI and files, and its
+    // group memberships). The server needs proof this browser owns the
+    // account: a session, or its signed temporary-account cookie. Without
+    // it the cloud account would survive while only this computer forgot
+    // it — so stop and say so, unless there is no cloud account left.
     try {
-      await fetch('/api/local/delete', {
+      const r = await fetch('/api/local/delete', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userId: localId })
       });
+      if (r.status === 401 || r.status === 403) {
+        const ex = await fetch(`/api/agent-exists?userId=${encodeURIComponent(localId)}`, { credentials: 'include' })
+          .then((x) => x.json()).catch(() => null);
+        if (ex?.accountExists !== false) {
+          showDeleteLocalUserDialog.value = false;
+          $q.notify({
+            type: 'warning', timeout: 15000,
+            message: `${localId} still exists at MAIA. Continue into it (sign in), then delete it from there, so it also leaves its groups.`
+          });
+          return;
+        }
+      }
     } catch {
-      // Non-fatal – clear local data regardless
+      // Unreachable server: nothing was deleted there; forget it locally.
     }
     await clearUserSnapshot(localId);
     clearWizardPendingKey(localId);
