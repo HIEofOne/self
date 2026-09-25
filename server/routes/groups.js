@@ -17,6 +17,7 @@ import { evaluatePolicies, evaluationOptionsFor, policySentence, normalizeCard, 
 import { isLocalDevRequest } from '../utils/api-guard.js';
 import { applyPseudonymMapping } from '../privacyFilter.js';
 import { medsAllergiesArtifact } from '../utils/summary-sections.js';
+import { recordPatientDecision as recordGnapDecision } from '../gnap/store.js';
 import { isVerified as emailTokenVerified } from '../emailVerification.js';
 import { CREDIT_PRICES, holdCredits, chargeCredits, resolveHold, getAccount } from '../credits.js';
 import {
@@ -3638,6 +3639,16 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
       reqDoc.status = decision === 'accept' ? 'accepted' : decision === 'block' ? 'blocked' : 'declined';
       reqDoc.decidedAt = new Date().toISOString();
       await cloudant.saveDocument(AS_REQUESTS_DB, reqDoc);
+
+      // A GNAP request (§10.5): the decision goes on the grant, and the
+      // requester's next continue gets a key-bound token (accept) or
+      // request_denied (decline); block is silence, like a deny-silent card
+      // (I-29). Nothing is emailed with an artifact (I-31).
+      if (reqDoc.gnapGrant) {
+        await recordGnapDecision(cloudant, reqDoc.gnapGrant, decision);
+        auditLog.logEvent({ type: 'gnap_decided', userId, ip: req.ip, details: { grant: reqDoc.gnapGrant, outcome: decision, by: 'patient' } });
+        return res.json({ success: true, status: reqDoc.status });
+      }
 
       if (decision === 'accept' || decision === 'block') {
         const userDoc = await cloudant.getDocument(USERS_DB, userId);
