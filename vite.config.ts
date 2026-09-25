@@ -75,6 +75,11 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:3001',
         changeOrigin: true
+      },
+      // GNAP (P4): the grant, continue, interaction and resource-server paths.
+      '/gnap': {
+        target: 'http://localhost:3001',
+        changeOrigin: true
       }
     }
   },
