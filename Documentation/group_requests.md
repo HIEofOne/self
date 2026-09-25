@@ -301,6 +301,13 @@ If step 5 is skipped, sharing can still be turned on. Allow cards for PS or meds
 2. **Interview.** The private AI asks about conditions, current medications, and allergies, and drafts a PS in the standard section format. The draft goes through the existing review dialog, which remains the only save path, and the patient verifies it.
 3. Other record PDFs → offered the `records-index` unlock (full RAG), or a later phase adds an in-context draft without a KB for small record sets.
 
+**Built (P7c, 2026-09-24): route 1 without a knowledge base.**
+- **Where it starts.** With no summary, the Patient Summary tab offers **Use my Apple Health export** (with an (i) note) and **Answer a few questions instead** (the P7a interview).
+- **Upload.** The chosen PDF is uploaded, recognized as an Apple Health export, and registered. A PDF that isn't an export is removed again.
+- **Pipeline.** Without `records-index`, the records pipeline skips indexing and reorders the rest: build the Lists → the patient verifies Current Medications (done means *verified*) → the private AI drafts → review. So nothing that merely advances the pipeline (such as opening the medications tab) can start a draft from an unverified list. The full edition's order is unchanged.
+- **Draft.** `runDraftGeneration` no longer stops with `NO_KB` here. The prompt builder reads every registered record, not only the KB folder, and uses the new clinical prompt `patient-summary.records-only`: the extracted blocks are the only source, and any section without a block says "Not documented in the available records."
+- **Not built yet.** Route 3 (the `records-index` unlock for other PDFs) needs an unlock screen, which doesn't exist yet.
+
 Current Medications verification reuses the existing Lists CM verify card. The rest of Lists stays behind `lists-full`.
 
 ---

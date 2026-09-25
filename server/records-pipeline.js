@@ -15,6 +15,8 @@
  * surface-specific triggers.
  */
 
+import { isFeatureEnabled } from './edition.js';
+
 // Order matters: `current` is the first non-done/non-skipped stage below.
 // summaryDrafted precedes medsVerified — the summary is drafted right after
 // indexing (hidden), then verifying meds PATCHES that draft. See
@@ -25,6 +27,20 @@ export const PIPELINE_STAGES = [
   'indexed',
   'summaryDrafted',
   'medsVerified',
+  'summaryVerified'
+];
+
+// Without indexing (Personal AS, D11 route 1) there is no hidden draft to
+// patch afterwards: the patient verifies Current Medications first and the
+// draft is written from the verified list — so nothing that merely
+// advances the pipeline (e.g. opening the medications tab) can start a
+// draft from an unverified list.
+const RECORDS_ONLY_STAGES = [
+  'imported',
+  'listsBuilt',
+  'indexed',
+  'medsVerified',
+  'summaryDrafted',
   'summaryVerified'
 ];
 
@@ -39,6 +55,11 @@ const trimmed = (v) => String(v || '').trim();
  *   the caller already computed it (user-status does); otherwise it is
  *   derived from the userDoc's own indexing fields, matching user-status's
  *   fallback logic.
+ * @param {boolean} [opts.indexing] — whether indexing the records is part of
+ *   this user's journey. Default: the `records-index` feature — always on in
+ *   the full edition; in the Personal AS edition only once the user turns on
+ *   "Search all my records". Without it the summary is drafted from the
+ *   deterministic lists alone (group_requests.md §5, D11).
  */
 export function computeRecordsPipeline(userDoc, opts = {}) {
   const files = Array.isArray(userDoc?.files) ? userDoc.files : [];
@@ -72,8 +93,13 @@ export function computeRecordsPipeline(userDoc, opts = {}) {
   // gates never blocked Epic-only users (their candidates come from the
   // slower Epic extraction and verification stays optional), and step 2
   // preserves that behavior.
-  if (trimmed(userDoc?.currentMedications)) {
-    stages.medsVerified = { status: 'done', at: null };
+  const indexing = opts.indexing ?? isFeatureEnabled('records-index', userDoc);
+  // Records-only: done means VERIFIED — the list is the draft's input.
+  const medsDone = indexing
+    ? !!trimmed(userDoc?.currentMedications)
+    : !!(trimmed(userDoc?.currentMedications) && userDoc?.currentMedicationsVerifiedAt);
+  if (medsDone) {
+    stages.medsVerified = { status: 'done', at: indexing ? null : userDoc.currentMedicationsVerifiedAt };
   } else {
     stages.medsVerified = { status: hasAppleFile ? 'pending' : 'skipped', at: null };
   }
@@ -84,7 +110,9 @@ export function computeRecordsPipeline(userDoc, opts = {}) {
   const docSaysIndexed = ks?.backendCompleted === true
     || (Array.isArray(userDoc?.kbIndexedBucketKeys) && userDoc.kbIndexedBucketKeys.length > 0);
   const indexedDone = opts.hasFilesInKB === true || (opts.hasFilesInKB == null && docSaysIndexed);
-  if (indexedDone) {
+  if (!indexing) {
+    stages.indexed = { status: 'skipped', at: null };
+  } else if (indexedDone) {
     stages.indexed = { status: 'done', at: ks?.completedAt || null };
   } else if (ks?.phase && ks.phase !== 'complete' && ks.phase !== 'error' && ks.phase !== 'failed') {
     stages.indexed = { status: 'running', at: ks.startedAt || null, phase: ks.phase };
@@ -121,7 +149,8 @@ export function computeRecordsPipeline(userDoc, opts = {}) {
     ? { status: 'done', at: null }
     : { status: 'pending', at: null };
 
-  const current = PIPELINE_STAGES.find((s) => !['done', 'skipped'].includes(stages[s].status)) || 'complete';
+  const order = indexing ? PIPELINE_STAGES : RECORDS_ONLY_STAGES;
+  const current = order.find((s) => !['done', 'skipped'].includes(stages[s].status)) || 'complete';
 
   return {
     stages,
