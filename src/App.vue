@@ -1137,6 +1137,7 @@ import { useVerifiedEmail } from './composables/verifiedEmail';
 import DeepLinkAccess from './components/DeepLinkAccess.vue';
 import AdminUsers from './components/AdminUsers.vue';
 import { useQuasar } from 'quasar';
+import { startAuthentication } from '@simplewebauthn/browser';
 import { saveUserSnapshot, getUserSnapshot, clearUserSnapshot } from './utils/localDb';
 import {
   writeStateFile, clearDirectoryHandle, scanWeblocOwner,
@@ -3379,6 +3380,33 @@ const handleDeleteUser = (userIdOrEvent?: string | Event) => {
 };
 
 /** [AUTH] Confirmed full delete: cloud account + local MAIA files + IndexedDB handle. Nothing to restore. */
+/** Delete an account with its passkey (no sign-in, so no private AI is
+ *  started for an account that is about to go). */
+const deleteWithPasskey = async (userId: string): Promise<'deleted' | 'cancelled' | 'failed'> => {
+  try {
+    const o = await fetch('/api/passkey/authenticate', {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId })
+    });
+    if (!o.ok) return 'failed';
+    const options = await o.json();
+    let assertion;
+    try {
+      assertion = await startAuthentication({ optionsJSON: options });
+    } catch {
+      return 'cancelled';
+    }
+    const r = await fetch('/api/local/delete', {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId, passkeyResponse: assertion })
+    });
+    return r.ok ? 'deleted' : 'failed';
+  } catch {
+    return 'failed';
+  }
+};
+
 const confirmDeleteLocalUser = async () => {
   const localId = welcomeLocalUserId.value;
   if (!localId) return;
@@ -3397,15 +3425,31 @@ const confirmDeleteLocalUser = async () => {
         body: JSON.stringify({ userId: localId })
       });
       if (r.status === 401 || r.status === 403) {
-        const ex = await fetch(`/api/agent-exists?userId=${encodeURIComponent(localId)}`, { credentials: 'include' })
-          .then((x) => x.json()).catch(() => null);
-        if (ex?.accountExists !== false) {
-          showDeleteLocalUserDialog.value = false;
-          $q.notify({
-            type: 'warning', timeout: 15000,
-            message: `${localId} still exists at MAIA. Continue into it (sign in), then delete it from there, so it also leaves its groups.`
-          });
-          return;
+        const d = await r.json().catch(() => ({}));
+        if (d.passkey) {
+          // The account's passkey is the proof: ask for it, then delete.
+          const outcome = await deleteWithPasskey(localId);
+          if (outcome !== 'deleted') {
+            showDeleteLocalUserDialog.value = false;
+            $q.notify({
+              type: 'warning', timeout: 10000,
+              message: outcome === 'cancelled'
+                ? 'Nothing was deleted.'
+                : `Your passkey couldn't be checked, so ${localId} was not deleted. Try again.`
+            });
+            return;
+          }
+        } else {
+          const ex = await fetch(`/api/agent-exists?userId=${encodeURIComponent(localId)}`, { credentials: 'include' })
+            .then((x) => x.json()).catch(() => null);
+          if (ex?.accountExists !== false) {
+            showDeleteLocalUserDialog.value = false;
+            $q.notify({
+              type: 'warning', timeout: 12000,
+              message: `MAIA couldn't confirm that ${localId} is yours on this computer, so it was not deleted.`
+            });
+            return;
+          }
         }
       }
     } catch {
