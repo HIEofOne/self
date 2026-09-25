@@ -1658,7 +1658,7 @@
                   <q-btn
                     v-if="showSummaryAttention && !isEditingSummaryTab"
                     outline
-                    label="Verify"
+                    :label="tabMedsDirty ? 'Save & verify' : 'Verify'"
                     color="primary"
                     icon="verified"
                     :class="{ 'verify-highlight': showSummaryAttention }"
@@ -1696,6 +1696,16 @@
                   placeholder="Enter patient summary..."
                 />
               </div>
+              <!-- P7d: the Current Medications section as rows, in place -->
+              <div v-else-if="tabMedsView" class="text-body1 q-pa-md bg-grey-1 rounded-borders" @click="handlePsCitationClick">
+                <div v-html="tabMedsView.before"></div>
+                <SummaryMedsRows
+                  :model-value="tabMedRows" :caption="medsProvenance.caption" :record-keys="medsProvenance.recordKeys"
+                  :differs-from="tabMedsDiffer" :render-row="renderMedRow" :disabled="isSavingSummary"
+                  @update:model-value="onTabMedRows"
+                />
+                <div v-html="tabMedsView.after"></div>
+              </div>
               <div
                 v-else
                 class="text-body1 q-pa-md bg-grey-1 rounded-borders"
@@ -1729,7 +1739,7 @@
                 <q-btn
                   v-if="showSummaryAttention && !isEditingSummaryTab"
                   outline
-                  label="Verify"
+                  :label="tabMedsDirty ? 'Save & verify' : 'Verify'"
                   color="primary"
                   icon="verified"
                   :class="{ 'verify-highlight': showSummaryAttention }"
@@ -1996,7 +2006,22 @@
             You can also edit it first — saving the edit counts as your
             verification. Nothing is saved until you choose.
           </div>
+          <div v-if="isPersonalAs && reviewMedsView" class="text-body2 q-mb-sm text-grey-9">
+            Check your Current Medications in the list below: edit, remove or add medicines right there.
+            They are verified with the rest of your summary.
+          </div>
+          <!-- P7d: the Current Medications section as rows, in place -->
+          <div v-if="isPersonalAs && reviewMedsView" class="text-body2 q-pa-md bg-grey-1 rounded-borders" @click="handlePsCitationClick">
+            <div v-html="reviewMedsView.before"></div>
+            <SummaryMedsRows
+              :model-value="reviewMedRows" :caption="medsProvenance.caption" :record-keys="medsProvenance.recordKeys"
+              :differs-from="reviewMedsDiffer" :render-row="renderMedRow"
+              @update:model-value="onReviewMedRows"
+            />
+            <div v-html="reviewMedsView.after"></div>
+          </div>
           <div
+            v-else
             class="text-body2 q-pa-md bg-grey-1 rounded-borders"
             v-html="renderPsHtml(newSummaryToReplace)"
             @click="handlePsCitationClick"
@@ -2081,6 +2106,8 @@ import {
   getLocalFolderStatus, readFileFromFolder, reconnectLocalFolder, reconnectLocalFolderWithGesture, writeFileToFolder
 } from '../utils/localFolder';
 import { findAppleHealthExportInFolder } from '../utils/appleHealthFolder';
+import { drugKey, joinMedsSection, sameMedList, splitMedsSection, type MedsSection } from '../utils/summaryMeds';
+import SummaryMedsRows from './SummaryMedsRows.vue';
 import { logModalEvent } from '../utils/modalLog';
 import { useEdition } from '../composables/useEdition';
 import { useSetupChecklist } from '../composables/useSetupChecklist';
@@ -2236,14 +2263,6 @@ const handleShowPatientSummary = () => {
 
 const handleCurrentMedicationsSaved = (payload: { value: string; edited: boolean; changed?: boolean; source?: string; verified?: boolean }) => {
   emit('current-medications-saved', payload);
-  // Personal AS, Apple Health route: the verified list was the last thing
-  // the draft needed — write the summary now (it opens for review).
-  if (payload.verified && isPersonalAs.value && appleHealthAwaitingMeds.value) {
-    appleHealthAwaitingMeds.value = false;
-    currentTab.value = 'summary';
-    void requestNewSummary({ skipCmGate: true });
-    return;
-  }
   if (payload.verified && !props.wizardActive) {
     // Outside the wizard, EVERY verified save reconciles against the
     // Patient Summary. Deliberately not gated on payload.changed: the
@@ -2488,7 +2507,15 @@ const TAB_FEATURES: Record<string, string> = {
   // lists: always shown; without `lists-full` it is Current Medications only
 };
 const { has, isPersonalAs } = useEdition();
-const tabVisible = (name: string) => !TAB_FEATURES[name] || has(TAB_FEATURES[name]);
+// P7d: in Personal AS the medicines are reviewed inside the Patient Summary,
+// so there is no separate Current Medications tab (Lists, if unlocked, stays).
+const tabVisible = (name: string) => (name === 'lists'
+  ? !isPersonalAs.value || has('lists-full')
+  : !TAB_FEATURES[name] || has(TAB_FEATURES[name]));
+// Anything that still asks for the hidden tab lands on the summary.
+watch([currentTab, isPersonalAs], ([t]) => {
+  if (t === 'lists' && !tabVisible('lists')) currentTab.value = 'summary';
+}, { immediate: true });
 
 const railTabs = computed(() => [
   { name: 'files',      icon: 'description',  label: 'Saved Files',     alertCount: 0, alertOutline: false, infoAlert: false,             infoTitle: '' },
@@ -3102,6 +3129,106 @@ const renderPsHtml = (text: string | null | undefined, maskMapping?: Array<{ ori
 const patientSummaryHtml = computed(() => {
   void userFiles.value;
   return renderPsHtml(patientSummary.value);
+});
+
+// ── P7d (Personal AS): Current Medications as rows inside the summary ──
+// The summary is still one text; the review screen and the tab show its
+// Current Medications section as rows the patient edits in place, and
+// join them back before the one Verify. The server derives the medication
+// list from the verified summary.
+const MEDS_MARK = 'MAIAMEDSROWSMARK';
+const LEGEND_TAIL = /\n\n---\n\*\*File legend\*\*[\s\S]*$/;
+/** Render the summary once with a marker where the rows go — so one File
+ *  legend also covers the rows' citations — and cut the HTML there. */
+const renderAroundMeds = (parts: MedsSection, rows: string[]): { before: string; after: string } | null => {
+  const tags = rows.flatMap((r) => r.match(/\[[^\]]*\]/g) || []).join(' ');
+  const html = renderPsHtml([parts.before, '', parts.heading, '', `${MEDS_MARK} ${tags}`, '', parts.after].join('\n'));
+  const m = html.match(new RegExp(`<p>${MEDS_MARK}[\\s\\S]*?</p>`));
+  if (!m || m.index === undefined) return null;
+  return { before: html.slice(0, m.index), after: html.slice(m.index + m[0].length) };
+};
+const renderMedRow = (row: string): string =>
+  psMarkdown.renderInline(processFileNCitations(row, userFiles.value as any).replace(LEGEND_TAIL, ''));
+
+// Where the rows came from, and a separately verified list that differs
+// (accounts verified before P7d; offered once, until the next Verify).
+const medsProvenance = reactive<{ caption: string; recordKeys: string[] | null | undefined; verifiedRows: string[] | null }>({
+  caption: '', recordKeys: undefined, verifiedRows: null
+});
+const loadMedsProvenance = async (): Promise<void> => {
+  if (!props.userId) return;
+  const q = `userId=${encodeURIComponent(props.userId)}`;
+  const [cur, st] = await Promise.all([
+    fetch(`/api/medications/current?${q}`, { credentials: 'include' }).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+    fetch(`/api/patient-summary?${q}`, { credentials: 'include' }).then((r) => (r.ok ? r.json() : null)).catch(() => null)
+  ]);
+  const mode = String(cur?.sourceMode || 'none');
+  medsProvenance.caption = mode === 'apple-health'
+    ? 'From your Apple Health export: medicines active in the past 18 months. Check each one.'
+    : (mode === 'epic' ? 'From the medication list in your records (past 18 months). Check each one.' : '');
+  medsProvenance.recordKeys = mode === 'none'
+    ? undefined
+    : (Array.isArray(cur?.currentMeds) ? cur.currentMeds.map((m: { name: string }) => drugKey(m.name)).filter(Boolean) : null);
+  const verified = String(st?.verifiedMedications?.text || '');
+  medsProvenance.verifiedRows = verified
+    ? verified.split('\n').map((l) => l.trim().replace(/^[-*•+]\s+/, '').trim()).filter((l) => l && !/^none\b/i.test(l))
+    : null;
+};
+const differingVerifiedRows = (rows: string[]): string[] | null =>
+  (medsProvenance.verifiedRows && !sameMedList(medsProvenance.verifiedRows, rows) ? medsProvenance.verifiedRows : null);
+
+// The review dialog (a new draft).
+const reviewMedParts = ref<MedsSection | null>(null);
+const reviewMedRows = ref<string[]>([]);
+const reviewMedsDiffer = ref<string[] | null>(null);
+watch(showReplaceSummaryDialog, async (open) => {
+  reviewMedParts.value = null;
+  reviewMedsDiffer.value = null;
+  if (!open || !isPersonalAs.value) return;
+  const p = splitMedsSection(newSummaryToReplace.value);
+  if (!p.found) return;
+  reviewMedParts.value = p;
+  reviewMedRows.value = [...p.rows];
+  await loadMedsProvenance();
+  reviewMedsDiffer.value = differingVerifiedRows(reviewMedRows.value);
+});
+const onReviewMedRows = (rows: string[]) => {
+  reviewMedRows.value = rows;
+  reviewMedsDiffer.value = null;
+  if (reviewMedParts.value) newSummaryToReplace.value = joinMedsSection(reviewMedParts.value, rows);
+};
+const reviewMedsView = computed(() => {
+  void userFiles.value;
+  return reviewMedParts.value ? renderAroundMeds(reviewMedParts.value, reviewMedRows.value) : null;
+});
+
+// The Patient Summary tab (the stored summary). Editing a row makes the
+// tab's Verify a "Save & verify" of the edited text.
+const tabMedParts = computed(() => {
+  if (!isPersonalAs.value || !patientSummary.value) return null;
+  const p = splitMedsSection(patientSummary.value);
+  return p.found ? p : null;
+});
+const tabMedRows = ref<string[]>([]);
+const tabMedsDirty = ref(false);
+const tabMedsDiffer = ref<string[] | null>(null);
+watch(tabMedParts, async (p) => {
+  tabMedRows.value = p ? [...p.rows] : [];
+  tabMedsDirty.value = false;
+  tabMedsDiffer.value = null;
+  if (!p) return;
+  await loadMedsProvenance();
+  tabMedsDiffer.value = differingVerifiedRows(tabMedRows.value);
+}, { immediate: true });
+const onTabMedRows = (rows: string[]) => {
+  tabMedRows.value = rows;
+  tabMedsDirty.value = true;
+  tabMedsDiffer.value = null;
+  summaryNeedsVerify.value = true;
+};
+const tabMedsView = computed(() => {
+  void userFiles.value;
+  return tabMedParts.value ? renderAroundMeds(tabMedParts.value, tabMedRows.value) : null;
 });
 /** Citation clicked in the Sharing Policies "What would be shared" preview —
  *  open the PDF viewer exactly like a Patient Summary citation. */
@@ -7095,7 +7222,6 @@ const onInterviewDrafted = (text: string) => {
 // lists alone into the review dialog — the only way to save and verify.
 const appleHealthInput = ref<HTMLInputElement | null>(null);
 const appleHealthProgress = ref('');
-const appleHealthAwaitingMeds = ref(false);
 
 // The export is found in the patient's MAIA folder — the one chosen in the
 // setup checklist — and recognized in the browser, so no other record
@@ -7237,19 +7363,9 @@ const continueAppleHealthRoute = async () => {
         ? 'Reading your export is taking longer than usual. Try again in a few minutes.'
         : 'MAIA could not read your Apple Health export. Try again.');
     }
-    const p = await fetchPipeline(props.userId);
-    if (p?.pipeline.stages.medsVerified?.status === 'done') {
-      currentTab.value = 'summary';
-      void requestNewSummary({ skipCmGate: true });
-      return;
-    }
-    // The draft uses the VERIFIED list — so verify it first.
-    appleHealthAwaitingMeds.value = true;
-    currentTab.value = 'lists';
-    $q.notify({
-      type: 'info', timeout: 15000,
-      message: 'Check your Current Medications, then click VERIFY. Your private AI writes your summary next.'
-    });
+    // P7d: the medicines are checked in the summary review itself.
+    currentTab.value = 'summary';
+    void requestNewSummary({ skipCmGate: true });
   } catch (e) {
     $q.notify({ type: 'negative', message: e instanceof Error ? e.message : 'Could not read your Apple Health export.' });
   } finally {
@@ -7315,7 +7431,7 @@ const requestNewSummary = async (opts?: { skipCmGate?: boolean }) => {
   // keeps the difference. Skipped when the caller already carries that consent
   // (e.g. the "Update Patient Summary?" dialog) and self-skips when no
   // verified summary exists (first-run wizard stays smooth).
-  if (!opts?.skipCmGate && psVerifiedAt.value && patientSummary.value) {
+  if (!opts?.skipCmGate && !isPersonalAs.value && psVerifiedAt.value && patientSummary.value) {
     const differ = await psMedsDifferFromVerified();
     if (differ && $q && typeof $q.dialog === 'function') {
       logModalEvent(props.userId, 'cm-differ-before-new-ps', 'shown');
@@ -7386,12 +7502,14 @@ const requestNewSummary = async (opts?: { skipCmGate?: boolean }) => {
     switch (adv.next.action) {
       case 'process-initial-file':
       case 'lists-build-running':
+        if (isPersonalAs.value) {
+          $q.notify({ type: 'info', message: 'MAIA is still reading your Apple Health export. Try again in a minute.', timeout: 10000 });
+          return;
+        }
         $q.notify({ type: 'warning', message: 'Your Lists are still being built from your records — opening Lists...', timeout: 12000 });
         currentTab.value = 'lists';
         return;
       case 'verify-medications':
-        // Personal AS: once they're verified, the draft starts by itself.
-        if (isPersonalAs.value) appleHealthAwaitingMeds.value = true;
         $q.notify({
           type: 'warning',
           message: 'Verify your Current Medications first — the Patient Summary is built from the verified list. Opening Lists...',
@@ -7868,7 +7986,8 @@ const saveSummaryFromTab = async () => {
 
     // Extract Current Medications from Patient Summary and save — but only if
     // the user hasn't already verified medications (their verified list is authoritative).
-    try {
+    // P7d (Personal AS): the server derives the list from this verified save.
+    if (!isPersonalAs.value) try {
       const statusRes = await fetch(`/api/user-status?userId=${encodeURIComponent(props.userId)}`, {
         credentials: 'include'
       });
@@ -7935,6 +8054,18 @@ const extractMedsFromPS = (psText: string): string[] => {
 
 const handleVerifySummaryTab = async () => {
   if (!props.userId || !patientSummary.value) return;
+
+  // P7d (Personal AS): the medicines are part of what is verified — no
+  // separate list to compare against. Edited rows are saved with it.
+  if (isPersonalAs.value) {
+    if (tabMedsDirty.value && tabMedParts.value) {
+      summaryEditText.value = joinMedsSection(tabMedParts.value, tabMedRows.value);
+      await saveSummaryFromTab();
+      return;
+    }
+    finishVerifySummary();
+    return;
+  }
 
   // Setup: this PS was just auto-patched from the verified meds list, so any
   // apparent diff is a formatting artifact, not a manual edit. Skip the

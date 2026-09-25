@@ -44,7 +44,8 @@ import setupPolicyRoutes from './routes/policies.js';
 import setupEditionRoutes from './routes/edition.js';
 import setupSetupRoutes from './routes/setup.js';
 import setupInterviewRoutes from './routes/interview.js';
-import { getEdition, isFeatureEnabled } from './edition.js';
+import { combinedSummaryReview, getEdition, isFeatureEnabled } from './edition.js';
+import { medsFromSummary } from './utils/summary-sections.js';
 import { createFeatureGuard } from './edition-routes.js';
 import {
   S3Client,
@@ -12071,9 +12072,35 @@ async function buildPatientSummaryPromptForUser(userId, userDoc, profileKey = 'd
     : (!kbPrefix || (f.bucketKey || '').startsWith(kbPrefix)));
   const verifiedMeds = String(userDoc?.currentMedications || '').trim();
   console.log(`[buildPatientSummaryPromptForUser] userId=${userId} profileKey=${profileKey} verifiedMedsPresent=${verifiedMeds.length > 0} verifiedMedsLen=${verifiedMeds.length} snippet="${verifiedMeds.slice(0, 200)}"`);
-  const currentMedications = verifiedMeds
+  // The records' medication source, read once for both medication blocks.
+  let medSourcePromise = null;
+  const getMedSource = () => (medSourcePromise ||= resolvePatientMedicationSource(userId, userDoc));
+  let currentMedications = verifiedMeds
     ? `**Authoritative Current Medications (verified by the patient):**\n${verifiedMeds}\n\nUse this list AS-IS for the "Current Medications" section above — do NOT replace it with anything from the knowledge base.`
     : '';
+  // P7d: not verified yet → the records' own list (Apple Health medication
+  // records or an Epic Medication List) goes in as the section, and the
+  // patient reviews it as rows before saving. No structured list → the
+  // agent extracts from the knowledge base, as before.
+  if (!verifiedMeds) {
+    try {
+      const cand = await computeCurrentMedCandidates(userId, userDoc, await getMedSource());
+      if (cand.currentMeds.length > 0) {
+        const lines = cand.currentMeds.map(m => {
+          const tag = m.fileTag ? ` [${m.fileTag}${m.page ? ` p.${m.page}` : ''}]` : '';
+          return `- ${m.name}${tag}`;
+        }).join('\n');
+        const from = cand.mode === 'apple-health' ? 'Apple Health medication records'
+          : (cand.mode === 'epic' ? 'the Epic Medication List' : 'the records');
+        const more = recordsOnly
+          ? 'Do not add or remove medications.'
+          : 'Add a medication from the knowledge base only if it is clearly current and not already listed, with its citation.';
+        currentMedications = `**Authoritative Current Medications (from ${from}: active within the past 18 months; the patient reviews this list before saving):**\n${lines}\n\nUse this for the "Current Medications" section above, one medication per line, keeping the citations. ${more}`;
+      }
+    } catch (e) {
+      console.warn(`[patient-summary] current-meds candidates failed: ${e?.message || e}`);
+    }
+  }
 
   // Patient identity (name / DOB / age / sex) — deterministic from the
   // PDF header (Apple Health "Date of birth: …" / Epic "DOB: …, Legal
@@ -12385,7 +12412,7 @@ async function buildPatientSummaryPromptForUser(userId, userDoc, profileKey = 'd
   // currently active won't also appear here.
   let stoppedMedications = '';
   try {
-    const { mode, meds, legend } = await resolvePatientMedicationSource(userId, userDoc);
+    const { mode, meds, legend } = await getMedSource();
     if (meds.length > 0) {
       const { mergeMedications } = await import('./utils/meds-extractor.js');
       const cutoff = new Date(); cutoff.setMonth(cutoff.getMonth() - 18);
@@ -13480,6 +13507,25 @@ app.get('/api/medications/worksheet', async (req, res) => {
  * Each med: { name, status:'active'|'discontinued', isoDate, page, fileTag }.
  * Returns { mode, meds, legend }.
  */
+/** The records' Current Medications: deduped by drug (latest entry wins),
+ *  active within the past 18 months, with the server-side redaction
+ *  (mirrors the System Instructions "remove sexual-function meds" rule —
+ *  the deterministic path bypasses the agent). Shared by the Lists card
+ *  (/api/medications/current) and the summary draft (P7d). Pass `source`
+ *  when resolvePatientMedicationSource already ran. */
+async function computeCurrentMedCandidates(userId, userDoc, source = null) {
+  const { mode, meds, legend } = source || await resolvePatientMedicationSource(userId, userDoc);
+  const cutoff = new Date();
+  cutoff.setMonth(cutoff.getMonth() - 18);
+  const cutoffDate = cutoff.toISOString().slice(0, 10);
+  const { mergeMedications } = await import('./utils/meds-extractor.js');
+  const merged = mergeMedications(meds);
+  const candidates = merged.filter(m => m.status === 'active' && m.isoDate >= cutoffDate);
+  const { redactMedications } = await import('./utils/medication-redactor.js');
+  const { kept: currentMeds, redacted } = redactMedications(candidates);
+  return { mode, cutoffDate, merged, currentMeds, redacted, legend };
+}
+
 async function resolvePatientMedicationSource(userId, userDoc) {
   if (!userDoc) userDoc = await cloudant.getDocument('maia_users', userId);
   if (!userDoc) return { mode: 'none', meds: [], legend: [] };
@@ -13554,22 +13600,7 @@ app.get('/api/medications/current', async (req, res) => {
     const userDoc = await cloudant.getDocument('maia_users', userId);
     if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
 
-    const { mode, meds, legend } = await resolvePatientMedicationSource(userId, userDoc);
-    const cutoff = new Date();
-    cutoff.setMonth(cutoff.getMonth() - 18);
-    const cutoffDate = cutoff.toISOString().slice(0, 10);
-
-    // Dedupe by drug (latest entry wins), then keep only current candidates.
-    const { mergeMedications } = await import('./utils/meds-extractor.js');
-    const merged = mergeMedications(meds);
-    const candidates = merged.filter(m => m.status === 'active' && m.isoDate >= cutoffDate);
-
-    // Apply server-side redaction (mirrors the System Instructions
-    // "remove sexual-function meds" rule). The deterministic pipeline
-    // bypasses the agent, so we apply the rule here before the user sees
-    // the pre-filled list.
-    const { redactMedications } = await import('./utils/medication-redactor.js');
-    const { kept: currentMeds, redacted } = redactMedications(candidates);
+    const { mode, cutoffDate, merged, currentMeds, redacted, legend } = await computeCurrentMedCandidates(userId, userDoc);
     const currentText = currentMeds.map(m => `- ${m.name}`).join('\n');
 
     res.json({
@@ -14529,6 +14560,11 @@ app.get('/api/patient-summary', async (req, res) => {
       // Phase 2: the persistent verified stamp for the CURRENT summary.
       // Cleared whenever a new/replacement summary is saved unverified.
       verifiedAt: userDoc.patientSummaryVerifiedAt || null,
+      // P7d: a separately verified medication list, so the review can offer
+      // it when it differs from the summary's own section.
+      verifiedMedications: userDoc.currentMedicationsVerifiedAt && userDoc.currentMedications
+        ? { text: userDoc.currentMedications, verifiedAt: userDoc.currentMedicationsVerifiedAt }
+        : null,
       // Phase 4: the auto-generated privacy-filtered copy ({text,
       // mappingCount, createdAt}) — default for sharing-request responses.
       // mapping rides along so the CLIENT can mask names in strings it
@@ -14559,6 +14595,18 @@ app.get('/api/patient-summary', async (req, res) => {
     });
   }
 });
+
+/** P7d: a verified summary's Current Medications section IS the verified
+ *  medication list, so the separate field is derived from it (it feeds the
+ *  next draft and the Lists view). A summary without the section leaves
+ *  the list as it is. */
+function syncMedsFromVerifiedSummary(doc, text) {
+  if (!combinedSummaryReview()) return;
+  const meds = medsFromSummary(text);
+  if (meds === null) return;
+  doc.currentMedications = meds;
+  doc.currentMedicationsVerifiedAt = doc.patientSummaryVerifiedAt || new Date().toISOString();
+}
 
 app.post('/api/patient-summary', async (req, res) => {
   try {
@@ -14627,6 +14675,7 @@ app.post('/api/patient-summary', async (req, res) => {
     const psVerified = req.body.verified === true;
     if (psVerified) {
       userDoc.patientSummaryVerifiedAt = userDoc.updatedAt;
+      syncMedsFromVerifiedSummary(userDoc, summary);
     } else {
       delete userDoc.patientSummaryVerifiedAt;
     }
@@ -14659,6 +14708,7 @@ app.post('/api/patient-summary', async (req, res) => {
         }
         if (psVerified) {
           freshDoc.patientSummaryVerifiedAt = freshDoc.updatedAt;
+          syncMedsFromVerifiedSummary(freshDoc, summary);
         } else {
           delete freshDoc.patientSummaryVerifiedAt;
         }
@@ -14710,6 +14760,7 @@ app.post('/api/patient-summary/verify', async (req, res) => {
       }
       userDoc.patientSummaryVerifiedAt = new Date().toISOString();
       userDoc.updatedAt = userDoc.patientSummaryVerifiedAt;
+      syncMedsFromVerifiedSummary(userDoc, current.text);
       // Phase 4: verification refreshes the privacy-filtered version — the
       // default artifact for responding to sharing requests.
       refreshPrivacyFilteredSummary(userDoc);

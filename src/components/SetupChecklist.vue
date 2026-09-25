@@ -68,7 +68,7 @@
                     <q-btn outline dense no-caps color="primary" class="q-mt-xs" label="Use an invitation" @click="emit('open-groups')" />
                   </template>
                 </div>
-                <!-- 5. Patient Summary + Current Medications -->
+                <!-- 5. Patient Summary, its Current Medications verified with it (P7d) -->
                 <!-- 6. Confirm the rules, then turn on sharing -->
                 <div v-else-if="row.key === 'sharing'" class="q-mt-xs">
                   <q-btn
@@ -185,9 +185,6 @@ const rows = computed(() => (status.value?.steps || [])
   .map((s) => {
     let detail = '';
     if (s.key === 'group' && s.done && s.groups?.length) detail = `Member of ${s.groups.join(', ')}`;
-    if (s.key === 'summary' && !s.done && (s.medicationsVerified || s.summaryVerified)) {
-      detail = s.medicationsVerified ? 'Current Medications verified' : 'Patient Summary verified';
-    }
     if (s.key === 'sharing' && !s.done) {
       if (s.asState === 'paused') detail = 'Sharing is paused.';
       else if (s.unconfirmed) detail = `${s.unconfirmed} ${s.unconfirmed === 1 ? 'rule' : 'rules'} to confirm`;

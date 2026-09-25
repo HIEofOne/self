@@ -167,6 +167,7 @@ describe('cross-host autonomous responses (registry on Host A, member AS on Host
       _id: 'jessica76', userId: 'jessica76',
       email: 'jessica76@example.com', emailVerified: true,
       currentMedications: 'Current Medications:\n- Aspirin 81mg daily\nAllergies: none',
+      currentMedicationsVerifiedAt: '2026-09-01T00:00:00Z', // only verified meds leave (P7d)
       privacyFilteredSummary: { text: '# Patient Summary\nFirst12 Last34, DOB [filtered]\nDx: hypertension.' },
       privacyFilter: { pseudonymMapping: [] },
       sharingPolicies: []

@@ -15,7 +15,7 @@
  * surface-specific triggers.
  */
 
-import { isFeatureEnabled } from './edition.js';
+import { combinedSummaryReview, isFeatureEnabled } from './edition.js';
 
 // Order matters: `current` is the first non-done/non-skipped stage below.
 // summaryDrafted precedes medsVerified — the summary is drafted right after
@@ -27,20 +27,6 @@ export const PIPELINE_STAGES = [
   'indexed',
   'summaryDrafted',
   'medsVerified',
-  'summaryVerified'
-];
-
-// Without indexing (Personal AS, D11 route 1) there is no hidden draft to
-// patch afterwards: the patient verifies Current Medications first and the
-// draft is written from the verified list — so nothing that merely
-// advances the pipeline (e.g. opening the medications tab) can start a
-// draft from an unverified list.
-const RECORDS_ONLY_STAGES = [
-  'imported',
-  'listsBuilt',
-  'indexed',
-  'medsVerified',
-  'summaryDrafted',
   'summaryVerified'
 ];
 
@@ -94,12 +80,12 @@ export function computeRecordsPipeline(userDoc, opts = {}) {
   // slower Epic extraction and verification stays optional), and step 2
   // preserves that behavior.
   const indexing = opts.indexing ?? isFeatureEnabled('records-index', userDoc);
-  // Records-only: done means VERIFIED — the list is the draft's input.
-  const medsDone = indexing
-    ? !!trimmed(userDoc?.currentMedications)
-    : !!(trimmed(userDoc?.currentMedications) && userDoc?.currentMedicationsVerifiedAt);
-  if (medsDone) {
-    stages.medsVerified = { status: 'done', at: indexing ? null : userDoc.currentMedicationsVerifiedAt };
+  // P7d: where Current Medications are verified inside the summary review,
+  // there is no separate medications step.
+  if (combinedSummaryReview()) {
+    stages.medsVerified = { status: 'skipped', at: null };
+  } else if (trimmed(userDoc?.currentMedications)) {
+    stages.medsVerified = { status: 'done', at: null };
   } else {
     stages.medsVerified = { status: hasAppleFile ? 'pending' : 'skipped', at: null };
   }
@@ -149,8 +135,7 @@ export function computeRecordsPipeline(userDoc, opts = {}) {
     ? { status: 'done', at: null }
     : { status: 'pending', at: null };
 
-  const order = indexing ? PIPELINE_STAGES : RECORDS_ONLY_STAGES;
-  const current = order.find((s) => !['done', 'skipped'].includes(stages[s].status)) || 'complete';
+  const current = PIPELINE_STAGES.find((s) => !['done', 'skipped'].includes(stages[s].status)) || 'complete';
 
   return {
     stages,
