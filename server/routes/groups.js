@@ -16,6 +16,7 @@
 import { evaluatePolicies, evaluationOptionsFor, policySentence, normalizeCard, POLICY_SCOPES, POLICY_PURPOSES } from './policies.js';
 import { isLocalDevRequest } from '../utils/api-guard.js';
 import { applyPseudonymMapping } from '../privacyFilter.js';
+import { medsAllergiesArtifact } from '../utils/summary-sections.js';
 import { isVerified as emailTokenVerified } from '../emailVerification.js';
 import { CREDIT_PRICES, holdCredits, chargeCredits, resolveHold, getAccount } from '../credits.js';
 import {
@@ -916,15 +917,13 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
         if (decision.outcome === 'allow' && ownerDoc) {
           // ONLY the privacy-filtered artifacts ever leave (allow cards are
           // filtered-by-default; unfiltered autonomous sharing is not offered).
-          const mapping = ownerDoc.privacyFilter?.pseudonymMapping || [];
           let artifact = '';
           let artifactLabel = '';
           if (scope === 'meds-allergies') {
-            const meds = String(ownerDoc.currentMedications || '').trim();
-            if (meds) {
-              artifact = applyPseudonymMapping(mapping, meds);
-              artifactLabel = 'privacy-filtered Current Medications';
-            }
+            // P7d: only something the patient verified — the summary's
+            // Current Medications and Allergies, or a verified list.
+            artifact = medsAllergiesArtifact(ownerDoc, applyPseudonymMapping);
+            if (artifact) artifactLabel = 'privacy-filtered Current Medications and Allergies';
           } else if (scope !== 'notification-only') {
             const pf = String(ownerDoc.privacyFilteredSummary?.text || '').trim();
             if (pf) {
@@ -4008,12 +4007,12 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
       // accepting with an empty response.
       if (decision && decision.outcome === 'allow'
           && r.resource && r.resource !== 'notification-only' && POLICY_SCOPES.includes(r.resource)) {
-        const mapping = userDoc.privacyFilter?.pseudonymMapping || [];
         let artifact = '';
         let artifactLabel = '';
         if (r.resource === 'meds-allergies') {
-          const meds = String(userDoc.currentMedications || '').trim();
-          if (meds) { artifact = applyPseudonymMapping(mapping, meds); artifactLabel = 'privacy-filtered Current Medications'; }
+          // P7d: only something the patient verified (see above).
+          artifact = medsAllergiesArtifact(userDoc, applyPseudonymMapping);
+          if (artifact) artifactLabel = 'privacy-filtered Current Medications and Allergies';
         } else {
           const pf = String(userDoc.privacyFilteredSummary?.text || '').trim();
           if (pf) { artifact = pf; artifactLabel = 'privacy-filtered Patient Summary'; }

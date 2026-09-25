@@ -10,7 +10,7 @@
  * see for itself: that the browser connected the user's MAIA folder. Only
  * a timestamp is kept — never the folder's name or contents.
  */
-import { getEdition } from '../edition.js';
+import { combinedSummaryReview, getEdition } from '../edition.js';
 import { asStateOf } from './policies.js';
 import { joinLinkFor } from './groups.js';
 import { requestedUserId } from '../utils/api-guard.js';
@@ -55,7 +55,10 @@ export const deriveSetupStatus = (doc, { joinableGroup = null, inviteOnlyGroup =
     {
       key: 'summary',
       required: false, // urged, skippable (§5 row 5)
-      done: !!(doc?.currentMedicationsVerifiedAt && doc?.patientSummaryVerifiedAt),
+      // P7d: the medications are verified as part of the summary.
+      done: combinedSummaryReview()
+        ? !!doc?.patientSummaryVerifiedAt
+        : !!(doc?.currentMedicationsVerifiedAt && doc?.patientSummaryVerifiedAt),
       medicationsVerified: !!doc?.currentMedicationsVerifiedAt,
       summaryVerified: !!doc?.patientSummaryVerifiedAt
     },

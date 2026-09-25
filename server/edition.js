@@ -161,3 +161,10 @@ export const describeEdition = (userDoc = null, edition = currentEdition) => ({
  */
 export const mayCreatePrimaryAgent = (userDoc, edition = currentEdition) =>
   edition !== 'personal-as' || !!userDoc?.emailVerified;
+
+/**
+ * P7d: Current Medications are reviewed and verified as a section of the
+ * Patient Summary — one screen, one Verify — instead of as a separate step.
+ * Personal AS edition now; the full edition gets it at the back-port.
+ */
+export const combinedSummaryReview = (edition = currentEdition) => edition === 'personal-as';
