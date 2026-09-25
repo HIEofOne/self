@@ -2372,6 +2372,8 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
   // Session pattern matches existing user endpoints: userId comes from the
   // request; when a session exists it must match (403 on mismatch).
 
+  const joinsInFlight = new Set(); // `${userId}|${groupId}` (request-join)
+
   const requireMatchingUser = (req, res) => {
     const userId = req.body?.userId || req.query?.userId;
     if (!userId) {
@@ -2712,6 +2714,19 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
   app.post('/api/user-groups/request-join', async (req, res) => {
     const userId = requireMatchingUser(req, res);
     if (!userId) return;
+    // One join per account and group at a time. The setup checklist could
+    // ask again while the first request was still talking to the registry
+    // (seconds over a public URL): both passed the "already a member" check,
+    // each registered its own pairwise key, and the account kept only one —
+    // leaving an orphaned "active" record at the registry.
+    const flightKey = `${userId}|${req.body?.groupId}`;
+    if (joinsInFlight.has(flightKey)) {
+      return res.status(409).json({ success: false, error: 'JOIN_IN_PROGRESS', message: 'Already joining this group.' });
+    }
+    joinsInFlight.add(flightKey);
+    const release = () => joinsInFlight.delete(flightKey);
+    res.on('finish', release);
+    res.on('close', release);
     try {
       const { groupId, token, alias, registryUrl } = req.body || {};
       if (!groupId || !token || !alias || !String(alias).trim()) {

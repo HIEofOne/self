@@ -10,7 +10,7 @@ import express from 'express';
 import session from 'express-session';
 import cookieParser from 'cookie-parser';
 import request from 'supertest';
-import { createApiGuard, isLocalDevRequest } from '../../server/utils/api-guard.js';
+import { createApiGuard, isLocalDevRequest, provesAccount, TEMP_USER_COOKIE } from '../../server/utils/api-guard.js';
 import setupAuthRoutes from '../../server/routes/auth.js';
 import { serve } from '../helpers/serve.js';
 
@@ -47,6 +47,24 @@ describe('api guard', () => {
     expect(await run(guard, { path: '/api/patient-summary', query: { userId: 'owner01' }, session: dl })).toBe(403);
     expect(await run(guard, { method: 'POST', path: '/api/user-settings', body: { userId: 'owner01' }, session: dl })).toBe(403);
     expect(await run(guard, { path: '/api/user-settings', query: { userId: 'someone-else' }, session: dl })).toBe(403);
+  });
+});
+
+describe('provesAccount (the welcome page deletes while signed out)', () => {
+  it('a session for the account, or the admin, proves it', () => {
+    expect(provesAccount({ session: { userId: 'alice01' } }, 'alice01')).toBe(true);
+    expect(provesAccount({ session: { userId: 'admin' } }, 'alice01')).toBe(true);
+    expect(provesAccount({ session: { userId: 'mallory07' } }, 'alice01')).toBe(false);
+  });
+  it("so does this browser's SIGNED temporary-account cookie for it — not an unsigned one, not another account's", () => {
+    expect(provesAccount({ session: {}, signedCookies: { [TEMP_USER_COOKIE]: 'alice01' } }, 'alice01')).toBe(true);
+    expect(provesAccount({ session: {}, signedCookies: { [TEMP_USER_COOKIE]: 'bob02' } }, 'alice01')).toBe(false);
+    expect(provesAccount({ session: {}, cookies: { [TEMP_USER_COOKIE]: 'alice01' } }, 'alice01')).toBe(false);
+    expect(provesAccount({ session: {} }, 'alice01')).toBe(false);
+  });
+  it('the guard lets the delete through so the route can check the proof itself', async () => {
+    const guard = createApiGuard({});
+    expect(await run(guard, { method: 'POST', path: '/api/local/delete', body: { userId: 'alice01' }, session: {} })).toBe('next');
   });
 });
 

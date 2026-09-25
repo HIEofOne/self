@@ -28,6 +28,21 @@ export const isLocalDevRequest = (req) => {
   return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
 };
 
+/** The temporary-account cookie (signed by cookie-parser with the session
+ *  secret); set in routes/auth.js. */
+export const TEMP_USER_COOKIE = 'maia_temp_user';
+
+/** Does this request prove it may act for `userId` — a session for that
+ *  account (or the admin's), or this browser's signed temporary-account
+ *  cookie naming it? Used where a signed-out page acts on its own account
+ *  (the welcome page's delete). */
+export const provesAccount = (req, userId) => {
+  if (!userId) return false;
+  const sessionUserId = req.session?.userId || null;
+  if (sessionUserId && (sessionUserId === userId || isAdminUserId(sessionUserId))) return true;
+  return req.signedCookies?.[TEMP_USER_COOKIE] === userId;
+};
+
 // Routes that run before sign-in with a userId and carry their own proof,
 // or return only non-sensitive status. Exact paths.
 export const PRE_AUTH_ROUTES = new Set([
@@ -41,6 +56,7 @@ export const PRE_AUTH_ROUTES = new Set([
   '/api/agent-exists',        // welcome page: does a cloud account exist for a local folder
   '/api/cloud-health',        // welcome page: restore status for a local folder
   '/api/client-log',
+  '/api/local/delete',        // welcome page's delete: checks provesAccount itself
   '/api/admin/provision',     // legacy emailed admin link: token-checked
   '/api/admin/provision/confirm'
 ]);
