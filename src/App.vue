@@ -1143,7 +1143,7 @@ import {
   getActiveUserId, setActiveUserId, discoverUsers,
   readStateFileByUserId, storeDirectoryHandle,
   setRestoreActive, clearRestoreActive, getRestoreActive,
-  bufferLogEvent, pickLocalFolder, readStateFile, writeWeblocFile,
+  bufferLogEvent, pickLocalFolder, readStateFile, writeWeblocFile, MAIA_FOLDER_PDFS,
   type MaiaState, type DiscoveredUser
 } from './utils/localFolder';
 import packageJson from '../package.json';
@@ -2744,13 +2744,10 @@ const saveLocalSnapshot = async (snapshot?: SignOutSnapshot | null) => {
         // files the user added or removed in Finder while signed out.
         let folderInventory: Array<{ name: string; size?: number; mtime?: number }> = [];
         try {
-          const { listFolderFiles } = await import('./utils/localFolder');
+          const { listFolderFiles, isMaiaGeneratedFile } = await import('./utils/localFolder');
           const folderEntries = await listFolderFiles(localFolderHandle.value);
           folderInventory = folderEntries
-            .filter(f => {
-              const n = f.name.toLowerCase();
-              return n !== 'maia-log.pdf' && n !== 'maia-state.json' && !n.endsWith('.webloc');
-            })
+            .filter(f => !isMaiaGeneratedFile(f.name))
             .map(f => ({ name: f.name, size: f.size, mtime: f.lastModified }));
         } catch (e) {
           console.warn('[saveLocalSnapshot] folder scan failed:', e);
@@ -3394,6 +3391,9 @@ const confirmDeleteLocalUser = async () => {
         await handleToClean.removeEntry('maia-state.json').catch(() => {});
         await handleToClean.removeEntry('maia-log.pdf').catch(() => {});
         await handleToClean.removeEntry('maia-setup-log.pdf').catch(() => {}); // legacy name
+        // The rules died with the account. The verified summary PDFs stay:
+        // they are the patient's own copy of the record.
+        await handleToClean.removeEntry(MAIA_FOLDER_PDFS.policies).catch(() => {});
         for await (const [name] of (handleToClean as any).entries()) {
           if (name.endsWith('.webloc') && name.startsWith('maia')) {
             await handleToClean.removeEntry(name).catch(() => {});

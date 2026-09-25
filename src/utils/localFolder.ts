@@ -105,6 +105,29 @@ export interface MaiaState {
 
 const STATE_FILE_NAME = 'maia-state.json';
 
+/** PDFs MAIA writes into the folder (Personal AS edition, group_requests.md
+ *  §7). The "MAIA " prefix keeps them from colliding with a record the
+ *  patient saved from a portal (a portal's own "Patient Summary.pdf"). */
+export const MAIA_FOLDER_PDFS = Object.freeze({
+  summary: 'MAIA Patient Summary.pdf',
+  filtered: 'MAIA Patient Summary - privacy filtered.pdf',
+  policies: 'MAIA Sharing Policies.pdf'
+});
+
+const MAIA_GENERATED_NAMES = new Set([
+  STATE_FILE_NAME,
+  'maia-log.pdf',
+  'maia-setup-log.pdf', // legacy name
+  ...Object.values(MAIA_FOLDER_PDFS).map((n) => n.toLowerCase())
+]);
+
+/** A file MAIA wrote itself — never one of the patient's records, so it is
+ *  never uploaded, restored, or counted as a record. */
+export function isMaiaGeneratedFile(name: string): boolean {
+  const lower = String(name || '').toLowerCase();
+  return MAIA_GENERATED_NAMES.has(lower) || lower.endsWith('.webloc');
+}
+
 // ── IndexedDB handle storage ───────────────────────────────────────
 // Minimal raw IndexedDB usage — one database, one store, one entry per user.
 // FileSystemDirectoryHandle requires structured clone (no JSON, no cookies).
@@ -201,6 +224,7 @@ export async function inspectFolderForForeignAccount(
       if (entry.kind !== 'file') continue;
       if (entry.name === STATE_FILE_NAME) hasStateFile = true;
       else if (entry.name === 'maia-log.pdf') hasArtifacts = true;
+      else if (MAIA_GENERATED_NAMES.has(entry.name.toLowerCase())) hasArtifacts = true;
       else if (entry.name.endsWith('.webloc') && entry.name.startsWith('maia')) hasArtifacts = true;
       else if (/^MAIA chat .*\.pdf$/i.test(entry.name)) hasArtifacts = true;
     }

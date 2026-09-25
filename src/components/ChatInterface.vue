@@ -1162,6 +1162,7 @@ import {
   reconnectLocalFolder,
   reconnectLocalFolderWithGesture,
   listFolderFiles,
+  isMaiaGeneratedFile,
   writeFileToFolder,
   readStateFile,
   writeStateFile,
@@ -4985,8 +4986,7 @@ const runSafariFolderWizard = async (files: File[]) => {
   try {
     // Phase 1: Upload PDFs
     localFolderAutoRunPhase.value = 'Uploading files...';
-    const MAIA_GENERATED_FILES = ['maia-log.pdf'];
-    const filesToUpload = files.filter(f => !MAIA_GENERATED_FILES.includes(f.name.toLowerCase()));
+    const filesToUpload = files.filter(f => !isMaiaGeneratedFile(f.name));
 
     let uploadedCount = 0;
     let appleHealthCount = 0;
@@ -5126,11 +5126,8 @@ const runAutoWizard = async () => {
   try {
     // Phase 1: Upload PDFs from folder to Spaces
     localFolderAutoRunPhase.value = 'Uploading files...';
-    const MAIA_GENERATED_FILES = ['maia-log.pdf'];
-    const filesToUpload = localFolderFiles.value.filter(f => {
-      const name = f.name.toLowerCase();
-      return name.endsWith('.pdf') && !MAIA_GENERATED_FILES.includes(name);
-    });
+    const filesToUpload = localFolderFiles.value.filter(f =>
+      f.name.toLowerCase().endsWith('.pdf') && !isMaiaGeneratedFile(f.name));
     let uploadedCount = 0;
     let appleHealthCount = 0;
     const uploadedFileNames: string[] = [];
@@ -6022,13 +6019,10 @@ const saveStateToLocalFolderImpl = async () => {
   // generated files). Used by Restore to diff against userDoc.files.
   let folderInventory: Array<{ name: string; size?: number; mtime?: number }> = [];
   try {
-    const { listFolderFiles } = await import('../utils/localFolder');
+    const { listFolderFiles, isMaiaGeneratedFile } = await import('../utils/localFolder');
     const folderEntries = await listFolderFiles(localFolderHandle.value);
     folderInventory = folderEntries
-      .filter(f => {
-        const n = f.name.toLowerCase();
-        return n !== 'maia-log.pdf' && n !== 'maia-state.json' && !n.endsWith('.webloc');
-      })
+      .filter(f => !isMaiaGeneratedFile(f.name))
       .map(f => ({ name: f.name, size: f.size, mtime: f.lastModified }));
   } catch { /* default to empty */ }
 
@@ -8857,7 +8851,7 @@ const setupChecklistFiles = computed(() => {
 
   // Files from local folder scan (not yet uploaded)
   for (const f of localFolderFiles.value) {
-    if (f.name.toLowerCase() === 'maia-log.pdf') continue;
+    if (isMaiaGeneratedFile(f.name)) continue;
     if (seen.has(f.name)) continue;
     seen.add(f.name);
     const isApple = stage3DisplayFiles.value.some(df => df.name === f.name && df.isAppleHealth);

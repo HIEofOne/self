@@ -71,6 +71,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue';
 import type { MaiaState } from '../utils/localFolder';
+import { isMaiaGeneratedFile } from '../utils/localFolder';
 
 interface RestoreItem {
   key: string;
@@ -348,10 +349,9 @@ const executeRehydrate = async () => {
       const { listFolderFiles } = await import('../utils/localFolder');
       const entries = await listFolderFiles(props.localFolderHandle);
       for (const e of entries) {
-        const lower = e.name.toLowerCase();
         // Skip MAIA-generated artifacts and OS junk (dotfiles like
         // .DS_Store). These are never user content.
-        if (e.name.startsWith('.') || lower === 'maia-log.pdf' || lower === 'maia-state.json' || lower.endsWith('.webloc')) continue;
+        if (e.name.startsWith('.') || isMaiaGeneratedFile(e.name)) continue;
         folderInventory.push({ name: e.name, size: e.size, mtime: e.lastModified });
         folderNameToHandle[e.name] = e.fileHandle;
       }
@@ -360,8 +360,7 @@ const executeRehydrate = async () => {
     }
   } else if (props.safariFolderFiles) {
     for (const f of props.safariFolderFiles) {
-      const lower = f.name.toLowerCase();
-      if (f.name.startsWith('.') || lower === 'maia-log.pdf' || lower === 'maia-state.json' || lower.endsWith('.webloc')) continue;
+      if (f.name.startsWith('.') || isMaiaGeneratedFile(f.name)) continue;
       folderInventory.push({ name: f.name, size: f.size, mtime: f.lastModified });
       folderNameToSafariFile[f.name] = f;
     }
@@ -863,22 +862,17 @@ const executeRestore = async () => {
   // sign-off"; the actual folder is the source of truth right now. Detect
   // both directions and surface them in maia-log.pdf so the user / support
   // can see why post-restore Saved Files differs from pre-sign-out.
-  const MAIA_GENERATED = new Set(['maia-log.pdf', 'maia-state.json']);
-  const isMaiaGenerated = (name: string) => {
-    const lower = name.toLowerCase();
-    return MAIA_GENERATED.has(lower) || lower.endsWith('.webloc');
-  };
   let presentFileNames: string[] = [];
   if (props.localFolderHandle) {
     try {
       const { listFolderFiles } = await import('../utils/localFolder');
       const folderFiles = await listFolderFiles(props.localFolderHandle, { extensions: ['pdf'] });
-      presentFileNames = folderFiles.map(f => f.name).filter(n => !isMaiaGenerated(n));
+      presentFileNames = folderFiles.map(f => f.name).filter(n => !isMaiaGeneratedFile(n));
     } catch (e: any) {
       console.warn('[RestoreWizard] Folder scan failed:', e?.message);
     }
   } else if (props.safariFolderFiles) {
-    presentFileNames = props.safariFolderFiles.map(f => f.name).filter(n => !isMaiaGenerated(n));
+    presentFileNames = props.safariFolderFiles.map(f => f.name).filter(n => !isMaiaGeneratedFile(n));
   }
 
   const expectedNameSet = new Set(expectedFiles.map(f => f.fileName));

@@ -348,9 +348,9 @@ The File System Access folder becomes where the patient's own copy of the record
 <MAIA folder>/
   maia-state.json                          existing: full userDoc backup (incl. group pairwise keys)
   maia-log.pdf                             existing: setup/provisioning log
-  Patient Summary.pdf                      NEW: verified PS incl. Current Medications (regenerated on each verify)
-  Patient Summary - privacy filtered.pdf   NEW: exactly what can leave automatically
-  Sharing Policies.pdf                     NEW: confirmed cards as rendered sentences + AS state + date
+  MAIA Patient Summary.pdf                      NEW: verified PS incl. Current Medications (regenerated on each verify)
+  MAIA Patient Summary - privacy filtered.pdf   NEW: exactly what can leave automatically
+  MAIA Sharing Policies.pdf                     NEW: confirmed cards as rendered sentences + AS state + date
   Requests/requests.jsonl                  NEW: append-only request events (canonical, dedup by id+event)
   Requests/Request Log.html                NEW: human-readable, regenerated from the jsonl
   Records/                                 the patient's record files (e.g. Apple Health export)
@@ -361,6 +361,13 @@ The File System Access folder becomes where the patient's own copy of the record
 - **The folder key.** At setup step 3 the browser generates an X25519 key pair. The server receives only the public half, which the RS seals incoming documents to. The private half is written to `maia-folder-key.json` and kept in IndexedDB. It is *not* part of `maia-state.json` or the userDoc, so neither a server compromise nor a cloud backup can open a waiting document. Keeping it in the folder adds no exposure, because the documents it opens end up in the same folder in plain form. Connecting the folder in a new browser restores it. If the folder is lost, documents still waiting can't be opened, and the sender has to send them again.
 
 - PDFs are made client-side with the existing `jspdf`/`html2pdf` dependencies (the same path as `generateSetupLogPdf`). They are written through `writeFileToFolder`. **Writing the PDF is part of the Verify action**, not a separate step to remember.
+- **Built (P7b, 2026-09-24).** `src/utils/folderPdfs.ts` makes the three PDFs and `useFolderPdfs()` writes them. Details:
+  - **Summary PDFs.** Every stamped save writes both summary PDFs: Verify, the review dialog's save, and Edit + Save. The writer re-reads the server and writes nothing unless the summary is verified. The filtered PDF is the stored privacy-filtered text verbatim (the text a request releases), never the pseudonym mapping.
+  - **Sharing Policies PDF.** Rewritten after every Confirm, rule save, on/off toggle, delete, and change of the sharing switch. It lists only confirmed, turned-on rules, in the order they apply.
+  - **Names.** The files carry a "MAIA " prefix. With plain names, a patient's own "Patient Summary.pdf" from a portal could be overwritten, or skipped on import. `isMaiaGeneratedFile()` in `localFolder.ts` is now the one list every folder scan uses (upload, restore, snapshot inventory), so these files are never taken for records.
+  - **Account deletion.** Deleting the account removes the Sharing Policies PDF; the summary PDFs stay as the patient's own copy.
+  - **Permission.** If the browser has dropped folder permission, a notice offers an Allow button.
+  - **Privacy filter fix.** The first filtered PDF showed real names. The filter's name finder missed a markdown name line (`**Pat Doe**, 66, F`, `## Pat Doe, 66, F`) and titled providers ("Dr. Jane Smith"). `extractSummaryNames` now handles both, in both editions. Existing auto-generated mappings pick up the missed names at the next summary load.
 - **Honest limitation:** File System Access writes happen only while a MAIA tab is open with permission granted. The server is the AS and holds the operating copy. The folder is synced at sign-in and while the Requests tab is open (`GET /api/requests/log?since=<cursor>`), and it trails the server between visits. The weekly digest reminds the patient when the folder log is out of date.
 - **Server retention (D10):** request records are kept at least 90 days after a decision. Older ones are pruned only after the client confirms they are in the folder (`logSyncedThrough`), with a 365-day hard cap. Undecided requests are never pruned. This keeps the local-first model from `NewRestore.md` (the folder is the durable record; the cloud is disposable) without the AS losing the history the advisor uses.
 
