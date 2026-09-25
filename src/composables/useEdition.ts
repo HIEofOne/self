@@ -27,9 +27,11 @@ interface EditionState {
   edition: Edition;
   features: Record<string, EditionFeature>;
   error: string;
+  /** Test apps only (MAIA_EMAIL_VERIFY_BYPASS): the sign-up address to use. */
+  testEmail: string | null;
 }
 
-const state = reactive<EditionState>({ loaded: false, edition: 'full', features: {}, error: '' });
+const state = reactive<EditionState>({ loaded: false, edition: 'full', features: {}, error: '', testEmail: null });
 let inflight: Promise<void> | null = null;
 
 /** Fetch the edition. Call again with `force` after sign-in or sign-out,
@@ -44,6 +46,7 @@ const load = (force = false): Promise<void> => {
       const data = await res.json();
       state.edition = data.edition === 'personal-as' ? 'personal-as' : 'full';
       state.features = data.features || {};
+      state.testEmail = typeof data.testEmail === 'string' ? data.testEmail : null;
       state.loaded = true;
       state.error = '';
     } catch (e) {
@@ -69,6 +72,6 @@ export function useEdition() {
 
 /** Tests only. */
 export const _resetEditionForTests = () => {
-  state.loaded = false; state.edition = 'full'; state.features = {}; state.error = '';
+  state.loaded = false; state.edition = 'full'; state.features = {}; state.error = ''; state.testEmail = null;
   inflight = null;
 };

@@ -72,6 +72,14 @@ const sendCode = async (): Promise<boolean> => {
     }
     state.token = j.token || state.token;
     saveToken(state.token);
+    if (j.autoVerified) {
+      // A test app's bypass address (MAIA_EMAIL_VERIFY_BYPASS): no code.
+      state.verified = true;
+      state.email = j.email || state.email;
+      state.codeSent = false;
+      state.devCode = null;
+      return true;
+    }
     state.codeSent = true;
     state.devCode = j.devCode || null;
     return true;

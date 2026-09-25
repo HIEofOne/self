@@ -1611,6 +1611,10 @@
                   <q-spinner size="14px" color="primary" class="q-ml-sm" />
                 </div>
               </div>
+              <div v-else-if="aiWaiting" class="text-center">
+                <q-spinner size="2em" color="primary" />
+                <div class="q-mt-sm">{{ PRIVATE_AI_WAIT_TEXT }}</div>
+              </div>
               <div v-else class="text-center">
                 <q-spinner size="2em" />
                 <div class="q-mt-sm">Loading patient summary...</div>
@@ -1620,7 +1624,7 @@
             <div v-else-if="summaryError" class="text-center q-pa-md">
               <q-icon name="error" color="negative" size="40px" />
               <div class="text-negative q-mt-sm">{{ summaryError }}</div>
-              <q-btn label="Retry" color="primary" @click="loadPatientSummary" class="q-mt-md" />
+              <q-btn label="Retry" color="primary" @click="retryAfterSummaryError" class="q-mt-md" />
             </div>
 
             <div v-else-if="patientSummary" class="q-mt-md">
@@ -2106,6 +2110,7 @@ import {
   getLocalFolderStatus, readFileFromFolder, reconnectLocalFolder, reconnectLocalFolderWithGesture, writeFileToFolder
 } from '../utils/localFolder';
 import { findAppleHealthExportInFolder } from '../utils/appleHealthFolder';
+import { PRIVATE_AI_WAIT_TEXT, privateAiNotReadyText, waitForPrivateAi } from '../utils/privateAi';
 import { drugKey, joinMedsSection, sameMedList, splitMedsSection, type MedsSection } from '../utils/summaryMeds';
 import SummaryMedsRows from './SummaryMedsRows.vue';
 import { logModalEvent } from '../utils/modalLog';
@@ -3273,6 +3278,20 @@ const kbNeedsUpdate = ref(false); // Track if KB needs to be updated (files move
 const kbSummaryTokens = ref<string | number | null>(null);
 const kbSummaryFiles = ref<number | null>(null);
 const summaryNeedsVerify = ref(false);
+// Waiting for a new account's private AI before drafting (Personal AS).
+const aiWaiting = ref(false);
+// The last error came from a draft, so RETRY runs the draft again (it used
+// to only reload the tab, although the message promised a new run).
+const summaryDraftFailed = ref(false);
+const retryAfterSummaryError = () => {
+  if (summaryDraftFailed.value) {
+    summaryDraftFailed.value = false;
+    summaryError.value = '';
+    void requestNewSummary();
+    return;
+  }
+  void loadPatientSummary();
+};
 // Phase 3: the CURRENT committed summary's persistent verify stamp (from
 // GET /api/patient-summary). Gates the "meds differ" consent dialog — it only
 // fires when a VERIFIED summary is about to be superseded.
@@ -7461,6 +7480,20 @@ const requestNewSummary = async (opts?: { skipCmGate?: boolean }) => {
     // meds are INJECTED into the prompt (unverified → "Not documented"),
     // no indexed KB → no AI summary, and every gate ACTS (a warning-only
     // gate looped the user with no way forward).
+    // Personal AS: a new account's private AI may still be deploying —
+    // wait for it here rather than start a draft that fails.
+    if (isPersonalAs.value) {
+      const ready = await waitForPrivateAi({
+        onWaiting: () => { loadingSummary.value = true; aiWaiting.value = true; }
+      });
+      aiWaiting.value = false;
+      if (ready !== 'ready') {
+        loadingSummary.value = false;
+        summaryError.value = privateAiNotReadyText(ready);
+        summaryDraftFailed.value = true;
+        return;
+      }
+    }
     const adv = await advancePipeline(props.userId, 'draft-summary');
     if (!adv) {
       await loadPatientSummary();
@@ -7472,12 +7505,17 @@ const requestNewSummary = async (opts?: { skipCmGate?: boolean }) => {
       loadingSummary.value = true;
       generatingSummary.value = true;
       summaryError.value = '';
+      summaryDraftFailed.value = false;
       startSummaryProgress();
       try {
         const status = await waitForStageDone(props.userId, 'summaryDrafted');
         if (status !== 'done') {
-          throw new Error(status === 'timeout'
-            ? 'The draft is taking too long — check back in a few minutes.'
+          summaryDraftFailed.value = true;
+          if (status === 'timeout') throw new Error('The draft is taking too long — check back in a few minutes.');
+          // Say why, when the reason is one the patient can act on.
+          const why = String((await fetchPipeline(props.userId))?.pipeline.stages.summaryDrafted?.error || '');
+          throw new Error(/AGENT_NOT_READY|AGENT_NOT_CONFIGURED|did not answer/i.test(why)
+            ? "Your private AI isn't ready yet. Wait a minute, then click RETRY."
             : 'The Patient Summary draft failed. RETRY will run it again.');
         }
         const g = await fetch(`/api/patient-summary?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });

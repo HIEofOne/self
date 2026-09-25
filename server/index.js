@@ -10391,6 +10391,14 @@ app.post('/api/user/notification-email', async (req, res) => {
 // a pre-account "tire-kicker" email never leaves this 10-min token store.
 app.post('/api/email/send-code', async (req, res) => {
   try {
+    // Test apps only (MAIA_EMAIL_VERIFY_BYPASS): a listed address is
+    // verified at once, and no email is sent.
+    if (emailVerification.bypassesVerification(req.body?.email)) {
+      const v = emailVerification.issueVerified(req.body?.email, req.body?.token);
+      if (v.error) return res.status(400).json({ success: false, error: v.error });
+      console.log(`[EMAIL-VERIFY] bypass (MAIA_EMAIL_VERIFY_BYPASS): ${v.email} verified without a code`);
+      return res.json({ success: true, token: v.token, sent: false, autoVerified: true, email: v.email });
+    }
     const result = emailVerification.issueCode(req.body?.email, req.body?.token);
     if (result.error) {
       const status = result.error === 'RATE_LIMITED' ? 429 : 400;
@@ -12736,8 +12744,11 @@ const runDraftGeneration = async (userId) => {
     }
     const hasPrimaryAgent = userDoc.assignedAgentId && userDoc.agentEndpoint;
     if (!hasPrimaryAgent) {
-      await setDraftJob(userId, { status: 'error', finishedAt: new Date().toISOString(), error: 'AGENT_NOT_CONFIGURED' });
-      return { httpStatus: 400, body: { success: false, error: 'AGENT_NOT_CONFIGURED' } };
+      // An agent that exists but has no endpoint yet is still deploying (a
+      // new account's first minutes): "not ready", not "not configured".
+      const code = userDoc.assignedAgentId ? 'AGENT_NOT_READY' : 'AGENT_NOT_CONFIGURED';
+      await setDraftJob(userId, { status: 'error', finishedAt: new Date().toISOString(), error: code });
+      return { httpStatus: code === 'AGENT_NOT_READY' ? 409 : 400, body: { success: false, error: code } };
     }
 
     await appendUserProvisioningEvent(userId, { event: 'draft-summary-started', primaryModel: userDoc.agentModelName || null });
