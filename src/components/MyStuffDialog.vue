@@ -1760,7 +1760,7 @@
               <div class="q-mt-sm">No patient summary found</div>
               <div class="q-mt-md">
                 <q-btn
-                  label="Request Summary"
+                  :label="isPersonalAs ? 'Write my summary' : 'Request Summary'"
                   color="primary"
                   @click="handleRequestNewSummary"
                   icon="add"
@@ -1918,6 +1918,9 @@
     </q-dialog>
 
     <!-- Replace Summary Dialog (when new summary is created and all slots are full) -->
+    <!-- Personal AS edition: Patient Summary by interview (D11) -->
+    <PatientInterview v-if="isPersonalAs" v-model="showInterview" :user-id="userId" @drafted="onInterviewDrafted" />
+
     <q-dialog v-model="showReplaceSummaryDialog" persistent>
       <q-card style="min-width: 800px; max-width: 1200px; max-height: 90vh;">
         <q-card-section class="row items-center q-pb-none">
@@ -2010,6 +2013,7 @@ import Lists from './Lists.vue';
 import GroupsPanel from './GroupsPanel.vue';
 import PoliciesPanel from './PoliciesPanel.vue';
 import SecondaryModelChooser from './SecondaryModelChooser.vue';
+import PatientInterview from './PatientInterview.vue';
 import { useQuasar } from 'quasar';
 import { useFolderPdfs } from '../composables/useFolderPdfs';
 import { deleteChatById } from '../utils/chatApi';
@@ -7003,7 +7007,21 @@ const saveVerifiedPdfs = () => {
   if (isPersonalAs.value && props.userId) void folderPdfs.saveSummaryPdfs(props.userId);
 };
 
+// Personal AS edition: a new summary comes from an interview (D11); its
+// draft opens the same review dialog — the only way to save and verify.
+const showInterview = ref(false);
+const onInterviewDrafted = (text: string) => {
+  currentTab.value = 'summary';
+  newSummaryToReplace.value = text;
+  showReplaceSummaryDialog.value = true;
+};
+
 const handleRequestNewSummary = () => {
+  if (isPersonalAs.value) {
+    currentTab.value = 'summary';
+    showInterview.value = true;
+    return;
+  }
   summaryPair.value = null;
   currentTab.value = 'summary';
   pendingSummaryRegeneration.value = true;
