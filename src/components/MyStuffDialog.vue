@@ -1766,21 +1766,49 @@
                   <span>{{ appleHealthProgress }}</span>
                 </div>
                 <template v-else>
-                  <div class="row items-center no-wrap">
-                    <q-btn
-                      unelevated no-caps color="primary" icon="favorite"
-                      label="Use my Apple Health export"
-                      :loading="loadingSummary"
-                      @click="startAppleHealthRoute"
-                    />
-                    <q-icon name="info_outline" size="18px" color="grey-6" class="q-ml-sm cursor-pointer">
-                      <q-tooltip max-width="320px">
-                        The PDF of your health records from the Health app on your iPhone. MAIA reads your
-                        medicines, allergies, conditions, visits and lab results from it, and your private AI
-                        writes the summary. You review it before anything is saved.
-                      </q-tooltip>
-                    </q-icon>
+                  <!-- The export comes from the patient's MAIA folder (§7). -->
+                  <div v-if="folderExport.state === 'scanning'" class="row items-center no-wrap q-gutter-sm text-grey-8">
+                    <q-spinner size="1.3em" color="primary" />
+                    <span>Looking in your MAIA folder…</span>
                   </div>
+                  <template v-else-if="folderExport.state === 'found'">
+                    <div class="row items-center no-wrap">
+                      <q-btn
+                        unelevated no-caps color="primary" icon="favorite"
+                        label="Use my Apple Health export"
+                        :loading="loadingSummary"
+                        @click="useFoundAppleHealthExport"
+                      />
+                      <q-icon name="info_outline" size="18px" color="grey-6" class="q-ml-sm cursor-pointer">
+                        <q-tooltip max-width="320px">
+                          MAIA reads your medicines, allergies, conditions, visits and lab results from it,
+                          and your private AI writes the summary. You review it before anything is saved.
+                        </q-tooltip>
+                      </q-icon>
+                    </div>
+                    <div class="text-caption text-grey-8">{{ folderExport.label }}</div>
+                  </template>
+                  <q-btn
+                    v-else-if="folderExport.state === 'no-permission'"
+                    unelevated no-caps color="primary" icon="folder_open"
+                    label="Let MAIA look in your folder for your Apple Health export"
+                    @click="allowFolderAndLook"
+                  />
+                  <template v-else>
+                    <div class="row items-center no-wrap text-body2 text-grey-8">
+                      No Apple Health export in your MAIA folder yet.
+                      <q-icon name="info_outline" size="18px" color="grey-6" class="q-ml-sm cursor-pointer">
+                        <q-tooltip max-width="320px">
+                          Save the PDF of your health records from the Health app on your iPhone, put it in
+                          your MAIA folder, then click Look again.
+                        </q-tooltip>
+                      </q-icon>
+                    </div>
+                    <div class="row justify-center q-gutter-sm">
+                      <q-btn outline no-caps color="primary" icon="refresh" label="Look again" @click="lookForFolderExport" />
+                      <q-btn flat no-caps color="primary" label="Choose the file…" @click="appleHealthInput?.click()" />
+                    </div>
+                  </template>
                   <q-btn flat no-caps color="primary" icon="edit_note" label="Answer a few questions instead"
                          :disable="loadingSummary" @click="showInterview = true" />
                 </template>
@@ -2033,7 +2061,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
+import { ref, reactive, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import VueMarkdown from 'vue-markdown-render';
 import MarkdownIt from 'markdown-it';
 import PdfViewerModal from './PdfViewerModal.vue';
@@ -2049,6 +2077,10 @@ import { deleteChatById } from '../utils/chatApi';
 import { processFileNCitations } from '../utils/fileNCitations';
 import { applyPseudonymsClient } from '../utils/pseudonyms';
 import { advancePipeline, fetchPipeline, waitForStageDone } from '../utils/pipeline';
+import {
+  getLocalFolderStatus, readFileFromFolder, reconnectLocalFolder, reconnectLocalFolderWithGesture, writeFileToFolder
+} from '../utils/localFolder';
+import { findAppleHealthExportInFolder } from '../utils/appleHealthFolder';
 import { logModalEvent } from '../utils/modalLog';
 import { useEdition } from '../composables/useEdition';
 import { useSetupChecklist } from '../composables/useSetupChecklist';
@@ -6829,6 +6861,8 @@ const deleteBubble = async (bubble: { id: string; entries: Array<{ id: string; m
   }
 };
 
+// Set once the first summary load finishes (the folder look waits for it).
+const summaryLoadedOnce = ref(false);
 const loadPatientSummary = async () => {
   loadingSummary.value = true;
   summaryError.value = '';
@@ -6893,6 +6927,7 @@ const loadPatientSummary = async () => {
     summaryError.value = err instanceof Error ? err.message : 'Failed to load patient summary';
   } finally {
     loadingSummary.value = false;
+    summaryLoadedOnce.value = true;
   }
 };
 
@@ -7062,21 +7097,74 @@ const appleHealthInput = ref<HTMLInputElement | null>(null);
 const appleHealthProgress = ref('');
 const appleHealthAwaitingMeds = ref(false);
 
-const startAppleHealthRoute = async () => {
+// The export is found in the patient's MAIA folder — the one chosen in the
+// setup checklist — and recognized in the browser, so no other record
+// leaves the computer. An export MAIA already has (registered) is reused.
+const folderExport = reactive<{
+  state: 'idle' | 'scanning' | 'found' | 'none' | 'no-permission';
+  label: string;
+  file: File | null;
+  registered: boolean;
+}>({ state: 'idle', label: '', file: null, registered: false });
+
+const lookForFolderExport = async () => {
+  if (!props.userId || folderExport.state === 'scanning') return;
+  folderExport.state = 'scanning';
+  try {
+    const p = await fetchPipeline(props.userId);
+    if (p?.pipeline.hasAppleFile) {
+      Object.assign(folderExport, { state: 'found', registered: true, file: null, label: `Your Apple Health export: ${p.pipeline.appleFileName || 'already added'}` });
+      return;
+    }
+    const folder = await reconnectLocalFolder(props.userId);
+    if (!folder) {
+      const status = await getLocalFolderStatus(props.userId);
+      Object.assign(folderExport, { state: status.configured ? 'no-permission' : 'none', registered: false, file: null, label: '' });
+      return;
+    }
+    const found = await findAppleHealthExportInFolder(folder.handle);
+    Object.assign(folderExport, found
+      ? { state: 'found', registered: false, file: found.file, label: `Found in your MAIA folder: ${found.path}${found.name}` }
+      : { state: 'none', registered: false, file: null, label: '' });
+  } catch {
+    Object.assign(folderExport, { state: 'none', registered: false, file: null, label: '' });
+  }
+};
+
+// The browser can drop folder permission between visits; asking again
+// needs this click.
+const allowFolderAndLook = async () => {
   if (!props.userId) return;
-  const p = await fetchPipeline(props.userId);
-  if (p?.pipeline.hasAppleFile) {
+  await reconnectLocalFolderWithGesture(props.userId);
+  folderExport.state = 'idle';
+  await lookForFolderExport();
+};
+
+// Look as soon as the empty summary tab shows (Personal AS only) — after
+// the summary has loaded, so a patient who has one isn't scanned for.
+watch([currentTab, patientSummary, isPersonalAs, summaryLoadedOnce], ([tab, summary, pa, loaded]) => {
+  if (pa && loaded && tab === 'summary' && !summary && folderExport.state === 'idle') void lookForFolderExport();
+}, { immediate: true });
+
+const useFoundAppleHealthExport = async () => {
+  if (folderExport.registered) {
     await continueAppleHealthRoute();
     return;
   }
-  appleHealthInput.value?.click();
+  if (folderExport.file) await useAppleHealthFile(folderExport.file, { copyToFolder: false });
 };
 
+// "Choose the file…": an export from elsewhere is also copied into the
+// MAIA folder, where the patient's records live.
 const handleAppleHealthFile = async (event: Event) => {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
   input.value = '';
-  if (!file || !props.userId) return;
+  if (file) await useAppleHealthFile(file, { copyToFolder: true });
+};
+
+const useAppleHealthFile = async (file: File, opts: { copyToFolder: boolean }) => {
+  if (!props.userId) return;
   if (!/\.pdf$/i.test(file.name)) {
     $q.notify({ type: 'warning', message: 'Choose the PDF of your health records from the Health app.' });
     return;
@@ -7121,6 +7209,15 @@ const handleAppleHealthFile = async (event: Event) => {
       })
     });
     if (!reg.ok) throw new Error('Your export was uploaded but could not be registered. Try again.');
+    if (opts.copyToFolder) {
+      try {
+        const folder = await reconnectLocalFolder(props.userId);
+        if (folder && !(await readFileFromFolder(folder.handle, file.name))) {
+          await writeFileToFolder(folder.handle, file.name, file);
+        }
+      } catch { /* the copy is a convenience; the summary doesn't need it */ }
+    }
+    Object.assign(folderExport, { state: 'found', registered: true, file: null, label: `Your Apple Health export: ${file.name}` });
     await continueAppleHealthRoute();
   } catch (e) {
     $q.notify({ type: 'negative', message: e instanceof Error ? e.message : 'Could not read your Apple Health export.' });

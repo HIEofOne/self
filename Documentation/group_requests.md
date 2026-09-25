@@ -304,6 +304,10 @@ If step 5 is skipped, sharing can still be turned on. Allow cards for PS or meds
 **Built (P7c, 2026-09-24): route 1 without a knowledge base.**
 - **Where it starts.** With no summary, the Patient Summary tab offers **Use my Apple Health export** (with an (i) note) and **Answer a few questions instead** (the P7a interview).
 - **Upload.** The chosen PDF is uploaded, recognized as an Apple Health export, and registered. A PDF that isn't an export is removed again.
+- **From the MAIA folder (fix, 2026-09-24).** The export comes from the patient's MAIA folder, not a file picker. When the empty tab shows, MAIA looks in the folder and its `Records/` subfolder (§7) for the newest PDF whose first page carries the Apple Health export sentence. It reads the PDFs in the browser (pdfjs), so no other record leaves the computer. Then:
+  - if it finds one, the button uses it directly ("Found in your MAIA folder: …");
+  - if not, the tab says so, with **Look again**, and a **Choose the file…** fallback that also copies the file into the folder;
+  - if the browser dropped folder permission, a button asks for it again.
 - **Pipeline.** Without `records-index`, the records pipeline skips indexing and reorders the rest: build the Lists → the patient verifies Current Medications (done means *verified*) → the private AI drafts → review. So nothing that merely advances the pipeline (such as opening the medications tab) can start a draft from an unverified list. The full edition's order is unchanged.
 - **Draft.** `runDraftGeneration` no longer stops with `NO_KB` here. The prompt builder reads every registered record, not only the KB folder, and uses the new clinical prompt `patient-summary.records-only`: the extracted blocks are the only source, and any section without a block says "Not documented in the available records."
 - **Not built yet.** Route 3 (the `records-index` unlock for other PDFs) needs an unlock screen, which doesn't exist yet.
