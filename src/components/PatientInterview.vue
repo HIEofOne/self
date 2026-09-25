@@ -12,7 +12,7 @@
       <q-card-section v-if="drafting" class="q-pt-none">
         <div class="row items-center no-wrap q-gutter-sm q-pa-md">
           <q-spinner size="1.6em" color="primary" />
-          <div class="text-body2">Your private AI is writing your summary. This usually takes about a minute.</div>
+          <div class="text-body2">{{ waitingForAi ? PRIVATE_AI_WAIT_TEXT : 'Your private AI is writing your summary. This usually takes about a minute.' }}</div>
         </div>
       </q-card-section>
 
@@ -46,6 +46,7 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue';
 import { waitForStageDone } from '../utils/pipeline';
+import { PRIVATE_AI_WAIT_TEXT, privateAiNotReadyText, waitForPrivateAi } from '../utils/privateAi';
 
 /**
  * Patient Summary by interview (Personal AS edition, D11): the answers go to
@@ -61,6 +62,7 @@ const emit = defineEmits<{
 const blank = () => ({ name: '', dateOfBirth: '', sex: '', conditions: '', medications: '', allergies: '', recentVisits: '', other: '' });
 const a = reactive(blank());
 const drafting = ref(false);
+const waitingForAi = ref(false);
 const error = ref('');
 const enough = computed(() => !!(a.conditions.trim() || a.medications.trim() || a.allergies.trim()));
 
@@ -80,6 +82,10 @@ const submit = async () => {
   error.value = '';
   drafting.value = true;
   try {
+    // A new account's private AI may still be deploying: wait for it.
+    const ready = await waitForPrivateAi({ onWaiting: () => { waitingForAi.value = true; } });
+    waitingForAi.value = false;
+    if (ready !== 'ready') throw new Error(privateAiNotReadyText(ready));
     const r = await fetch('/api/patient-summary/interview', {
       method: 'POST',
       credentials: 'include',
@@ -104,6 +110,7 @@ const submit = async () => {
     error.value = e instanceof Error ? e.message : String(e);
   } finally {
     drafting.value = false;
+    waitingForAi.value = false;
   }
 };
 </script>

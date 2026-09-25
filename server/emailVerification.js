@@ -50,6 +50,31 @@ export function issueCode(email, token) {
   return { token: t, code, email: addr };
 }
 
+/**
+ * TEST APPS ONLY: addresses listed in MAIA_EMAIL_VERIFY_BYPASS (comma
+ * separated, exact match) are verified without a code, to speed up manual
+ * testing. Unset — the default, and always in production — means no
+ * address is. Never a pattern: one listed address can't cover another.
+ */
+export function bypassesVerification(email, list = process.env.MAIA_EMAIL_VERIFY_BYPASS) {
+  const addr = String(email || '').trim().toLowerCase();
+  if (!addr || !list) return false;
+  return String(list).split(',').map((a) => a.trim().toLowerCase()).filter(Boolean).includes(addr);
+}
+
+/** A token already verified for `email` (the bypass above). Returns
+ *  { token, email } or { error }. */
+export function issueVerified(email, token) {
+  const addr = String(email || '').trim().toLowerCase();
+  if (!EMAIL_RE.test(addr)) return { error: 'INVALID_EMAIL' };
+  const t = (typeof token === 'string' && /^[a-f0-9]{32}$/.test(token)) ? token : randomBytes(16).toString('hex');
+  pending.set(t, {
+    email: addr, code: null, expiresAt: Date.now() + CODE_TTL_MS,
+    attempts: 0, verified: true, verifiedAt: Date.now(), lastSentAt: Date.now()
+  });
+  return { token: t, email: addr };
+}
+
 /** Check a code against a token. Returns { email } on success or { error }. */
 export function checkCode(token, code) {
   const v = (typeof token === 'string') ? pending.get(token) : null;
