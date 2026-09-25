@@ -45,6 +45,8 @@ const RELAY_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 /** A membership is "recently active" (liquidity signal) if refreshed within
  *  48 h — twice the daily refresh cadence, tolerant of a missed beat. */
 const LIVENESS_WINDOW_MS = 48 * 60 * 60 * 1000;
+/** How often a refresh re-stamps lastRefreshAt on the group doc. */
+const REFRESH_STAMP_MS = 15 * 60 * 1000;
 /** Cap the decrypted inbox stored per membership on the userDoc. */
 const INBOX_MAX = 200;
 /** Cap the sent-message log stored per membership on the userDoc. Sent
@@ -1262,6 +1264,9 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
     status: m.status,
     invitedAt: m.invitedAt || null,
     joinedAt: m.joinedAt || null,
+    // When the member's MAIA last checked in: tells a live member from an
+    // entry whose account is gone.
+    lastRefreshAt: m.status === 'active' ? (m.lastRefreshAt || null) : null,
     revokedAt: m.revokedAt || null,
     inviteEmail: m.status === 'invited' ? (m.inviteEmail || null) : null,
     inviteExpiresAt: m.status === 'invited' ? (m.inviteExpiresAt || null) : null,
@@ -1850,8 +1855,26 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
         return res.status(403).json({ success: false, error: 'Invalid signature' });
       }
 
-      member.lastRefreshAt = new Date().toISOString();
-      await cloudant.saveDocument(GROUPS_DB, doc);
+      // Liveness stamp. An open Groups panel refreshes every minute, and
+      // every member writes this one group doc: stamp at most every 15
+      // minutes, retry a conflict on a fresh copy, and never fail the
+      // refresh over it.
+      const last = Date.parse(member.lastRefreshAt || '') || 0;
+      if (Date.now() - last > REFRESH_STAMP_MS) {
+        let current = doc;
+        for (let attempt = 0; attempt < 3 && current; attempt++) {
+          const m = (current.members || []).find((x) => x.pairwiseId === pairwiseId);
+          if (!m) break;
+          m.lastRefreshAt = new Date().toISOString();
+          try {
+            await cloudant.saveDocument(GROUPS_DB, current);
+            break;
+          } catch (e) {
+            if (e?.statusCode !== 409) throw e;
+            current = await cloudant.getDocument(GROUPS_DB, doc._id);
+          }
+        }
+      }
 
       // Delete acknowledged (delivered) messages.
       if (Array.isArray(ackMessageIds) && ackMessageIds.length) {

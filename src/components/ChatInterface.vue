@@ -1326,9 +1326,9 @@ const handleOpenPeerThread = (t: { groupId: string; peerId: string; alias: strin
   // re-expands anytime (the persisted width preference is untouched).
   myStuffDialogRef.value?.collapseRail();
 };
-// Leaving a peer thread returns to the live AI conversation. Reached via
-// the thread's Block decision (emit('close')); the everyday exit is the
-// rail's "Current chat" row.
+// Leaving a peer thread returns to the live AI conversation: the thread's
+// "Back to AI chat" button, its Block decision, or the rail's "Current
+// chat" row.
 const handlePeerThreadClose = () => {
   peerThread.value = null;
   railActiveKind.value = 'ai';

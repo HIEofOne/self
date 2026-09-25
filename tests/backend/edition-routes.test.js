@@ -150,7 +150,7 @@ describe.each(EDITIONS)('feature guard, edition "%s"', (edition) => {
   beforeEach(async () => {
     setEditionForTests(edition);
     const cloudant = new FakeCloudant({
-      alice01: { _id: 'alice01', userId: 'alice01', features: { 'records-index': ON, 'deep-links': ON } },
+      alice01: { _id: 'alice01', userId: 'alice01', features: { 'records-index': ON, 'lists-full': ON } },
       bob02: { _id: 'bob02', userId: 'bob02' }
     });
     server = await serve(makeApp({
@@ -196,13 +196,14 @@ describe.each(EDITIONS)('feature guard, edition "%s"', (edition) => {
   });
 
   it('judges a clinician guest on the unlocks of the patient who shared', async () => {
-    expect((await request(server).post('/api/deep-link/login').send({ shareId: 'share-alice' })).status).toBe(200);
-    expect((await request(server).post('/api/deep-link/login').send({ shareId: 'share-bob' })).status).toBe(gated(403));
-    expect((await request(server).get('/api/load-chat-by-share/share-bob')).status).toBe(gated(403));
+    // Clinician links are on for everyone; what the guest may then read
+    // depends on the sharing patient: lists-full is on for alice only.
+    expect((await request(server).post('/api/deep-link/login').send({ shareId: 'share-bob' })).status).toBe(200);
+    expect((await request(server).get('/api/load-chat-by-share/share-bob')).status).toBe(200);
     expect((await request(server).get('/api/deep-link/session?shareId=share-alice')).status).toBe(200);
-    // A guest session reading the patient's lists: lists-full is not on for alice.
-    expect((await request(server).get('/api/labs/history').set('x-test-share', 'share-alice')).status).toBe(gated(403));
-    expect((await request(server).post('/api/deep-link/login').send({ shareId: 'no-such-share' })).status).toBe(gated(403));
+    expect((await request(server).get('/api/labs/history').set('x-test-share', 'share-alice')).status).toBe(200);
+    expect((await request(server).get('/api/labs/history').set('x-test-share', 'share-bob')).status).toBe(gated(403));
+    expect((await request(server).get('/api/labs/history').set('x-test-share', 'no-such-share')).status).toBe(gated(403));
   });
 
   it('passes unknown routes through (they 404 later)', async () => {
