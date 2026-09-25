@@ -42,13 +42,14 @@ const card = (id, outcome, elements = {}, extra = {}) => ({
   ...extra
 });
 
-let server, cloudant, clock, emails, baseUrl;
+let server, cloudant, clock, emails, baseUrl, emailMode;
 const patient = () => cloudant.db('maia_users').get('pat01');
 
 beforeEach(async () => {
   setEditionForTests('personal-as');
   clock = Date.parse('2026-09-25T12:00:00Z');
   emails = [];
+  emailMode = 'ok';
   cloudant = new FakeCloudant();
   await cloudant.saveDocument('maia_users', {
     _id: 'pat01', userId: 'pat01', email: 'pat@example.com', emailVerified: true, asId: AS_ID, asState: 'active',
@@ -59,7 +60,13 @@ beforeEach(async () => {
   const app = express();
   app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
   app.use((req, _res, next) => { const u = req.get('x-test-user'); req.session = u ? { userId: u } : {}; next(); });
-  const sendEmail = async (to, subject, text) => { emails.push({ to, subject, text }); return true; };
+  // 'ok' delivers; 'off' is delivery switched off (local dev); 'fail' throws.
+  const sendEmail = async (to, subject, text) => {
+    if (emailMode === 'fail') throw new Error('provider error');
+    if (emailMode === 'off') return false;
+    emails.push({ to, subject, text });
+    return true;
+  };
   setupGnapRoutes(app, { cloudant, sendEmail, now: () => clock, publicBaseUrl: () => baseUrl });
   setupGroupRoutes(app, cloudant, { logEvent: () => {} }, { sendEmail });
   server = await serve(app);
@@ -183,7 +190,7 @@ describe('ask', () => {
     expect(emails.map((e) => e.subject)).toEqual(['A request is waiting for you in MAIA']);
     expect((await cont(c, first.body.continue)).body.error.code).toBe('too_fast');
     expect((await decide('accept')).status).toBe(200);
-    clock += 61 * 1000;
+    // The decision lifts the wait: collect at once.
     const done = await cont(c, first.body.continue);
     expect(done.status).toBe(200);
     expect((await read(c, done.body.access_token)).body.text).toBe(FILTERED);
@@ -268,6 +275,66 @@ describe('interaction: a verified email', () => {
     const done = await cont(c, first.body.continue, { interact_ref: ref }); // at once: no too_fast after interaction
     expect(done.status).toBe(200);
     expect(done.body.access_token).toBeTruthy();
+  });
+});
+
+describe('P5: the requester hears back; the patient can stop sharing', () => {
+  const INTERACT = { interact: { start: ['redirect'], finish: { method: 'redirect', uri: 'https://client.example/r', nonce: 'client-nonce-123' } } };
+  const verifyEmail = async (first, email = 'dr@example.com') => {
+    const ix = new URL(first.body.interact.redirect).pathname;
+    await request(server).post(`${ix}/code`).send({ email });
+    const code = emails.find((e) => e.to === email).text.match(/\d{6}/)[0];
+    const v = await request(server).post(`${ix}/verify`).send({ code });
+    return new URL(v.body.redirect).searchParams.get('interact_ref');
+  };
+
+  it('a verified requester is emailed once that there is an answer — a link, no record data', async () => {
+    const c = newClient();
+    const first = await ask(c, INTERACT);
+    await verifyEmail(first);
+    expect((await decide('accept')).status).toBe(200);
+    const toRequester = emails.filter((e) => e.to === 'dr@example.com' && !/code/.test(e.subject));
+    expect(toRequester).toHaveLength(1);
+    expect(toRequester[0].text).toContain(`/r/${AS_ID}`);
+    expect(toRequester[0].text).not.toContain('Metformin');
+  });
+
+  it('a declined request is answered too; a blocked one never (I-29)', async () => {
+    const c1 = newClient('k1');
+    await verifyEmail(await ask(c1, INTERACT), 'one@example.com');
+    await decide('decline');
+    const c2 = newClient('k2');
+    await verifyEmail(await ask(c2, INTERACT), 'two@example.com');
+    await decide('block');
+    const answers = emails.filter((e) => /has an answer/.test(e.subject)).map((e) => e.to);
+    expect(answers).toEqual(['one@example.com']);
+  });
+
+  it('Stop sharing revokes the token: the next read is refused', async () => {
+    const c = newClient();
+    const first = await ask(c);
+    await decide('accept');
+    clock += 61 * 1000;
+    const at = (await cont(c, first.body.continue)).body.access_token;
+    expect((await read(c, at)).status).toBe(200);
+    const reqs = await request(server).get('/api/user-groups/requests?userId=pat01').set('x-test-user', 'pat01');
+    const id = reqs.body.requests[0].id;
+    expect(reqs.body.requests[0].route).toBe('gnap-direct');
+    const stop = await request(server).post(`/api/user-groups/requests/${id}/stop-sharing`).set('x-test-user', 'pat01').send({ userId: 'pat01' });
+    expect(stop.body.status).toBe('stopped');
+    expect((await read(c, at)).status).toBe(401);
+  });
+
+  it('the verification code reaches the page only when delivery is switched off, never on a failed send', async () => {
+    const first = await ask(newClient(), INTERACT);
+    const ix = new URL(first.body.interact.redirect).pathname;
+    emailMode = 'fail';
+    const failed = await request(server).post(`${ix}/code`).send({ email: 'dr@example.com' });
+    expect(failed.status).toBe(500);
+    expect(failed.body.devCode).toBeUndefined();
+    emailMode = 'off';
+    const dev = await request(server).post(`${ix}/code`).send({ email: 'dr2@example.com' });
+    expect(dev.body.devCode).toMatch(/^\d{6}$/);
   });
 });
 

@@ -192,6 +192,7 @@ export const ROUTE_FEATURES = Object.freeze({
   // ── requests (the member's own inbox and decisions) ───────────────────
   'GET /api/user-groups/requests': 'requests',
   'POST /api/user-groups/requests/:id/decision': 'requests',
+  'POST /api/user-groups/requests/:id/stop-sharing': 'requests',
 
   // ── groups-core (member side) ─────────────────────────────────────────
   'GET /api/user-groups': 'groups-core',

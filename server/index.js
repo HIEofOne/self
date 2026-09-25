@@ -1511,7 +1511,11 @@ const allowedOrigins = corsOriginsEnv
       appUrlConfig.appOrigin
     ].filter(Boolean);
 
-app.use(cors({
+// GNAP's /gnap paths (routes/gnap.js) set their own CORS: open to any
+// origin, no cookies, and the signature headers allowed. They also answer
+// OPTIONS themselves (RFC 9635 discovery), which this middleware would
+// otherwise swallow with an empty 204.
+const appCors = cors({
   origin: (origin, callback) => {
     // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
@@ -1538,7 +1542,8 @@ app.use(cors({
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
-}));
+});
+app.use((req, res, next) => (req.path.startsWith('/gnap/') ? next() : appCors(req, res, next)));
 
 // Trust the reverse proxy (DO App Platform) so secure cookies work behind HTTPS load balancers
 if ((process.env.PUBLIC_APP_URL || '').startsWith('https://')) {
