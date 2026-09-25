@@ -36,6 +36,7 @@ Line counts as of v1.6.4 (September 2026); whole repo ≈ 71,000 lines (`src/` 3
 - `server/edition.js` — edition switch (`MAIA_EDITION`) and feature registry (~190 lines)
 - `server/edition-routes.js` — every route's feature, and the /api feature gate. **Adding a route? Add it to `ROUTE_FEATURES`**, or `tests/backend/edition-routes.test.js` fails
 - `server/utils/api-guard.js` — /api account-access guard: the session decides the account (~100 lines)
+- `server/routes/gnap.js` + `server/gnap/` — GNAP personal AS (direct route): RFC 9421 signatures, grants, RS; reference client `scripts/gnap-client.mjs`
 - `Documentation/group_requests.md` — design of the Personal AS edition (phases P0–P12)
 
 ## Environment Variables

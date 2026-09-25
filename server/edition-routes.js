@@ -172,6 +172,18 @@ export const ROUTE_FEATURES = Object.freeze({
   'POST /api/user-policies': 'policies',
   'PUT /api/user-policies/:id': 'policies',
   'DELETE /api/user-policies/:id': 'policies',
+  // ── gnap: the personal AS's request API (§10; P4). The /gnap paths are
+  // outside /api, so routes/gnap.js checks the feature itself.
+  'POST /gnap/as/:asId': 'gnap',
+  'POST /gnap/continue/:grant': 'gnap',
+  'DELETE /gnap/continue/:grant': 'gnap',
+  'GET /gnap/interact/:ix': 'gnap',
+  'POST /gnap/interact/:ix/code': 'gnap',
+  'POST /gnap/interact/:ix/verify': 'gnap',
+  'DELETE /gnap/token/:tok': 'gnap',
+  'GET /gnap/rs/:res': 'gnap',
+  'GET /api/gnap/request-link': 'gnap',
+  'POST /api/gnap/request-link/rotate': 'gnap',
   'POST /api/user-policies/:id/confirm': 'policies',
   'POST /api/as-state': 'policies',
   'POST /api/user-groups/import-suggested-policies': 'policies',

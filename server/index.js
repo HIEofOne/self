@@ -40,6 +40,7 @@ import { createApiGuard, isLocalDevRequest, isAdminUserId, provesAccount } from 
 import setupFileRoutes from './routes/files.js';
 import { getUserBucketSize } from './routes/files.js';
 import setupGroupRoutes from './routes/groups.js';
+import setupGnapRoutes from './routes/gnap.js';
 import setupPolicyRoutes from './routes/policies.js';
 import setupEditionRoutes from './routes/edition.js';
 import setupSetupRoutes from './routes/setup.js';
@@ -858,7 +859,7 @@ ensureBucketExists();
     return;
   }
 
-  const databases = ['maia_sessions', 'maia_users', 'maia_audit_log', 'maia_chats', 'maia_groups', 'maia_relay', 'maia_as_requests', 'maia_credits'];
+  const databases = ['maia_sessions', 'maia_users', 'maia_audit_log', 'maia_chats', 'maia_groups', 'maia_relay', 'maia_as_requests', 'maia_credits', 'maia_gnap'];
 
   for (const dbName of databases) {
     try {
@@ -1549,11 +1550,12 @@ if ((process.env.PUBLIC_APP_URL || '').startsWith('https://')) {
 const SESSION_SECRET = process.env.SESSION_SECRET || deriveSessionSecret();
 app.use(cookieParser(SESSION_SECRET));
 // Stripe webhook signatures are computed over the EXACT bytes Stripe sent,
-// so that one route needs the raw body preserved alongside the parsed JSON.
+// and GNAP requests are signed over their Content-Digest (RFC 9421), so
+// those routes keep the raw body alongside the parsed JSON.
 app.use(express.json({
   limit: '10mb',
   verify: (req, _res, buf) => {
-    if (req.originalUrl === '/api/stripe/webhook') req.rawBody = buf;
+    if (req.originalUrl === '/api/stripe/webhook' || req.originalUrl.startsWith('/gnap/')) req.rawBody = buf;
   }
 }));
 app.use(express.urlencoded({ extended: true }));
@@ -1619,15 +1621,19 @@ setupPolicyRoutes(app, cloudant, auditLog);
 // balance lookup for verified visitors + admin grant/stats/config.
 setupCreditRoutes(app, cloudant, { emailTokenVerified: emailVerification.isVerified });
 
+const sendPlainEmail = async (to, subject, text) => {
+  const resend = await initResend();
+  if (!resend) return false;
+  const from = process.env.RESEND_FROM_EMAIL || 'noreply@maia.healthurl.com';
+  await resend.emails.send({ from, to, subject, text });
+  return true;
+};
 const { runDailyGroupMaintenance, runHourlyMailPull } = setupGroupRoutes(app, cloudant, auditLog, {
-  sendEmail: async (to, subject, text) => {
-    const resend = await initResend();
-    if (!resend) return false;
-    const from = process.env.RESEND_FROM_EMAIL || 'noreply@maia.healthurl.com';
-    await resend.emails.send({ from, to, subject, text });
-    return true;
-  }
+  sendEmail: sendPlainEmail
 });
+// GNAP: the personal AS's only external API in the Personal AS edition
+// (group_requests.md §10, P4). Its paths don't exist in the full edition.
+setupGnapRoutes(app, { cloudant, auditLog, sendEmail: sendPlainEmail });
 
 // Groups daily maintenance (Groups.md §6.1/§6.3/§7.3): renew 24h membership
 // credentials, reconcile registry-side revocation, pull relay mail, and

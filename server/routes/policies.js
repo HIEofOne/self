@@ -175,6 +175,10 @@ const SCOPE_COVERS = {
   'ah-category': ['ah-category']
 };
 
+/** Does a grant for scope `granted` cover a read of scope `requested`?
+ *  (The same lattice the cards use; GNAP's resource server, §10.7.) */
+export const scopeCovers = (granted, requested) => (SCOPE_COVERS[granted] || [granted]).includes(requested);
+
 const cardMatches = (card, req) => {
   const e = card.elements;
   // A card imported from a group (provenance 'group:<id>') belongs to THAT
