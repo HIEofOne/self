@@ -62,6 +62,13 @@ export function bypassesVerification(email, list = process.env.MAIA_EMAIL_VERIFY
   return String(list).split(',').map((a) => a.trim().toLowerCase()).filter(Boolean).includes(addr);
 }
 
+/** The address a test app signs new accounts up with: the first listed
+ *  bypass address, or null (always null in production). */
+export function testEmailAddress(list = process.env.MAIA_EMAIL_VERIFY_BYPASS) {
+  const first = String(list || '').split(',').map((a) => a.trim().toLowerCase()).find(Boolean);
+  return first && EMAIL_RE.test(first) ? first : null;
+}
+
 /** A token already verified for `email` (the bypass above). Returns
  *  { token, email } or { error }. */
 export function issueVerified(email, token) {

@@ -3,10 +3,14 @@
  * exact listed addresses skip the code, nothing does when it's unset, and
  * the token it issues satisfies the account-creation check.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
+import express from 'express';
+import request from 'supertest';
+import { serve } from '../helpers/serve.js';
 import {
-  bypassesVerification, issueVerified, isVerified, statusOf, issueCode
+  bypassesVerification, issueVerified, isVerified, statusOf, issueCode, testEmailAddress
 } from '../../server/emailVerification.js';
+import setupEditionRoutes from '../../server/routes/edition.js';
 
 describe('MAIA_EMAIL_VERIFY_BYPASS', () => {
   const LIST = 'agropper+tst@gmail.com, qa@example.com';
@@ -37,3 +41,31 @@ describe('MAIA_EMAIL_VERIFY_BYPASS', () => {
     expect(isVerified(c.token, 'someone@example.com')).toBe(false);
   });
 });
+
+describe('the sign-up address a test app fills in', () => {
+  const saved = process.env.MAIA_EMAIL_VERIFY_BYPASS;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.MAIA_EMAIL_VERIFY_BYPASS;
+    else process.env.MAIA_EMAIL_VERIFY_BYPASS = saved;
+  });
+  const edition = async () => {
+    const app = express();
+    app.use((req, _res, next) => { req.session = {}; next(); });
+    setupEditionRoutes(app, { getDocument: async () => null });
+    return (await request(await serve(app)).get('/api/edition')).body;
+  };
+
+  it('is the first listed address', () => {
+    expect(testEmailAddress(' Agropper+tst@gmail.com , qa@example.com')).toBe('agropper+tst@gmail.com');
+    expect(testEmailAddress('')).toBeNull();
+    expect(testEmailAddress('not-an-address')).toBeNull();
+  });
+
+  it('GET /api/edition reports it only when the bypass is set', async () => {
+    delete process.env.MAIA_EMAIL_VERIFY_BYPASS;
+    expect(await edition()).not.toHaveProperty('testEmail');
+    process.env.MAIA_EMAIL_VERIFY_BYPASS = 'agropper+tst@gmail.com';
+    expect((await edition()).testEmail).toBe('agropper+tst@gmail.com');
+  });
+});
+

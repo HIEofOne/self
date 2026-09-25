@@ -1493,7 +1493,22 @@ const welcomeSetupFiles = ref<File[]>([]);
 // email" cell share ONE address (composable state). Mirror it into wf.email so
 // GET STARTED sends it; if it gets verified anywhere, surface it in the setup
 // block (auto-open the notification-email row).
-const { state: verifiedEmail, hydrate: hydrateVerifiedEmail, beginEdit: beginEditVerifiedEmail } = useVerifiedEmail();
+const { state: verifiedEmail, hydrate: hydrateVerifiedEmail, beginEdit: beginEditVerifiedEmail, setEmail: setVerifiedEmail, sendCode: sendVerifiedEmailCode } = useVerifiedEmail();
+// Test apps only (MAIA_EMAIL_VERIFY_BYPASS): the sign-up email is filled in
+// and verified without asking — nothing to type.
+// One try per address (no retry loop if it fails); a reset re-arms it.
+let testEmailTried: string | null = null;
+watch(
+  () => [editionState.testEmail, verifiedEmail.verified] as const,
+  ([testEmail, verified]) => {
+    if (verified) { testEmailTried = null; return; }
+    if (!testEmail || testEmailTried === testEmail) return;
+    testEmailTried = testEmail;
+    setVerifiedEmail(testEmail);
+    void sendVerifiedEmailCode();
+  },
+  { immediate: true }
+);
 watch(() => verifiedEmail.email, (v) => { wf.value.email = v; });
 watch(() => verifiedEmail.verified, (ok) => { if (ok) wf.value.emailOptIn = true; });
 

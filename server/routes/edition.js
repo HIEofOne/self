@@ -12,6 +12,7 @@
  */
 import { describeEdition, featureMode } from '../edition.js';
 import { requestedUserId } from '../utils/api-guard.js';
+import { testEmailAddress } from '../emailVerification.js';
 
 const USERS_DB = 'maia_users';
 
@@ -26,7 +27,10 @@ export default function setupEditionRoutes(app, cloudant, auditLog = null) {
         console.warn('[edition] could not load user for /api/edition:', e?.message || e);
       }
     }
-    res.json({ success: true, ...describeEdition(userDoc) });
+    // Test apps only (MAIA_EMAIL_VERIFY_BYPASS): the address new accounts
+    // sign up with, filled in and verified without asking.
+    const testEmail = testEmailAddress();
+    res.json({ success: true, ...describeEdition(userDoc), ...(testEmail ? { testEmail } : {}) });
   });
 
   app.post('/api/user-features', async (req, res) => {
