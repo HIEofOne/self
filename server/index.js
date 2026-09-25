@@ -36,7 +36,8 @@ import { getChunkingForDataSource, getChunkingForStrategy, getRerankingModelName
 import { getProjectIdForGenAI } from './utils/project-config.js';
 import setupAuthRoutes from './routes/auth.js';
 import setupChatRoutes, { getOwnerIdForDeepLinkSession, getShareOwnerId } from './routes/chat.js';
-import { createApiGuard, isLocalDevRequest, isAdminUserId, provesAccount } from './utils/api-guard.js';
+import { createApiGuard, isLocalDevRequest, isAdminUserId } from './utils/api-guard.js';
+import { deletionProof } from './utils/delete-proof.js';
 import setupFileRoutes from './routes/files.js';
 import { getUserBucketSize } from './routes/files.js';
 import setupGroupRoutes from './routes/groups.js';
@@ -9823,13 +9824,10 @@ app.post('/api/local/delete', async (req, res) => {
     if (adminUsername && userId.trim().toLowerCase() === adminUsername.toLowerCase()) {
       return res.status(403).json({ success: false, error: 'Forbidden' });
     }
-    // The welcome page deletes while signed out, so the /api guard lets this
-    // route through; the proof is checked here: a session for the account,
-    // or this browser's signed temporary-account cookie for it. Without
-    // one, nothing is deleted (the page asks the patient to sign in).
-    if (!provesAccount(req, userId.trim())) {
-      return res.status(401).json({ success: false, error: 'SIGN_IN_REQUIRED', message: 'Sign in to this MAIA to delete it.' });
-    }
+    // Signed out: the proof is a session, this browser's signed temporary-
+    // account cookie, or the account's passkey (server/utils/delete-proof.js).
+    const proof = await deletionProof(req, userId.trim(), { cloudant, passkeyService });
+    if (!proof.ok) return res.status(proof.status).json(proof.body);
     console.log(`[LOCAL-DELETE] Deletion requested for ${userId}`);
     // Capture user doc before deletion for the notification email
     let preDeleteUserDoc = null;
