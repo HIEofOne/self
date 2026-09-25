@@ -20,8 +20,8 @@ afterAll(() => setEditionForTests(originalEdition));
 
 // group_requests.md §4.2
 const CORE = ['account', 'groups-core', 'policies', 'requests', 'summary', 'advisor', 'notifications',
-  'gnap', 'documents-in', 'requests-out'];
-const UNLOCKABLE = ['records-index', 'lists-full', 'second-ai', 'public-ai', 'saved-chats', 'deep-links',
+  'gnap', 'documents-in', 'requests-out', 'saved-chats', 'deep-links'];
+const UNLOCKABLE = ['records-index', 'lists-full', 'second-ai', 'public-ai',
   'peer-messaging', 'vouch', 'diary', 'references', 'privacy-filter-editor'];
 const NEW_REQUEST_PATH = ['gnap', 'documents-in', 'requests-out'];
 

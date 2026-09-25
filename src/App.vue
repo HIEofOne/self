@@ -3460,16 +3460,18 @@ const confirmDeleteLocalUser = async () => {
     if (getActiveUserId() === localId) {
       setActiveUserId(null);
     }
-    // Remove MAIA files from local folder (keep health record PDFs)
+    // Remove every file MAIA added to the local folder; the patient's own
+    // records stay. The summary PDFs go too: they name pseudonyms and a
+    // verification that died with the account.
     const handleToClean = localFolderHandle.value;
     if (handleToClean) {
       try {
         await handleToClean.removeEntry('maia-state.json').catch(() => {});
         await handleToClean.removeEntry('maia-log.pdf').catch(() => {});
         await handleToClean.removeEntry('maia-setup-log.pdf').catch(() => {}); // legacy name
-        // The rules died with the account. The verified summary PDFs stay:
-        // they are the patient's own copy of the record.
-        await handleToClean.removeEntry(MAIA_FOLDER_PDFS.policies).catch(() => {});
+        for (const pdf of Object.values(MAIA_FOLDER_PDFS)) {
+          await handleToClean.removeEntry(pdf).catch(() => {});
+        }
         for await (const [name] of (handleToClean as any).entries()) {
           if (name.endsWith('.webloc') && name.startsWith('maia')) {
             await handleToClean.removeEntry(name).catch(() => {});

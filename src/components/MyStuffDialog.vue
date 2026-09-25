@@ -59,6 +59,7 @@
              a non-idle state), a yellow rotating ring appears
              around the icon as a "wizard in progress" indicator. -->
         <button
+          v-if="!isPersonalAs || setupIncomplete"
           type="button"
           class="my-stuff-rail__btn my-stuff-rail__btn--wizard"
           :class="{ 'is-wizard-active': setupIncomplete }"
@@ -137,8 +138,11 @@
         <div class="my-stuff-rail__user">
           <!-- Backup: browser-universal download of maia-state.json (and
                the setup log). The Chrome folder auto-writes these; this
-               is the always-available manual path for everyone else. -->
+               is the always-available manual path for everyone else.
+               Personal AS requires the folder and keeps it current, so
+               there is nothing for this button to add. -->
           <button
+            v-if="!isPersonalAs"
             type="button"
             class="my-stuff-rail__signout"
             :class="{ 'my-stuff-rail__signout--icon': !railLabeled }"
@@ -2514,9 +2518,12 @@ const TAB_FEATURES: Record<string, string> = {
 const { has, isPersonalAs } = useEdition();
 // P7d: in Personal AS the medicines are reviewed inside the Patient Summary,
 // so there is no separate Current Medications tab (Lists, if unlocked, stays).
+// Personal AS: Saved Chats appears once there is a saved chat.
 const tabVisible = (name: string) => (name === 'lists'
   ? !isPersonalAs.value || has('lists-full')
-  : !TAB_FEATURES[name] || has(TAB_FEATURES[name]));
+  : name === 'chats' && isPersonalAs.value && !((props.savedChatCount || 0) > 0)
+    ? false
+    : !TAB_FEATURES[name] || has(TAB_FEATURES[name]));
 // Anything that still asks for the hidden tab lands on the summary.
 watch([currentTab, isPersonalAs], ([t]) => {
   if (t === 'lists' && !tabVisible('lists')) currentTab.value = 'summary';

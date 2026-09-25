@@ -256,7 +256,7 @@ Two design disciplines (not invariants):
 | `lists-full` | Categories, encounters, out-of-range labs, medication worksheets | Unlockable |
 | `second-ai` | Secondary private agent, PS generate-pair | Unlockable |
 | `public-ai` | Anthropic / OpenAI / DeepSeek / Gemini via DO Inference | Unlockable |
-| `saved-chats`, `deep-links` | Stored chats, clinician deep links | Unlockable |
+| `saved-chats`, `deep-links` | Stored chats, clinician deep links | **Core** (each needs the patient's own click; the Saved Chats tab appears with the first saved chat) |
 | `peer-messaging` | Threads, Everyone broadcast, directory, mentors, member invites | Unlockable |
 | `vouch` | "People I vouch for" (`verified-by-me`) | Unlockable |
 | `diary`, `references`, `privacy-filter-editor` | The corresponding Workbook tabs (the PS pseudonym mapping stays core, inside Summary) | Unlockable |
@@ -874,7 +874,7 @@ A member who asks 1,000 advisor questions costs about $1. The secondary DeepSeek
 | Knowledge base + OpenSearch | One KB per user at first indexing. The account's OpenSearch cluster is created at the first KB | **None unless `records-index` is turned on** | **The real lever: $19.60/month fixed.** A new edition host on its own DO account (e.g. trustee.ai) never creates the cluster until a member indexes. On the existing shared account the cluster already exists, so the test app saves nothing |
 | Public-AI inference | Available to everyone | Off unless turned on | Small, but it's the only AI spend that isn't on DO-hosted open models |
 | Spaces objects | Uploaded records persist (root / archived / KB) | Same in v1. Later: transient upload → parse → delete, with the folder as the only persistent copy | None (flat $5 subscription up to 250 GiB). This is a privacy change, not a cost change |
-| Server chats (`maia_chats`) | Yes | Off unless `saved-chats` is on | None (CouchDB is a fixed droplet) |
+| Server chats (`maia_chats`) | Yes | Only chats the member saves | None (CouchDB is a fixed droplet) |
 | Email (Resend) | Requests, invites, nudges | + weekly digests, + "answer ready" emails to verified requesters | Small volume |
 
 **What a minimal edition host costs:** App Platform $5–10 + CouchDB droplet $6 + Spaces $5 ≈ **$16–21/month**, plus **$19.60** only once someone turns on indexing (≈ $36–41). Both figures are inside the README's "$10–40/month" range. Member count barely moves the bill: what scales with members is tokens (cents) and email.
