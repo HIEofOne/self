@@ -79,14 +79,17 @@ export const FEATURES = Object.freeze({
     'Chat with commercial AI models from Anthropic, OpenAI, DeepSeek or Google.',
     'What you send in those chats goes to that model\'s provider.',
     UNLOCKABLE),
+  // On in the Personal AS edition too: saving a chat is the patient's own
+  // click (chat text is then stored on the MAIA server), and a clinician
+  // link exists only once the patient shares one.
   'saved-chats': feature('Saved chats',
     'Keep chats so you can come back to them.',
     'Chat text is stored on the MAIA server.',
-    UNLOCKABLE),
+    CORE),
   'deep-links': feature('Links for clinicians',
     'Share a link that lets a clinician chat with your private AI about your records.',
     'Anyone with the link can ask your private AI questions until you remove the link.',
-    UNLOCKABLE),
+    CORE),
   'peer-messaging': feature('Messages with members',
     'Message threads with other members of your groups, the Everyone channel, the member directory and mentors.',
     null, UNLOCKABLE),

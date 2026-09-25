@@ -70,7 +70,8 @@ async function saveUserDocWithRetry(cloudant, userId, mutateDoc, maxAttempts = 3
     }
     mutateDoc(freshDoc);
     try {
-      await cloudant.saveDocument('maia_users', freshDoc);
+      const saved = await cloudant.saveDocument('maia_users', freshDoc);
+      if (saved?.rev) freshDoc._rev = saved.rev;
       return freshDoc;
     } catch (error) {
       if (error?.statusCode === 409 && attempt < maxAttempts) {
@@ -373,6 +374,13 @@ export async function ensureUserAgent(doClient, cloudant, userDoc) {
   if (!userDoc) return userDoc;
   const userId = userDoc.userId;
   if (!userId) return userDoc;
+  // Saving a copy without _rev makes saveDocument borrow the latest one and
+  // overwrite the account with this copy — erasing whatever was written
+  // since it was read. Such a copy is stale: start from the stored one.
+  if (!userDoc._rev) {
+    const stored = await cloudant.getDocument('maia_users', userId);
+    if (stored) userDoc = stored;
+  }
 
   // Acquire per-user lock — if another call is already creating an agent,
   // wait for it to finish then re-read the user doc to get the result.
@@ -841,15 +849,20 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
         return res.status(400).json({ error: 'Registration verification failed' });
       }
 
-      // Update user with credential info
-      const updatedUser = result.userDoc;
-      updatedUser.challenge = undefined; // Remove challenge
-      
-      console.log(`[NEW FLOW 2] Passkey verified; minimal user setup for ${updatedUser.userId}`);
-      updatedUser.workflowStage = 'active';
-      updatedUser.initialFile = null;
-      updatedUser.temporaryAccount = false;
-      
+      // Save the credential on a fresh copy of the account. ensureUserAgent
+      // saves only its own agent fields when it has to retry, and saves
+      // nothing when another request is creating the agent — the new
+      // passkey must not ride on either.
+      console.log(`[NEW FLOW 2] Passkey verified; minimal user setup for ${userId}`);
+      const updatedUser = await saveUserDocWithRetry(cloudant, userId, (doc) => {
+        Object.assign(doc, result.credentialInfo);
+        delete doc.challenge;
+        doc.workflowStage = 'active';
+        doc.initialFile = null;
+        doc.temporaryAccount = false;
+        doc.updatedAt = new Date().toISOString();
+      });
+
       const agentReadyUser = await ensureUserAgent(doClient, cloudant, updatedUser);
       console.log(`[NEW FLOW 2] ✅ User document saved (agent ready)`);
 
@@ -1010,8 +1023,13 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       }
 
       // Update counter
-      const updatedUser = result.userDoc;
-      updatedUser.challenge = undefined; // Remove challenge
+      // Save the new counter on a fresh copy (see register-verify).
+      const newCounter = result.userDoc?.counter;
+      const updatedUser = await saveUserDocWithRetry(cloudant, userId, (doc) => {
+        if (newCounter !== undefined) doc.counter = newCounter;
+        delete doc.challenge;
+        doc.updatedAt = new Date().toISOString();
+      });
       const agentReadyUser = await ensureUserAgent(doClient, cloudant, updatedUser);
 
       // Set session
@@ -1456,7 +1474,11 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
           updatedAt: new Date().toISOString()
         };
         try {
-          await cloudant.saveDocument('maia_users', candidateDoc);
+          const saved = await cloudant.saveDocument('maia_users', candidateDoc);
+          // Keep the revision: the background agent start below saves this
+          // object again, and without _rev that save would overwrite
+          // whatever landed meanwhile (a group join, the folder).
+          candidateDoc._rev = saved.rev;
           userId = candidateId;
           displayName = candidateDisplayName;
           userDoc = candidateDoc;

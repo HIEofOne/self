@@ -84,6 +84,7 @@
             <div class="member-cell text-caption text-grey-7" style="flex: 3 1 0; min-width: 0">
               <template v-if="m.status === 'active'">
                 accepted {{ formatDate(m.joinedAt) }}
+                · {{ lastSeenText(m) }}
               </template>
               <template v-else-if="m.status === 'invited'">
                 invited {{ formatDate(m.invitedAt) }}
@@ -383,6 +384,7 @@ interface MemberSummary {
   status: 'invited' | 'active' | 'revoked' | 'requested';
   invitedAt: string | null;
   joinedAt: string | null;
+  lastRefreshAt?: string | null;
   revokedAt: string | null;
   inviteEmail: string | null;
   inviteExpiresAt: string | null;
@@ -563,6 +565,15 @@ const formatDate = (iso: string | null | undefined): string => {
   } catch {
     return iso;
   }
+};
+
+/** A member whose MAIA never checked in after joining is usually an entry
+ *  whose account is gone (a lost or duplicate join): safe to remove. */
+const lastSeenText = (m: MemberSummary): string => {
+  const seen = Date.parse(m.lastRefreshAt || '');
+  const joined = Date.parse(m.joinedAt || '');
+  if (!seen || (joined && seen - joined < 60 * 1000)) return 'not seen since joining';
+  return `last seen ${new Date(seen).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}`;
 };
 
 const loadMembers = async (groupId: string) => {

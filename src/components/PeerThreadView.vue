@@ -2,13 +2,14 @@
   <div class="peer-thread">
     <!-- The participant's identity now lives ONCE, on the selected rail row
          (badge + hover tooltip) and in the composer's To: chip — no repeated
-         header block. Leaving the thread is the rail's "Current chat" row.
-         Member threads keep the request-records affordance as a slim
-         toolbar; the per-participant background tint below carries the
-         "which thread am I in" signal. -->
-    <div v-if="!isOutsider && !isEveryone" class="peer-thread__toolbar" :style="{ background: threadTint }">
+         header block. A slim toolbar says how to get back to the AIs (the
+         rail's "Current chat" row does the same, but isn't obvious), and
+         member threads keep the request-records affordance there; the
+         per-participant background tint carries "which thread am I in". -->
+    <div class="peer-thread__toolbar" :style="{ background: threadTint }">
+      <q-btn flat dense no-caps size="sm" icon="arrow_back" color="primary" label="Back to AI chat" @click="emit('close')" />
       <q-space />
-      <q-btn flat dense round size="sm" icon="rule" color="primary" @click="openRequestDialog">
+      <q-btn v-if="!isOutsider && !isEveryone" flat dense round size="sm" icon="rule" color="primary" @click="openRequestDialog">
         <q-tooltip>Request records from {{ peerAlias || 'this member' }} — their sharing policies (or they themselves) decide</q-tooltip>
       </q-btn>
     </div>
