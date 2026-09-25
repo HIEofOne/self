@@ -1758,9 +1758,38 @@
             <div v-else class="text-center q-pa-md text-grey">
               <q-icon name="description" size="3em" />
               <div class="q-mt-sm">No patient summary found</div>
-              <div class="q-mt-md">
+              <!-- Personal AS edition (D11): two ways to a summary without a
+                   search index — an Apple Health export, or an interview. -->
+              <div v-if="isPersonalAs" class="q-mt-md column items-center q-gutter-sm">
+                <div v-if="appleHealthProgress" class="row items-center no-wrap q-gutter-sm text-grey-8">
+                  <q-spinner size="1.3em" color="primary" />
+                  <span>{{ appleHealthProgress }}</span>
+                </div>
+                <template v-else>
+                  <div class="row items-center no-wrap">
+                    <q-btn
+                      unelevated no-caps color="primary" icon="favorite"
+                      label="Use my Apple Health export"
+                      :loading="loadingSummary"
+                      @click="startAppleHealthRoute"
+                    />
+                    <q-icon name="info_outline" size="18px" color="grey-6" class="q-ml-sm cursor-pointer">
+                      <q-tooltip max-width="320px">
+                        The PDF of your health records from the Health app on your iPhone. MAIA reads your
+                        medicines, allergies, conditions, visits and lab results from it, and your private AI
+                        writes the summary. You review it before anything is saved.
+                      </q-tooltip>
+                    </q-icon>
+                  </div>
+                  <q-btn flat no-caps color="primary" icon="edit_note" label="Answer a few questions instead"
+                         :disable="loadingSummary" @click="showInterview = true" />
+                </template>
+                <input ref="appleHealthInput" type="file" accept="application/pdf,.pdf" style="display: none"
+                       @change="handleAppleHealthFile" />
+              </div>
+              <div v-else class="q-mt-md">
                 <q-btn
-                  :label="isPersonalAs ? 'Write my summary' : 'Request Summary'"
+                  label="Request Summary"
                   color="primary"
                   @click="handleRequestNewSummary"
                   icon="add"
@@ -2019,7 +2048,7 @@ import { useFolderPdfs } from '../composables/useFolderPdfs';
 import { deleteChatById } from '../utils/chatApi';
 import { processFileNCitations } from '../utils/fileNCitations';
 import { applyPseudonymsClient } from '../utils/pseudonyms';
-import { advancePipeline, waitForStageDone } from '../utils/pipeline';
+import { advancePipeline, fetchPipeline, waitForStageDone } from '../utils/pipeline';
 import { logModalEvent } from '../utils/modalLog';
 import { useEdition } from '../composables/useEdition';
 import { useSetupChecklist } from '../composables/useSetupChecklist';
@@ -2175,6 +2204,14 @@ const handleShowPatientSummary = () => {
 
 const handleCurrentMedicationsSaved = (payload: { value: string; edited: boolean; changed?: boolean; source?: string; verified?: boolean }) => {
   emit('current-medications-saved', payload);
+  // Personal AS, Apple Health route: the verified list was the last thing
+  // the draft needed — write the summary now (it opens for review).
+  if (payload.verified && isPersonalAs.value && appleHealthAwaitingMeds.value) {
+    appleHealthAwaitingMeds.value = false;
+    currentTab.value = 'summary';
+    void requestNewSummary({ skipCmGate: true });
+    return;
+  }
   if (payload.verified && !props.wizardActive) {
     // Outside the wizard, EVERY verified save reconciles against the
     // Patient Summary. Deliberately not gated on payload.changed: the
@@ -2895,7 +2932,8 @@ const generatingSummary = ref(false);
 const summaryGenerationStep = ref(0);
 const summaryElapsed = ref(0);
 let summaryTimer: ReturnType<typeof setInterval> | null = null;
-const summaryGenerationSteps = [
+// Personal AS (records not indexed): there is no knowledge base to query.
+const summaryGenerationSteps = computed(() => [
   { label: 'Parsing patient identity from PDF headers', delay: 2 },
   { label: 'Extracting verified medications', delay: 3 },
   { label: 'Scanning Apple Health for out-of-range labs', delay: 6 },
@@ -2904,16 +2942,16 @@ const summaryGenerationSteps = [
   { label: 'Extracting medical & social history', delay: 14 },
   { label: 'Extracting radiology / imaging', delay: 17 },
   { label: 'Building stopped medications list', delay: 20 },
-  { label: 'Querying AI agent with knowledge base...', delay: 23 },
-];
+  { label: isPersonalAs.value ? 'Your private AI is writing the summary...' : 'Querying AI agent with knowledge base...', delay: 23 },
+]);
 const startSummaryProgress = () => {
   summaryGenerationStep.value = 0;
   summaryElapsed.value = 0;
   if (summaryTimer) clearInterval(summaryTimer);
   summaryTimer = setInterval(() => {
     summaryElapsed.value++;
-    const nextStep = summaryGenerationSteps.findIndex(s => s.delay > summaryElapsed.value);
-    summaryGenerationStep.value = nextStep < 0 ? summaryGenerationSteps.length : nextStep;
+    const nextStep = summaryGenerationSteps.value.findIndex(s => s.delay > summaryElapsed.value);
+    summaryGenerationStep.value = nextStep < 0 ? summaryGenerationSteps.value.length : nextStep;
   }, 1000);
 };
 const stopSummaryProgress = () => {
@@ -7016,10 +7054,126 @@ const onInterviewDrafted = (text: string) => {
   showReplaceSummaryDialog.value = true;
 };
 
+// Personal AS edition (D11 route 1): a Patient Summary from an Apple Health
+// export, with no search index. The export's Lists are built, the patient
+// verifies Current Medications, then the private AI drafts from those
+// lists alone into the review dialog — the only way to save and verify.
+const appleHealthInput = ref<HTMLInputElement | null>(null);
+const appleHealthProgress = ref('');
+const appleHealthAwaitingMeds = ref(false);
+
+const startAppleHealthRoute = async () => {
+  if (!props.userId) return;
+  const p = await fetchPipeline(props.userId);
+  if (p?.pipeline.hasAppleFile) {
+    await continueAppleHealthRoute();
+    return;
+  }
+  appleHealthInput.value?.click();
+};
+
+const handleAppleHealthFile = async (event: Event) => {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = '';
+  if (!file || !props.userId) return;
+  if (!/\.pdf$/i.test(file.name)) {
+    $q.notify({ type: 'warning', message: 'Choose the PDF of your health records from the Health app.' });
+    return;
+  }
+  appleHealthProgress.value = 'Reading your Apple Health export…';
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+    const up = await fetch('/api/files/upload', { method: 'POST', credentials: 'include', body: fd });
+    const upj = await up.json().catch(() => ({} as any));
+    if (!up.ok || !upj?.fileInfo?.bucketKey) throw new Error(upj?.message || upj?.error || 'The upload failed.');
+    const info = upj.fileInfo;
+    if (!(await detectAppleHealthFromBucket(info.bucketKey))) {
+      // Not an Apple Health export: nothing was registered, so remove the
+      // upload again rather than keep a record MAIA can't read here.
+      await fetch('/api/delete-file', {
+        method: 'DELETE', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: props.userId, bucketKey: info.bucketKey })
+      }).catch(() => {});
+      $q.notify({
+        type: 'warning', timeout: 12000,
+        message: "That PDF isn't an Apple Health export. Choose the health records PDF from the Health app, or answer a few questions instead."
+      });
+      return;
+    }
+    const reg = await fetch('/api/user-file-metadata', {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: props.userId,
+        fileMetadata: {
+          fileName: info.fileName,
+          bucketKey: info.bucketKey,
+          bucketPath: info.userFolder,
+          fileSize: info.size,
+          fileType: 'pdf',
+          uploadedAt: info.uploadedAt,
+          isAppleHealth: true
+        },
+        updateInitialFile: true
+      })
+    });
+    if (!reg.ok) throw new Error('Your export was uploaded but could not be registered. Try again.');
+    await continueAppleHealthRoute();
+  } catch (e) {
+    $q.notify({ type: 'negative', message: e instanceof Error ? e.message : 'Could not read your Apple Health export.' });
+  } finally {
+    appleHealthProgress.value = '';
+  }
+};
+
+const continueAppleHealthRoute = async () => {
+  if (!props.userId) return;
+  appleHealthProgress.value = 'Building your lists from the export…';
+  try {
+    await advancePipeline(props.userId); // starts the Lists build when needed
+    const built = await waitForStageDone(props.userId, 'listsBuilt', 5 * 60 * 1000, 3000);
+    if (built !== 'done') {
+      throw new Error(built === 'timeout'
+        ? 'Reading your export is taking longer than usual. Try again in a few minutes.'
+        : 'MAIA could not read your Apple Health export. Try again.');
+    }
+    const p = await fetchPipeline(props.userId);
+    if (p?.pipeline.stages.medsVerified?.status === 'done') {
+      currentTab.value = 'summary';
+      void requestNewSummary({ skipCmGate: true });
+      return;
+    }
+    // The draft uses the VERIFIED list — so verify it first.
+    appleHealthAwaitingMeds.value = true;
+    currentTab.value = 'lists';
+    $q.notify({
+      type: 'info', timeout: 15000,
+      message: 'Check your Current Medications, then click VERIFY. Your private AI writes your summary next.'
+    });
+  } catch (e) {
+    $q.notify({ type: 'negative', message: e instanceof Error ? e.message : 'Could not read your Apple Health export.' });
+  } finally {
+    appleHealthProgress.value = '';
+  }
+};
+
 const handleRequestNewSummary = () => {
   if (isPersonalAs.value) {
     currentTab.value = 'summary';
-    showInterview.value = true;
+    // A new draft from the Apple Health export when there is one;
+    // otherwise the interview.
+    void fetchPipeline(props.userId).then((p) => {
+      if (p?.pipeline.hasAppleFile) {
+        summaryPair.value = null;
+        pendingSummaryRegeneration.value = true;
+        void requestNewSummary();
+      } else {
+        showInterview.value = true;
+      }
+    });
     return;
   }
   summaryPair.value = null;
@@ -7139,6 +7293,8 @@ const requestNewSummary = async (opts?: { skipCmGate?: boolean }) => {
         currentTab.value = 'lists';
         return;
       case 'verify-medications':
+        // Personal AS: once they're verified, the draft starts by itself.
+        if (isPersonalAs.value) appleHealthAwaitingMeds.value = true;
         $q.notify({
           type: 'warning',
           message: 'Verify your Current Medications first — the Patient Summary is built from the verified list. Opening Lists...',

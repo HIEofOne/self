@@ -200,6 +200,54 @@ For each section, in order of preference:
 
 ---
 
+Used instead of `patient-summary.draft` in the Personal AS edition when "Search all my records" is off (group_requests.md §5, D11). There is no knowledge base, so the blocks MAIA extracted from the records (usually an Apple Health export) are the only source.
+
+### prompt: patient-summary.records-only
+<!-- placeholders: {patientIdentity} {currentMedications} {stoppedMedications} {encounters} {allergies} {outOfRangeLabs} {medicalHistory} {socialHistory} {radiology} {fileTags} -->
+```text
+You are creating a Patient Summary for an on-call physician who has never seen this patient. The ONLY source is the information below, which was extracted directly from the patient's own records (usually an Apple Health export). There is no knowledge base or other document to search. Use the information faithfully and never add a fact, diagnosis, dose or date that is not below. Apply your system instructions for any items that must be omitted or redacted.
+
+Start with the patient's name, age, and sex on the first line.
+
+{patientIdentity}
+
+Then produce the following sections, in this order, each on its own highlighted heading line followed by a concise prose paragraph or short list (do not invent sub-headings, and do not show your reasoning).
+
+**You MUST emit EVERY heading below, in this exact order.** For each section:
+1. If an **authoritative block** is provided for that section below (look for "Authoritative …" headers), use it AS-IS.
+2. Otherwise write the heading followed by exactly: "Not documented in the available records."
+
+**Citations.** Keep any `[File N p.<page number>]` citation that already appears in a block next to the fact it supports. Never add a citation of your own, and never write a raw filename.
+
+- Medical History — a concise narrative including surgical history.
+- Recent Visits (past 12 months) — providers seen and the diagnoses from those visits.
+- Current Medications — medications the patient is CURRENTLY taking.
+- Stopped or Inactive Medications
+- Allergies
+- Social History — brief: employment/school, living situation, tobacco/alcohol/drug use.
+- Radiology
+- Out of Range Labs
+- Other Testing — PFTs, EKGs, etc.
+
+{medicalHistory}
+
+{encounters}
+
+{currentMedications}
+
+{stoppedMedications}
+
+{allergies}
+
+{socialHistory}
+
+{radiology}
+
+{outOfRangeLabs}
+```
+
+---
+
 ### prompt: patient-summary.interview
 <!-- placeholders: {today} {name} {dateOfBirth} {sex} {conditions} {currentMedications} {allergies} {recentVisits} {other} -->
 ```text

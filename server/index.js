@@ -44,7 +44,7 @@ import setupPolicyRoutes from './routes/policies.js';
 import setupEditionRoutes from './routes/edition.js';
 import setupSetupRoutes from './routes/setup.js';
 import setupInterviewRoutes from './routes/interview.js';
-import { getEdition } from './edition.js';
+import { getEdition, isFeatureEnabled } from './edition.js';
 import { createFeatureGuard } from './edition-routes.js';
 import {
   S3Client,
@@ -12060,6 +12060,15 @@ function serverReplaceMedicationsInSummary(summaryText, newMedsText, markVerifie
 }
 
 async function buildPatientSummaryPromptForUser(userId, userDoc, profileKey = 'default') {
+  // Personal AS edition without "Search all my records": there is no
+  // knowledge base. The summary comes from the deterministic blocks alone,
+  // read from EVERY registered record (un-indexed files never move into the
+  // KB folder), with a prompt that says so (group_requests.md §5, D11).
+  const recordsOnly = !isFeatureEnabled('records-index', userDoc);
+  const referencesPrefixAll = `${userId}/References/`;
+  const isSummarySource = (f, kbPrefix) => (recordsOnly
+    ? !(f.bucketKey || '').startsWith(referencesPrefixAll) && f.isReference !== true
+    : (!kbPrefix || (f.bucketKey || '').startsWith(kbPrefix)));
   const verifiedMeds = String(userDoc?.currentMedications || '').trim();
   console.log(`[buildPatientSummaryPromptForUser] userId=${userId} profileKey=${profileKey} verifiedMedsPresent=${verifiedMeds.length > 0} verifiedMedsLen=${verifiedMeds.length} snippet="${verifiedMeds.slice(0, 200)}"`);
   const currentMedications = verifiedMeds
@@ -12080,7 +12089,7 @@ async function buildPatientSummaryPromptForUser(userId, userDoc, profileKey = 'd
     const kbNamePI = getKBNameFromUserDoc(userDoc, userId);
     const kbPrefixPI = kbNamePI ? `${userId}/${kbNamePI}/` : null;
     const pdfFilesPI = (userDoc?.files || []).filter(f =>
-      f?.fileName && (!kbPrefixPI || (f.bucketKey || '').startsWith(kbPrefixPI)) &&
+      f?.fileName && isSummarySource(f, kbPrefixPI) &&
       (/\.pdf$/i.test(f.fileName) || /pdf/i.test(f.fileType || ''))
     );
     hasAppleHealth = pdfFilesPI.some(f => f.isAppleHealth);
@@ -12180,7 +12189,9 @@ async function buildPatientSummaryPromptForUser(userId, userDoc, profileKey = 'd
     // markdown preserves "[OUT OF RANGE]" flags that Epic exports
     // don't. Point the user to the deterministic Epic OOR scanner in
     // My Lists, which they can run on demand.
-    outOfRangeLabs = `**For the "Out of Range Labs" section above**, write exactly this and nothing more: "Out-of-range labs work best when an Apple Health file is available. Open My Lists → Out of Range Labs to run a deterministic scan over the patient's non-Apple-Health PDFs."`;
+    outOfRangeLabs = recordsOnly
+      ? `**For the "Out of Range Labs" section above**, write exactly: "Not documented in the available records."`
+      : `**For the "Out of Range Labs" section above**, write exactly this and nothing more: "Out-of-range labs work best when an Apple Health file is available. Open My Lists → Out of Range Labs to run a deterministic scan over the patient's non-Apple-Health PDFs."`;
   }
 
   // Encounters context: extract deterministically from PDFs and keep the
@@ -12193,7 +12204,7 @@ async function buildPatientSummaryPromptForUser(userId, userDoc, profileKey = 'd
     const kbName = getKBNameFromUserDoc(userDoc, userId);
     const kbPrefix = kbName ? `${userId}/${kbName}/` : null;
     const pdfFiles = (userDoc?.files || []).filter(f =>
-      f?.fileName && (!kbPrefix || (f.bucketKey || '').startsWith(kbPrefix)) &&
+      f?.fileName && isSummarySource(f, kbPrefix) &&
       (/\.pdf$/i.test(f.fileName) || /pdf/i.test(f.fileType || ''))
     );
     const collected = [];
@@ -12345,7 +12356,7 @@ async function buildPatientSummaryPromptForUser(userId, userDoc, profileKey = 'd
       `\n\n**Citation format (ALL sections):** cite sources ONLY as \`[File N p.<page>]\` (e.g. \`[File 2 p.81]\`). NEVER write a raw filename inside a citation. (Legend: ${fileLegend})`;
     if (radiology) {
       radiology += citationRule;
-    } else {
+    } else if (!recordsOnly) {
       // No AH-derived Radiology block. The agent will do KB-RAG; we
       // still inject the legend + citation rule so any imaging it
       // surfaces is cited in tag form.
@@ -12420,7 +12431,8 @@ async function buildPatientSummaryPromptForUser(userId, userDoc, profileKey = 'd
   if (override && override.trim()) {
     return substitutePromptPlaceholders(override, vars) + globalCitationContract;
   }
-  return (getClinicalPrompt('patient-summary.draft', vars)
+  return (getClinicalPrompt(recordsOnly ? 'patient-summary.records-only' : 'patient-summary.draft', vars)
+    || getClinicalPrompt('patient-summary.draft', vars)
     || 'Please generate a patient summary.') + globalCitationContract;
 }
 
@@ -12714,10 +12726,12 @@ const runDraftGeneration = async (userId) => {
         }
       }
       await ensureAgentRetrieval(userDoc.assignedAgentId);
-    } else if (!userDoc.kbId) {
+    } else if (!userDoc.kbId && isFeatureEnabled('records-index', userDoc)) {
       await setDraftJob(userId, { status: 'error', finishedAt: new Date().toISOString(), error: 'NO_KB' });
       return { httpStatus: 400, body: { success: false, error: 'NO_KB' } };
     }
+    // Otherwise (Personal AS, records not indexed): drafted from the
+    // deterministic lists alone, no KB to attach.
 
     const { DigitalOceanProvider } = await import('../lib/chat-client/providers/digitalocean.js');
     let agentProvider;
@@ -12780,7 +12794,11 @@ const runDraftGeneration = async (userId) => {
     // + past-12mo encounters context). Used by every summary endpoint so they
     // can never drift.
     const draftPrompt = await buildPatientSummaryPromptForUser(userId, userDoc);
-    await appendUserProvisioningEvent(userId, { event: 'draft-summary-prompt-built', promptLength: draftPrompt.length });
+    await appendUserProvisioningEvent(userId, {
+      event: 'draft-summary-prompt-built',
+      promptLength: draftPrompt.length,
+      ...(isFeatureEnabled('records-index', userDoc) ? {} : { source: 'records-only' })
+    });
     const chatMessages = [{ role: 'user', content: draftPrompt }];
     const chatModel = userDoc.agentModelName || 'openai-gpt-oss-120b';
     const chatOptions = { model: chatModel, stream: false };
@@ -12822,6 +12840,9 @@ const runDraftGeneration = async (userId) => {
     const aiElapsedMs = Date.now() - aiStartedAt;
     console.log(`[DRAFT SUMMARY] Private AI responded for ${userId} in ${(aiElapsedMs / 1000).toFixed(1)}s (model: ${usedModel})`);
 
+    // Both attempts failed (logged above): say so, rather than failing on
+    // the missing response.
+    if (!chatResp) throw new Error('The private AI did not answer');
     let summary = (chatResp.content || chatResp.text || '').trim();
     if (!summary) throw new Error('Empty draft from agent');
     // Same deterministic citation-rewrite as the other PS endpoints.
