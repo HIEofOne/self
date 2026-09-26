@@ -6,105 +6,11 @@ import { ChatClient } from '../../lib/chat-client/index.js';
 import { DigitalOceanProvider } from '../../lib/chat-client/providers/digitalocean.js';
 import { getOrCreateAgentApiKey, recreateAgentApiKey } from '../utils/agent-helper.js';
 import { ensureUserAgent, ensureSecondaryAgent } from './auth.js';
-import { policySentence, POLICY_SCOPES, READ_SCOPES, POLICY_PURPOSES } from './policies.js';
+import { policySentence, READ_SCOPES, POLICY_PURPOSES } from './policies.js';
+import { buildPolicyAdvisorContext, buildEditionAdvisorContext, advisorContextKind } from '../advisor-context.js';
 import { isVerified as emailTokenVerified } from '../emailVerification.js';
 import { chargeCredits, ADVISOR_QUESTION_CREDITS } from '../credits.js';
 import { isFeatureEnabled } from '../edition.js';
-
-/**
- * Policy Advisor context (Phase 1): a server-assembled system block that
- * turns the patient's own private AI into an advisor on their sharing
- * policies. STRICT CONTRACT: the AI advises and drafts cards; the
- * deterministic evaluator and the user's explicit save are the only
- * things that decide. Anything the AI proposes travels as a fenced
- * `policy-card` JSON block that the client renders as a confirmable card
- * and saves through normalizeCard — malformed output simply won't
- * validate. Assembled server-side only (never trust client-supplied
- * policy text), and never for deep-link visitors.
- */
-async function buildPolicyAdvisorContext(cloudant, userDoc) {
-  const cards = Array.isArray(userDoc.sharingPolicies) ? userDoc.sharingPolicies : [];
-  const cardLines = cards.length
-    ? cards.map((c, i) => {
-        const state = c.enabled === false ? ' [DISABLED]' : '';
-        const prov = typeof c.provenance === 'string' && c.provenance.startsWith('group:')
-          ? ' [suggested by their group]' : '';
-        return `${i + 1}. ${policySentence(c)}${state}${prov}\n   JSON: ${JSON.stringify({ outcome: c.outcome, denyMode: c.denyMode, elements: c.elements })}`;
-      }).join('\n')
-    : '(none — every request currently comes to the patient as a question)';
-
-  // Recent request log — the personalization that makes advice concrete.
-  let logLines = '(no requests yet)';
-  try {
-    const all = await cloudant.getAllDocuments('maia_as_requests');
-    const mine = (all || [])
-      .filter((r) => r && r.type === 'as_request' && r.userId === userDoc.userId)
-      .sort((a, b) => String(b.receivedAt).localeCompare(String(a.receivedAt)))
-      .slice(0, 15);
-    if (mine.length) {
-      logLines = mine.map((r) => {
-        const who = r.fromOutsider
-          ? `${r.requester?.name || 'an outside requester'}${r.requester?.organization ? ` (${r.requester.organization})` : ''} [outside the group]`
-          : (r.fromAlias || 'a group member');
-        const outcome = r.status === 'accepted' ? (r.autonomous ? 'auto-accepted' : 'accepted by the patient')
-          : r.status === 'declined' ? (r.autonomous ? 'auto-declined' : 'declined by the patient')
-          : r.status === 'blocked' ? 'blocked' : 'still awaiting the patient';
-        return `- ${r.receivedAt}: ${who} asked for ${r.resource} (${r.purpose || 'any'}) → ${outcome}`;
-      }).join('\n');
-    }
-  } catch { /* log stays generic */ }
-
-  const groups = (userDoc.groupMemberships || []).map((m) => m.groupName).filter(Boolean);
-  const profile = [
-    `- Groups: ${groups.length ? groups.join(', ') : 'none'}`,
-    `- Patient Summary: ${userDoc.patientSummaryVerifiedAt ? `VERIFIED (${userDoc.patientSummaryVerifiedAt})` : (userDoc.patientSummary ? 'exists but NOT verified' : 'none yet')}`,
-    `- Privacy-filtered summary: ${userDoc.privacyFilteredSummary ? `exists (${userDoc.privacyFilteredSummary.mappingCount || 0} pseudonym(s))` : 'none yet'} — the ONLY summary artifact that ever leaves automatically`,
-    `- Current Medications: ${userDoc.currentMedicationsVerifiedAt ? 'VERIFIED' : (userDoc.currentMedications ? 'exists but NOT verified' : 'none')}`
-  ].join('\n');
-
-  return [
-    '=== POLICY ADVISOR CONTEXT (server-assembled, authoritative) ===',
-    'In this conversation you are ALSO the patient\'s sharing-policy advisor. Explain their',
-    'policies as they relate to THEIR record and history below; identify gaps, redundancies,',
-    'and risks; and propose changes when asked. You NEVER change policies yourself — you draft',
-    'cards for the patient to confirm.',
-    '',
-    'How decisions work (deterministic, never AI): an enabled DENY card that matches wins;',
-    'then an enabled ASK card (forces the patient\'s approval even where a broader allow would',
-    'apply); then an enabled ALLOW card responds automatically with the PRIVACY-FILTERED',
-    'artifact only; anything no card matches always comes to the patient as a question.',
-    'Scope subsumption: everything covers {not-sensitive, patient-summary, meds-allergies};',
-    'patient-summary and not-sensitive each cover meds-allergies but not each other.',
-    'Signature is the MINIMUM identity proof required: unverified < verified-email <',
-    'group-member < doximity < verified-by-me. TODAY verified-email, group-member, and',
-    'verified-by-me (the patient\'s own vouch) are actually verifiable — doximity claims',
-    'evaluate as unverified until real verification exists. Payments are real credits',
-    '(spam deposit 5, evaluation payment 2, sharing payment 25; 100 credits = $2).',
-    '',
-    'THE PATIENT\'S POLICY CARDS:',
-    cardLines,
-    '',
-    'RECENT REQUESTS (newest first):',
-    logLines,
-    '',
-    'RECORD PROFILE:',
-    profile,
-    '',
-    'PROPOSING A CARD: output one fenced code block per card, language tag `policy-card`,',
-    'containing ONLY the JSON object — no prose inside the fence. Shape:',
-    '{"outcome":"allow"|"deny"|"ask","denyMode":"silent"|"respond" (deny only),',
-    ` "elements":{"party":{"type":"anyone"}|{"type":"group","groupId":"<their group id>","groupName":"<name>"},`,
-    ` "purpose":one of ${JSON.stringify(POLICY_PURPOSES)},`,
-    ` "scope":one of ${JSON.stringify(POLICY_SCOPES)}, "ahCategory":"<only when scope is ah-category>",`,
-    ' "action":"add" ONLY with scope "document" (someone adding a document, such as a radiology report, to the',
-    '  patient\'s folder) and then signature "verified-email" or stronger; omit "action" for every other card,',
-    ' "filtered":true,"signature":"unverified"|"verified-email"|"group-member"|"doximity"|"verified-by-me",',
-    ' "payment":"none"|"spam-deposit"|"notification-deposit"|"sharing-payment"}}',
-    'Propose at most a few cards at a time, each with a one-sentence reason OUTSIDE the fence.',
-    'The patient sees each as a card with a save button — never claim a change is already made.',
-    '=== END POLICY ADVISOR CONTEXT ==='
-  ].join('\n');
-}
 
 // One SSE event per streaming update. Intermediate updates carry only the
 // new delta: the provider's running totals (content / reasoningContent)
@@ -396,18 +302,26 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient, app
 
       const startTime = Date.now();
 
-      // Policy Advisor mode: inject the server-assembled context so the
-      // patient's AI can advise on THEIR policies and draft cards. Never
-      // for deep-link visitors or shared chats — the context contains the
-      // owner's policies and request history.
-      if (req.body?.policyAdvisor === true && !req.session?.isDeepLink && !shareIdForRequest && userId && Array.isArray(messages)) {
+      // Advisor context (server-assembled): the full edition's Policy
+      // Advisor when the patient opens it; in the Personal AS edition,
+      // every turn with the patient's own private AI (§9, P10). Never for
+      // deep-link visitors or shared chats — the context contains the
+      // owner's summary, policies and request history.
+      const advisorKind = advisorContextKind({
+        provider, policyAdvisor: req.body?.policyAdvisor === true,
+        isDeepLink: !!req.session?.isDeepLink, shareId: shareIdForRequest, userId
+      });
+      if (advisorKind && Array.isArray(messages)) {
         try {
           const advisorDoc = userDoc || await cloudant?.getDocument('maia_users', userId);
           if (advisorDoc) {
-            messages.unshift({ role: 'system', content: await buildPolicyAdvisorContext(cloudant, advisorDoc) });
+            const content = advisorKind === 'edition'
+              ? await buildEditionAdvisorContext(cloudant, advisorDoc)
+              : await buildPolicyAdvisorContext(cloudant, advisorDoc);
+            messages.unshift({ role: 'system', content });
           }
         } catch (e) {
-          console.warn('[chat] policy-advisor context failed (chat continues without it):', e?.message || e);
+          console.warn('[chat] advisor context failed (chat continues without it):', e?.message || e);
         }
       }
 

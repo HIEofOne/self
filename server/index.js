@@ -1600,7 +1600,23 @@ app.use('/api', createFeatureGuard({
 }));
 
 // Edition + feature registry (server/edition.js; group_requests.md §4).
-setupEditionRoutes(app, cloudant, auditLog);
+setupEditionRoutes(app, cloudant, auditLog, {
+  // "Search all my records" (records-index) turned off: the private AI stops
+  // searching the index; turned back on: it searches it again. The index
+  // itself is kept either way (turning a feature off deletes nothing), and a
+  // first turn-on starts indexing from the client (/api/pipeline/advance).
+  onFeatureChanged: async ({ feature, on, userDoc }) => {
+    if (feature !== 'records-index' || !userDoc?.kbId || !userDoc.assignedAgentId) return;
+    if (on) {
+      await doClient.agent.attachKB(userDoc.assignedAgentId, userDoc.kbId).catch((e) => {
+        if (!String(e?.message || '').includes('already')) throw e;
+      });
+      await ensureAgentRetrieval(userDoc.assignedAgentId);
+    } else {
+      await doClient.agent.detachKB(userDoc.assignedAgentId, userDoc.kbId);
+    }
+  }
+});
 // Personal AS setup checklist state (derived; group_requests.md §5).
 setupSetupRoutes(app, cloudant);
 // Patient Summary by interview (Personal AS edition, §5 D11). The helpers
