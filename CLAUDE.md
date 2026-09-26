@@ -39,7 +39,7 @@ Line counts as of v1.6.4 (September 2026); whole repo ≈ 71,000 lines (`src/` 3
 - `server/routes/gnap.js` + `server/gnap/` — GNAP personal AS (direct route): RFC 9421 signatures, grants, RS; reference client `scripts/gnap-client.mjs`
 - `server/routes/gnap-group.js` + `server/gnap/group.js` — GNAP group routing: the group's endpoint, fan-out of signed copies with a group attestation, sealed answers (the member's side is `receiveGroupCopy` in `routes/gnap.js`)
 - `src/gnap/` + `src/components/RequestPage.vue` / `GroupRequestPage.vue` — the browser GNAP client and the requester's pages at `/r/<asId>` and `/g/<groupId>/request` (mounted by `main.ts`); `RequestsPanel.vue` is the patient's side
-- `Documentation/group_requests.md` — design of the Personal AS edition (phases P0–P12); `public/MAIA_Request_Map.html` (served at `/MAIA_Request_Map.html`, linked from the welcome page) maps who runs what and how requests travel — update it when a request path changes
+- `Documentation/group_requests.md` — design of the Personal AS edition (phases P0–P12); `public/MAIA_Request_Map.html` (who runs what, how requests travel) and `public/MAIA_Group_Network.html` (how hosts, groups and people connect), served at those paths and linked from the welcome page — update them when a request path changes
 
 ## Environment Variables
 

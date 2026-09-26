@@ -326,9 +326,10 @@
                       <a href="#" class="welcome-footer-link text-caption" @click.prevent="addingFamilyMember = false">Back to my MAIA</a>
                     </div>
                     </template>
-                    <!-- The MAIA Request Map (public/MAIA_Request_Map.html): open to
+                    <!-- The MAIA Request Map and Group Network (public/*.html): open to
                          anyone, before any account exists. -->
-                    <a href="/MAIA_Request_Map.html" target="_blank" rel="noopener" class="map-card q-mt-lg">
+                    <div class="map-cards q-mt-lg">
+                    <a href="/MAIA_Request_Map.html" target="_blank" rel="noopener" class="map-card">
                       <svg class="map-card__art" viewBox="0 0 96 56" aria-hidden="true">
                         <g stroke="#c5d3e3" stroke-width="1.5" stroke-dasharray="2 3">
                           <line x1="10" y1="6" x2="10" y2="52" /><line x1="29" y1="6" x2="29" y2="52" />
@@ -346,6 +347,25 @@
                       </span>
                       <q-icon name="open_in_new" size="18px" class="map-card__icon" />
                     </a>
+                    <a href="/MAIA_Group_Network.html" target="_blank" rel="noopener" class="map-card">
+                      <svg class="map-card__art" viewBox="0 0 96 56" aria-hidden="true">
+                        <path d="M30 17 L22 39" stroke="#6b4fbb" stroke-width="1.6" stroke-dasharray="3 2" fill="none" />
+                        <path d="M30 17 L64 39" stroke="#6b4fbb" stroke-width="1.6" stroke-dasharray="3 2" fill="none" />
+                        <path d="M66 17 L30 39" stroke="#0b7f76" stroke-width="1.6" stroke-dasharray="3 2" fill="none" />
+                        <path d="M8 30 C 12 36, 14 40, 16 42" stroke="#b06a00" stroke-width="3" fill="none" stroke-linecap="round" />
+                        <rect x="20" y="4" width="22" height="13" rx="3" fill="#efedf6" stroke="#6b4fbb" stroke-width="1.2" />
+                        <rect x="56" y="4" width="22" height="13" rx="3" fill="#efedf6" stroke="#0b7f76" stroke-width="1.2" />
+                        <rect x="14" y="39" width="30" height="14" rx="3" fill="#e8f0fa" stroke="#1976d2" stroke-width="1.2" />
+                        <rect x="54" y="39" width="30" height="14" rx="3" fill="#e8f0fa" stroke="#1976d2" stroke-width="1.2" />
+                        <circle cx="6" cy="24" r="4" fill="#586675" />
+                      </svg>
+                      <span class="map-card__text">
+                        <span class="map-card__title">How MAIA groups connect</span>
+                        <span class="map-card__sub">Patient hosts, group-only hosts, and a radiologist sending a report</span>
+                      </span>
+                      <q-icon name="open_in_new" size="18px" class="map-card__icon" />
+                    </a>
+                    </div>
                     <div class="text-center text-caption text-grey-6 q-mt-lg">
                       <a href="/page.html?doc=Privacy" target="_blank" class="welcome-footer-link">Privacy</a>
                       · MAIA v{{ appVersion }}
@@ -4663,6 +4683,11 @@ onMounted(async () => {
 }
 .edition-start__info {
   cursor: help;
+}
+.map-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 .map-card {
   display: flex;
