@@ -20,6 +20,25 @@ Each entry classifies its changes:
 
 ---
 
+## v3 — 2026-09-26 (app v1.6.35)
+
+- **Added** the card element `action`, with values `read` and `add`, and the
+  scope value `document`, which pairs only with `add` (and `add` only with
+  `document`). *Compatible.* A card without `action` means `read`, exactly
+  as before, and matching requires the card's action to equal the
+  request's, so no stored card changes its extension and none of them can
+  accept an add (I-32). Read requests carry no action and are matched as
+  before; `document` is a new, exact-match point in the scope lattice that
+  no read scope covers.
+- `normalizeCard` refuses an add card that asks for no identity check:
+  adding always needs at least `verified-email` (D15). It stamps an add
+  card edition 3 at least; every other card keeps the edition it was
+  stamped with.
+- `policySentence` / `sentenceFor`: "Anyone with verified-email identity or
+  stronger may add documents to my MAIA for clinical use."
+- The older request paths (the full edition's form and relay) accept only
+  the read scopes (`READ_SCOPES`), so they behave exactly as before.
+
 ## v2 — 2026-08-09 (app v1.5.173)
 
 - **Removed** signature level `npi` from the authorable vocabulary

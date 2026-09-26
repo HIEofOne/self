@@ -13,7 +13,7 @@
  *       and the patient-side /api/user-groups endpoints.
  * PR-3 (relay/heartbeat), PR-4 (requests inbox), PR-5 (directory) follow.
  */
-import { evaluatePolicies, evaluationOptionsFor, policySentence, normalizeCard, POLICY_SCOPES, POLICY_PURPOSES } from './policies.js';
+import { evaluatePolicies, evaluationOptionsFor, policySentence, normalizeCard, READ_SCOPES, POLICY_PURPOSES } from './policies.js';
 import { isLocalDevRequest } from '../utils/api-guard.js';
 import { applyPseudonymMapping } from '../privacyFilter.js';
 import { medsAllergiesArtifact } from '../utils/summary-sections.js';
@@ -800,7 +800,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
       const email = String(b.email || '').trim().slice(0, 120);
       const organization = String(b.organization || '').trim().slice(0, 120);
       const message = String(b.message || '').trim().slice(0, 2000);
-      const scope = POLICY_SCOPES.includes(b.scope) ? b.scope : null;
+      const scope = READ_SCOPES.includes(b.scope) ? b.scope : null;
       const purpose = POLICY_PURPOSES.includes(b.purpose) ? b.purpose : null;
       if (!name || !email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
         return res.status(400).json({ success: false, error: 'A name and a valid contact email are required' });
@@ -3609,6 +3609,13 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
           recognized: !!r.recognized,
           forgottenAt: r.forgottenAt || null,
           gnapPayment: r.route ? (r.payment || null) : null,
+          // A document someone added (§10.12): what they described and where
+          // its hold stands — never where the sealed box is kept.
+          document: r.document ? {
+            kind: r.document.kind || null, title: r.document.title || '', mediaType: r.document.mediaType || null,
+            size: r.document.size || 0, sha256: r.document.sha256 || null, state: r.document.state || null,
+            fileName: r.document.fileName || null, deliveredAt: r.document.deliveredAt || null
+          } : null,
           aiSummary: r.aiSummary || null
         }));
       res.json({ success: true, requests });
@@ -3716,6 +3723,13 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
       const reqDoc = await cloudant.getDocument(AS_REQUESTS_DB, req.params.id);
       if (!reqDoc || reqDoc.type !== 'as_request' || reqDoc.userId !== userId) {
         return res.status(404).json({ success: false, error: 'Request not found' });
+      }
+      // A document someone added (§10.12): its own decision — the sealed
+      // hold is kept for the folder, or deleted.
+      if (reqDoc.document && typeof gnapHooks.decideDocument === 'function') {
+        const out = await gnapHooks.decideDocument(reqDoc, decision);
+        if (!out.ok) return res.status(400).json({ success: false, error: out.error });
+        return res.json({ success: true, status: out.status });
       }
       reqDoc.status = decision === 'accept' ? 'accepted' : decision === 'block' ? 'blocked' : 'declined';
       reqDoc.decidedAt = new Date().toISOString();
@@ -4067,7 +4081,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
         // Store it as a record of that decision — no re-evaluation, no
         // silent drop; the requester has already been emailed.
         decision = null;
-      } else if (POLICY_SCOPES.includes(r.resource)) {
+      } else if (READ_SCOPES.includes(r.resource)) {
         // Outsiders (W3) present no membership and no identity — UNLESS
         // the registry proved a verified email at delivery time
         // (r.signature === 'verified-email'). Either way they evaluate
@@ -4119,7 +4133,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
       // never verified) the request escalates to the human instead of
       // accepting with an empty response.
       if (decision && decision.outcome === 'allow'
-          && r.resource && r.resource !== 'notification-only' && POLICY_SCOPES.includes(r.resource)) {
+          && r.resource && r.resource !== 'notification-only' && READ_SCOPES.includes(r.resource)) {
         let artifact = '';
         let artifactLabel = '';
         if (r.resource === 'meds-allergies') {

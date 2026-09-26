@@ -116,6 +116,7 @@ export const MAIA_FOLDER_PDFS = Object.freeze({
 
 const MAIA_GENERATED_NAMES = new Set([
   STATE_FILE_NAME,
+  'maia-folder-key.json', // the folder key (utils/folderKey.ts): never uploaded or restored as a record
   'maia-log.pdf',
   'maia-setup-log.pdf', // legacy name
   ...Object.values(MAIA_FOLDER_PDFS).map((n) => n.toLowerCase())

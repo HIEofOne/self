@@ -184,6 +184,7 @@ export const ROUTE_FEATURES = Object.freeze({
   'POST /gnap/interact/:ix/finish': 'gnap',
   'DELETE /gnap/token/:tok': 'gnap',
   'GET /gnap/rs/:res': 'gnap',
+  'PUT /gnap/rs/:res': 'gnap',
   // P6: group routing (routes/gnap-group.js)
   'POST /gnap/group/:groupId': 'gnap',
   'POST /gnap/group/:groupId/continue/:bcast': 'gnap',
@@ -214,6 +215,12 @@ export const ROUTE_FEATURES = Object.freeze({
   'POST /api/user-groups/requests/:id/forget-requester': 'requests',
   'GET /api/requests/log': 'requests',
   'POST /api/requests/log/synced': 'requests',
+  // P9: documents others add — the folder key and the sealed holds (routes/received.js)
+  'GET /api/folder-key': 'documents-in',
+  'POST /api/folder-key': 'documents-in',
+  'GET /api/received': 'documents-in',
+  'GET /api/received/:id/box': 'documents-in',
+  'POST /api/received/:id/delivered': 'documents-in',
 
   // ── groups-core (member side) ─────────────────────────────────────────
   'GET /api/user-groups': 'groups-core',

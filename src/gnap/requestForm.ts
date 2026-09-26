@@ -25,3 +25,18 @@ const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', 
 export const answerToHtml = (text: string) => escapeHtml(text || '')
   .replace(/^#{1,4}\s+(.+)$/gm, '<strong>$1</strong>')
   .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+
+/** Adding a document (§10.12, D15): what it is, and the files accepted. */
+export const DOCUMENT_KINDS = [
+  { value: 'radiology-report', label: 'Radiology report' },
+  { value: 'lab-report', label: 'Lab report' },
+  { value: 'visit-note', label: 'Visit note' },
+  { value: 'discharge-summary', label: 'Discharge summary' },
+  { value: 'imaging', label: 'Image' },
+  { value: 'other', label: 'Other document' }
+];
+export const DOCUMENT_TYPES: Record<string, string> = {
+  'application/pdf': 'PDF', 'image/jpeg': 'JPEG image', 'image/png': 'PNG image', 'text/plain': 'text file'
+};
+export const DOCUMENT_ACCEPT = '.pdf,.jpg,.jpeg,.png,.txt,application/pdf,image/jpeg,image/png,text/plain';
+export const MAX_DOCUMENT_BYTES = 20 * 1024 * 1024;

@@ -19,7 +19,7 @@ import { randomBytes } from 'crypto';
 import { requestedUserId } from '../utils/api-guard.js';
 import { signRequest } from '../gnap/httpsig.js';
 import { ACCESS_TYPE, GRANT_TTL_MS } from '../gnap/grants.js';
-import { POLICY_SCOPES, POLICY_PURPOSES } from './policies.js';
+import { READ_SCOPES, POLICY_PURPOSES } from './policies.js';
 import { GNAP_DB, getDoc, updateDoc } from '../gnap/store.js';
 import { openFrom } from '../utils/sealed-box.js';
 
@@ -127,7 +127,7 @@ export default function setupGnapMemberRoutes(app, {
     try {
       const { groupId, to = null, toAlias = null, datatype, purpose } = req.body || {};
       const message = typeof req.body?.message === 'string' ? req.body.message.trim().slice(0, MAX_MESSAGE) : '';
-      if (!POLICY_SCOPES.includes(datatype) || datatype === 'ah-category' || !POLICY_PURPOSES.includes(purpose) || purpose === 'any') {
+      if (!READ_SCOPES.includes(datatype) || datatype === 'ah-category' || !POLICY_PURPOSES.includes(purpose) || purpose === 'any') {
         return res.status(400).json({ success: false, error: 'INVALID_REQUEST' });
       }
       const userDoc = await loadUser(userId);

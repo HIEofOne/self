@@ -28,7 +28,10 @@
 
     <!-- ── Live card ────────────────────────────────────── -->
     <div class="pcb-card-stage">
-      <div v-if="!complete" class="pcb-card-empty">
+      <div v-if="addNeedsIdentity" class="pcb-card-empty">
+        Adding a document always needs at least a verified email. Pick a stronger identity.
+      </div>
+      <div v-else-if="!complete" class="pcb-card-empty">
         Pick one cell in every column and MAIA writes the rule here.
       </div>
       <div v-else class="pcb-card" :class="cardClass">
@@ -157,7 +160,9 @@ if (props.existing) {
 }
 
 const pick = (key: string, v: string) => { sel[key as ColKey] = sel[key as ColKey] === v ? null : v; };
-const complete = computed(() => !!(sel.signature && sel.scope && sel.purpose && sel.payment && sel.action));
+// Adding a document always needs at least a verified email (D15).
+const addNeedsIdentity = computed(() => sel.scope === 'document' && sel.signature === 'unverified');
+const complete = computed(() => !!(sel.signature && sel.scope && sel.purpose && sel.payment && sel.action) && !addNeedsIdentity.value);
 
 // ── Build the card object from selections ──
 const builtCard = computed<PolicyCard>(() => ({
@@ -168,6 +173,7 @@ const builtCard = computed<PolicyCard>(() => ({
   provenance: props.existing?.provenance || 'user',
   elements: {
     party: props.party || props.existing?.elements?.party || { type: 'anyone' },
+    ...(sel.scope === 'document' ? { action: 'add' as const } : {}),
     purpose: (sel.purpose || 'clinical') as Purpose,
     scope: (sel.scope || 'patient-summary') as Scope,
     ...(sel.scope === 'ah-category' ? { ahCategory: ahCategory.value } : {}),

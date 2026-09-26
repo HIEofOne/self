@@ -215,6 +215,7 @@
       <div class="inv"><b>I-29 · Declines look alike</b><p>A rule's decline and a person's are the same answer; ignoring looks exactly like no answer yet.</p></div>
       <div class="inv"><b>I-30 · One door</b><p>Direct, group or member: every request is a signed GNAP request, decided by the patient's own cards.</p></div>
       <div class="inv"><b>I-31 · One exit</b><p>Data leaves only from the resource server. No email, relay message or log carries health data.</p></div>
+      <div class="inv"><b>I-32 · Adding is separate, and sealed</b><p>Only a rule that says “add” accepts a document. It waits sealed to the patient's folder key and is saved only to Received/.</p></div>
       <div class="inv"><b>I-33 · Asks only when told</b><p>A MAIA sends a request for its user only after they click Send. Planned more widely in P11.</p></div>
     </div>
   </section>
@@ -230,7 +231,7 @@ const PEOPLE = [
     ['Keys in the browser', 'built', 'P5a', 'Ed25519 to sign, X25519 to open answers; neither can be exported'],
     ['Recognized next time', 'built', 'P5b', 'An instance_id after an email check: no code for 12 months'],
     ['Credits', 'built', 'P5b', 'A deposit, fee or sharing payment from a balance on the host'],
-    ['Add a document', 'planned', 'P9', 'A radiology report, say, sealed to the patient’s folder key']
+    ['Add a document', 'built', 'P9', 'A radiology report, say, sealed to the patient’s folder key']
   ]},
   { name: 'Group Host', who: 'Runs a group’s registry and relay. Never decides a request.', items: [
     ['Registry', 'built', '', 'Pairwise ids, aliases, public keys; member emails deleted at join'],
@@ -248,8 +249,8 @@ const PEOPLE = [
     ['Private AI', 'built', '', 'One agent per patient, started after the email check'],
     ['Member’s GNAP client', 'built', 'P6b', 'Asks a group for its member; reads answers on demand'],
     ['Credits ledger and notices', 'built', '', 'Credits keyed by verified email; no health data in any email'],
-    ['Weekly digest', 'planned', 'P8', ''],
-    ['Sealed hold for added documents', 'planned', 'P9', ''],
+    ['Weekly digest and request log', 'built', 'P8', 'A digest email; the log in the folder, Requests/'],
+    ['Sealed hold for added documents', 'built', 'P9', 'Opened only by the patient’s folder key; deleted once saved'],
     ['GNAP client for its user', 'planned', 'P11', 'Drafted by the private AI, sent on a click'],
     ['Delegation (UCAN)', 'other', 'later', 'A covering colleague, narrowed and revocable']
   ]},
@@ -259,8 +260,8 @@ const PEOPLE = [
     ['Patient Summary', 'built', 'P7d', 'Verified; only its privacy-filtered copy is ever shared'],
     ['Sharing Policies', 'built', 'P3', 'Confirm suggested rules; turn sharing on or pause'],
     ['Requests tab', 'built', 'P5', 'Link and QR, Share / Decline / Ignore, Stop sharing, Forget'],
-    ['“Always handle requests like this”', 'planned', 'P8', 'A rule made from a decision'],
-    ['Received/ folder', 'planned', 'P9', 'Added documents and collected answers'],
+    ['“Always handle requests like this”', 'built', 'P8', 'A rule made from a decision'],
+    ['Folder key and Received/', 'built', 'P9', 'Documents others added: preview, accept, saved to Received/'],
     ['Private AI suggestions and drafts', 'planned', 'P10–P11', '']
   ]},
   { name: 'Group Member', who: 'A patient acting inside a group: asks, answers and messages other members.', items: [
@@ -365,18 +366,18 @@ const FLOWS = [
     ]
   },
   {
-    id: 'add', tab: 'Add a document', planned: true, status: 'Planned · P9',
+    id: 'add', tab: 'Add a document', status: 'Built · P9',
     title: 'Someone adds a document to the patient’s folder',
     summary: 'A radiology report, say. Adding is separate from reading, and the document arrives sealed to the patient’s folder key.',
     note: 'No existing card lets anyone add: a card must say action “add”. The folder key’s private half lives only in the folder and the patient’s browser (I-32).',
-    code: 'planned: vocabulary v3 (action read | add), PUT /gnap/rs/:res, the sealed hold',
+    code: 'vocabulary v3 (action read | add) · PUT /gnap/rs/:res · server/gnap/documents.js · src/utils/received.ts',
     steps: [
       { from: 'OUT', to: 'MH', kind: 'signed', t: 'Signed request: action “add”, with the document’s kind, title and hash', d: '' },
-      { at: 'MH', kind: 'action', t: 'Only a card with action “add” decides', d: 'A verified email at least.' },
-      { from: 'OUT', to: 'MH', kind: 'signed', t: 'Upload with an add token, or held as an offer', d: '' },
+      { at: 'MH', kind: 'action', t: 'Only a card with action “add” decides', d: 'A verified email at least. No card: an offer, held for the patient.' },
+      { from: 'OUT', to: 'MH', kind: 'signed', t: 'Upload once, on an add or offer token', d: 'Exactly the document described: size, SHA-256 and type are checked.' },
       { at: 'MH', kind: 'action', t: 'Sealed to the folder key; the server can’t read it', d: '' },
-      { from: 'MH', to: 'PT', kind: 'notice', t: '“A document was added” notice', d: '' },
-      { from: 'MH', to: 'PT', kind: 'local', t: 'Opened in the browser, saved to Received/', d: 'Never into the summary, the rules or the private AI’s instructions.' }
+      { from: 'MH', to: 'PT', kind: 'notice', t: '“A document was added” or “waiting for you” notice', d: 'Its kind, never its title.' },
+      { from: 'MH', to: 'PT', kind: 'local', t: 'Previewed and accepted, then saved to Received/', d: 'Opened in the browser with the folder key. Never into the summary, the rules or the private AI’s instructions.' }
     ]
   },
   {

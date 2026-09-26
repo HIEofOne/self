@@ -15,6 +15,8 @@
  *   POST    /gnap/interact/:ix/finish   … attach credits (optional), then finish
  *   DELETE  /gnap/token/:tok            token management: revoke
  *   GET     /gnap/rs/:res               resource server: the filtered artifact
+ *   PUT     /gnap/rs/:res               resource server: a document added on an
+ *                                        add or offer token, sealed to the folder key
  * and, for the signed-in patient:
  *   GET     /api/gnap/request-link      the personal AS address (made on first use)
  *   POST    /api/gnap/request-link/rotate   a new address; every direct grant stops
@@ -22,15 +24,20 @@
  * Personal AS edition only (feature `gnap`); elsewhere these paths don't exist.
  */
 import { randomBytes } from 'crypto';
+import express from 'express';
 import { isFeatureEnabled } from '../edition.js';
 import { requestedUserId } from '../utils/api-guard.js';
 import * as emailVerification from '../emailVerification.js';
 import { verifyGnapRequest, createNonceCache } from '../gnap/httpsig.js';
 import {
   GnapError, parseGrantRequest, toPolicyRequest, decideGrant, artifactFor, mayStillRead,
-  newHandle, newTokenValue, hashToken, nextWait, interactionHash,
+  newHandle, newTokenValue, hashToken, nextWait, interactionHash, isAddAccess, uploadVerdict,
   GRANT_TTL_MS, TOKEN_TTL_S
 } from '../gnap/grants.js';
+import {
+  MAX_DOCUMENT_BYTES, sha256Hex, matchesDeclaredType, sealDocument, hasFolderKey, holdKeyFor,
+  capExceeded, createMemoryHoldStore, KIND_WORDS
+} from '../gnap/documents.js';
 import { GNAP_DB, getDoc, updateDoc } from '../gnap/store.js';
 import { issueInstance, resolveInstance } from '../gnap/instances.js';
 import { attachPayment, settleGrantPayment, creditsFor, GNAP_PAYMENTS } from '../gnap/payments.js';
@@ -53,7 +60,8 @@ export const SCOPE_WORDS = {
 
 export default function setupGnapRoutes(app, {
   cloudant, auditLog = { logEvent: () => {} }, sendEmail = async () => false,
-  now = () => Date.now(), publicBaseUrl = () => process.env.PUBLIC_APP_URL, notices = null
+  now = () => Date.now(), publicBaseUrl = () => process.env.PUBLIC_APP_URL, notices = null,
+  holds = createMemoryHoldStore()
 } = {}) {
   const nonceCache = createNonceCache();
   const ipWindow = new Map(); // ip → [timestamps]
@@ -87,7 +95,7 @@ export default function setupGnapRoutes(app, {
   const cors = (res) => {
     res.set('Access-Control-Allow-Origin', '*');
     res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type, Content-Digest, Signature, Signature-Input');
-    res.set('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+    res.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   };
 
   const saveNew = (doc) => cloudant.saveDocument(GNAP_DB, doc);
@@ -115,8 +123,10 @@ export default function setupGnapRoutes(app, {
     return { continue: { access_token: { value }, uri: `${base()}/gnap/continue/${grant._id.slice(3)}`, wait }, ...extra };
   };
 
-  /** Issue a key-bound access token (never bearer, I-28). */
-  const tokenResponse = async (grant) => {
+  /** Issue a key-bound access token (never bearer, I-28). A document gets
+   *  a single-use `add` token (the cards accept it) or `offer` token (it is
+   *  held for the patient), for exactly the document described (§10.12). */
+  const tokenResponse = async (grant, { kind = 'read' } = {}) => {
     const value = newTokenValue();
     const manage = newTokenValue();
     const manageHandle = newHandle();
@@ -126,6 +136,7 @@ export default function setupGnapRoutes(app, {
       _id: tokenId, type: 'gnap_token', grant: grant._id.slice(3), userId: grant.userId,
       clientKey: grant.clientKey, keyThumbprint: grant.keyThumbprint, rsHandle: grant.rsHandle,
       datatype: grant.access.datatypes[0], expiresAt, revoked: false,
+      ...(kind !== 'read' ? { kind, document: grant.access.document, usedAt: null } : {}),
       manageHandle, manageTokenHash: hashToken(manage), createdAt: new Date(now()).toISOString()
     });
     await saveNew({ _id: `tm_${manageHandle}`, type: 'gnap_tm', tokenId });
@@ -139,7 +150,7 @@ export default function setupGnapRoutes(app, {
     return {
       access_token: {
         value,
-        access: [{ ...grant.access, locations: [`${base()}/gnap/rs/${grant.rsHandle}`] }],
+        access: [{ ...grant.access, ...(kind === 'offer' ? { actions: ['offer'] } : {}), locations: [`${base()}/gnap/rs/${grant.rsHandle}`] }],
         expires_in: TOKEN_TTL_S,
         manage: { uri: `${base()}/gnap/token/${manageHandle}`, access_token: { value: manage } }
       }
@@ -169,19 +180,57 @@ export default function setupGnapRoutes(app, {
         name: grant.displayName || null, nameVerified: false,
         email: grant.requester?.email || null, emailVerified: !!grant.requester?.emailVerified
       },
-      action: 'request', resource: grant.access.datatypes[0], purpose: grant.access.purpose,
+      action: isAddAccess(grant.access) ? 'add' : 'request', resource: grant.access.datatypes[0], purpose: grant.access.purpose,
       payload: grant.message || '', receivedAt: doc.receivedAt || grant.createdAt,
       recognized: !!grant.recognized,
       payment: grant.payment ? { type: grant.payment.type, amount: grant.payment.amount } : null,
       status, ...extra
     });
+    // A document: what was described, and where its hold stands.
+    if (isAddAccess(grant.access)) doc.document = { ...grant.access.document, ...(doc.document || {}), ...(extra.document || {}) };
     try { await cloudant.saveDocument(AS_REQUESTS_DB, doc); } catch (e) { console.warn('[gnap] request record failed:', e?.message || e); }
     return id;
   };
 
+  const requestsOf = async (userId) => ((await cloudant.getAllDocuments(AS_REQUESTS_DB).catch(() => [])) || [])
+    .filter((r) => r?.type === 'as_request' && r.userId === userId);
+
+  /**
+   * A document the cards accept (allow) or leave to the patient (ask): a
+   * single-use upload token. It goes nowhere without the patient's folder
+   * key, and never over the limits (§10.12).
+   */
+  const uploadTokenResponse = async (grant, userDoc, d, extra) => {
+    const at = new Date(now()).toISOString();
+    if (!hasFolderKey(userDoc)) {
+      // Nothing to seal to: the sender waits as for silence (I-29), and the
+      // patient sees why in their list.
+      if (!grant.silent) {
+        await updateDoc(cloudant, grant._id, (g) => { g.silent = true; g.decision = { outcome: 'deny-silent', by: 'system', policyId: null, at }; return true; });
+        await recordRequest(grant, 'declined', { autonomous: true, decidedAt: at, document: { state: 'no-key' } });
+      }
+      return { status: 200, body: await waitResponse(await getDoc(cloudant, grant._id), extra) };
+    }
+    const cap = capExceeded(await requestsOf(grant.userId), { size: grant.access.document.size, senderEmail: grant.requester?.email, now: now() });
+    if (cap) throw new GnapError('too_many_attempts', cap, 429);
+    const kind = d.outcome === 'allow' ? 'add' : 'offer';
+    await updateDoc(cloudant, grant._id, (g) => {
+      g.uploadKind = kind;
+      if (kind === 'add') g.decision = { outcome: 'allow', by: 'policy', policyId: d.policyId, at };
+      return true;
+    });
+    log('gnap_decided', { grant: grant._id.slice(3), userId: grant.userId, outcome: kind, policyId: d.policyId });
+    return { status: 200, body: await tokenResponse(await getDoc(cloudant, grant._id), { kind }) };
+  };
+
   /** Decide (or re-decide) a pending grant with the current cards and act. */
   const decideAndRespond = async (grant, userDoc, { first = false, extra = {} } = {}) => {
+    const adding = isAddAccess(grant.access);
+    // Adding needs a verified email first (D15): until the interaction
+    // step proves one, nothing is decided and nothing is recorded.
+    if (adding && grant.policyRequest.signature === 'unverified') return { status: 200, body: await waitResponse(grant, extra) };
     const d = decideGrant(userDoc, grant.policyRequest);
+    if (adding && (d.outcome === 'allow' || d.outcome === 'ask')) return uploadTokenResponse(grant, userDoc, d, extra);
     const at = new Date(now()).toISOString();
     if (d.outcome === 'allow') {
       await updateDoc(cloudant, grant._id, (g) => { g.decision = { outcome: 'allow', by: 'policy', policyId: d.policyId, at }; return true; });
@@ -272,6 +321,7 @@ export default function setupGnapRoutes(app, {
       let body;
       try { body = JSON.parse(String(r.body)); } catch { return { ok: false, error: 'bad body' }; }
       const parsed = parseGrantRequest(body);
+      if (isAddAccess(parsed.access)) return { ok: false, error: 'a document is added on a personal link' };
       if (!parsed.clientKey || !isX25519PublicJwk(body.maia_seal_jwk)) return { ok: false, error: 'no key' };
       const headers = Object.fromEntries(Object.entries(r.headers || {}).map(([k, v]) => [k.toLowerCase(), String(v)]));
       const sig = verifyGnapRequest(
@@ -391,6 +441,11 @@ export default function setupGnapRoutes(app, {
       if (inst && inst.userId !== as.userId) throw new GnapError('invalid_client', 'Unknown client instance', 401);
       const clientKey = inst ? inst.clientKey : parsed.clientKey;
       const sig = checkSignature(req, clientKey);
+      if (isAddAccess(parsed.access)) {
+        if (!isFeatureEnabled('documents-in')) throw new GnapError('invalid_request', 'Adding documents is not available here');
+        // Adding always needs a verified email (D15): a new sender verifies one.
+        if (!inst && !parsed.interact) throw new GnapError('invalid_request', 'Adding a document needs a verified email: include interact');
+      }
       const userDoc = await cloudant.getDocument(USERS_DB, as.userId).catch(() => null);
       if (!userDoc) return next();
       // At most MAX_PENDING_PER_AS new requests to one address a day.
@@ -521,9 +576,10 @@ export default function setupGnapRoutes(app, {
     const found = await loadInteraction(req.params.ix);
     if (!found) return next();
     const { grant } = found;
-    const what = SCOPE_WORDS[grant.access.datatypes[0]] || grant.access.datatypes[0];
+    const adding = isAddAccess(grant.access);
+    const what = adding ? (KIND_WORDS[grant.access.document?.kind] || 'a document') : (SCOPE_WORDS[grant.access.datatypes[0]] || grant.access.datatypes[0]);
     res.set('Cache-Control', 'no-store');
-    res.type('html').send(interactionPage({ what, purpose: grant.access.purpose, verified: !!grant.interact.verifiedAt }));
+    res.type('html').send(interactionPage({ what, purpose: grant.access.purpose, verified: !!grant.interact.verifiedAt, adding }));
   });
 
   app.post('/gnap/interact/:ix/code', async (req, res, next) => {
@@ -694,6 +750,111 @@ export default function setupGnapRoutes(app, {
     }
   });
 
+  // ── Adding a document (§10.12) ─────────────────────────────────────────
+
+  // The upload's exact bytes: signed over (Content-Digest), checked against
+  // the descriptor, sealed, and dropped. Never parsed, rendered or logged.
+  const rawDocument = express.raw({ type: () => true, limit: MAX_DOCUMENT_BYTES + 1024 });
+  const readDocumentBody = (req, res, next) => {
+    if (!on()) return next();
+    rawDocument(req, res, (err) => {
+      if (!err) return next();
+      cors(res);
+      return res.status(413).json({ error: { code: 'invalid_request', description: 'The document is too large' } });
+    });
+  };
+
+  app.put('/gnap/rs/:res', readDocumentBody, async (req, res, next) => {
+    if (!on()) return next();
+    cors(res);
+    try {
+      const presented = presentedToken(req);
+      const tok = presented ? await getDoc(cloudant, `tok_${hashToken(presented)}`) : null;
+      if (!tok || tok.revoked || tok.rsHandle !== req.params.res || Date.parse(tok.expiresAt) < now() || !['add', 'offer'].includes(tok.kind)) {
+        throw new GnapError('invalid_token', 'Invalid token', 401);
+      }
+      const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+      req.rawBody = body;
+      checkSignature(req, tok.clientKey);
+      if (tok.usedAt) throw new GnapError('invalid_token', 'This token was already used', 401);
+      const desc = tok.document;
+      const type = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+      if (type !== desc.mediaType || body.length !== desc.size || sha256Hex(body) !== desc.sha256 || !matchesDeclaredType(body, desc.mediaType)) {
+        throw new GnapError('invalid_request', 'The document is not the one described in the request');
+      }
+      // Single use: the first upload claims the token.
+      let claimed = false;
+      await updateDoc(cloudant, tok._id, (t) => {
+        if (t.usedAt) return false;
+        t.usedAt = new Date(now()).toISOString();
+        claimed = true;
+        return true;
+      });
+      if (!claimed) throw new GnapError('invalid_token', 'This token was already used', 401);
+      const grant = await getDoc(cloudant, `gr_${tok.grant}`);
+      const userDoc = await cloudant.getDocument(USERS_DB, tok.userId).catch(() => null);
+      if (!grant || !userDoc || grant.state === 'canceled') throw new GnapError('insufficient_access', 'Not accepted', 403);
+      if (!hasFolderKey(userDoc)) throw new GnapError('not_available', 'This person can’t receive documents right now', 409);
+      const verdict = uploadVerdict(userDoc, grant, tok.kind);
+      if (verdict === 'refuse') throw new GnapError('insufficient_access', 'Not accepted', 403);
+      const cap = capExceeded(await requestsOf(userDoc.userId), { size: desc.size, senderEmail: grant.requester?.email, now: now() });
+      if (cap) throw new GnapError('too_many_attempts', cap, 429);
+
+      const holdId = newHandle();
+      const holdKey = holdKeyFor(userDoc.userId, holdId);
+      await holds.put(holdKey, JSON.stringify(sealDocument(userDoc.folderKeyJwk, body)));
+      const at = new Date(now()).toISOString();
+      const accepted = verdict === 'accept';
+      const asRequestId = await recordRequest(grant, accepted ? 'accepted' : 'pending', {
+        ...(accepted ? { autonomous: true, decidedAt: at } : {}),
+        document: { state: accepted ? 'accepted' : 'held', holdId, holdKey, heldAt: at, ...(accepted ? { acceptedAt: at } : {}) }
+      });
+      await updateDoc(cloudant, grant._id, (g) => { g.uploadedAt = at; g.asRequestId = asRequestId; return true; });
+      if (accepted) {
+        await settleGrantPayment(cloudant, tok.grant, 'accepted');
+        void tell.shared(userDoc, asRequestId);
+      } else {
+        void tell.ask(userDoc);
+      }
+      log('gnap_document_received', { grant: tok.grant, userId: tok.userId, kind: desc.kind, size: desc.size, outcome: accepted ? 'accepted' : 'held' });
+      return res.status(201).json({ status: accepted ? 'accepted' : 'held' });
+    } catch (e) {
+      return fail(res, e);
+    }
+  });
+
+  /**
+   * The patient decides a held document in their requests list. Accept →
+   * it waits to be written to Received/ in the folder; Decline or Ignore →
+   * the hold is deleted. A verified sender hears Accept or Decline (no
+   * PHI, not even the title — I-31); Ignore says nothing (I-29).
+   */
+  const decideDocument = async (reqDoc, decision) => {
+    if (reqDoc.status !== 'pending' || reqDoc.document?.state !== 'held') return { ok: false, error: 'NOT_WAITING' };
+    const at = new Date(now()).toISOString();
+    if (decision === 'accept') {
+      reqDoc.status = 'accepted';
+      reqDoc.document = { ...reqDoc.document, state: 'accepted', acceptedAt: at };
+    } else {
+      try { await holds.del(reqDoc.document.holdKey); } catch (e) { console.warn('[gnap] hold delete failed:', e?.message || e); }
+      reqDoc.status = decision === 'block' ? 'blocked' : 'declined';
+      reqDoc.document = { ...reqDoc.document, state: 'declined', holdKey: null, declinedAt: at };
+    }
+    reqDoc.decidedAt = at;
+    await cloudant.saveDocument(AS_REQUESTS_DB, reqDoc);
+    if (decision !== 'block') await settleGrantPayment(cloudant, reqDoc.gnapGrant, decision === 'accept' ? 'accepted' : 'declined');
+    log('gnap_decided', { grant: reqDoc.gnapGrant, userId: reqDoc.userId, outcome: decision, by: 'patient', document: true });
+    const to = reqDoc.requester?.emailVerified ? reqDoc.requester.email : null;
+    if (to && decision !== 'block') {
+      const text = decision === 'accept'
+        ? 'The person you sent a document to accepted it. It is saved in their own MAIA folder.'
+        : 'The person you sent a document to declined it, and it was deleted.';
+      sendEmail(to, decision === 'accept' ? 'Your document was accepted' : 'Your document was declined', text)
+        .catch((e) => console.warn('[gnap] document decision email failed:', e?.message || e));
+    }
+    return { ok: true, status: reqDoc.status };
+  };
+
   // ── The patient's personal request address ─────────────────────────────
 
   const sessionUser = (req, res) => {
@@ -791,7 +952,7 @@ export default function setupGnapRoutes(app, {
 
   // For groups.js: copies of group requests pulled from the relay, and the
   // patient's later decisions on them.
-  return { receiveGroupCopy, answerGroupGrant, retryPendingGroupAnswers, notices: tell };
+  return { receiveGroupCopy, answerGroupGrant, retryPendingGroupAnswers, decideDocument, notices: tell };
 }
 
 
@@ -799,7 +960,7 @@ export default function setupGnapRoutes(app, {
 // requesting app. Everything shown is data from the request (no PHI).
 const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-export function interactionPage({ what, purpose, verified, audience = 'a MAIA' }) {
+export function interactionPage({ what, purpose, verified, audience = 'a MAIA', adding = false }) {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MAIA — verify your email</title>
@@ -815,8 +976,11 @@ export function interactionPage({ what, purpose, verified, audience = 'a MAIA' }
 </style></head>
 <body>
   <h1 id="title">${verified ? 'Add credits to your request?' : 'Verify your email'}</h1>
-  <p>You asked ${escapeHtml(audience)} for <strong>${escapeHtml(what)}</strong> for <strong>${escapeHtml(purpose)}</strong> use.
-     <span id="why-email"${verified ? ' hidden' : ''}>Their rules may answer a request from a verified email that an unverified one can't get.</span></p>
+  <p>${adding
+    ? `You're sending ${escapeHtml(audience)} <strong>${escapeHtml(what)}</strong> for <strong>${escapeHtml(purpose)}</strong> use.
+     <span id="why-email"${verified ? ' hidden' : ''}>A document is accepted only from a verified email. Once you verify, your document is sent.</span>`
+    : `You asked ${escapeHtml(audience)} for <strong>${escapeHtml(what)}</strong> for <strong>${escapeHtml(purpose)}</strong> use.
+     <span id="why-email"${verified ? ' hidden' : ''}>Their rules may answer a request from a verified email that an unverified one can't get.</span>`}</p>
   <div id="step-email"${verified ? ' hidden' : ''}>
     <label>Your email<input id="email" type="email" autocomplete="email"></label>
     <button id="send">Send code</button>

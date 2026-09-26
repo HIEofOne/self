@@ -45,6 +45,8 @@ import setupGnapRoutes from './routes/gnap.js';
 import setupGnapGroupRoutes from './routes/gnap-group.js';
 import setupGnapMemberRoutes from './routes/gnap-member.js';
 import setupRequestLogRoutes from './routes/requests-log.js';
+import setupReceivedRoutes from './routes/received.js';
+import { createSpacesHoldStore, sweepExpiredHolds } from './gnap/documents.js';
 import { sweepExpiredGnapPayments } from './gnap/payments.js';
 import setupPolicyRoutes from './routes/policies.js';
 import setupEditionRoutes from './routes/edition.js';
@@ -1648,11 +1650,27 @@ const { runDailyGroupMaintenance, runHourlyMailPull, pullSameHostMembers } = set
 // (group_requests.md §10, P4–P6). Its paths don't exist in the full edition.
 // The group routes go first: gnap.js ends with a catch-all OPTIONS /gnap/*.
 setupGnapGroupRoutes(app, { cloudant, auditLog, sendEmail: sendPlainEmail, pullNow: pullSameHostMembers });
-Object.assign(gnapHooks, setupGnapRoutes(app, { cloudant, auditLog, sendEmail: sendPlainEmail }));
+// Documents others add wait sealed in Spaces, under the patient's prefix (P9).
+let documentHoldsClient = null;
+const documentHolds = createSpacesHoldStore({
+  bucket: getSpacesBucketName,
+  getClient: async () => documentHoldsClient || (documentHoldsClient = new S3Client({
+    endpoint: getSpacesEndpoint(),
+    region: 'us-east-1',
+    forcePathStyle: process.env.S3_FORCE_PATH_STYLE === 'true',
+    credentials: {
+      accessKeyId: process.env.DIGITALOCEAN_AWS_ACCESS_KEY_ID || '',
+      secretAccessKey: process.env.DIGITALOCEAN_AWS_SECRET_ACCESS_KEY || ''
+    }
+  }))
+});
+Object.assign(gnapHooks, setupGnapRoutes(app, { cloudant, auditLog, sendEmail: sendPlainEmail, holds: documentHolds }));
 // A member's MAIA asking its groups, after the member clicks Send (P6b).
 const { pollSentRequests } = setupGnapMemberRoutes(app, { cloudant, auditLog, sendEmail: sendPlainEmail });
 // The request log for the patient's folder, and what the notices know of it (P8).
 setupRequestLogRoutes(app, { cloudant, notices: gnapHooks.notices });
+// The folder key and the sealed holds the patient's browser opens (P9).
+setupReceivedRoutes(app, { cloudant, holds: documentHolds, auditLog });
 
 // Groups daily maintenance (Groups.md §6.1/§6.3/§7.3): renew 24h membership
 // credentials, reconcile registry-side revocation, pull relay mail, and
@@ -1672,6 +1690,9 @@ const sweepGnapPayments = () => (isFeatureEnabled('gnap') ? sweepExpiredGnapPaym
   .then((n) => { if (n) console.log(`[gnap-cron] sent ${n} digest(s)`); })
   .then(() => (isFeatureEnabled('gnap') ? gnapHooks.notices.prune() : 0))
   .then((n) => { if (n) console.log(`[gnap-cron] pruned ${n} old request record(s) the folder holds`); })
+  // Documents neither decided nor saved to the folder in 90 days (P9).
+  .then(() => (isFeatureEnabled('documents-in') ? sweepExpiredHolds({ cloudant, holds: documentHolds }) : 0))
+  .then((n) => { if (n) console.log(`[gnap-cron] deleted ${n} document hold(s) past 90 days`); })
   .catch((e) => console.warn('[gnap-cron] sweep failed:', e?.message || e));
 setTimeout(() => {
   runDailyGroupMaintenance().catch((e) => console.warn('[groups-cron] initial run failed:', e?.message || e));

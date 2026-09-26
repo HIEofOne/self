@@ -175,6 +175,8 @@ export default function setupGnapGroupRoutes(app, {
       if (raw.length > MAX_BODY) throw new GnapError('invalid_request', 'Request too large', 413);
       if (rateLimited(req.ip || 'unknown')) throw new GnapError('too_many_attempts', 'Too many requests', 429);
       const parsed = parseGrantRequest(req.body);
+      // A document is about one person: it is added on their personal link (§10.12).
+      if (parsed.access.actions[0] === 'add') throw new GnapError('invalid_request', 'A document can’t be sent to a whole group: use the person’s own request link');
       if (!parsed.clientKey) throw new GnapError('invalid_client', 'A group request presents its key, not an instance', 400);
       if (!isX25519PublicJwk(req.body?.maia_seal_jwk)) throw new GnapError('invalid_request', 'maia_seal_jwk must be a public X25519 JWK');
       // A member asking? Its key is one the group registered for an active member.
