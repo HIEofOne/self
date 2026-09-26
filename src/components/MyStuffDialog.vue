@@ -1147,6 +1147,11 @@
             />
           </q-tab-panel>
 
+          <!-- Requests Tab (Personal AS edition, group_requests.md §8.4) -->
+          <q-tab-panel name="requests" class="q-pa-none" style="overflow-y: auto;">
+            <RequestsPanel :userId="userId" @changed="refreshGroupsAlert" />
+          </q-tab-panel>
+
           <!-- Privacy Filter Tab -->
           <q-tab-panel name="privacy">
             <!-- Filter Current Chat Button -->
@@ -2102,6 +2107,7 @@ import TextViewerModal from './TextViewerModal.vue';
 import Lists from './Lists.vue';
 import GroupsPanel from './GroupsPanel.vue';
 import PoliciesPanel from './PoliciesPanel.vue';
+import RequestsPanel from './RequestsPanel.vue';
 import SecondaryModelChooser from './SecondaryModelChooser.vue';
 import PatientInterview from './PatientInterview.vue';
 import { useQuasar } from 'quasar';
@@ -2462,13 +2468,15 @@ const groupsSeenMessages = ref<number>(readGroupsSeen());
 const groupsNewMessages = computed(() =>
   Math.max(0, groupsMessageCount.value - groupsSeenMessages.value)
 );
+// Personal AS: requests have their own tab, so Groups doesn't flag them.
+const groupsRequestAlert = computed(() => !isPersonalAs.value && groupsPendingRequests.value > 0);
 const groupsAlert = computed(() =>
-  groupsHasInvite.value || groupsPendingRequests.value > 0 || groupsNewMessages.value > 0
+  groupsHasInvite.value || groupsRequestAlert.value || groupsNewMessages.value > 0
 );
 const groupsAlertTitle = computed(() => {
   const parts: string[] = [];
   if (groupsHasInvite.value) parts.push('You have a group invitation');
-  if (groupsPendingRequests.value > 0) {
+  if (groupsRequestAlert.value) {
     parts.push(`${groupsPendingRequests.value} group request${groupsPendingRequests.value > 1 ? 's' : ''} awaiting your response`);
   }
   if (groupsNewMessages.value > 0) {
@@ -2518,9 +2526,13 @@ const TAB_FEATURES: Record<string, string> = {
 const { has, isPersonalAs } = useEdition();
 // P7d: in Personal AS the medicines are reviewed inside the Patient Summary,
 // so there is no separate Current Medications tab (Lists, if unlocked, stays).
-// Personal AS: Saved Chats appears once there is a saved chat.
+// Requests: its own tab in Personal AS only (the full edition keeps
+// requests in the conversation rail). Personal AS: Saved Chats appears once
+// there is a saved chat.
 const tabVisible = (name: string) => (name === 'lists'
   ? !isPersonalAs.value || has('lists-full')
+  : name === 'requests'
+    ? isPersonalAs.value && has('requests')
   : name === 'chats' && isPersonalAs.value && !((props.savedChatCount || 0) > 0)
     ? false
     : !TAB_FEATURES[name] || has(TAB_FEATURES[name]));
@@ -2537,6 +2549,7 @@ const railTabs = computed(() => [
   { name: 'lists',      icon: 'list',         label: has('lists-full') ? 'Lists' : 'Current Medications', alertCount: 0, alertOutline: !!props.medsNeedsVerify, infoAlert: false, infoTitle: '' },
   { name: 'groups',     icon: 'groups',       label: 'Groups',          alertCount: 0, alertOutline: false, infoAlert: groupsAlert.value, infoTitle: groupsAlertTitle.value },
   { name: 'policies',   icon: 'policy',       label: 'Sharing Policies', alertCount: 0, alertOutline: false, infoAlert: false,            infoTitle: '' },
+  { name: 'requests',   icon: 'move_to_inbox', label: 'Requests',       alertCount: groupsPendingRequests.value, alertOutline: false, infoAlert: false, infoTitle: '' },
   { name: 'privacy',    icon: 'privacy_tip',  label: 'Privacy Filter',  alertCount: 0, alertOutline: false, infoAlert: false,             infoTitle: '' },
   { name: 'diary',      icon: 'book',         label: 'Patient Diary',   alertCount: 0, alertOutline: false, infoAlert: false,             infoTitle: '' },
   { name: 'references', icon: 'link',         label: 'References',      alertCount: 0, alertOutline: false, infoAlert: false,             infoTitle: '' }

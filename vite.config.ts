@@ -71,6 +71,9 @@ export default defineConfig({
   ],
   server: {
     port: 5173,
+    // Let OPTIONS reach the backend: GNAP discovery is an OPTIONS request
+    // (RFC 9635 §9), and Vite's own CORS handler would answer it empty.
+    cors: false,
     proxy: {
       '/api': {
         target: 'http://localhost:3001',

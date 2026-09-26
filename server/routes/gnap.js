@@ -379,8 +379,11 @@ export default function setupGnapRoutes(app, {
       const r = emailVerification.issueCode(email, found.link.emailToken);
       if (r.error) return res.status(r.error === 'RATE_LIMITED' ? 429 : 400).json({ success: false, error: r.error });
       await updateDoc(cloudant, found.link._id, (l) => { l.emailToken = r.token; return true; });
+      // sendEmail answers false only when delivery is switched off (local
+      // development); then the page shows the code. A failed send throws
+      // (below): the code must never reach the page on a real host.
       const sent = await sendEmail(r.email, 'Your MAIA verification code',
-        `Your MAIA email verification code is ${r.code}. It expires in 10 minutes.\n\nIf you didn't request this, you can ignore this message.`).catch(() => false);
+        `Your MAIA email verification code is ${r.code}. It expires in 10 minutes.\n\nIf you didn't request this, you can ignore this message.`);
       return res.json({ success: true, sent: !!sent, ...(sent ? {} : { devCode: r.code }) });
     } catch (e) {
       return res.status(500).json({ success: false, error: 'SEND_FAILED' });
@@ -499,11 +502,40 @@ export default function setupGnapRoutes(app, {
     return userId;
   };
   const linkFor = (asId) => ({ asId, grantEndpoint: `${base()}/gnap/as/${asId}`, pageUrl: `${base()}/r/${asId}` });
+  const indexAsId = (userId, asId) =>
+    saveNew({ _id: `as_${asId}`, type: 'gnap_as', userId, asId, grants: [], createdAt: new Date(now()).toISOString() });
 
-  const newAsId = async (userId) => {
-    const asId = randomBytes(16).toString('hex');
-    await saveNew({ _id: `as_${asId}`, type: 'gnap_as', userId, asId, grants: [], createdAt: new Date(now()).toISOString() });
-    return asId;
+  /** Save a change to the account on a fresh copy (setup writes race it). */
+  const updateUser = async (userId, mutate) => {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const d = await cloudant.getDocument(USERS_DB, userId);
+      if (!d) return null;
+      if (mutate(d) === false) return d;
+      d.updatedAt = new Date(now()).toISOString();
+      try {
+        await cloudant.saveDocument(USERS_DB, d);
+        return d;
+      } catch (e) {
+        if (e?.statusCode !== 409 || attempt === 3) throw e;
+      }
+    }
+    return null;
+  };
+
+  /** Give the account a new address: the account first, then its index, so
+   *  a failure never leaves a working address the patient doesn't know. An
+   *  address another request just made is kept (unless replacing `old`). */
+  const assignAsId = async (userId, { replacing = undefined } = {}) => {
+    const candidate = randomBytes(16).toString('hex');
+    let chosen = candidate;
+    await updateUser(userId, (d) => {
+      if (d.asId && d.asId !== replacing) { chosen = d.asId; return false; }
+      d.asId = candidate;
+      return true;
+    });
+    if (chosen === candidate) await indexAsId(userId, candidate);
+    else if (!(await getDoc(cloudant, `as_${chosen}`))) await indexAsId(userId, chosen);
+    return chosen;
   };
 
   app.get('/api/gnap/request-link', async (req, res) => {
@@ -514,16 +546,11 @@ export default function setupGnapRoutes(app, {
       if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
       let asId = userDoc.asId;
       const index = asId ? await getDoc(cloudant, `as_${asId}`) : null;
-      if (!asId || !index || index.userId !== userId || index.retired) {
-        if (asId && !index) {
-          // An address made before GNAP (groups.js): index it as it is.
-          await saveNew({ _id: `as_${asId}`, type: 'gnap_as', userId, asId, grants: [], createdAt: new Date(now()).toISOString() });
-        } else {
-          asId = await newAsId(userId);
-          userDoc.asId = asId;
-          userDoc.updatedAt = new Date(now()).toISOString();
-          await cloudant.saveDocument(USERS_DB, userDoc);
-        }
+      if (asId && !index) {
+        // An address made before GNAP (groups.js): index it as it is.
+        await indexAsId(userId, asId);
+      } else if (!asId || index.userId !== userId || index.retired) {
+        asId = await assignAsId(userId, { replacing: asId });
       }
       res.json({ success: true, ...linkFor(asId) });
     } catch (e) {
@@ -550,10 +577,7 @@ export default function setupGnapRoutes(app, {
         }
         await updateDoc(cloudant, old._id, (a) => { a.retired = true; return true; });
       }
-      const asId = await newAsId(userId);
-      userDoc.asId = asId;
-      userDoc.updatedAt = new Date(now()).toISOString();
-      await cloudant.saveDocument(USERS_DB, userDoc);
+      const asId = await assignAsId(userId, { replacing: userDoc.asId });
       log('gnap_link_rotated', { userId, grantsStopped: (old?.grants || []).length });
       res.json({ success: true, ...linkFor(asId) });
     } catch (e) {

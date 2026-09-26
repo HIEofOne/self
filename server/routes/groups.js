@@ -17,7 +17,7 @@ import { evaluatePolicies, evaluationOptionsFor, policySentence, normalizeCard, 
 import { isLocalDevRequest } from '../utils/api-guard.js';
 import { applyPseudonymMapping } from '../privacyFilter.js';
 import { medsAllergiesArtifact } from '../utils/summary-sections.js';
-import { recordPatientDecision as recordGnapDecision } from '../gnap/store.js';
+import { recordPatientDecision as recordGnapDecision, stopSharing as stopGnapSharing } from '../gnap/store.js';
 import { isVerified as emailTokenVerified } from '../emailVerification.js';
 import { CREDIT_PRICES, holdCredits, chargeCredits, resolveHold, getAccount } from '../credits.js';
 import {
@@ -3622,12 +3622,41 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
           payload: r.payload,
           receivedAt: r.receivedAt,
           status: r.status,
+          route: r.route || null,
+          stoppedAt: r.stoppedAt || null,
           aiSummary: r.aiSummary || null
         }));
       res.json({ success: true, requests });
     } catch (error) {
       console.error('[user-groups] requests list failed:', error);
       res.status(500).json({ success: false, error: 'Failed to load requests' });
+    }
+  });
+
+  // POST /api/user-groups/requests/:id/stop-sharing — the patient stops a
+  // share made through GNAP (§8.4): the grant's tokens are revoked and an
+  // answer not yet collected can no longer be.
+  app.post('/api/user-groups/requests/:id/stop-sharing', async (req, res) => {
+    const userId = requireMatchingUser(req, res);
+    if (!userId) return;
+    try {
+      const reqDoc = await cloudant.getDocument(AS_REQUESTS_DB, req.params.id);
+      if (!reqDoc || reqDoc.type !== 'as_request' || reqDoc.userId !== userId) {
+        return res.status(404).json({ success: false, error: 'Request not found' });
+      }
+      if (!reqDoc.gnapGrant || reqDoc.status !== 'accepted') {
+        return res.status(400).json({ success: false, error: 'NOT_SHARED' });
+      }
+      const at = new Date().toISOString();
+      await stopGnapSharing(cloudant, reqDoc.gnapGrant, at);
+      reqDoc.status = 'stopped';
+      reqDoc.stoppedAt = at;
+      await cloudant.saveDocument(AS_REQUESTS_DB, reqDoc);
+      auditLog.logEvent({ type: 'gnap_token_revoked', userId, ip: req.ip, details: { grant: reqDoc.gnapGrant, by: 'patient' } });
+      res.json({ success: true, status: 'stopped' });
+    } catch (error) {
+      console.error('[user-groups] stop sharing failed:', error?.message || error);
+      res.status(500).json({ success: false, error: 'Failed to stop sharing' });
     }
   });
 
@@ -3683,8 +3712,19 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
       // request_denied (decline); block is silence, like a deny-silent card
       // (I-29). Nothing is emailed with an artifact (I-31).
       if (reqDoc.gnapGrant) {
-        await recordGnapDecision(cloudant, reqDoc.gnapGrant, decision);
+        const { grant, changed } = await recordGnapDecision(cloudant, reqDoc.gnapGrant, decision);
         auditLog.logEvent({ type: 'gnap_decided', userId, ip: req.ip, details: { grant: reqDoc.gnapGrant, outcome: decision, by: 'patient' } });
+        // "Answer ready" (§8.2): only to an address the requester verified,
+        // only that there is an answer, and never for block (I-29, I-31).
+        const to = grant?.requester?.emailVerified ? grant.requester.email : null;
+        if (changed && decision !== 'block' && to && grant.asId && typeof sendEmail === 'function') {
+          const page = `${String(process.env.PUBLIC_APP_URL || '').replace(/\/$/, '')}/r/${grant.asId}`;
+          sendEmail(to, 'Your request to a MAIA has an answer', [
+            'The person you asked has answered your request.',
+            '',
+            `See the answer on your request page, in the same browser you used to ask: ${page}`
+          ].join('\n')).catch((e) => console.warn('[gnap] answer-ready email failed:', e?.message || e));
+        }
         return res.json({ success: true, status: reqDoc.status });
       }
 
