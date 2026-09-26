@@ -1,0 +1,537 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MAIA Request Map: who runs what, and how requests travel (built and planned).
+     Served by the app at /MAIA_Request_Map.html and linked from the Personal AS welcome page.
+     Keep it in step with group_requests.md §10 and MAIA_Request_Security_Privacy_Design.md §6.3. -->
+<title>MAIA Request Map</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700&family=IBM+Plex+Mono:wght@400;500&family=Public+Sans:wght@400;500;600&display=swap">
+<style>
+  body { margin: 0; }
+  [hidden] { display: none !important; }
+  :root {
+    --bg: #F4F6F8;
+    --surface: #FFFFFF;
+    --surface-2: #EEF2F6;
+    --ink: #14202B;
+    --muted: #586675;
+    --rule: #D6DDE4;
+    --lane-head: #E6ECF3;
+    --accent: #1F6FD0;
+    --c-signed: #1F6FD0;
+    --c-sealed: #0B7F76;
+    --c-data: #2E7D32;
+    --c-notice: #7A8794;
+    --c-local: #3E4C5A;
+    --c-planned: #B06A00;
+    --pill-built-bg: #E4F0FB;
+    --pill-built-ink: #174F92;
+    --pill-planned-bg: #FBEFDD;
+    --pill-planned-ink: #8A5200;
+    --pill-other-bg: #ECEFF2;
+    --pill-other-ink: #4D5A67;
+    --hl: #FFF6D6;
+    --num-ink: #FFFFFF;
+    --font-display: 'Archivo', 'Helvetica Neue', Arial, sans-serif;
+    --font-body: 'Public Sans', -apple-system, 'Segoe UI', Roboto, sans-serif;
+    --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #0F151B; --surface: #161E26; --surface-2: #1D2731; --ink: #E6ECF2; --muted: #9AA8B6;
+      --rule: #2B3843; --lane-head: #1F2A35; --accent: #6AA8F5; --c-signed: #6AA8F5; --c-sealed: #3CC2B6;
+      --c-data: #6CC070; --c-notice: #8C99A6; --c-local: #B8C4D0; --c-planned: #E0A040;
+      --pill-built-bg: #17314F; --pill-built-ink: #A9CCF6; --pill-planned-bg: #3A2A10; --pill-planned-ink: #F0C27A;
+      --pill-other-bg: #25303A; --pill-other-ink: #B3C0CC; --hl: #2C2A1A; --num-ink: #0F151B;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #0F151B; --surface: #161E26; --surface-2: #1D2731; --ink: #E6ECF2; --muted: #9AA8B6;
+    --rule: #2B3843; --lane-head: #1F2A35; --accent: #6AA8F5; --c-signed: #6AA8F5; --c-sealed: #3CC2B6;
+    --c-data: #6CC070; --c-notice: #8C99A6; --c-local: #B8C4D0; --c-planned: #E0A040;
+    --pill-built-bg: #17314F; --pill-built-ink: #A9CCF6; --pill-planned-bg: #3A2A10; --pill-planned-ink: #F0C27A;
+    --pill-other-bg: #25303A; --pill-other-ink: #B3C0CC; --hl: #2C2A1A; --num-ink: #0F151B;
+  }
+
+  body { background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 15px; line-height: 1.5; }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 32px 20px 56px; }
+  h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
+  h1 { font-size: 30px; letter-spacing: -0.01em; }
+  h2 { font-size: 20px; }
+  h3 { font-size: 15px; }
+  .lede { color: var(--muted); max-width: 70ch; margin: 8px 0 0; }
+  code, .mono { font-family: var(--font-mono); font-size: 0.86em; }
+  .eyebrow { font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+
+  section { margin-top: 36px; }
+  .section-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 16px; margin-bottom: 14px; }
+  .section-head p { margin: 0; color: var(--muted); font-size: 14px; }
+
+  /* Who runs what */
+  .people { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
+  .person { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 14px 14px 10px; display: flex; flex-direction: column; gap: 10px; }
+  .person header { display: flex; flex-direction: column; gap: 4px; padding-bottom: 10px; border-bottom: 1px solid var(--rule); }
+  .person header p { margin: 0; font-size: 13px; color: var(--muted); }
+  .person ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 9px; }
+  .person li { display: grid; gap: 2px; }
+  .item-title { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-weight: 600; font-size: 13.5px; }
+  .item-desc { font-size: 12.5px; color: var(--muted); }
+  .pill { flex: none; font-size: 10.5px; font-weight: 600; letter-spacing: 0.03em; padding: 1px 7px; border-radius: 999px; white-space: nowrap; font-family: var(--font-body); }
+  .pill.built { background: var(--pill-built-bg); color: var(--pill-built-ink); }
+  .pill.planned { background: var(--pill-planned-bg); color: var(--pill-planned-ink); }
+  .pill.other { background: var(--pill-other-bg); color: var(--pill-other-ink); }
+  .note { font-size: 13.5px; color: var(--muted); margin: 12px 0 0; }
+
+  /* Flows */
+  .tabs { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 14px; }
+  .tabs .group-label { font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); font-weight: 600; margin: 0 2px 0 8px; }
+  .tab { font: 600 13.5px var(--font-body); color: var(--ink); background: var(--surface); border: 1px solid var(--rule); border-radius: 999px; padding: 6px 14px; cursor: pointer; }
+  .tab:hover { border-color: var(--accent); }
+  .tab[aria-selected="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .tab.planned[aria-selected="true"] { background: var(--c-planned); border-color: var(--c-planned); }
+  .tab:focus-visible, .steps li:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .flow { background: var(--surface); border: 1px solid var(--rule); border-radius: 12px; padding: 18px; }
+  .flow-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 20px; align-items: baseline; margin-bottom: 12px; }
+  .flow-head p { margin: 4px 0 0; color: var(--muted); max-width: 80ch; font-size: 14px; }
+  .flow-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; }
+  .diagram { overflow-x: auto; border-radius: 8px; }
+  .diagram svg { display: block; min-width: 820px; width: 100%; height: auto; }
+  .code-line { margin-top: 12px; font-size: 12.5px; color: var(--muted); }
+  .flow-note { margin-top: 10px; font-size: 13.5px; background: var(--surface-2); border-radius: 8px; padding: 10px 12px; }
+
+  .steps { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px 18px; }
+  .steps li { display: grid; grid-template-columns: 24px 1fr; gap: 8px; padding: 7px 8px; border-radius: 8px; cursor: default; }
+  .steps li.hl { background: var(--hl); }
+  .steps .num { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font: 600 11.5px var(--font-body); color: var(--num-ink); font-variant-numeric: tabular-nums; }
+  .steps .t { font-weight: 600; font-size: 13.5px; }
+  .steps .d { font-size: 12.5px; color: var(--muted); }
+  .steps .who { font-size: 11px; color: var(--muted); letter-spacing: 0.02em; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 14px; font-size: 12.5px; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 8px; }
+  .legend svg { flex: none; }
+
+  /* SVG */
+  .lane-head rect { fill: var(--lane-head); }
+  .lane-head text { fill: var(--ink); font: 700 13px var(--font-display); }
+  .lifeline { stroke: var(--rule); stroke-width: 1.5; stroke-dasharray: 4 5; }
+  .step text { font: 500 13.5px var(--font-body); fill: var(--ink); }
+  .step .num-bg { stroke: var(--surface); stroke-width: 2; }
+  .step .num-t { font: 600 11px var(--font-body); fill: var(--num-ink); }
+  .step .action { fill: var(--surface-2); stroke-width: 1.5; }
+  .step .hitbox { fill: transparent; }
+  .step.hl .hitbox { fill: var(--hl); }
+  .k-signed { stroke: var(--c-signed); } .f-signed { fill: var(--c-signed); }
+  .k-sealed { stroke: var(--c-sealed); } .f-sealed { fill: var(--c-sealed); }
+  .k-data { stroke: var(--c-data); } .f-data { fill: var(--c-data); }
+  .k-notice { stroke: var(--c-notice); } .f-notice { fill: var(--c-notice); }
+  .k-local { stroke: var(--c-local); } .f-local { fill: var(--c-local); }
+  .k-planned { stroke: var(--c-planned); } .f-planned { fill: var(--c-planned); }
+  .arrow { stroke-width: 2; fill: none; }
+  .arrow.k-data { stroke-width: 3.2; }
+  .arrow.k-notice { stroke-dasharray: 2 4; stroke-linecap: round; }
+  .arrow.k-planned, .action.k-planned { stroke-dasharray: 7 4; }
+
+  .invariants { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+  .inv { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 12px 14px; }
+  .inv b { font-family: var(--font-mono); font-size: 12.5px; color: var(--accent); font-weight: 500; }
+  .inv p { margin: 4px 0 0; font-size: 13.5px; }
+  footer { margin-top: 36px; font-size: 12.5px; color: var(--muted); }
+
+  @media (max-width: 1100px) {
+    .people { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .steps { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 720px) {
+    .people { grid-template-columns: 1fr 1fr; }
+    .invariants { grid-template-columns: 1fr; }
+    h1 { font-size: 25px; }
+  }
+  @media (max-width: 460px) {
+    .people { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">MAIA · Personal AS edition · as of v1.6.31</div>
+    <h1>MAIA Request Map</h1>
+    <p class="lede">Who runs what, and how a request travels between an outsider, a group, the hosts and the patient. Every request is a signed GNAP grant request; data leaves a patient's MAIA only from its resource server, to a key-bound token.</p>
+  </header>
+
+  <section aria-labelledby="who">
+    <div class="section-head">
+      <h2 id="who">Who runs what</h2>
+      <p>Built pieces show their phase; planned ones the phase that brings them.</p>
+    </div>
+    <div class="people" id="people"></div>
+    <p class="note">One server can play both host roles: test.agropper.xyz does today, and trustee.ai will at launch. A Group Member is a patient acting inside a group, so their MAIA runs on a MAIA Host too.</p>
+  </section>
+
+  <section aria-labelledby="how">
+    <div class="section-head">
+      <h2 id="how">How requests travel</h2>
+      <p>Pick a flow. Hover a step to find it in the diagram.</p>
+    </div>
+    <div class="tabs" role="tablist" id="tabs" aria-label="Request flows"></div>
+    <div class="flow" id="flow" role="tabpanel">
+      <div class="flow-head">
+        <div>
+          <div class="eyebrow" id="flow-status"></div>
+          <h3 id="flow-title" style="font-size:18px"></h3>
+          <p id="flow-summary"></p>
+        </div>
+      </div>
+      <div class="flow-body">
+        <div>
+          <div class="diagram" id="diagram"></div>
+          <div class="flow-note" id="flow-note"></div>
+          <div class="code-line">Code: <span class="mono" id="flow-code"></span></div>
+        </div>
+        <ol class="steps" id="steps"></ol>
+      </div>
+      <div class="legend" id="legend"></div>
+    </div>
+  </section>
+
+  <section aria-labelledby="rules">
+    <div class="section-head">
+      <h2 id="rules">The rules every path keeps</h2>
+      <p>From the security design doc, Appendix A.</p>
+    </div>
+    <div class="invariants">
+      <div class="inv"><b>I-24 · Unconfirmed never acts</b><p>Group-suggested rules decide nothing until the patient confirms them; while sharing is off, every request asks.</p></div>
+      <div class="inv"><b>I-28 · Key-bound tokens</b><p>Every token is bound to the requester's key and stored only as a hash. Bearer tokens are refused.</p></div>
+      <div class="inv"><b>I-29 · Declines look alike</b><p>A rule's decline and a person's are the same answer; ignoring looks exactly like no answer yet.</p></div>
+      <div class="inv"><b>I-30 · One door</b><p>Direct, group or member: every request is a signed GNAP request, decided by the patient's own cards.</p></div>
+      <div class="inv"><b>I-31 · One exit</b><p>Data leaves only from the resource server. No email, relay message or log carries health data.</p></div>
+      <div class="inv"><b>I-33 · Asks only when told</b><p>A MAIA sends a request for its user only after they click Send. Planned more widely in P11.</p></div>
+    </div>
+  </section>
+
+  <footer>Design: <span class="mono">Documentation/group_requests.md</span> §10 · Security: <span class="mono">Documentation/MAIA_Request_Security_Privacy_Design.md</span> §6.3</footer>
+</div>
+
+<script>
+const PEOPLE = [
+  { name: 'Outsider', who: 'A clinician, researcher or family member. No MAIA account, just a browser.', items: [
+    ['Personal request page', 'built', 'P5a', '/r/<asId>: ask one patient, check an email, read the answer'],
+    ['Group request page', 'built', 'P6a', '/g/<groupId>/request: ask every member at once'],
+    ['Keys in the browser', 'built', 'P5a', 'Ed25519 to sign, X25519 to open answers; neither can be exported'],
+    ['Recognized next time', 'built', 'P5b', 'An instance_id after an email check: no code for 12 months'],
+    ['Credits', 'built', 'P5b', 'A deposit, fee or sharing payment from a balance on the host'],
+    ['Add a document', 'planned', 'P9', 'A radiology report, say, sealed to the patient’s folder key']
+  ]},
+  { name: 'Group Host', who: 'Runs a group’s registry and relay. Never decides a request.', items: [
+    ['Registry', 'built', '', 'Pairwise ids, aliases, public keys; member emails deleted at join'],
+    ['Join links and suggested rules', 'built', '', 'Open, approval or invite-only; a QR code for the link'],
+    ['Relay', 'built', '', 'Sealed messages, 24-hour credentials, when members last checked in'],
+    ['GNAP group endpoint', 'built', 'P6a', 'One email check, one payment, signed copies to every member'],
+    ['Answer slot', 'built', 'P6a', 'Sealed boxes it can’t open, and counts'],
+    ['Signed rule updates with test requests', 'planned', '', ''],
+    ['The group as a requester', 'other', 'later', '']
+  ]},
+  { name: 'MAIA Host', who: 'Runs each patient’s authorization server, resource server and private AI.', items: [
+    ['Personal authorization server', 'built', 'P4', '/gnap/as/<asId>, one per patient'],
+    ['Evaluator', 'built', 'P3', 'Confirmed cards only; sharing on or paused'],
+    ['Resource server', 'built', 'P4', 'The only exit: privacy-filtered answers to key-bound tokens'],
+    ['Private AI', 'built', '', 'One agent per patient, started after the email check'],
+    ['Member’s GNAP client', 'built', 'P6b', 'Asks a group for its member; reads answers on demand'],
+    ['Credits ledger and notices', 'built', '', 'Credits keyed by verified email; no health data in any email'],
+    ['Weekly digest', 'planned', 'P8', ''],
+    ['Sealed hold for added documents', 'planned', 'P9', ''],
+    ['GNAP client for its user', 'planned', 'P11', 'Drafted by the private AI, sent on a click'],
+    ['Delegation (UCAN)', 'other', 'later', 'A covering colleague, narrowed and revocable']
+  ]},
+  { name: 'Patient', who: 'Owns the records and decides. Their records live in the MAIA folder.', items: [
+    ['Setup checklist', 'built', 'P2', 'Email, passkey, folder, group, summary, rules'],
+    ['MAIA folder', 'built', 'P7', 'Records, summary PDFs, rules PDF, maia-state.json'],
+    ['Patient Summary', 'built', 'P7d', 'Verified; only its privacy-filtered copy is ever shared'],
+    ['Sharing Policies', 'built', 'P3', 'Confirm suggested rules; turn sharing on or pause'],
+    ['Requests tab', 'built', 'P5', 'Link and QR, Share / Decline / Ignore, Stop sharing, Forget'],
+    ['“Always handle requests like this”', 'planned', 'P8', 'A rule made from a decision'],
+    ['Received/ folder', 'planned', 'P9', 'Added documents and collected answers'],
+    ['Private AI suggestions and drafts', 'planned', 'P10–P11', '']
+  ]},
+  { name: 'Group Member', who: 'A patient acting inside a group: asks, answers and messages other members.', items: [
+    ['Membership', 'built', '', 'Per-group signing and sealing keys, and an alias'],
+    ['Ask your group', 'built', 'P6b', 'Everyone, or one member from a thread'],
+    ['Sent', 'built', 'P6b', 'Counts and answers, read on demand'],
+    ['Answering members', 'built', 'P6b', 'Their cards see a group member, not a stranger'],
+    ['Messages and Everyone', 'other', 'unlockable', 'End-to-end sealed threads'],
+    ['Vouch', 'other', 'unlockable', '“verified-by-me” for people you know'],
+    ['Membership proofs across groups', 'other', 'later', '']
+  ]}
+];
+
+const LANES = [
+  { id: 'OUT', name: 'Outsider' },
+  { id: 'GH', name: 'Group Host' },
+  { id: 'MH', name: 'MAIA Host' },
+  { id: 'PT', name: 'Patient' },
+  { id: 'GM', name: 'Group Member' }
+];
+
+// kind: signed | sealed | data | notice | local | action.  at = self step.
+const FLOWS = [
+  {
+    id: 'direct', tab: 'Direct request', status: 'Built · P4, P5a, P5b',
+    title: 'An outsider asks one patient',
+    summary: 'The patient hands out their personal request link. The outsider’s browser signs the request; the patient’s cards, or the patient, decide.',
+    note: 'Next time the same browser presents its instance_id and skips the code. The patient can Forget a requester, and changing the link forgets everyone.',
+    code: 'server/routes/gnap.js · server/gnap/ · src/components/RequestPage.vue · src/gnap/client.ts · RequestsPanel.vue',
+    steps: [
+      { from: 'PT', to: 'OUT', kind: 'local', t: 'Hands out the request link or QR code', d: 'From Requests → Your request link.' },
+      { at: 'OUT', kind: 'action', t: 'Browser makes a key it can’t export', d: 'Ed25519, kept in this browser’s IndexedDB. The answer can be read only from the browser that asked.' },
+      { from: 'OUT', to: 'MH', kind: 'signed', t: 'Signed grant request to /gnap/as/<asId>', d: 'RFC 9635, signed with RFC 9421: tag “gnap”, created within ±5 minutes, a nonce.' },
+      { from: 'MH', to: 'OUT', kind: 'local', t: 'Email check page, credits optional', d: 'Verifies an email, then offers credits held on this host. Issues an instance_id.' },
+      { at: 'MH', kind: 'action', t: 'The patient’s confirmed cards decide', d: 'Allow, ask, decline or silent decline. Nothing decides while sharing is off (I-24).' },
+      { from: 'MH', to: 'PT', kind: 'notice', t: '“A request is waiting” email', d: 'No health data in any email (I-31).' },
+      { from: 'PT', to: 'MH', kind: 'local', t: 'Share, Decline or Ignore in Requests', d: 'Ignore looks exactly like no answer yet (I-29).' },
+      { from: 'MH', to: 'OUT', kind: 'notice', t: '“Your request has an answer” email', d: 'Only to a verified address; never for Ignore.' },
+      { from: 'OUT', to: 'MH', kind: 'signed', t: 'Signed continue → key-bound token', d: 'Stored only as a hash; bearer tokens are refused (I-28).' },
+      { from: 'MH', to: 'OUT', kind: 'data', t: 'Resource server returns the privacy-filtered answer', d: 'The only way data leaves (I-31). Names replaced; machine attribution.' },
+      { from: 'PT', to: 'MH', kind: 'local', t: 'Stop sharing, if they change their mind', d: 'Revokes the tokens: the next read is refused.' }
+    ]
+  },
+  {
+    id: 'group', tab: 'Group request', status: 'Built · P6a',
+    title: 'An outsider asks every member of a group',
+    summary: 'One request reaches every member without revealing who they are. Each member’s own MAIA decides; answers come back sealed so only the requester can open them.',
+    note: 'The group learns that a request was made, by which verified email, and counts. It never sees an answer or learns who answered. The requester never learns the roster, who declined, or any member’s personal address.',
+    code: 'server/routes/gnap-group.js · server/gnap/group.js · receiveGroupCopy in server/routes/gnap.js · GroupRequestPage.vue · src/gnap/sealedBox.ts',
+    steps: [
+      { from: 'GH', to: 'OUT', kind: 'local', t: 'Admin shares the group request page', d: '/g/<groupId>/request, shown in the admin’s group dialog.' },
+      { at: 'OUT', kind: 'action', t: 'Browser makes a signing key and a sealing key', d: 'Ed25519 and X25519; neither private key leaves the browser.' },
+      { from: 'OUT', to: 'GH', kind: 'signed', t: 'One signed request, with the sealing key', d: 'POST /gnap/group/<groupId> with maia_seal_jwk.' },
+      { from: 'GH', to: 'OUT', kind: 'local', t: 'Email check once; credits held once', d: 'Nothing reaches members before this. One payment covers the whole request.' },
+      { from: 'GH', to: 'MH', kind: 'sealed', t: 'Signed copy + group attestation to each member', d: 'Through the relay, sealed per member. The attestation covers the group, arrival time, body hash, verified email, payment and answer slot.' },
+      { at: 'MH', kind: 'action', t: 'Each member’s MAIA checks both signatures; its cards decide', d: 'The requester counts as “anyone” at verified-email strength (I-30).' },
+      { from: 'MH', to: 'PT', kind: 'notice', t: 'Asks the member if no card decides', d: 'The member answers in Requests.' },
+      { from: 'PT', to: 'MH', kind: 'local', t: 'Share, Decline or Ignore', d: '' },
+      { from: 'MH', to: 'GH', kind: 'sealed', t: 'Answer sealed to the requester, plus a count', d: 'A share holds a continuation only the requester’s key can use. Ignore sends nothing (I-29).' },
+      { from: 'GH', to: 'OUT', kind: 'notice', t: '“Members have answered” email', d: 'Counts only, at most every 30 minutes.' },
+      { from: 'OUT', to: 'GH', kind: 'signed', t: 'Poll: counts and sealed boxes', d: 'The group stores boxes it can’t open.' },
+      { at: 'OUT', kind: 'action', t: 'Opens the boxes in the browser', d: '' },
+      { from: 'OUT', to: 'MH', kind: 'signed', t: 'Continue at each sharing member’s MAIA → token', d: 'That member’s MAIA may be on another host.' },
+      { from: 'MH', to: 'OUT', kind: 'data', t: 'That member’s privacy-filtered answer', d: '' }
+    ]
+  },
+  {
+    id: 'member', tab: 'Member request', status: 'Built · P6b',
+    title: 'A member asks the rest of their group',
+    summary: 'The asking member’s MAIA is the client, signing with the member’s per-group key. The group vouches that a member is asking, so rules written for the group apply.',
+    note: 'Steps 2, 8 and 10 run on the asking member’s MAIA host; steps 5 to 7 on each answering member’s host — often the same server. The asking host keeps only continuations and hour-long tokens, never an answer.',
+    code: 'server/routes/gnap-member.js · server/routes/gnap-group.js · RequestsPanel.vue (Ask your group, Sent)',
+    steps: [
+      { from: 'GM', to: 'MH', kind: 'local', t: '“Ask your group”, then Send', d: 'Or “Request records” in a member thread, for one member. Never automatic (I-33).' },
+      { from: 'MH', to: 'GH', kind: 'signed', t: 'Signed with the member’s per-group key', d: 'No email check: the group already knows the key.' },
+      { at: 'GH', kind: 'action', t: 'Attests “group member”, pairwise id and alias', d: 'Rate-limited per member per day.' },
+      { from: 'GH', to: 'MH', kind: 'sealed', t: 'Copies to every other member, or one', d: 'maia_to names one member. Same relay and attestation as a group request.' },
+      { at: 'MH', kind: 'action', t: 'Recipients’ cards see a group member', d: 'e.g. “Anyone in Trustee Test with group-member identity may receive my Patient Summary for peer support.” A blocked sender is dropped.' },
+      { from: 'MH', to: 'PT', kind: 'notice', t: 'Asks the member if no card decides', d: '' },
+      { from: 'MH', to: 'GH', kind: 'sealed', t: 'Answer sealed to the asking member’s key', d: '' },
+      { from: 'MH', to: 'GH', kind: 'signed', t: 'Asking MAIA polls, hourly or on Check', d: '' },
+      { from: 'MH', to: 'GM', kind: 'notice', t: '“Members answered” email; the Sent list', d: 'Counts only.' },
+      { from: 'GM', to: 'MH', kind: 'local', t: 'Read', d: 'Fetched from the answering member’s resource server and shown; nothing is stored.' }
+    ]
+  },
+  {
+    id: 'setup', tab: 'Setup and rules', status: 'Built · P1–P3, P7',
+    title: 'Joining, the summary, and turning sharing on',
+    summary: 'What has to be true before any request can be answered automatically: a verified summary with its privacy-filtered copy, and rules the patient confirmed.',
+    note: 'Until the patient confirms rules and turns sharing on, every request comes to them as a question. Pausing sharing stops every read at once, whichever route the request came by.',
+    code: 'SetupChecklist.vue · server/routes/setup.js · server/routes/groups.js · PoliciesPanel.vue · MyStuffDialog.vue',
+    steps: [
+      { from: 'PT', to: 'MH', kind: 'local', t: 'Welcome: verify an email, create the account', d: 'A new account needs a verified email.' },
+      { at: 'MH', kind: 'action', t: 'Starts the patient’s private AI', d: 'One agent, only after the email check.' },
+      { from: 'PT', to: 'MH', kind: 'local', t: 'Add a passkey; choose the MAIA folder', d: 'The folder is on the patient’s computer.' },
+      { from: 'GM', to: 'GH', kind: 'signed', t: 'Join by link: per-group keys and an alias', d: 'The group keeps a pairwise id and public keys; the invite email is deleted at join.' },
+      { from: 'GH', to: 'MH', kind: 'local', t: 'Suggested rules arrive unconfirmed', d: 'They decide nothing until confirmed (I-24, I-25).' },
+      { from: 'PT', to: 'MH', kind: 'local', t: 'Summary drafted, reviewed and verified', d: 'Verifying makes the privacy-filtered copy: the only thing that can be shared.' },
+      { from: 'MH', to: 'PT', kind: 'local', t: 'PDFs written to the MAIA folder', d: 'The summary, its privacy-filtered copy, and the sharing rules.' },
+      { from: 'PT', to: 'MH', kind: 'local', t: 'Confirm rules; turn sharing on', d: 'Pause at any time.' },
+      { from: 'MH', to: 'GH', kind: 'signed', t: 'Refresh: 24-hour credential and relay mail', d: 'Hourly; the group records when each member last checked in.' }
+    ]
+  },
+  {
+    id: 'add', tab: 'Add a document', planned: true, status: 'Planned · P9',
+    title: 'Someone adds a document to the patient’s folder',
+    summary: 'A radiology report, say. Adding is separate from reading, and the document arrives sealed to the patient’s folder key.',
+    note: 'No existing card lets anyone add: a card must say action “add”. The folder key’s private half lives only in the folder and the patient’s browser (I-32).',
+    code: 'planned: vocabulary v3 (action read | add), PUT /gnap/rs/:res, the sealed hold',
+    steps: [
+      { from: 'OUT', to: 'MH', kind: 'signed', t: 'Signed request: action “add”, with the document’s kind, title and hash', d: '' },
+      { at: 'MH', kind: 'action', t: 'Only a card with action “add” decides', d: 'A verified email at least.' },
+      { from: 'OUT', to: 'MH', kind: 'signed', t: 'Upload with an add token, or held as an offer', d: '' },
+      { at: 'MH', kind: 'action', t: 'Sealed to the folder key; the server can’t read it', d: '' },
+      { from: 'MH', to: 'PT', kind: 'notice', t: '“A document was added” notice', d: '' },
+      { from: 'MH', to: 'PT', kind: 'local', t: 'Opened in the browser, saved to Received/', d: 'Never into the summary, the rules or the private AI’s instructions.' }
+    ]
+  },
+  {
+    id: 'symmetry', tab: 'MAIA asks for you', planned: true, status: 'Planned · P11',
+    title: 'A patient’s MAIA asks another patient’s MAIA',
+    summary: 'Every MAIA is also a GNAP client for its own user. The private AI can draft a request; only the user sends it.',
+    note: 'The answering MAIA needs nothing new: the request comes through the same door and the same cards decide it. Collected answers are sealed to the asking user’s folder key, like added documents.',
+    code: 'planned: maia-request drafts, a server-side GNAP client with pairwise keys, /gnap/client/finish',
+    steps: [
+      { from: 'PT', to: 'MH', kind: 'local', t: 'Asks the private AI to get something', d: '' },
+      { at: 'MH', kind: 'action', t: 'Drafts a request; a confirm card lists what sending reveals', d: '' },
+      { from: 'PT', to: 'MH', kind: 'local', t: 'Clicks Send', d: 'Never automatic, never a reaction to another request (I-33).' },
+      { at: 'MH', kind: 'action', t: 'Asks the other patient’s MAIA, on any host', d: 'A pairwise key per target. First contact verifies an email; after that, an instance_id.' },
+      { at: 'MH', kind: 'action', t: 'Waits for days; seals the answer to your folder key', d: '' },
+      { from: 'MH', to: 'PT', kind: 'local', t: 'Delivered to Received/ when MAIA is open', d: '' }
+    ]
+  }
+];
+
+const KINDS = {
+  signed: 'Signed request (RFC 9421)',
+  sealed: 'Sealed: only the recipient can open it',
+  data: 'Data leaves: resource server, key-bound token',
+  notice: 'Email or notice, never health data',
+  local: 'Person, page or local action',
+  planned: 'Planned'
+};
+
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const laneName = (id) => LANES.find((l) => l.id === id).name;
+
+// ── Who runs what ──
+document.getElementById('people').innerHTML = PEOPLE.map((p) => `
+  <article class="person">
+    <header><h3>${esc(p.name)}</h3><p>${esc(p.who)}</p></header>
+    <ul>${p.items.map(([t, s, phase, d]) => `
+      <li>
+        <div class="item-title"><span>${esc(t)}</span>
+          <span class="pill ${s}">${s === 'built' ? (phase ? 'Built ' + esc(phase) : 'Built') : s === 'planned' ? (phase ? 'Planned ' + esc(phase) : 'Planned') : esc(phase)}</span></div>
+        ${d ? `<div class="item-desc">${esc(d)}</div>` : ''}
+      </li>`).join('')}
+    </ul>
+  </article>`).join('');
+
+// ── Sequence diagram ──
+const W = 1080, X0 = 125, DX = 207.5, Y0 = 84, ROW = 62;
+const laneX = (id) => X0 + LANES.findIndex((l) => l.id === id) * DX;
+const wrap = (text, width) => {
+  const max = Math.max(12, Math.floor(width / 7.1));
+  const words = text.split(' ');
+  const lines = [];
+  let line = '';
+  for (const w of words) {
+    if ((line + ' ' + w).trim().length > max && line) { lines.push(line); line = w; } else line = (line + ' ' + w).trim();
+  }
+  if (line) lines.push(line);
+  return lines.slice(0, 2);
+};
+
+function renderDiagram(flow) {
+  const n = flow.steps.length;
+  const H = Y0 + n * ROW + 16;
+  const kindOf = (s) => (flow.planned ? 'planned' : s.kind === 'action' ? 'local' : s.kind);
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(flow.title)}: sequence of ${n} steps">
+    <defs>${Object.keys(KINDS).map((k) => `<marker id="m-${k}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-${k}"/></marker>`).join('')}</defs>`;
+  LANES.forEach((l, i) => {
+    const x = X0 + i * DX;
+    svg += `<line class="lifeline" x1="${x}" y1="46" x2="${x}" y2="${H - 6}"/>`;
+    svg += `<g class="lane-head"><rect x="${x - 80}" y="8" width="160" height="34" rx="8"/><text x="${x}" y="30" text-anchor="middle">${esc(l.name)}</text></g>`;
+  });
+  flow.steps.forEach((s, i) => {
+    const y = Y0 + i * ROW;
+    const k = kindOf(s);
+    svg += `<g class="step" data-step="${i}"><rect class="hitbox" x="4" y="${y - 6}" width="${W - 8}" height="${ROW - 4}" rx="6"/>`;
+    if (s.at) {
+      const x = laneX(s.at);
+      const lines = wrap(s.t, 180);
+      svg += `<rect class="action k-${k}" x="${x - 96}" y="${y}" width="192" height="${lines.length > 1 ? 46 : 32}" rx="8"/>`;
+      lines.forEach((ln, j) => { svg += `<text x="${x}" y="${y + (lines.length > 1 ? 19 : 21) + j * 16}" text-anchor="middle">${esc(ln)}</text>`; });
+      svg += `<circle class="num-bg f-${k}" cx="${x - 96}" cy="${y}" r="11"/><text class="num-t" x="${x - 96}" y="${y + 4}" text-anchor="middle">${i + 1}</text>`;
+    } else {
+      const x1 = laneX(s.from), x2 = laneX(s.to);
+      const dir = x2 > x1 ? 1 : -1;
+      const ly = y + 30;
+      const span = Math.abs(x2 - x1);
+      const lines = wrap(s.t, Math.max(170, span - 30));
+      const mid = (x1 + x2) / 2;
+      lines.forEach((ln, j) => { svg += `<text x="${mid}" y="${ly - 8 - (lines.length - 1 - j) * 16}" text-anchor="middle">${esc(ln)}</text>`; });
+      svg += `<line class="arrow k-${k}" x1="${x1 + dir * 14}" y1="${ly}" x2="${x2 - dir * 4}" y2="${ly}" marker-end="url(#m-${k})"/>`;
+      svg += `<circle class="num-bg f-${k}" cx="${x1}" cy="${ly}" r="11"/><text class="num-t" x="${x1}" y="${ly + 4}" text-anchor="middle">${i + 1}</text>`;
+    }
+    svg += `</g>`;
+  });
+  return svg + `</svg>`;
+}
+
+function renderSteps(flow) {
+  return flow.steps.map((s, i) => {
+    const k = flow.planned ? 'planned' : s.kind === 'action' ? 'local' : s.kind;
+    const who = s.at ? laneName(s.at) : `${laneName(s.from)} → ${laneName(s.to)}`;
+    return `<li tabindex="0" data-step="${i}">
+      <span class="num f-${k}" style="background: var(--c-${k})">${i + 1}</span>
+      <div><div class="who">${esc(who)}</div><div class="t">${esc(s.t)}</div>${s.d ? `<div class="d">${esc(s.d)}</div>` : ''}</div>
+    </li>`;
+  }).join('');
+}
+
+function legend(flow) {
+  const kinds = flow.planned ? ['planned', 'local'] : ['signed', 'sealed', 'data', 'notice', 'local'];
+  return kinds.map((k) => `<span><svg width="34" height="10" aria-hidden="true"><line class="arrow k-${k}" x1="2" y1="5" x2="30" y2="5"/></svg>${esc(KINDS[k])}</span>`).join('');
+}
+
+function highlight(i, on) {
+  document.querySelectorAll(`[data-step="${i}"]`).forEach((el) => el.classList.toggle('hl', on));
+}
+
+function show(id) {
+  const flow = FLOWS.find((f) => f.id === id);
+  document.querySelectorAll('.tab').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.flow === id)));
+  document.getElementById('flow-status').textContent = flow.status;
+  document.getElementById('flow-title').textContent = flow.title;
+  document.getElementById('flow-summary').textContent = flow.summary;
+  document.getElementById('flow-note').textContent = flow.note;
+  document.getElementById('flow-code').textContent = flow.code;
+  document.getElementById('diagram').innerHTML = renderDiagram(flow);
+  document.getElementById('steps').innerHTML = renderSteps(flow);
+  document.getElementById('legend').innerHTML = legend(flow);
+  document.querySelectorAll('#flow [data-step]').forEach((el) => {
+    const i = el.dataset.step;
+    el.addEventListener('mouseenter', () => highlight(i, true));
+    el.addEventListener('mouseleave', () => highlight(i, false));
+    el.addEventListener('focus', () => highlight(i, true));
+    el.addEventListener('blur', () => highlight(i, false));
+  });
+  try { localStorage.setItem('maia-map-flow', id); } catch { /* per-viewer convenience only */ }
+}
+
+const tabs = document.getElementById('tabs');
+const built = FLOWS.filter((f) => !f.planned);
+const planned = FLOWS.filter((f) => f.planned);
+const tabHtml = (f) => `<button class="tab${f.planned ? ' planned' : ''}" role="tab" id="tab-${f.id}" data-flow="${f.id}" aria-selected="false">${esc(f.tab)}</button>`;
+tabs.innerHTML = built.map(tabHtml).join('') + `<span class="group-label">Planned</span>` + planned.map(tabHtml).join('');
+tabs.addEventListener('click', (e) => { const b = e.target.closest('.tab'); if (b) show(b.dataset.flow); });
+tabs.addEventListener('keydown', (e) => {
+  if (!['ArrowRight', 'ArrowLeft'].includes(e.key)) return;
+  const all = [...tabs.querySelectorAll('.tab')];
+  const i = all.indexOf(document.activeElement);
+  if (i < 0) return;
+  const next = all[(i + (e.key === 'ArrowRight' ? 1 : all.length - 1)) % all.length];
+  next.focus();
+  show(next.dataset.flow);
+});
+
+let start = 'direct';
+try { const saved = localStorage.getItem('maia-map-flow'); if (FLOWS.some((f) => f.id === saved)) start = saved; } catch { /* default */ }
+show(start);
+</script>
+</body>
+</html>
