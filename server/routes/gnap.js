@@ -183,6 +183,8 @@ export default function setupGnapRoutes(app, {
       action: isAddAccess(grant.access) ? 'add' : 'request', resource: grant.access.datatypes[0], purpose: grant.access.purpose,
       payload: grant.message || '', receivedAt: doc.receivedAt || grant.createdAt,
       recognized: !!grant.recognized,
+      // Sent by another MAIA for its user (self-reported, §10.13).
+      origin: grant.origin || null,
       payment: grant.payment ? { type: grant.payment.type, amount: grant.payment.amount } : null,
       status, ...extra
     });
@@ -459,7 +461,7 @@ export default function setupGnapRoutes(app, {
       const grant = {
         _id: `gr_${handle}`, type: 'gnap_grant', route: 'direct', userId: as.userId, asId: req.params.asId,
         clientKey, keyThumbprint: sig.thumbprint, displayName: inst ? inst.displayName : parsed.displayName,
-        message: parsed.message, access: parsed.access,
+        message: parsed.message, access: parsed.access, origin: parsed.origin,
         policyRequest: toPolicyRequest(parsed.access, { verifiedEmail: !!inst }),
         requester: inst ? { email: inst.email, emailVerified: true } : { email: null, emailVerified: false },
         ...(inst ? { instanceId: inst._id.slice(3), recognized: true } : {}),

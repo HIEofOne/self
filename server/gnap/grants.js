@@ -121,6 +121,7 @@ export function parseGrantRequest(body) {
 
   const message = typeof body.maia_message === 'string' ? body.maia_message.trim().slice(0, MAX_MESSAGE) : '';
   return {
+    origin: parseMaiaOrigin(body.maia_origin),
     access: {
       type: ACCESS_TYPE, actions: [action], datatypes: [scope], purpose: a.purpose,
       ...(ahCategory ? { ahCategory } : {}), ...(document ? { document } : {})
@@ -134,6 +135,21 @@ export function parseGrantRequest(body) {
 }
 
 export const isAddAccess = (access) => access?.actions?.[0] === 'add';
+
+/**
+ * A request another MAIA sent for its user says so (§10.13): self-reported,
+ * shown to the patient labeled that way, never used by a card. Anything
+ * else there is dropped.
+ */
+export function parseMaiaOrigin(o) {
+  if (!o || typeof o !== 'object' || o.software !== 'maia') return null;
+  return {
+    software: 'maia',
+    version: typeof o.version === 'string' ? o.version.replace(/[^0-9A-Za-z.+-]/g, '').slice(0, 20) : '',
+    drafted_by: o.drafted_by === 'private-ai' ? 'private-ai' : 'user',
+    sent_by: 'user'
+  };
+}
 
 /** The evaluator input (I-30: every route builds the same shape). */
 export const toPolicyRequest = (access, { verifiedEmail = false } = {}) => ({

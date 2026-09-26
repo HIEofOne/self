@@ -216,7 +216,7 @@
       <div class="inv"><b>I-30 · One door</b><p>Direct, group or member: every request is a signed GNAP request, decided by the patient's own cards.</p></div>
       <div class="inv"><b>I-31 · One exit</b><p>Data leaves only from the resource server. No email, relay message or log carries health data.</p></div>
       <div class="inv"><b>I-32 · Adding is separate, and sealed</b><p>Only a rule that says “add” accepts a document. It waits sealed to the patient's folder key and is saved only to Received/.</p></div>
-      <div class="inv"><b>I-33 · Asks only when told</b><p>A MAIA sends a request for its user only after they click Send. Planned more widely in P11.</p></div>
+      <div class="inv"><b>I-33 · Asks only when told</b><p>A MAIA sends a request for its user only after they click Send, never as a reaction to one it received. What it collects is sealed to the user's folder key.</p></div>
     </div>
   </section>
 
@@ -251,7 +251,7 @@ const PEOPLE = [
     ['Credits ledger and notices', 'built', '', 'Credits keyed by verified email; no health data in any email'],
     ['Weekly digest and request log', 'built', 'P8', 'A digest email; the log in the folder, Requests/'],
     ['Sealed hold for added documents', 'built', 'P9', 'Opened only by the patient’s folder key; deleted once saved'],
-    ['GNAP client for its user', 'planned', 'P11', 'Drafted by the private AI, sent on a click'],
+    ['GNAP client for its user', 'built', 'P11', 'Pairwise keys; one email check; waits on the server; answers to Received/'],
     ['Delegation (UCAN)', 'other', 'later', 'A covering colleague, narrowed and revocable']
   ]},
   { name: 'Patient', who: 'Owns the records and decides. Their records live in the MAIA folder.', items: [
@@ -263,7 +263,8 @@ const PEOPLE = [
     ['“Always handle requests like this”', 'built', 'P8', 'A rule made from a decision'],
     ['Folder key and Received/', 'built', 'P9', 'Documents others added: preview, accept, saved to Received/'],
     ['Private AI suggestions', 'built', 'P10', 'Rule cards and features to turn on, in MAIA’s words; nothing changes without a click'],
-    ['Private AI drafts requests', 'planned', 'P11', '']
+    ['Ask someone’s MAIA', 'built', 'P11', 'Their request link; your MAIA waits and saves the answer to Received/'],
+    ['Private AI drafts requests', 'built', 'P11', 'A card with what sending reveals; only your Send sends']
   ]},
   { name: 'Group Member', who: 'A patient acting inside a group: asks, answers and messages other members.', items: [
     ['Membership', 'built', '', 'Per-group signing and sealing keys, and an alias'],
@@ -382,18 +383,20 @@ const FLOWS = [
     ]
   },
   {
-    id: 'symmetry', tab: 'MAIA asks for you', planned: true, status: 'Planned · P11',
+    id: 'symmetry', tab: 'MAIA asks for you', status: 'Built · P11',
     title: 'A patient’s MAIA asks another patient’s MAIA',
-    summary: 'Every MAIA is also a GNAP client for its own user. The private AI can draft a request; only the user sends it.',
-    note: 'The answering MAIA needs nothing new: the request comes through the same door and the same cards decide it. Collected answers are sealed to the asking user’s folder key, like added documents.',
-    code: 'planned: maia-request drafts, a server-side GNAP client with pairwise keys, /gnap/client/finish',
+    summary: 'Every MAIA is also a GNAP client for its own user. The private AI can draft a request; only the user sends it. The other person’s request link is the address.',
+    note: 'The answering MAIA needs nothing new: the request comes through the same door and its patient’s cards decide it. The asking MAIA reads the answer once, seals it to its user’s folder key, and keeps no readable copy.',
+    code: 'maia-request drafts · server/routes/gnap-out.js (pairwise keys, /gnap/client/finish/:id, server-side waiting) · the sealed hold → Received/',
     steps: [
-      { from: 'PT', to: 'MH', kind: 'local', t: 'Asks the private AI to get something', d: '' },
-      { at: 'MH', kind: 'action', t: 'Drafts a request; a confirm card lists what sending reveals', d: '' },
+      { from: 'PT', to: 'MH', kind: 'local', t: 'Asks the private AI, or opens Ask someone’s MAIA', d: 'With the request link the other person gave them.' },
+      { at: 'MH', kind: 'action', t: 'The private AI drafts a request; the card says what sending reveals', d: 'It can’t send.' },
       { from: 'PT', to: 'MH', kind: 'local', t: 'Clicks Send', d: 'Never automatic, never a reaction to another request (I-33).' },
-      { at: 'MH', kind: 'action', t: 'Asks the other patient’s MAIA, on any host', d: 'A pairwise key per target. First contact verifies an email; after that, an instance_id.' },
-      { at: 'MH', kind: 'action', t: 'Waits for days; seals the answer to your folder key', d: '' },
-      { from: 'MH', to: 'PT', kind: 'local', t: 'Delivered to Received/ when MAIA is open', d: '' }
+      { at: 'MH', kind: 'action', t: 'Signs with a key made for that MAIA only, and asks it', d: 'Its patient’s cards decide. The request says a MAIA sent it (self-reported).' },
+      { from: 'PT', to: 'MH', kind: 'local', t: 'First time only: confirms an email on the other MAIA’s page', d: 'Then that MAIA recognizes this one until its patient chooses Forget.' },
+      { at: 'MH', kind: 'action', t: 'Waits, for days if need be; seals the answer to your folder key', d: 'No readable copy stays on the server.' },
+      { from: 'MH', to: 'PT', kind: 'notice', t: '“They answered your request” email', d: 'No health data.' },
+      { from: 'MH', to: 'PT', kind: 'local', t: 'Saved to Received/ when MAIA is open', d: '' }
     ]
   }
 ];
@@ -520,7 +523,7 @@ const tabs = document.getElementById('tabs');
 const built = FLOWS.filter((f) => !f.planned);
 const planned = FLOWS.filter((f) => f.planned);
 const tabHtml = (f) => `<button class="tab${f.planned ? ' planned' : ''}" role="tab" id="tab-${f.id}" data-flow="${f.id}" aria-selected="false">${esc(f.tab)}</button>`;
-tabs.innerHTML = built.map(tabHtml).join('') + `<span class="group-label">Planned</span>` + planned.map(tabHtml).join('');
+tabs.innerHTML = built.map(tabHtml).join('') + (planned.length ? `<span class="group-label">Planned</span>` + planned.map(tabHtml).join('') : '');
 tabs.addEventListener('click', (e) => { const b = e.target.closest('.tab'); if (b) show(b.dataset.flow); });
 tabs.addEventListener('keydown', (e) => {
   if (!['ArrowRight', 'ArrowLeft'].includes(e.key)) return;

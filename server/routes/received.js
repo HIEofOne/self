@@ -10,11 +10,20 @@
  *   GET  /api/received                  accepted documents not yet in the folder
  *   GET  /api/received/:id/box          one sealed box (a held one, for a preview)
  *   POST /api/received/:id/delivered    { fileName } — it is in Received/; delete the hold
+ * Also answers the user's MAIA collected from other MAIAs (P11, gnap-out.js):
+ * the same sealed hold, the same path into Received/ (I-33).
  * Feature `documents-in`. Every route acts only for the session's own account.
  */
 import { requestedUserId } from '../utils/api-guard.js';
 import { isX25519PublicJwk } from '../utils/sealed-box.js';
 import { isLiveHold } from '../gnap/documents.js';
+import { GNAP_DB } from '../gnap/store.js';
+
+/** What a collected answer is, for its file name in Received/. */
+const ANSWER_LABELS = {
+  'patient-summary': 'Patient Summary', 'meds-allergies': 'Medications and allergies',
+  'not-sensitive': 'Record except sensitive categories', everything: 'Whole record', 'notification-only': 'Note'
+};
 
 const USERS_DB = 'maia_users';
 const AS_REQUESTS_DB = 'maia_as_requests';
@@ -34,6 +43,17 @@ export default function setupReceivedRoutes(app, { cloudant, holds, auditLog = {
     const r = await cloudant.getDocument(AS_REQUESTS_DB, id).catch(() => null);
     return r && r.type === 'as_request' && r.userId === userId && r.document ? r : null;
   };
+  // An answer collected from another MAIA (og_<id> in maia_gnap).
+  const ownAnswer = async (userId, id) => {
+    if (!String(id).startsWith('og_')) return null;
+    const og = await cloudant.getDocument(GNAP_DB, id).catch(() => null);
+    return og && og.type === 'gnap_out_request' && og.userId === userId && og.hold ? og : null;
+  };
+  const answerItem = (og) => ({
+    id: og._id, kind: 'answer', label: `${ANSWER_LABELS[og.access.datatypes[0]] || 'Answer'} (requested)`, title: '',
+    mediaType: 'text/plain', size: og.hold.size, sha256: og.hold.sha256, receivedAt: og.answeredAt || og.createdAt, acceptedAt: og.answeredAt || null,
+    sender: { name: og.label || new URL(og.grantEndpoint).host, email: null, emailVerified: false }
+  });
 
   app.get('/api/folder-key', async (req, res) => {
     const userId = sessionUser(req, res);
@@ -86,14 +106,16 @@ export default function setupReceivedRoutes(app, { cloudant, holds, auditLog = {
     try {
       const mine = ((await cloudant.getAllDocuments(AS_REQUESTS_DB).catch(() => [])) || [])
         .filter((r) => r?.type === 'as_request' && r.userId === userId && r.document?.state === 'accepted');
+      const answers = ((await cloudant.getAllDocuments(GNAP_DB).catch(() => [])) || [])
+        .filter((d) => d?.type === 'gnap_out_request' && d.userId === userId && d.hold?.state === 'accepted');
       res.set('Cache-Control', 'no-store');
       res.json({
         success: true,
-        documents: mine.map((r) => ({
+        documents: [...answers.map(answerItem), ...mine.map((r) => ({
           id: r._id, kind: r.document.kind, title: r.document.title || '', mediaType: r.document.mediaType,
           size: r.document.size, sha256: r.document.sha256, receivedAt: r.receivedAt, acceptedAt: r.document.acceptedAt || r.decidedAt || null,
           sender: { name: r.requester?.name || null, email: r.requester?.emailVerified ? r.requester.email : null, emailVerified: !!r.requester?.emailVerified }
-        }))
+        }))]
       });
     } catch {
       res.status(500).json({ success: false, error: 'RECEIVED_FAILED' });
@@ -104,9 +126,11 @@ export default function setupReceivedRoutes(app, { cloudant, holds, auditLog = {
     const userId = sessionUser(req, res);
     if (!userId) return;
     try {
-      const r = await ownRequest(userId, req.params.id);
-      if (!r || !isLiveHold(r) || !r.document.holdKey) return res.status(404).json({ success: false, error: 'NOT_FOUND' });
-      const text = await holds.get(r.document.holdKey);
+      const og = await ownAnswer(userId, req.params.id);
+      const r = og ? null : await ownRequest(userId, req.params.id);
+      const holdKey = og ? (og.hold.state === 'accepted' ? og.hold.holdKey : null) : (r && isLiveHold(r) ? r.document.holdKey : null);
+      if (!holdKey) return res.status(404).json({ success: false, error: 'NOT_FOUND' });
+      const text = await holds.get(holdKey);
       if (!text) return res.status(404).json({ success: false, error: 'NOT_FOUND' });
       res.set('Cache-Control', 'no-store');
       res.type('json').send(text);
@@ -119,11 +143,20 @@ export default function setupReceivedRoutes(app, { cloudant, holds, auditLog = {
     const userId = sessionUser(req, res);
     if (!userId) return;
     try {
+      const fileName = String(req.body?.fileName || '').replace(/[\u0000-\u001f\u007f/\\]/g, ' ').trim().slice(0, MAX_FILE_NAME);
+      const og = await ownAnswer(userId, req.params.id);
+      if (og) {
+        if (og.hold.state === 'delivered') return res.json({ success: true });
+        try { await holds.del(og.hold.holdKey); } catch (e) { console.warn('[received] hold delete failed:', e?.message || e); }
+        og.hold = { ...og.hold, state: 'delivered', deliveredAt: new Date(now()).toISOString(), fileName: fileName || null, holdKey: null };
+        await cloudant.saveDocument(GNAP_DB, og);
+        log('answer_delivered', userId, { request: og._id });
+        return res.json({ success: true });
+      }
       const r = await ownRequest(userId, req.params.id);
       if (!r) return res.status(404).json({ success: false, error: 'NOT_FOUND' });
       if (r.document.state === 'delivered') return res.json({ success: true });
       if (r.document.state !== 'accepted') return res.status(400).json({ success: false, error: 'NOT_ACCEPTED' });
-      const fileName = String(req.body?.fileName || '').replace(/[\u0000-\u001f\u007f/\\]/g, ' ').trim().slice(0, MAX_FILE_NAME);
       try { await holds.del(r.document.holdKey); } catch (e) { console.warn('[received] hold delete failed:', e?.message || e); }
       r.document = { ...r.document, state: 'delivered', deliveredAt: new Date(now()).toISOString(), fileName: fileName || null, holdKey: null };
       await cloudant.saveDocument(AS_REQUESTS_DB, r);

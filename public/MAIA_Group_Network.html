@@ -30,6 +30,8 @@
     --onc-soft: #ECE7F8;
     --tru-soft: #DDF1EF;
     --rad-soft: #FBEFDD;
+    --mm: #1F66C2;
+    --mm-soft: #E1ECFA;
     --num-ink: #FFFFFF;
     --font-display: 'Archivo', 'Helvetica Neue', Arial, sans-serif;
     --font-body: 'Public Sans', -apple-system, 'Segoe UI', Roboto, sans-serif;
@@ -40,16 +42,16 @@
       color-scheme: dark;
       --bg: #0F151B; --surface: #161E26; --surface-2: #1E2832; --ink: #E6ECF2; --muted: #9AA8B6; --rule: #2E3B47;
       --host-patient: #15253A; --host-group: #221E33; --accent: #6AA8F5;
-      --onc: #A58BF0; --tru: #3CC2B6; --rad: #E0A040;
-      --onc-soft: #2A2342; --tru-soft: #15332F; --rad-soft: #3A2A10; --num-ink: #0F151B;
+      --onc: #A58BF0; --tru: #3CC2B6; --rad: #E0A040; --mm: #6FA8F2;
+      --onc-soft: #2A2342; --tru-soft: #15332F; --rad-soft: #3A2A10; --mm-soft: #172A44; --num-ink: #0F151B;
     }
   }
   :root[data-theme="dark"] {
     color-scheme: dark;
     --bg: #0F151B; --surface: #161E26; --surface-2: #1E2832; --ink: #E6ECF2; --muted: #9AA8B6; --rule: #2E3B47;
     --host-patient: #15253A; --host-group: #221E33; --accent: #6AA8F5;
-    --onc: #A58BF0; --tru: #3CC2B6; --rad: #E0A040;
-    --onc-soft: #2A2342; --tru-soft: #15332F; --rad-soft: #3A2A10; --num-ink: #0F151B;
+    --onc: #A58BF0; --tru: #3CC2B6; --rad: #E0A040; --mm: #6FA8F2;
+    --onc-soft: #2A2342; --tru-soft: #15332F; --rad-soft: #3A2A10; --mm-soft: #172A44; --num-ink: #0F151B;
   }
 
   body { background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 15px; line-height: 1.5; }
@@ -94,21 +96,22 @@
   .flow-onc .edge, .flow-onc.badge circle { stroke: var(--onc); } .flow-onc.badge circle { fill: var(--onc); }
   .flow-tru .edge, .flow-tru.badge circle { stroke: var(--tru); } .flow-tru.badge circle { fill: var(--tru); }
   .flow-rad .edge, .flow-rad.badge circle { stroke: var(--rad); } .flow-rad.badge circle { fill: var(--rad); }
-  .head-onc { fill: var(--onc); } .head-tru { fill: var(--tru); } .head-rad { fill: var(--rad); }
+  .flow-mm .edge, .flow-mm.badge circle { stroke: var(--mm); } .flow-mm.badge circle { fill: var(--mm); }
+  .head-onc { fill: var(--onc); } .head-tru { fill: var(--tru); } .head-rad { fill: var(--rad); } .head-mm { fill: var(--mm); }
   .badge circle { stroke: var(--surface) !important; stroke-width: 2; }
   .badge text { font: 700 11.5px var(--font-body); fill: var(--num-ink); }
   .lbl { font: 600 12.5px var(--font-body); paint-order: stroke; stroke: var(--surface); stroke-width: 5px; stroke-linejoin: round; opacity: 0; transition: opacity 0.2s ease; pointer-events: none; }
-  .flow-onc .lbl { fill: var(--onc); } .flow-tru .lbl { fill: var(--tru); } .flow-rad .lbl { fill: var(--rad); }
+  .flow-onc .lbl { fill: var(--onc); } .flow-tru .lbl { fill: var(--tru); } .flow-rad .lbl { fill: var(--rad); } .flow-mm .lbl { fill: var(--mm); }
   .flowgroup { transition: opacity 0.2s ease; }
   svg[data-focus] .flowgroup { opacity: 0.12; }
-  svg[data-focus="onc"] .flowgroup.flow-onc, svg[data-focus="tru"] .flowgroup.flow-tru, svg[data-focus="rad"] .flowgroup.flow-rad { opacity: 1; }
-  svg[data-focus="onc"] .flow-onc .lbl, svg[data-focus="tru"] .flow-tru .lbl, svg[data-focus="rad"] .flow-rad .lbl { opacity: 1; }
+  svg[data-focus="onc"] .flowgroup.flow-onc, svg[data-focus="tru"] .flowgroup.flow-tru, svg[data-focus="rad"] .flowgroup.flow-rad, svg[data-focus="mm"] .flowgroup.flow-mm { opacity: 1; }
+  svg[data-focus="onc"] .flow-onc .lbl, svg[data-focus="tru"] .flow-tru .lbl, svg[data-focus="rad"] .flow-rad .lbl, svg[data-focus="mm"] .flow-mm .lbl { opacity: 1; }
 
   .legend { display: flex; flex-wrap: wrap; gap: 8px 22px; margin-top: 12px; font-size: 13px; color: var(--muted); }
   .legend span { display: inline-flex; align-items: center; gap: 8px; }
   .legend .sw { stroke: var(--muted); fill: none; }
 
-  .flows { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 20px; }
+  .flows { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-top: 20px; }
   .flow-card { background: var(--surface); border: 1px solid var(--rule); border-radius: 12px; padding: 14px 16px; cursor: pointer; text-align: left; font: inherit; color: inherit; display: flex; flex-direction: column; gap: 8px; }
   .flow-card[aria-pressed="true"] { border-color: var(--ink); box-shadow: inset 0 0 0 1px var(--ink); }
   .flow-card .status { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
@@ -121,7 +124,8 @@
 
   .foot { margin-top: 22px; font-size: 13.5px; color: var(--muted); max-width: 90ch; }
 
-  @media (max-width: 960px) { .flows { grid-template-columns: 1fr; } }
+  @media (max-width: 1100px) { .flows { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 700px) { .flows { grid-template-columns: 1fr; } }
   @media (prefers-reduced-motion: reduce) { .edge, .lbl, .flowgroup { transition: none; } }
 </style>
 </head>
@@ -131,7 +135,7 @@
   <header>
     <div class="eyebrow">MAIA · Personal AS edition · how groups connect</div>
     <h1>MAIA Group Network</h1>
-    <p class="lede">Four MAIA servers: two host patients' MAIAs, and two host only a group, one of them run by an oncology practice. A radiologist with no MAIA and no group sends a report. Only the major links are drawn: the request, and the resource access.</p>
+    <p class="lede">Four MAIA servers: two host patients' MAIAs, and two host only a group, one of them run by an oncology practice. A radiologist with no MAIA and no group sends a report, and one patient's MAIA asks another's directly. Only the major links are drawn: the request, and the resource access.</p>
     <p class="lede" style="margin-top:6px"><a href="/MAIA_Request_Map.html" style="color: var(--accent)">The MAIA Request Map</a> shows each request step by step, from every perspective.</p>
   </header>
 
@@ -140,12 +144,13 @@
     <button class="chip" data-focus="onc" aria-pressed="false"><span class="dot" style="background: var(--onc)"></span>The practice asks its group</button>
     <button class="chip" data-focus="tru" aria-pressed="false"><span class="dot" style="background: var(--tru)"></span>A Trustee member asks the others</button>
     <button class="chip" data-focus="rad" aria-pressed="false"><span class="dot" style="background: var(--rad)"></span>A radiologist sends a report</button>
+    <button class="chip" data-focus="mm" aria-pressed="false"><span class="dot" style="background: var(--mm)"></span>Pat’s MAIA asks Bo’s</button>
   </div>
 
   <div class="canvas">
     <svg id="net" viewBox="0 0 1280 760" role="img" aria-labelledby="net-title net-desc">
       <title id="net-title">MAIA group network</title>
-      <desc id="net-desc">Two group-only MAIA hosts (Riverside Oncology, run by an oncology practice, and Trustee) above two patient hosts (host A with Ann and Pat, host B with Bo and Cy). An oncologist asks the Riverside group; a Trustee member, Cy, asks the Trustee group; an unaffiliated radiologist sends Ann a report. Requests go to authorization servers; resource access goes to resource servers.</desc>
+      <desc id="net-desc">Two group-only MAIA hosts (Riverside Oncology, run by an oncology practice, and Trustee) above two patient hosts (host A with Ann and Pat, host B with Bo and Cy). An oncologist asks the Riverside group; a Trustee member, Cy, asks the Trustee group; an unaffiliated radiologist sends Ann a report; Pat's MAIA asks Bo's MAIA directly, with no shared group. Requests go to authorization servers; resource access goes to resource servers.</desc>
       <defs>
         <marker id="h-onc" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="head-onc"/></marker>
         <marker id="h-tru" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="head-tru"/></marker>
@@ -153,6 +158,8 @@
         <marker id="hr-onc" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="3.4" markerHeight="3.4" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="head-onc"/></marker>
         <marker id="hr-tru" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="3.4" markerHeight="3.4" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="head-tru"/></marker>
         <marker id="hr-rad" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="3.4" markerHeight="3.4" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="head-rad"/></marker>
+        <marker id="h-mm" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="head-mm"/></marker>
+        <marker id="hr-mm" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="3.4" markerHeight="3.4" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="head-mm"/></marker>
         <g id="person"><circle cx="0" cy="-9" r="7"/><path d="M-12 12 C -12 1, 12 1, 12 12 Z"/></g>
       </defs>
 
@@ -211,13 +218,13 @@
 
   <div class="flows" id="flows"></div>
 
-  <p class="foot">Group hosts are ordinary MAIA servers that host only a group: they never decide a request and can't read an answer, which travels back sealed to the requester (not drawn). A host can also run patients' MAIAs and a group at once. Tags on each patient show their group memberships; the lines show only what happens in these three examples.</p>
+  <p class="foot">Group hosts are ordinary MAIA servers that host only a group: they never decide a request and can't read an answer, which travels back sealed to the requester (not drawn). A host can also run patients' MAIAs and a group at once. Tags on each patient show their group memberships; the lines show only what happens in these four examples.</p>
 </div>
 
 <script>
 const PODS = [
-  { name: 'Ann', x: 270, tags: [['onc', 'Riverside Oncology']], note: 'Received/' },
-  { name: 'Pat', x: 440, tags: [['tru', 'Trustee']] },
+  { name: 'Ann', x: 270, tags: [['onc', 'Riverside Oncology']], note: 'Report → Received/' },
+  { name: 'Pat', x: 440, tags: [['tru', 'Trustee']], note: 'Answer → Received/' },
   { name: 'Bo', x: 820, tags: [['onc', 'Riverside Oncology']] },
   { name: 'Cy', x: 990, tags: [['tru', 'Trustee']] }
 ];
@@ -235,7 +242,10 @@ const EDGES = [
   { flow: 'tru', kind: 'resource', n: 3, d: 'M1100 508 C 1096 452, 530 455, 518 500', b: [820, 463], l: [820, 444], t: 'Cy’s MAIA reads Pat’s answer', a: 'middle' },
 
   { flow: 'rad', kind: 'request', n: 1, d: 'M202 330 C 258 330, 300 420, 300 504', b: [236, 338], l: [206, 290], t: 'request to add a report', a: 'start' },
-  { flow: 'rad', kind: 'resource', n: 2, d: 'M202 366 C 296 366, 348 420, 348 500', b: [292, 390], l: [390, 420], t: 'upload, sealed to Ann’s folder key', a: 'start' }
+  { flow: 'rad', kind: 'resource', n: 2, d: 'M202 366 C 296 366, 348 420, 348 500', b: [292, 390], l: [390, 420], t: 'upload, sealed to Ann’s folder key', a: 'start' },
+
+  { flow: 'mm', kind: 'request', n: 1, d: 'M556 508 C 575 430, 830 430, 850 506', b: [703, 449], l: [703, 470], t: 'Pat’s MAIA asks Bo’s, with Bo’s link', a: 'middle' },
+  { flow: 'mm', kind: 'resource', n: 2, d: 'M574 508 C 600 360, 880 360, 898 506', b: [739, 397], l: [739, 382], t: 'reads Bo’s answer, sealed to Pat’s folder key', a: 'middle' }
 ];
 
 const FLOWS = [
@@ -252,7 +262,11 @@ const FLOWS = [
   { id: 'rad', title: 'An unaffiliated radiologist sends a report', status: 'Built · P9', steps: [
     ['Request', 'A signed request to add a report, through the personal request link Ann gave them.'],
     ['Resource access', 'The report is uploaded to Ann’s resource server, sealed to her folder key.']
-  ], note: 'Only a rule that allows adding documents can accept it. MAIA can’t read the report; Ann’s browser saves it to Received/ in her folder.' }
+  ], note: 'Only a rule that allows adding documents can accept it. MAIA can’t read the report; Ann’s browser saves it to Received/ in her folder.' },
+  { id: 'mm', title: 'Pat’s MAIA asks Bo’s MAIA', status: 'Built · P11', steps: [
+    ['Request', 'After Pat clicks Send, Pat’s MAIA signs a request to Bo’s MAIA, using the request link Bo gave Pat. The first time, Pat confirms an email on Bo’s MAIA.'],
+    ['Resource access', 'When Bo’s rules, or Bo, say yes, Pat’s MAIA reads the answer at Bo’s resource server and seals it at once to Pat’s folder key.']
+  ], note: 'No shared group is needed. Pat’s private AI can draft the request; only Pat sends it. The answer reaches Received/ in Pat’s folder the next time MAIA is open.' }
 ];
 
 const NS = 'http://www.w3.org/2000/svg';
@@ -277,12 +291,12 @@ document.getElementById('pods').innerHTML = PODS.map((p) => {
     <text class="name" x="${p.x + 46}" y="${y + 80}">${esc(p.name)}</text>
     <text class="small" x="${p.x + 46}" y="${y + 96}">a patient's MAIA</text>
     ${tags}
-    ${p.note ? `<text class="small" x="${p.x + 12}" y="${y + 150}">Report → ${esc(p.note)}</text>` : ''}
+    ${p.note ? `<text class="small" x="${p.x + 12}" y="${y + 150}">${esc(p.note)}</text>` : ''}
   </g>`;
 }).join('');
 
 // Edges grouped by flow so one flow can be brought forward.
-document.getElementById('edges').innerHTML = ['onc', 'tru', 'rad'].map((f) => `<g class="flowgroup flow-${f}">${
+document.getElementById('edges').innerHTML = ['onc', 'tru', 'rad', 'mm'].map((f) => `<g class="flowgroup flow-${f}">${
   EDGES.filter((e) => e.flow === f).map((e) => `
     <path class="edge ${e.kind}" d="${e.d}" marker-end="url(#${e.kind === 'resource' ? 'hr' : 'h'}-${f})"/>
     <text class="lbl" x="${e.l[0]}" y="${e.l[1]}" text-anchor="${e.a}">${esc(e.t)}</text>`).join('')

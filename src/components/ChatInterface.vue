@@ -135,6 +135,37 @@
                     <q-badge v-else color="green" label="saved to your Sharing Policies" />
                   </div>
                 </div>
+                <!-- Requests the private AI drafted (P11, I-33): nothing is
+                     sent until the patient clicks Send. -->
+                <template v-for="(rd, rdi) in (msg.requestDrafts || [])" :key="'rd' + rdi">
+                  <div v-if="rd.state !== 'discarded'" class="pa-proposed-card q-mt-sm">
+                    <div class="row items-center q-gutter-xs q-mb-xs">
+                      <q-icon name="outgoing_mail" color="primary" size="18px" />
+                      <span class="text-caption text-grey-7">request drafted by your private AI — nothing is sent until you click Send</span>
+                    </div>
+                    <div class="text-body2">
+                      Ask <strong>{{ rd.to || 'this person' }}</strong> <span class="text-grey-7">({{ draftHost(rd.link) }})</span>
+                      for <strong>{{ draftWhat(rd.what) }}</strong>, for <strong>{{ draftWhy(rd.why) }}</strong>.
+                    </div>
+                    <template v-if="!rd.state || rd.state === 'idle' || rd.state === 'busy' || rd.state === 'error'">
+                      <q-input v-model="rd.message" dense outlined autogrow type="textarea" maxlength="1000" label="Message to them" class="q-mt-sm" />
+                      <q-input v-model="draftFromName" dense outlined maxlength="80" label="Your name, as they will see it" class="q-mt-sm" />
+                      <div class="text-caption text-grey-7 q-mt-xs">
+                        Sending tells them your name above, your message, and that your MAIA sent it and your private AI drafted it
+                        (they see that marked as self-reported). The first time, you confirm your email on their MAIA's page, and they see it.
+                        Their own rules decide; an answer is saved in your MAIA folder, in Received.
+                      </div>
+                      <div class="q-mt-xs row items-center q-gutter-sm">
+                        <q-btn dense unelevated no-caps size="sm" color="primary" label="Send" :loading="rd.state === 'busy'" :disable="!draftFromName.trim()" @click="sendDraft(rd)" />
+                        <q-btn dense flat no-caps size="sm" color="grey-8" label="Discard" :disable="rd.state === 'busy'" @click="rd.state = 'discarded'" />
+                      </div>
+                    </template>
+                    <div v-if="rd.note" class="text-caption q-mt-xs" :class="rd.state === 'error' ? 'text-negative' : 'text-grey-8'">
+                      {{ rd.note }}
+                      <a v-if="rd.verifyUrl" :href="rd.verifyUrl" target="_blank" rel="noopener">Confirm my email on their MAIA</a>
+                    </div>
+                  </div>
+                </template>
                 <!-- Feature suggestions (Personal AS, I-27): what the feature
                      does comes from MAIA's registry, not from the AI, and
                      only the patient's click turns it on. -->
@@ -1184,7 +1215,11 @@ import { logModalEvent } from '../utils/modalLog';
 import SummaryProgress from './SummaryProgress.vue';
 import { useEdition } from '../composables/useEdition';
 import { summaryIntent } from '../utils/summaryIntent';
-import { extractFeatureProposals, featureCardText, setFeature, type FeatureProposal } from '../utils/advisorProposals';
+import {
+  extractFeatureProposals, featureCardText, setFeature, extractRequestDrafts, type FeatureProposal, type RequestDraft
+} from '../utils/advisorProposals';
+import { sendOut, afterSendNote } from '../utils/requestsOut';
+import { WHAT as REQUEST_WHAT, WHY as REQUEST_WHY } from '../gnap/requestForm';
 import { startRecordsIndexing, INDEX_WORDS } from '../utils/recordsSearch';
 import {
   isFileSystemAccessSupported,
@@ -1215,6 +1250,8 @@ interface Message {
   policyCards?: Array<PolicyCard & { saved?: boolean }>;
   /** Personal AS: features the private AI suggested (```maia-feature fences). */
   featureProposals?: FeatureProposal[];
+  /** Personal AS: requests to other MAIAs the private AI drafted (```maia-request). */
+  requestDrafts?: RequestDraft[];
 }
 
 interface User {
@@ -3477,7 +3514,9 @@ const extractPolicyCards = (msg: Message) => {
   if (editionAdvisor) {
     const { proposals, content } = extractFeatureProposals(msg.content, editionState.features);
     if (proposals.length) msg.featureProposals = proposals;
-    msg.content = content;
+    const drafted = extractRequestDrafts(content, { allowLocal: window.location.hostname === 'localhost' });
+    if (drafted.drafts.length) msg.requestDrafts = drafted.drafts;
+    msg.content = drafted.content;
   }
   if (!policyAdvisorMode.value && !editionAdvisor) return;
   const fences = /```policy-card\s*\n([\s\S]*?)```/g;
@@ -3562,6 +3601,34 @@ const turnOnProposedFeature = async (fp: FeatureProposal) => {
   } catch {
     fp.state = 'error';
     fp.note = 'That didn’t work. Try again, or use Workbook → More features.';
+  }
+};
+
+// ── Requests the private AI drafted to other MAIAs (P11, I-33) ─────────
+// A draft is a card until the patient clicks Send; the card says what
+// sending reveals. The patient's name as the other side sees it is theirs
+// to type (remembered on this device).
+const draftFromName = ref((() => { try { return localStorage.getItem('maia.requestFromName') || ''; } catch { return ''; } })());
+const draftHost = (link: string) => { try { return new URL(link).host; } catch { return link; } };
+const draftWhat = (v: string) => REQUEST_WHAT.find((o) => o.value === v)?.label.replace(/^Their /, 'their ') || v.replace(/-/g, ' ');
+const draftWhy = (v: string) => (REQUEST_WHY.find((o) => o.value === v)?.label || v).toLowerCase();
+const sendDraft = async (d: RequestDraft) => {
+  const uid = props.user?.userId;
+  if (!uid || d.state === 'busy') return;
+  d.state = 'busy';
+  d.note = '';
+  try {
+    try { localStorage.setItem('maia.requestFromName', draftFromName.value.trim()); } catch { /* private window */ }
+    const r = await sendOut(uid, {
+      link: d.link, label: d.to, what: d.what, why: d.why, message: d.message,
+      fromName: draftFromName.value.trim(), draftedBy: 'private-ai'
+    });
+    d.state = r.state === 'failed' ? 'error' : 'sent';
+    d.note = afterSendNote(r);
+    d.verifyUrl = r.verifyUrl;
+  } catch (e) {
+    d.state = 'error';
+    d.note = e instanceof Error ? e.message : 'The request couldn’t be sent.';
   }
 };
 
