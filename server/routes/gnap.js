@@ -36,6 +36,7 @@ import { issueInstance, resolveInstance } from '../gnap/instances.js';
 import { attachPayment, settleGrantPayment, creditsFor, GNAP_PAYMENTS } from '../gnap/payments.js';
 import { verifyAttestation, bodySha256, COPY_SENDER_PREFIX } from '../gnap/group.js';
 import { sealTo, isX25519PublicJwk } from '../utils/sealed-box.js';
+import { createNotices } from '../gnap/notices.js';
 import { scopeCovers } from './policies.js';
 
 const USERS_DB = 'maia_users';
@@ -52,7 +53,7 @@ export const SCOPE_WORDS = {
 
 export default function setupGnapRoutes(app, {
   cloudant, auditLog = { logEvent: () => {} }, sendEmail = async () => false,
-  now = () => Date.now(), publicBaseUrl = () => process.env.PUBLIC_APP_URL
+  now = () => Date.now(), publicBaseUrl = () => process.env.PUBLIC_APP_URL, notices = null
 } = {}) {
   const nonceCache = createNonceCache();
   const ipWindow = new Map(); // ip → [timestamps]
@@ -151,18 +152,8 @@ export default function setupGnapRoutes(app, {
   };
 
   // ── The patient's side: notices (no PHI, no artifact — I-31) ────────────
-
-  const notifyPatient = async (userDoc, kind) => {
-    const to = userDoc?.emailVerified ? userDoc.email : null;
-    if (!to) return;
-    const appUrl = base();
-    const [subject, text] = kind === 'shared'
-      ? ['Your MAIA answered a request',
-        `Your MAIA answered a request under one of your sharing rules. See it in MAIA: ${appUrl}`]
-      : ['A request is waiting for you in MAIA',
-        `Someone asked your MAIA for information. Your rules didn't decide it, so it is waiting for you. Decide in MAIA: ${appUrl}`];
-    try { await sendEmail(to, subject, text); } catch { /* notice is best-effort */ }
-  };
+  // Every automatic share at once; asks at most every 6 hours (§8.2).
+  const tell = notices || createNotices({ cloudant, sendEmail, now, appUrl: base });
 
   /** The patient's own record of the request (their requests list). */
   const recordRequest = async (grant, status, extra = {}) => {
@@ -194,9 +185,9 @@ export default function setupGnapRoutes(app, {
     const at = new Date(now()).toISOString();
     if (d.outcome === 'allow') {
       await updateDoc(cloudant, grant._id, (g) => { g.decision = { outcome: 'allow', by: 'policy', policyId: d.policyId, at }; return true; });
-      await recordRequest(grant, 'accepted', { autonomous: true, decidedAt: at });
+      const asRequestId = await recordRequest(grant, 'accepted', { autonomous: true, decidedAt: at });
       await settleGrantPayment(cloudant, grant._id.slice(3), 'accepted');
-      void notifyPatient(userDoc, 'shared');
+      void tell.shared(userDoc, asRequestId);
       log('gnap_decided', { grant: grant._id.slice(3), userId: grant.userId, outcome: 'allow', policyId: d.policyId });
       return { status: 200, body: await tokenResponse(await getDoc(cloudant, grant._id)) };
     }
@@ -218,7 +209,7 @@ export default function setupGnapRoutes(app, {
     if (first || !grant.asRequestId) {
       const asRequestId = await recordRequest(grant, 'pending');
       await updateDoc(cloudant, grant._id, (g) => { g.asRequestId = asRequestId; return true; });
-      void notifyPatient(userDoc, 'ask');
+      void tell.ask(userDoc);
     }
     return { status: 200, body: await waitResponse(await getDoc(cloudant, grant._id), extra) };
   };
@@ -334,8 +325,8 @@ export default function setupGnapRoutes(app, {
       const at = createdAt;
       if (d.outcome === 'allow') {
         const g = await updateDoc(cloudant, grant._id, (x) => { x.state = 'approved'; x.decision = { outcome: 'allow', by: 'policy', policyId: d.policyId, at }; return true; });
-        await recordRequest(g, 'accepted', { autonomous: true, decidedAt: at });
-        void notifyPatient(userDoc, 'shared');
+        const asRequestId = await recordRequest(g, 'accepted', { autonomous: true, decidedAt: at });
+        void tell.shared(userDoc, asRequestId);
         await answerGroupGrant(handle, 'shared');
       } else if (d.outcome === 'deny-respond') {
         const g = await updateDoc(cloudant, grant._id, (x) => { x.state = 'denied'; x.decision = { outcome: 'deny-respond', by: 'policy', policyId: d.policyId, at }; return true; });
@@ -347,7 +338,7 @@ export default function setupGnapRoutes(app, {
       } else {
         const asRequestId = await recordRequest(grant, 'pending');
         await updateDoc(cloudant, grant._id, (x) => { x.asRequestId = asRequestId; return true; });
-        void notifyPatient(userDoc, 'ask');
+        void tell.ask(userDoc);
       }
       log('gnap_decided', { grant: handle, userId: userDoc.userId, outcome: d.outcome, policyId: d.policyId, route: 'group' });
       return { ok: true, outcome: d.outcome };
@@ -507,7 +498,7 @@ export default function setupGnapRoutes(app, {
       if (grant.asRequestId) {
         try {
           const r = await cloudant.getDocument(AS_REQUESTS_DB, grant.asRequestId);
-          if (r && r.status === 'pending') { r.status = 'withdrawn'; await cloudant.saveDocument(AS_REQUESTS_DB, r); }
+          if (r && r.status === 'pending') { r.status = 'withdrawn'; r.withdrawnAt = new Date(now()).toISOString(); await cloudant.saveDocument(AS_REQUESTS_DB, r); }
         } catch { /* the record stays as it was */ }
       }
       return res.status(204).end();
@@ -800,7 +791,7 @@ export default function setupGnapRoutes(app, {
 
   // For groups.js: copies of group requests pulled from the relay, and the
   // patient's later decisions on them.
-  return { receiveGroupCopy, answerGroupGrant, retryPendingGroupAnswers };
+  return { receiveGroupCopy, answerGroupGrant, retryPendingGroupAnswers, notices: tell };
 }
 
 

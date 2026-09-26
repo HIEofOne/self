@@ -2108,6 +2108,7 @@ import Lists from './Lists.vue';
 import GroupsPanel from './GroupsPanel.vue';
 import PoliciesPanel from './PoliciesPanel.vue';
 import RequestsPanel from './RequestsPanel.vue';
+import { syncRequestLog } from '../utils/requestLog';
 import SecondaryModelChooser from './SecondaryModelChooser.vue';
 import PatientInterview from './PatientInterview.vue';
 import { useQuasar } from 'quasar';
@@ -2524,6 +2525,15 @@ const TAB_FEATURES: Record<string, string> = {
   // lists: always shown; without `lists-full` it is Current Medications only
 };
 const { has, isPersonalAs } = useEdition();
+// Personal AS: bring the folder's request log up to date at sign-in (§7) —
+// quietly, once per account; the Requests tab offers Allow when the browser
+// needs the folder permission again.
+const logSyncedFor = new Set<string>();
+watch([isPersonalAs, () => props.userId], ([pas, uid]) => {
+  if (!pas || !uid || logSyncedFor.has(uid)) return;
+  logSyncedFor.add(uid);
+  void syncRequestLog(uid).catch(() => { /* next time */ });
+}, { immediate: true });
 // P7d: in Personal AS the medicines are reviewed inside the Patient Summary,
 // so there is no separate Current Medications tab (Lists, if unlocked, stays).
 // Requests: its own tab in Personal AS only (the full edition keeps
