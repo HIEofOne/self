@@ -18,6 +18,8 @@ import { isLocalDevRequest } from '../utils/api-guard.js';
 import { applyPseudonymMapping } from '../privacyFilter.js';
 import { medsAllergiesArtifact } from '../utils/summary-sections.js';
 import { recordPatientDecision as recordGnapDecision, stopSharing as stopGnapSharing } from '../gnap/store.js';
+import { settleGrantPayment } from '../gnap/payments.js';
+import { forgetRequester } from '../gnap/instances.js';
 import { isVerified as emailTokenVerified } from '../emailVerification.js';
 import { CREDIT_PRICES, holdCredits, chargeCredits, resolveHold, getAccount } from '../credits.js';
 import {
@@ -3624,6 +3626,9 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
           status: r.status,
           route: r.route || null,
           stoppedAt: r.stoppedAt || null,
+          recognized: !!r.recognized,
+          forgottenAt: r.forgottenAt || null,
+          gnapPayment: r.route ? (r.payment || null) : null,
           aiSummary: r.aiSummary || null
         }));
       res.json({ success: true, requests });
@@ -3657,6 +3662,35 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
     } catch (error) {
       console.error('[user-groups] stop sharing failed:', error?.message || error);
       res.status(500).json({ success: false, error: 'Failed to stop sharing' });
+    }
+  });
+
+  // POST /api/user-groups/requests/:id/forget-requester — the patient's
+  // Forget (§8.4): this requester's next request is no longer recognized
+  // from their earlier verified email, and goes through the email check.
+  app.post('/api/user-groups/requests/:id/forget-requester', async (req, res) => {
+    const userId = requireMatchingUser(req, res);
+    if (!userId) return;
+    try {
+      const reqDoc = await cloudant.getDocument(AS_REQUESTS_DB, req.params.id);
+      if (!reqDoc || reqDoc.type !== 'as_request' || reqDoc.userId !== userId || !reqDoc.gnapGrant) {
+        return res.status(404).json({ success: false, error: 'Request not found' });
+      }
+      const forgotten = await forgetRequester(cloudant, reqDoc.gnapGrant);
+      const at = new Date().toISOString();
+      // Mark every request from that address, so the list stops offering Forget.
+      const email = reqDoc.requester?.email;
+      const all = email ? await cloudant.getAllDocuments(AS_REQUESTS_DB) : [reqDoc];
+      for (const r of all || []) {
+        if (r?.type !== 'as_request' || r.userId !== userId || !r.gnapGrant || r.requester?.email !== email || r.forgottenAt) continue;
+        r.forgottenAt = at;
+        await cloudant.saveDocument(AS_REQUESTS_DB, r).catch(() => {});
+      }
+      auditLog.logEvent({ type: 'gnap_requester_forgotten', userId, ip: req.ip, details: { grant: reqDoc.gnapGrant, instances: forgotten } });
+      res.json({ success: true, forgotten });
+    } catch (error) {
+      console.error('[user-groups] forget requester failed:', error?.message || error);
+      res.status(500).json({ success: false, error: 'Failed to forget the requester' });
     }
   });
 
@@ -3714,6 +3748,11 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
       if (reqDoc.gnapGrant) {
         const { grant, changed } = await recordGnapDecision(cloudant, reqDoc.gnapGrant, decision);
         auditLog.logEvent({ type: 'gnap_decided', userId, ip: req.ip, details: { grant: reqDoc.gnapGrant, outcome: decision, by: 'patient' } });
+        // Credits attached to the request settle on a real answer; an
+        // ignored request settles only when it expires (I-29).
+        if (changed && decision !== 'block') {
+          await settleGrantPayment(cloudant, reqDoc.gnapGrant, decision === 'accept' ? 'accepted' : 'declined');
+        }
         // "Answer ready" (§8.2): only to an address the requester verified,
         // only that there is an answer, and never for block (I-29, I-31).
         const to = grant?.requester?.emailVerified ? grant.requester.email : null;

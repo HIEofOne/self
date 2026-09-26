@@ -180,6 +180,8 @@ export const ROUTE_FEATURES = Object.freeze({
   'GET /gnap/interact/:ix': 'gnap',
   'POST /gnap/interact/:ix/code': 'gnap',
   'POST /gnap/interact/:ix/verify': 'gnap',
+  'GET /gnap/interact/:ix/credits': 'gnap',
+  'POST /gnap/interact/:ix/finish': 'gnap',
   'DELETE /gnap/token/:tok': 'gnap',
   'GET /gnap/rs/:res': 'gnap',
   'GET /api/gnap/request-link': 'gnap',
@@ -193,6 +195,7 @@ export const ROUTE_FEATURES = Object.freeze({
   'GET /api/user-groups/requests': 'requests',
   'POST /api/user-groups/requests/:id/decision': 'requests',
   'POST /api/user-groups/requests/:id/stop-sharing': 'requests',
+  'POST /api/user-groups/requests/:id/forget-requester': 'requests',
 
   // ── groups-core (member side) ─────────────────────────────────────────
   'GET /api/user-groups': 'groups-core',

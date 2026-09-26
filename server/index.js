@@ -42,6 +42,7 @@ import setupFileRoutes from './routes/files.js';
 import { getUserBucketSize } from './routes/files.js';
 import setupGroupRoutes from './routes/groups.js';
 import setupGnapRoutes from './routes/gnap.js';
+import { sweepExpiredGnapPayments } from './gnap/payments.js';
 import setupPolicyRoutes from './routes/policies.js';
 import setupEditionRoutes from './routes/edition.js';
 import setupSetupRoutes from './routes/setup.js';
@@ -1647,10 +1648,17 @@ setupGnapRoutes(app, { cloudant, auditLog, sendEmail: sendPlainEmail });
 // settle) and every 24h thereafter. A single-deployment interval is fine
 // for Phase 1; a durable scheduler can replace it later.
 const GROUP_MAINTENANCE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+// GNAP (personal-as): credits held on direct requests that expired
+// unanswered are settled (a spam deposit forfeited, a sharing payment returned).
+const sweepGnapPayments = () => (isFeatureEnabled('gnap') ? sweepExpiredGnapPayments(cloudant) : Promise.resolve(0))
+  .then((n) => { if (n) console.log(`[gnap-cron] settled ${n} expired request payment(s)`); })
+  .catch((e) => console.warn('[gnap-cron] payment sweep failed:', e?.message || e));
 setTimeout(() => {
   runDailyGroupMaintenance().catch((e) => console.warn('[groups-cron] initial run failed:', e?.message || e));
+  void sweepGnapPayments();
   setInterval(() => {
     runDailyGroupMaintenance().catch((e) => console.warn('[groups-cron] run failed:', e?.message || e));
+    void sweepGnapPayments();
   }, GROUP_MAINTENANCE_INTERVAL_MS);
 }, 5 * 60 * 1000);
 // Hourly mail pull: bounds CROSS-HOST message-notification latency to ~1h

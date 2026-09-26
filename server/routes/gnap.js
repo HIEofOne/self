@@ -10,7 +10,9 @@
  *   DELETE  /gnap/continue/:grant       the client cancels
  *   GET     /gnap/interact/:ix          requester's page: verify email
  *   POST    /gnap/interact/:ix/code     … send a code
- *   POST    /gnap/interact/:ix/verify   … check it, then finish
+ *   POST    /gnap/interact/:ix/verify   … check it (then finish, or offer credits)
+ *   GET     /gnap/interact/:ix/credits  … the verified requester's balance here
+ *   POST    /gnap/interact/:ix/finish   … attach credits (optional), then finish
  *   DELETE  /gnap/token/:tok            token management: revoke
  *   GET     /gnap/rs/:res               resource server: the filtered artifact
  * and, for the signed-in patient:
@@ -30,6 +32,8 @@ import {
   GRANT_TTL_MS, TOKEN_TTL_S
 } from '../gnap/grants.js';
 import { GNAP_DB, getDoc, updateDoc } from '../gnap/store.js';
+import { issueInstance, resolveInstance } from '../gnap/instances.js';
+import { attachPayment, settleGrantPayment, creditsFor } from '../gnap/payments.js';
 import { scopeCovers } from './policies.js';
 
 const USERS_DB = 'maia_users';
@@ -171,6 +175,8 @@ export default function setupGnapRoutes(app, {
       },
       action: 'request', resource: grant.access.datatypes[0], purpose: grant.access.purpose,
       payload: grant.message || '', receivedAt: doc.receivedAt || grant.createdAt,
+      recognized: !!grant.recognized,
+      payment: grant.payment ? { type: grant.payment.type, amount: grant.payment.amount } : null,
       status, ...extra
     });
     try { await cloudant.saveDocument(AS_REQUESTS_DB, doc); } catch (e) { console.warn('[gnap] request record failed:', e?.message || e); }
@@ -184,12 +190,14 @@ export default function setupGnapRoutes(app, {
     if (d.outcome === 'allow') {
       await updateDoc(cloudant, grant._id, (g) => { g.decision = { outcome: 'allow', by: 'policy', policyId: d.policyId, at }; return true; });
       await recordRequest(grant, 'accepted', { autonomous: true, decidedAt: at });
+      await settleGrantPayment(cloudant, grant._id.slice(3), 'accepted');
       void notifyPatient(userDoc, 'shared');
       log('gnap_decided', { grant: grant._id.slice(3), userId: grant.userId, outcome: 'allow', policyId: d.policyId });
       return { status: 200, body: await tokenResponse(await getDoc(cloudant, grant._id)) };
     }
     if (d.outcome === 'deny-respond') {
       await recordRequest(grant, 'declined', { autonomous: true, decidedAt: at });
+      await settleGrantPayment(cloudant, grant._id.slice(3), 'declined');
       log('gnap_decided', { grant: grant._id.slice(3), userId: grant.userId, outcome: 'deny', policyId: d.policyId });
       return deniedResponse(grant);
     }
@@ -235,7 +243,12 @@ export default function setupGnapRoutes(app, {
       if ((req.rawBody || Buffer.alloc(0)).length > MAX_BODY) throw new GnapError('invalid_request', 'Request too large', 413);
       if (rateLimited(req.ip || 'unknown')) throw new GnapError('too_many_attempts', 'Too many requests', 429);
       const parsed = parseGrantRequest(req.body);
-      const sig = checkSignature(req, parsed.clientKey);
+      // A returning client: its key and verified email come from the
+      // instance it was given (§10.6), and it is judged at verified-email.
+      const inst = parsed.clientInstance ? await resolveInstance(cloudant, req.params.asId, parsed.clientInstance, now()) : null;
+      if (inst && inst.userId !== as.userId) throw new GnapError('invalid_client', 'Unknown client instance', 401);
+      const clientKey = inst ? inst.clientKey : parsed.clientKey;
+      const sig = checkSignature(req, clientKey);
       const userDoc = await cloudant.getDocument(USERS_DB, as.userId).catch(() => null);
       if (!userDoc) return next();
       // At most MAX_PENDING_PER_AS new requests to one address a day.
@@ -248,10 +261,11 @@ export default function setupGnapRoutes(app, {
       const createdAt = new Date(now()).toISOString();
       const grant = {
         _id: `gr_${handle}`, type: 'gnap_grant', route: 'direct', userId: as.userId, asId: req.params.asId,
-        clientKey: parsed.clientKey, keyThumbprint: sig.thumbprint, displayName: parsed.displayName,
+        clientKey, keyThumbprint: sig.thumbprint, displayName: inst ? inst.displayName : parsed.displayName,
         message: parsed.message, access: parsed.access,
-        policyRequest: toPolicyRequest(parsed.access),
-        requester: { email: null, emailVerified: false },
+        policyRequest: toPolicyRequest(parsed.access, { verifiedEmail: !!inst }),
+        requester: inst ? { email: inst.email, emailVerified: true } : { email: null, emailVerified: false },
+        ...(inst ? { instanceId: inst._id.slice(3), recognized: true } : {}),
         state: 'pending', decision: null, silent: false, asRequestId: null,
         continueTokenHash: null, polls: 0, nextPollAt: 0,
         interact: null, rsHandle: newHandle(), tokenIds: [],
@@ -260,7 +274,9 @@ export default function setupGnapRoutes(app, {
       let extra = {};
       if (parsed.interact) {
         const ix = newHandle();
-        grant.interact = { ix, finish: parsed.interact.finish, serverNonce: randomBytes(12).toString('base64url'), ref: null, verifiedAt: null };
+        // A recognized requester comes here only to attach credits: their
+        // email is already verified.
+        grant.interact = { ix, finish: parsed.interact.finish, serverNonce: randomBytes(12).toString('base64url'), ref: null, verifiedAt: inst ? createdAt : null };
         await saveNew({ _id: `ix_${ix}`, type: 'gnap_ix', grant: handle });
         extra = { interact: { redirect: `${base()}/gnap/interact/${ix}`, ...(parsed.interact.finish ? { finish: grant.interact.serverNonce } : {}) } };
       }
@@ -314,15 +330,17 @@ export default function setupGnapRoutes(app, {
       }
       const userDoc = await cloudant.getDocument(USERS_DB, grant.userId).catch(() => null);
       if (!userDoc || grant.state === 'canceled') throw new GnapError('invalid_continuation', 'The grant is no longer available');
-      if (grant.state === 'approved') return res.json(await tokenResponse(grant));
+      // The instance_id this client may present next time (§10.6).
+      const inst = grant.instanceId ? { instance_id: grant.instanceId } : {};
+      if (grant.state === 'approved') return res.json({ ...(await tokenResponse(grant)), ...inst });
       if (grant.state === 'denied') {
         const out = await deniedResponse(grant);
         return res.status(out.status).json(out.body);
       }
       if (grant.state !== 'pending') throw new GnapError('invalid_continuation', 'The grant is finished');
-      if (grant.silent) return res.json(await waitResponse(grant));
+      if (grant.silent) return res.json({ ...(await waitResponse(grant)), ...inst });
       const out = await decideAndRespond(grant, userDoc);
-      return res.status(out.status).json(out.body);
+      return res.status(out.status).json(out.status === 200 ? { ...out.body, ...inst } : out.body);
     } catch (e) {
       return fail(res, e);
     }
@@ -334,6 +352,7 @@ export default function setupGnapRoutes(app, {
     try {
       const grant = await loadGrantForClient(req);
       await updateDoc(cloudant, grant._id, (g) => { g.state = 'canceled'; g.continueTokenHash = null; return true; });
+      await settleGrantPayment(cloudant, grant._id.slice(3), 'withdrawn');
       if (grant.asRequestId) {
         try {
           const r = await cloudant.getDocument(AS_REQUESTS_DB, grant.asRequestId);
@@ -390,6 +409,30 @@ export default function setupGnapRoutes(app, {
     }
   });
 
+  /** Back to the client: the interaction reference and the §4.2.3 hash,
+   *  by redirect (the page follows it) or by push. */
+  const finishInteraction = async (grantId) => {
+    const ref = newHandle();
+    const grant = await updateDoc(cloudant, grantId, (g) => { g.interact = { ...g.interact, ref }; return true; });
+    log('gnap_interaction_finished', { grant: grant._id.slice(3), userId: grant.userId });
+    const finish = grant.interact.finish;
+    if (!finish) return { success: true, done: true };
+    const hash = interactionHash(finish.nonce, grant.interact.serverNonce, ref, `${base()}/gnap/as/${grant.asId}`);
+    if (finish.method === 'redirect') {
+      const u = new URL(finish.uri);
+      u.searchParams.set('hash', hash);
+      u.searchParams.set('interact_ref', ref);
+      return { success: true, done: true, redirect: u.toString() };
+    }
+    try {
+      await fetch(finish.uri, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hash, interact_ref: ref })
+      });
+    } catch { /* the client can still continue by polling */ }
+    return { success: true, done: true };
+  };
+
   app.post('/gnap/interact/:ix/verify', async (req, res, next) => {
     if (!on()) return next();
     try {
@@ -404,33 +447,51 @@ export default function setupGnapRoutes(app, {
         if (r.error) return res.status(r.error === 'TOO_MANY_ATTEMPTS' ? 429 : 400).json({ success: false, error: r.error });
         email = r.email;
       }
-      const ref = newHandle();
       const grant = await updateDoc(cloudant, found.grant._id, (g) => {
         g.requester = { email, emailVerified: true };
         g.policyRequest = { ...g.policyRequest, signature: 'verified-email' };
-        g.interact = { ...g.interact, ref, verifiedAt: new Date(now()).toISOString() };
+        g.interact = { ...g.interact, verifiedAt: new Date(now()).toISOString() };
         return true;
       });
+      // Recognized next time, without a code (§10.6).
+      await issueInstance(cloudant, grant, now());
       if (grant.asRequestId) await recordRequest(grant, 'pending');
-      log('gnap_interaction_finished', { grant: grant._id.slice(3), userId: grant.userId });
-      const finish = grant.interact.finish;
-      if (!finish) return res.json({ success: true, done: true });
-      const hash = interactionHash(finish.nonce, grant.interact.serverNonce, ref, `${base()}/gnap/as/${grant.asId}`);
-      if (finish.method === 'redirect') {
-        const u = new URL(finish.uri);
-        u.searchParams.set('hash', hash);
-        u.searchParams.set('interact_ref', ref);
-        return res.json({ success: true, done: true, redirect: u.toString() });
-      }
-      try {
-        await fetch(finish.uri, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ hash, interact_ref: ref })
-        });
-      } catch { /* the client can still continue by polling */ }
-      return res.json({ success: true, done: true });
+      // Credits held here for this email may go with the request.
+      const credits = await creditsFor(cloudant, email);
+      if (credits.balance > 0) return res.json({ success: true, verified: true, credits });
+      return res.json(await finishInteraction(grant._id));
     } catch (e) {
       return res.status(500).json({ success: false, error: 'VERIFY_FAILED' });
+    }
+  });
+
+  app.get('/gnap/interact/:ix/credits', async (req, res, next) => {
+    if (!on()) return next();
+    const found = await loadInteraction(req.params.ix);
+    if (!found) return next();
+    const r = found.grant.requester;
+    if (!r?.emailVerified) return res.status(403).json({ success: false, error: 'EMAIL_NOT_VERIFIED' });
+    res.set('Cache-Control', 'no-store');
+    res.json({ success: true, credits: await creditsFor(cloudant, r.email) });
+  });
+
+  app.post('/gnap/interact/:ix/finish', async (req, res, next) => {
+    if (!on()) return next();
+    try {
+      const found = await loadInteraction(req.params.ix);
+      if (!found) return next();
+      if (!found.grant.requester?.emailVerified) return res.status(403).json({ success: false, error: 'EMAIL_NOT_VERIFIED' });
+      const payment = typeof req.body?.payment === 'string' && req.body.payment ? req.body.payment : null;
+      if (payment) {
+        const r = await attachPayment(cloudant, found.grant._id.slice(3), payment);
+        if (!r.ok) return res.status(r.error === 'NOT_ENOUGH_CREDITS' ? 402 : 400).json({ success: false, error: r.error });
+        const grant = await getDoc(cloudant, found.grant._id);
+        if (grant.asRequestId) await recordRequest(grant, 'pending');
+        log('gnap_payment_attached', { grant: grant._id.slice(3), userId: grant.userId, payment });
+      }
+      return res.json(await finishInteraction(found.grant._id));
+    } catch (e) {
+      return res.status(500).json({ success: false, error: 'FINISH_FAILED' });
     }
   });
 
@@ -571,6 +632,7 @@ export default function setupGnapRoutes(app, {
       if (old && old.userId === userId) {
         for (const { h: handle } of old.grants || []) {
           const g = await updateDoc(cloudant, `gr_${handle}`, (x) => { x.state = 'canceled'; x.continueTokenHash = null; return true; });
+          if (g) await settleGrantPayment(cloudant, handle, 'canceled');
           for (const tokenId of g?.tokenIds || []) {
             await updateDoc(cloudant, tokenId, (t) => { t.revoked = true; t.revokedAt = new Date(now()).toISOString(); return true; });
           }
@@ -597,14 +659,17 @@ function interactionPage({ what, purpose, verified }) {
 <style>
   body { font-family: -apple-system, system-ui, sans-serif; max-width: 460px; margin: 48px auto; padding: 0 16px; color: #222; }
   h1 { font-size: 20px; } p { line-height: 1.45; } .muted { color: #666; font-size: 14px; }
-  input { font-size: 16px; padding: 8px; width: 100%; box-sizing: border-box; margin: 6px 0 10px; }
+  input[type=email], input[inputmode] { font-size: 16px; padding: 8px; width: 100%; box-sizing: border-box; margin: 6px 0 10px; }
   button { font-size: 15px; padding: 8px 16px; background: #1976d2; color: #fff; border: 0; border-radius: 4px; cursor: pointer; }
+  button.plain { background: none; color: #1976d2; padding: 8px 4px; }
+  label.opt { display: block; border: 1px solid #ddd; border-radius: 6px; padding: 8px 10px; margin: 6px 0; cursor: pointer; }
+  label.opt input { margin-right: 8px; }
   .err { color: #b00020; } [hidden] { display: none !important; }
 </style></head>
 <body>
-  <h1>Verify your email</h1>
+  <h1 id="title">${verified ? 'Add credits to your request?' : 'Verify your email'}</h1>
   <p>You asked a MAIA for <strong>${escapeHtml(what)}</strong> for <strong>${escapeHtml(purpose)}</strong> use.
-     The patient's rules may answer a request from a verified email that an unverified one can't get.</p>
+     <span id="why-email"${verified ? ' hidden' : ''}>The patient's rules may answer a request from a verified email that an unverified one can't get.</span></p>
   <div id="step-email"${verified ? ' hidden' : ''}>
     <label>Your email<input id="email" type="email" autocomplete="email"></label>
     <button id="send">Send code</button>
@@ -614,7 +679,14 @@ function interactionPage({ what, purpose, verified }) {
     <button id="verify">Verify</button>
     <p class="muted" id="dev"></p>
   </div>
-  <p id="done"${verified ? '' : ' hidden'}>Your email is verified. You can go back to the app that sent your request.</p>
+  <div id="step-credits" hidden>
+    <p>Some people's rules answer only requests that come with credits. You have <strong id="balance"></strong> credits here.</p>
+    <div id="options"></div>
+    <p class="muted">A deposit comes back when the person answers, and is kept if your request is ignored until it expires.
+      A sharing payment is taken only if they share, and comes back otherwise. The evaluation fee is taken now.</p>
+    <button id="attach">Continue</button>
+  </div>
+  <p id="done" hidden>You can go back to the app that sent your request.</p>
   <p class="err" id="err"></p>
 <script>
   const base = location.pathname.replace(/\\/$/, '');
@@ -623,21 +695,59 @@ function interactionPage({ what, purpose, verified }) {
     const r = await fetch(base + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     return { ok: r.ok, data: await r.json().catch(() => ({})) };
   };
-  const finish = async () => {
+  const LABELS = {
+    'spam-deposit': 'A spam deposit',
+    'notification-deposit': 'An evaluation fee',
+    'sharing-payment': 'A sharing payment'
+  };
+  const done = (data) => {
+    if (data.redirect) { location.href = data.redirect; return; }
+    for (const id of ['step-email', 'step-code', 'step-credits']) $(id).hidden = true;
+    $('done').hidden = false;
+  };
+  const showCredits = (credits) => {
+    for (const id of ['step-email', 'step-code', 'why-email']) $(id).hidden = true;
+    $('title').textContent = 'Add credits to your request?';
+    $('balance').textContent = String(credits.balance);
+    const rows = [['', 'No credits', 0]].concat(Object.entries(credits.prices).map(([k, v]) => [k, LABELS[k] || k, v]));
+    $('options').innerHTML = '';
+    for (const [value, label, price] of rows) {
+      const l = document.createElement('label');
+      l.className = 'opt';
+      const i = document.createElement('input');
+      i.type = 'radio'; i.name = 'payment'; i.value = value; i.checked = value === ''; i.disabled = price > credits.balance;
+      l.appendChild(i);
+      l.appendChild(document.createTextNode(price ? label + ' (' + price + ' credits)' : label));
+      $('options').appendChild(l);
+    }
+    $('step-credits').hidden = false;
+  };
+  const verify = async () => {
     const { ok, data } = await post('/verify', { code: $('code').value.trim() });
     if (!ok) { $('err').textContent = data.error === 'BAD_CODE' ? 'That code is not right.' : 'Could not verify. Try again.'; return; }
-    if (data.redirect) { location.href = data.redirect; return; }
-    $('step-code').hidden = true; $('step-email').hidden = true; $('done').hidden = false;
+    if (data.credits) return showCredits(data.credits);
+    done(data);
   };
   $('send').onclick = async () => {
     $('err').textContent = '';
     const { ok, data } = await post('/code', { email: $('email').value.trim() });
     if (!ok) { $('err').textContent = data.error === 'INVALID_EMAIL' ? 'Enter a valid email.' : 'Could not send a code. Try again.'; return; }
-    if (data.autoVerified) return finish();
+    if (data.autoVerified) return verify();
     $('step-email').hidden = true; $('step-code').hidden = false;
     if (data.devCode) $('dev').textContent = '(Email delivery is off here. Code: ' + data.devCode + ')';
   };
-  $('verify').onclick = finish;
+  $('verify').onclick = verify;
+  $('attach').onclick = async () => {
+    $('err').textContent = '';
+    const picked = document.querySelector('input[name=payment]:checked');
+    const { ok, data } = await post('/finish', { payment: picked ? picked.value : '' });
+    if (!ok) { $('err').textContent = data.error === 'NOT_ENOUGH_CREDITS' ? 'Not enough credits for that.' : 'Could not continue. Try again.'; return; }
+    done(data);
+  };
+  // Already verified (a recognized requester adding credits): show them.
+  if (${verified ? 'true' : 'false'}) {
+    fetch(base + '/credits').then((r) => r.json()).then((d) => d.credits ? showCredits(d.credits) : done({})).catch(() => done({}));
+  }
 </script>
 </body></html>`;
 }
