@@ -47,9 +47,20 @@
         <q-btn v-if="groups.length" dense flat no-caps size="sm" color="primary" icon="forum" label="Ask your group" class="q-mr-xs" @click="openAsk" />
         <q-btn dense flat round size="sm" icon="refresh" :loading="loading" @click="load"><q-tooltip>Refresh</q-tooltip></q-btn>
       </div>
+      <div v-if="requests.length" class="rp__filters">
+        <button v-for="f in FILTERS" :key="f.id" type="button" class="rp__filter" :aria-pressed="filter === f.id" @click="filter = f.id">
+          {{ f.label }}<template v-if="f.id === 'pending' && pendingCount"> ({{ pendingCount }})</template>
+        </button>
+      </div>
+      <div class="rp__log text-caption">
+        <q-icon :name="logState.icon" size="15px" :color="logState.color" />
+        <span>{{ logState.text }}</span>
+        <q-btn v-if="logResult === 'no-permission'" dense flat no-caps size="sm" color="primary" label="Allow" @click="allowFolder" />
+      </div>
       <div v-if="!loading && !requests.length" class="text-caption text-grey-7">
         No requests yet. When someone uses your link, the request appears here.
       </div>
+      <div v-else-if="requests.length && !ordered.length" class="text-caption text-grey-7">Nothing here.</div>
 
       <div v-for="r in ordered" :key="r.id" class="rp__item" :class="{ 'rp__item--pending': r.status === 'pending' }">
         <div class="row items-center no-wrap">
@@ -98,9 +109,36 @@
             <q-tooltip>Their next request will need a new email check.</q-tooltip>
           </q-btn>
         </div>
+        <div v-if="r.route" class="q-mt-xs">
+          <q-btn dense flat no-caps size="sm" color="primary" icon="rule" label="Always handle requests like this…" @click="openRule(r)">
+            <q-tooltip>Make a sharing rule from this request, so the next one like it is handled without asking you.</q-tooltip>
+          </q-btn>
+        </div>
       </div>
       <div v-if="error" class="text-negative text-caption q-mt-sm">{{ error }}</div>
     </div>
+
+    <!-- "Always handle requests like this…": a rule born from a decision (§8.4) -->
+    <q-dialog v-model="ruleOpen">
+      <q-card style="min-width: 360px; max-width: 540px">
+        <q-card-section>
+          <div class="text-h6">Always handle requests like this</div>
+          <div class="text-caption text-grey-7">A rule made from this request. It applies from the next request, and you can change or turn it off in Sharing Policies.</div>
+        </q-card-section>
+        <q-card-section class="q-pt-none">
+          <q-option-group v-model="ruleOutcome" :options="RULE_OUTCOMES" dense />
+          <div class="rp__sentence">{{ ruleSentence }}</div>
+          <div v-if="asState !== 'active'" class="text-caption text-orange-9 q-mt-sm">
+            Sharing isn't on yet, so rules don't act until you turn it on in Sharing Policies.
+          </div>
+          <div v-if="ruleError" class="text-negative text-caption q-mt-sm">{{ ruleError }}</div>
+        </q-card-section>
+        <q-card-actions align="right">
+          <q-btn flat no-caps label="Cancel" v-close-popup />
+          <q-btn unelevated no-caps color="primary" label="Add this rule" :loading="ruleSaving" @click="saveRule" />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
 
     <!-- Requests this member sent to their groups (§10.9, §8.4 "Sent") -->
     <div v-if="sent.length" class="rp__list">
@@ -172,14 +210,18 @@
  */
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue';
 import QRCode from 'qrcode';
-import { SCOPE_OPTIONS, PURPOSE_OPTIONS } from '../utils/policyCards';
+import { SCOPE_OPTIONS, PURPOSE_OPTIONS, sentenceFor, type PolicyCard, type AsState } from '../utils/policyCards';
 import { WHAT, WHY, answerToHtml } from '../gnap/requestForm';
+import { syncRequestLog, type LogSyncResult } from '../utils/requestLog';
+import { reconnectLocalFolderWithGesture } from '../utils/localFolder';
+import { useFolderPdfs } from '../composables/useFolderPdfs';
 
 const props = defineProps<{ userId: string }>();
 const emit = defineEmits<{ changed: [] }>();
 
 interface RequestRow {
   id: string;
+  groupId?: string | null;
   groupName?: string | null;
   fromAlias?: string | null;
   requester?: { name?: string | null; email?: string | null; emailVerified?: boolean } | null;
@@ -235,8 +277,107 @@ const scopeLabel = (v: string) => SCOPE_OPTIONS.find((o) => o.value === v)?.labe
 const purposeLabel = (v: string) => (PURPOSE_OPTIONS.find((o) => o.value === v)?.label || v).toLowerCase();
 const when = (iso: string) => { try { return new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); } catch { return iso; } };
 
-const ordered = computed(() => [...requests.value].sort((a, b) =>
+// Filters (§8.4): needs your decision / shared / declined / all.
+const FILTERS = [
+  { id: 'all', label: 'All' },
+  { id: 'pending', label: 'Needs your decision' },
+  { id: 'shared', label: 'Shared' },
+  { id: 'declined', label: 'Declined' }
+] as const;
+const filter = ref<'all' | 'pending' | 'shared' | 'declined'>('all');
+const inFilter = (r: RequestRow) => filter.value === 'all'
+  || (filter.value === 'pending' && r.status === 'pending')
+  || (filter.value === 'shared' && (r.status === 'accepted' || r.status === 'stopped'))
+  || (filter.value === 'declined' && (r.status === 'declined' || r.status === 'blocked'));
+const pendingCount = computed(() => requests.value.filter((r) => r.status === 'pending').length);
+const ordered = computed(() => requests.value.filter(inFilter).sort((a, b) =>
   (a.status === 'pending' ? 0 : 1) - (b.status === 'pending' ? 0 : 1) || String(b.receivedAt).localeCompare(String(a.receivedAt))));
+
+// ── The request log in the MAIA folder (§7) ─────────────────────────────
+const logResult = ref<LogSyncResult | 'syncing' | ''>('');
+const logState = computed(() => ({
+  '': { icon: 'folder', color: 'grey-6', text: 'Request log in your MAIA folder: checking…' },
+  syncing: { icon: 'sync', color: 'grey-6', text: 'Updating the request log in your MAIA folder…' },
+  written: { icon: 'check_circle', color: 'green-7', text: 'Request log saved in your MAIA folder: Requests/Request Log.html' },
+  unchanged: { icon: 'check_circle', color: 'green-7', text: 'Request log in your MAIA folder is up to date: Requests/Request Log.html' },
+  'no-permission': { icon: 'lock', color: 'orange-8', text: 'MAIA needs your permission to write the request log in your MAIA folder.' },
+  'no-folder': { icon: 'folder_off', color: 'grey-6', text: 'Connect your MAIA folder to keep a request log there.' },
+  failed: { icon: 'error_outline', color: 'orange-8', text: 'The request log couldn’t be written. MAIA tries again later.' }
+}[logResult.value]));
+let syncing = false;
+const syncLog = async () => {
+  if (syncing || !props.userId) return;
+  syncing = true;
+  if (!logResult.value) logResult.value = 'syncing';
+  try { logResult.value = await syncRequestLog(props.userId); } catch { logResult.value = 'failed'; } finally { syncing = false; }
+};
+const allowFolder = async () => {
+  if (await reconnectLocalFolderWithGesture(props.userId)) await syncLog();
+};
+
+// ── "Always handle requests like this…" ────────────────────────────────
+type RuleChoice = 'allow' | 'ask' | 'deny-respond' | 'deny-silent';
+const RULE_OUTCOMES: Array<{ value: RuleChoice; label: string }> = [
+  { value: 'allow', label: 'Share automatically' },
+  { value: 'ask', label: 'Always ask me first' },
+  { value: 'deny-respond', label: 'Decline, and tell them' },
+  { value: 'deny-silent', label: 'Ignore, without telling them' }
+];
+const ruleOpen = ref(false);
+const ruleFrom = ref<RequestRow | null>(null);
+const ruleOutcome = ref<RuleChoice>('allow');
+const ruleSaving = ref(false);
+const ruleError = ref('');
+const asState = ref<AsState>('setup');
+const { saveSharingPoliciesPdf } = useFolderPdfs();
+const ruleCard = (r: RequestRow, choice: RuleChoice): PolicyCard => {
+  const member = r.fromOutsider === false;
+  return {
+    id: 'draft',
+    outcome: choice.startsWith('deny') ? 'deny' : (choice as 'allow' | 'ask'),
+    ...(choice.startsWith('deny') ? { denyMode: choice === 'deny-respond' ? 'respond' : 'silent' } : {}),
+    enabled: true,
+    provenance: 'user',
+    createdFrom: 'request',
+    elements: {
+      party: member ? { type: 'group', groupId: r.groupId || '', groupName: r.groupName || '' } : { type: 'anyone' },
+      purpose: (r.purpose || 'any') as PolicyCard['elements']['purpose'],
+      scope: r.resource as PolicyCard['elements']['scope'],
+      filtered: true,
+      signature: member ? 'group-member' : (r.requester?.emailVerified ? 'verified-email' : 'unverified'),
+      payment: (r.gnapPayment?.type || 'none') as PolicyCard['elements']['payment']
+    }
+  } as PolicyCard;
+};
+const ruleSentence = computed(() => (ruleFrom.value ? sentenceFor(ruleCard(ruleFrom.value, ruleOutcome.value)) : ''));
+const openRule = async (r: RequestRow) => {
+  ruleFrom.value = r;
+  ruleError.value = '';
+  ruleOutcome.value = r.status === 'declined' ? 'deny-respond' : r.status === 'blocked' ? 'deny-silent' : 'allow';
+  ruleOpen.value = true;
+  try {
+    const d = await (await fetch(`/api/user-policies?${q()}`, { credentials: 'include' })).json();
+    if (d.success) asState.value = d.asState;
+  } catch { /* the note about sharing just stays */ }
+};
+const saveRule = async () => {
+  if (!ruleFrom.value) return;
+  ruleSaving.value = true;
+  ruleError.value = '';
+  try {
+    const { id: _draft, ...policy } = ruleCard(ruleFrom.value, ruleOutcome.value);
+    void _draft;
+    const res = await post('/api/user-policies', { policy });
+    const d = await res.json();
+    if (!res.ok || !d.success) throw new Error(d.error || 'save failed');
+    ruleOpen.value = false;
+    // Keep the Sharing Policies PDF in the folder in step (§7).
+    const list = await (await fetch(`/api/user-policies?${q()}`, { credentials: 'include' })).json();
+    if (list.success) void saveSharingPoliciesPdf(props.userId, { cards: list.policies, asState: list.asState });
+  } catch (e) {
+    ruleError.value = e instanceof Error && e.message.startsWith('Policy limit') ? e.message : 'The rule couldn’t be added. Try again.';
+  } finally { ruleSaving.value = false; }
+};
 
 const loadLink = async () => {
   linkError.value = '';
@@ -281,6 +422,7 @@ const decide = async (r: RequestRow, decision: 'accept' | 'decline' | 'block') =
     if (!res.ok) throw new Error();
     await load();
     emit('changed');
+    void syncLog();
   } catch { error.value = "That decision couldn't be saved. Try again."; } finally { busyId.value = ''; }
 };
 
@@ -292,6 +434,7 @@ const stop = async (r: RequestRow) => {
     if (!res.ok) throw new Error();
     await load();
     emit('changed');
+    void syncLog();
   } catch { error.value = "Sharing couldn't be stopped. Try again."; } finally { busyId.value = ''; }
 };
 
@@ -302,6 +445,7 @@ const forget = async (r: RequestRow) => {
     const res = await post(`/api/user-groups/requests/${encodeURIComponent(r.id)}/forget-requester`);
     if (!res.ok) throw new Error();
     await load();
+    void syncLog();
   } catch { error.value = "That requester couldn't be forgotten. Try again."; } finally { busyId.value = ''; }
 };
 
@@ -387,7 +531,9 @@ onMounted(() => {
   void loadLink();
   void load();
   void loadSent();
-  timer = setInterval(() => { void load(); void loadSent(); }, 60000);
+  void syncLog();
+  // While the tab is open: new requests, and the folder log kept in step.
+  timer = setInterval(() => { void load(); void loadSent(); void syncLog(); }, 60000);
 });
 onUnmounted(() => { if (timer) clearInterval(timer); });
 watch(() => props.userId, () => { void loadLink(); void load(); void loadSent(); });
@@ -396,6 +542,12 @@ watch(() => props.userId, () => { void loadLink(); void load(); void loadSent();
 <style scoped>
 .rp { padding: 16px; display: flex; flex-direction: column; gap: 20px; }
 .rp__link-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.rp__filters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.rp__filter { font: 500 12.5px inherit; font-family: inherit; border: 1px solid #d6dde4; background: #fff; border-radius: 999px; padding: 3px 11px; cursor: pointer; color: #37474f; }
+.rp__filter[aria-pressed="true"] { background: #1976d2; border-color: #1976d2; color: #fff; }
+.rp__filter:focus-visible { outline: 2px solid #1976d2; outline-offset: 2px; }
+.rp__log { display: flex; align-items: center; gap: 6px; color: #607080; margin-bottom: 10px; min-height: 26px; }
+.rp__sentence { margin-top: 10px; padding: 8px 10px; border-left: 3px solid #1976d2; background: #f5f8fc; font-size: 13.5px; }
 .rp__qr { margin-top: 10px; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
 .rp__url { background: #f5f5f5; border-radius: 4px; padding: 4px 8px; font-size: 12px; word-break: break-all; }
 .rp__item { border: 1px solid #e0e0e0; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }

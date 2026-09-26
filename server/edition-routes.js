@@ -212,6 +212,8 @@ export const ROUTE_FEATURES = Object.freeze({
   'POST /api/user-groups/requests/:id/decision': 'requests',
   'POST /api/user-groups/requests/:id/stop-sharing': 'requests',
   'POST /api/user-groups/requests/:id/forget-requester': 'requests',
+  'GET /api/requests/log': 'requests',
+  'POST /api/requests/log/synced': 'requests',
 
   // ── groups-core (member side) ─────────────────────────────────────────
   'GET /api/user-groups': 'groups-core',

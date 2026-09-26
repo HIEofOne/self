@@ -44,6 +44,7 @@ import setupGroupRoutes from './routes/groups.js';
 import setupGnapRoutes from './routes/gnap.js';
 import setupGnapGroupRoutes from './routes/gnap-group.js';
 import setupGnapMemberRoutes from './routes/gnap-member.js';
+import setupRequestLogRoutes from './routes/requests-log.js';
 import { sweepExpiredGnapPayments } from './gnap/payments.js';
 import setupPolicyRoutes from './routes/policies.js';
 import setupEditionRoutes from './routes/edition.js';
@@ -1650,6 +1651,8 @@ setupGnapGroupRoutes(app, { cloudant, auditLog, sendEmail: sendPlainEmail, pullN
 Object.assign(gnapHooks, setupGnapRoutes(app, { cloudant, auditLog, sendEmail: sendPlainEmail }));
 // A member's MAIA asking its groups, after the member clicks Send (P6b).
 const { pollSentRequests } = setupGnapMemberRoutes(app, { cloudant, auditLog, sendEmail: sendPlainEmail });
+// The request log for the patient's folder, and what the notices know of it (P8).
+setupRequestLogRoutes(app, { cloudant, notices: gnapHooks.notices });
 
 // Groups daily maintenance (Groups.md §6.1/§6.3/§7.3): renew 24h membership
 // credentials, reconcile registry-side revocation, pull relay mail, and
@@ -1664,6 +1667,11 @@ const sweepGnapPayments = () => (isFeatureEnabled('gnap') ? sweepExpiredGnapPaym
   .then((n) => { if (n) console.log(`[gnap-cron] settled ${n} expired request payment(s)`); })
   .then(() => (isFeatureEnabled('gnap') ? gnapHooks.retryPendingGroupAnswers?.() : 0))
   .then((n) => { if (n) console.log(`[gnap-cron] delivered ${n} pending group answer(s)`); })
+  // Weekly digests / monthly heartbeats, then retention (P8).
+  .then(() => (isFeatureEnabled('gnap') ? gnapHooks.notices.sendDigests() : 0))
+  .then((n) => { if (n) console.log(`[gnap-cron] sent ${n} digest(s)`); })
+  .then(() => (isFeatureEnabled('gnap') ? gnapHooks.notices.prune() : 0))
+  .then((n) => { if (n) console.log(`[gnap-cron] pruned ${n} old request record(s) the folder holds`); })
   .catch((e) => console.warn('[gnap-cron] sweep failed:', e?.message || e));
 setTimeout(() => {
   runDailyGroupMaintenance().catch((e) => console.warn('[groups-cron] initial run failed:', e?.message || e));
@@ -1683,6 +1691,8 @@ setTimeout(() => {
     // Members' sent GNAP requests: new answers, and an email when some arrive.
     if (isFeatureEnabled('gnap')) {
       pollSentRequests().catch((e) => console.warn('[gnap-member] poll failed:', e?.message || e));
+      // Asks that waited out the 6-hour quiet period (P8).
+      gnapHooks.notices.sendDueAsks().catch((e) => console.warn('[gnap-notices] asks failed:', e?.message || e));
     }
   }, GROUP_MAIL_PULL_INTERVAL_MS);
 }, 15 * 60 * 1000);
