@@ -169,9 +169,11 @@ export default function setupGnapRoutes(app, {
     const id = `asreq_gnap_${grant._id.slice(3)}`;
     const doc = (await cloudant.getDocument(AS_REQUESTS_DB, id).catch(() => null)) || { _id: id };
     const viaGroup = grant.route === 'group';
+    const fromMember = !!grant.fromMember;
     Object.assign(doc, {
       type: 'as_request', userId: grant.userId, route: viaGroup ? 'gnap-group' : 'gnap-direct', gnapGrant: grant._id.slice(3),
-      groupId: viaGroup ? grant.groupId : null, groupName: viaGroup ? grant.groupName : 'Direct request', fromOutsider: true,
+      groupId: viaGroup ? grant.groupId : null, groupName: viaGroup ? grant.groupName : 'Direct request', fromOutsider: !fromMember,
+      ...(fromMember ? { fromPairwiseId: grant.fromMember.pairwiseId, fromAlias: grant.fromMember.alias || null } : {}),
       requester: {
         name: grant.displayName || null, nameVerified: false,
         email: grant.requester?.email || null, emailVerified: !!grant.requester?.emailVerified
@@ -287,6 +289,15 @@ export default function setupGnapRoutes(app, {
       );
       if (!sig.ok) return { ok: false, error: `signature: ${sig.error}` };
 
+      // A member asking: the group vouches for who it is (§10.9). The
+      // patient's cards see the group party at group-member strength, and a
+      // sender the patient blocked is dropped.
+      const memberRoute = claim.route === 'member';
+      if (memberRoute) {
+        if (!claim.from?.pairwiseId || claim.from.pairwiseId === membership.pairwiseId) return { ok: false, error: 'bad sender' };
+        if ((membership.blockedSenders || []).includes(claim.from.pairwiseId)) return { ok: true, blocked: true };
+      }
+
       // One grant per request and member, however often the copy arrives.
       const seenId = `gc_${hashToken(`${copy.bcast}|${userDoc.userId}`)}`;
       if (await getDoc(cloudant, seenId)) return { ok: true, duplicate: true };
@@ -298,10 +309,19 @@ export default function setupGnapRoutes(app, {
         _id: `gr_${handle}`, type: 'gnap_grant', route: 'group', userId: userDoc.userId, asId: null,
         groupId: membership.groupId, groupName: membership.groupName || membership.groupId,
         bcast: copy.bcast, answerUri: claim.answerUri, sealJwk: body.maia_seal_jwk,
-        clientKey: parsed.clientKey, keyThumbprint: sig.thumbprint, displayName: parsed.displayName,
+        clientKey: parsed.clientKey, keyThumbprint: sig.thumbprint,
+        displayName: memberRoute ? (claim.from.alias || 'A member') : parsed.displayName,
         message: parsed.message, access: parsed.access,
-        policyRequest: { ...toPolicyRequest(parsed.access, { verifiedEmail }), payment: GNAP_PAYMENTS.includes(claim.payment) ? claim.payment : 'none' },
-        requester: { email: verifiedEmail ? claim.requester.email : null, emailVerified: verifiedEmail },
+        policyRequest: memberRoute
+          ? {
+            party: { type: 'group', groupId: membership.groupId, pairwiseId: claim.from.pairwiseId },
+            purpose: parsed.access.purpose, scope: parsed.access.datatypes[0],
+            ...(parsed.access.ahCategory ? { ahCategory: parsed.access.ahCategory } : {}),
+            signature: 'group-member', payment: 'none'
+          }
+          : { ...toPolicyRequest(parsed.access, { verifiedEmail }), payment: GNAP_PAYMENTS.includes(claim.payment) ? claim.payment : 'none' },
+        requester: { email: verifiedEmail && !memberRoute ? claim.requester.email : null, emailVerified: verifiedEmail && !memberRoute },
+        ...(memberRoute ? { fromMember: { pairwiseId: claim.from.pairwiseId, alias: claim.from.alias || null } } : {}),
         state: 'pending', decision: null, silent: false, asRequestId: null,
         continueTokenHash: null, polls: 0, nextPollAt: 0, interact: null,
         rsHandle: newHandle(), tokenIds: [], createdAt, expiresAt: claim.expiresAt

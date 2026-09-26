@@ -1,6 +1,6 @@
 # MAIA Request Security and Privacy Design
 
-- **Date:** 2026-08-07 (revised 2026-08-09: NPI removed from the signature vocabulary, v1.5.173; vocabulary editions + card stamping added, §15.6, v1.5.174)
+- **Date:** 2026-08-07 (revised 2026-08-09: NPI removed from the signature vocabulary, v1.5.173; vocabulary editions + card stamping added, §15.6, v1.5.174; revised 2026-09-25: the Personal AS edition's GNAP request path, §6.3, and invariants I-24…I-31)
 - **Status:** Comprehensive review — implemented behavior through **v1.5.169** (PRs #264–#301), plus the approved roadmap (VC/UCAN artifacts → federation → GNAP/MCP → external resource servers).
 - **Baseline:** `Groups_Design.md` (2026-07-05/06), the verbatim design conversation this document traces against.
 - **Audience:** MAIA maintainers; prospective **group administrators** evaluating whether to sponsor a group; **privacy and security experts** validating the design and its implementation.
@@ -169,7 +169,43 @@ Two design notes for reviewers. The credential is **host-locked by construction*
 
 Sender's host seals to the recipient's pairwise key and pushes with a signed member claim; the registry relays ciphertext it cannot read. The recipient's own AS evaluates at ingest (party = group, signature = group-member). Autonomous replies travel as sealed relay messages (reaching any host) plus direct email when the recipient's host knows the requester. First-contact requests escalate unless a card decides; accepting writes the `acceptedSenders` fact.
 
-### 6.3 Reliability properties that carry security weight
+### 6.3 The Personal AS edition: every request is a GNAP grant request
+
+In the Personal AS edition (`MAIA_EDITION=personal-as`, v1.6.25 onward) the request paths of §6.1 and §6.2 are replaced. The replaced paths are the welcome-page form, which emailed artifacts, and the relay's `as-request` envelopes; their routes answer `403 FEATURE_OFF` there. Every request is now an RFC 9635 (GNAP) grant request, signed with RFC 9421 HTTP Message Signatures, and it reaches the patient's MAIA through one of three routes. Design: `group_requests.md` §10. Code: `server/routes/gnap.js`, `gnap-group.js`, `gnap-member.js` and `server/gnap/`.
+
+- **Direct.** A person on the patient's personal request page (`/r/<asId>`) or any software client posts to `POST /gnap/as/<asId>`. The request is signed with an Ed25519 key that the browser made and cannot export.
+  - **Identity.** An optional interaction step verifies an email; the grant is then judged at `verified-email`. The AS then gives the client an `instance_id`, which a later request can present, signed by the same key, to be recognized for 12 months. The patient can **Forget** the requester, and changing the link forgets everyone.
+  - **Credits.** Credits attached in the interaction step are held on this host and settle by the rules of §8.
+  - **Answers.** Allow returns a key-bound access token for the co-located resource server. Ask returns "wait", and the patient decides in the Requests tab. Decline returns `request_denied`. A silent deny keeps answering "wait" until the grant expires.
+- **A whole group, from outside** (`/g/<groupId>/request`). The requester signs one request to `POST /gnap/group/<groupId>`, with an X25519 sealing key made in the browser.
+  - **Verification.** The group verifies the email once, and may hold one payment for the whole request. Nothing goes out before that check.
+  - **Fan-out.** The group then seals to each member's relay inbox a copy of the **exact signed request**, with an **attestation signed by the group key**. The attestation covers the group, the request, when it arrived and expires, the target URI, a hash of the body, the verified email, the payment and the answer slot.
+  - **The member's AS** verifies both signatures, checking freshness against the group's receipt time, makes its own grant, and decides with its own cards.
+  - **Answers.** A share or a decline, whether by card or by the patient later, is posted to the group **sealed to the requester's key**. For a share, the box holds a continuation at the member's AS that only the requester's key can use. Ignoring posts nothing.
+  - **Collecting.** The requester's page opens the boxes, continues at each member's AS, receives a token and reads the artifact there.
+- **Member to member.** A member's MAIA signs with the member's existing per-group key, and only after the member clicks Send.
+  - **Attestation.** The group recognizes the key and attests `group-member` together with the member's pairwise id and alias. No email check is needed.
+  - **Recipients.** The request goes to every other member, or to one named by `maia_to`. A recipient's cards see the group party at `group-member` strength.
+  - **Answers** are sealed to the member's per-group X25519 key. The requesting host opens them and keeps only the continuation and a token that lasts an hour. The member reads each answer on demand from the answering member's AS, and it is never stored on the requesting host.
+
+What each party learns in the group routes:
+
+| Party | Learns | Never learns |
+|---|---|---|
+| Requester | Counts; the answers of members who shared; each sharing member's opaque grant handles | The roster; who declined, stayed silent or ignored; any member's personal AS address; which card decided |
+| Group (registry) | That a request was made, by which verified email (or which member), and counts | Any answer's content (it stores boxes it cannot open); any usable token (tokens are bound to the requester's key); which member answered |
+| Member's AS | Its own copy of the request and the group's attestation | Other members' answers |
+
+Hardening:
+- **Signatures.** Every signature must cover `@method`, `@target-uri`, `content-digest` (when there is a body) and `authorization` (when a token is presented), must carry `tag="gnap"`, and must be created within ±5 minutes; nonces are cached for 10 minutes. The target URI is rebuilt from `PUBLIC_APP_URL`, because the platform proxies requests.
+- **Tokens and handles.** Tokens are opaque and bound to the client key, and only their SHA-256 is stored. A `bearer` flag is refused. Continue, token and resource-server locations are per-grant handles, never the patient's address, and every continue rotates the continuation token.
+- **Limits.** Rate limits apply per IP, per address, per group, per verified email and per member.
+- **Answer counts.** A group's answer slot can't count more answers than the members it reached.
+- **Failed deliveries** are retried daily.
+- **Email.** No email carries record data. Patients get "a request is waiting" and "your MAIA shared" notices; requesters get only "there is an answer", and only at an address they verified.
+- **Cross-origin access.** The `/gnap` paths are open to any origin, without cookies, and are exempt from the app's session CORS.
+
+### 6.4 Reliability properties that carry security weight
 
 - **Idempotent ingest:** request docs use deterministic ids derived from the relay message id, so racing refreshes cannot duplicate a request or *reset a human decision already made* (an upsert store makes this a genuine hazard; the id scheme neutralizes it).
 - **Nudge debouncing** (6 h quiet period) is time-based, not queue-count-based — a member who is away still gets exactly one nudge, and bulk requests cannot weaponize notifications.
@@ -370,6 +406,8 @@ Registry → admin → member → RqP chains, cross-group trust as cross-signed 
 
 ### 15.4 GNAP / MCP phase
 
+**Status (2026-09-25):** the GNAP core shipped in the Personal AS edition (v1.6.25–v1.6.31; §6.3). It covers direct, group and member-to-member routes, key-bound opaque tokens, RFC 9421 signatures, recognized client instances and sealed group answers. Serialized UCAN tokens, delegation and an MCP facade remain roadmap (`group_requests.md` §10.13–10.14).
+
 Trigger: the first machine-to-machine requester — expected to arrive as an MCP client. GNAP access token = serialized UCAN; RFC 9421 message signatures; an MCP-facing facade for requester-side agents; offline attenuated re-delegation with enforcement (and the patient's cards) still authoritative at invocation. Neither MCP nor A2A has native delegation semantics today; both leave an OAuth-shaped token slot that an audience-bound UCAN fills, which is what removes their bearer-token and confused-deputy exposure.
 
 The standing invariant across all phases: **capability issuance is consent-gated by cards; invocation re-checks cards and revocation at the patient's AS.** Delegation decentralizes; enforcement does not.
@@ -438,6 +476,17 @@ Testable claims. Suites that pin them are named in §14.1.
 - **I-21** The registry never stores a vouch code (only its SHA-256, as the document id) nor the patient's label for the vouched person.
 - **I-22** A stronger identity buys automation, never more data: every autonomous release is privacy-filtered regardless of signature level.
 - **I-23** Every card records the vocabulary edition it was authored under and its consent sentence as rendered at save (absent stamp = edition 1); a vocabulary change either provably preserves a card's semantics or returns it to the patient, failing closed to ask in between.
+
+Personal AS edition (§6.3; `group_requests.md` §3):
+
+- **I-24** Unconfirmed policy never acts: imported, restored or pack-updated cards take no part in evaluation until the patient confirms them, and while the patient's AS is not `active` every request escalates to ask.
+- **I-25** Import is a write path: every card written to a patient's record, by any route, passes `normalizeCard`.
+- **I-26** Edition gates are server-enforced: a route behind a feature that is off answers `403 FEATURE_OFF`, and no cost-bearing resource is created for a feature the user has not turned on.
+- **I-27** Unlocking is a user act: the private AI may suggest a feature, but the confirm text comes from the feature registry and only the user's click turns it on.
+- **I-28** GNAP tokens are key-bound and stored as hashes: continuation, access and management tokens are bound to the client key, a `bearer` flag is refused, and only SHA-256 of each token value is kept.
+- **I-29** Declines are indistinguishable: a policy decline and a human decline return the same `request_denied`; a silent deny behaves exactly like an ask the patient never answered (a direct client keeps getting "wait"; a group request gets no answer from that member).
+- **I-30** One door: every request reaches a patient's MAIA as a signed GNAP grant request, whether over HTTP or carried by the group relay; each member's AS verifies the requester's signature itself, relies on the group only for what the group attested (email, payment, membership), and every route builds the same evaluator input under the same privacy-filter ceiling.
+- **I-31** One exit: data leaves a patient's MAIA only as a response from the co-located resource server to a valid key-bound token; no email, relay message, notification or log line carries an artifact, and the group relay carries only signed requests, sealed answers and counts.
 
 ## Appendix B. Glossary
 

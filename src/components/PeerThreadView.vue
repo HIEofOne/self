@@ -142,8 +142,10 @@
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue';
 import { useQuasar } from 'quasar';
 import { SCOPE_OPTIONS, PURPOSE_OPTIONS, type Scope, type Purpose } from '../utils/policyCards';
+import { useEdition } from '../composables/useEdition';
 
 const $q = useQuasar();
+const { isPersonalAs } = useEdition();
 const props = defineProps<{
   userId: string;
   groupId: string;
@@ -374,20 +376,38 @@ const sendDataRequest = async () => {
   if (sendingRequest.value) return;
   sendingRequest.value = true;
   try {
-    const res = await fetch('/api/user-groups/request', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({
-        userId: props.userId, groupId: props.groupId, toPairwiseId: props.peerId,
-        action: 'share-request', resource: reqScope.value, purpose: reqPurpose.value,
-        payload: reqNote.value.trim() || null
+    // Personal AS: a GNAP request to this one member through the group
+    // (§10.9, maia_to); its answer shows under Requests → Sent.
+    const res = isPersonalAs.value
+      ? await fetch('/api/gnap/member-requests', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          userId: props.userId, groupId: props.groupId, to: props.peerId, toAlias: props.peerAlias || null,
+          datatype: reqScope.value, purpose: reqPurpose.value === 'any' ? 'peer-support' : reqPurpose.value,
+          message: reqNote.value.trim()
+        })
       })
-    });
+      : await fetch('/api/user-groups/request', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          userId: props.userId, groupId: props.groupId, toPairwiseId: props.peerId,
+          action: 'share-request', resource: reqScope.value, purpose: reqPurpose.value,
+          payload: reqNote.value.trim() || null
+        })
+      });
     const data = await res.json();
     if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
     showRequestDialog.value = false;
-    $q.notify({ type: 'positive', message: 'Request sent — their sharing policies (or they themselves) will decide.' });
+    $q.notify({
+      type: 'positive',
+      message: isPersonalAs.value
+        ? 'Request sent: their sharing policies, or they themselves, will decide. See it under Requests → Sent.'
+        : 'Request sent — their sharing policies (or they themselves) will decide.'
+    });
   } catch (err) {
     $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to send request' });
   } finally { sendingRequest.value = false; }

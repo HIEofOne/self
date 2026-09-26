@@ -43,6 +43,7 @@ import { getUserBucketSize } from './routes/files.js';
 import setupGroupRoutes from './routes/groups.js';
 import setupGnapRoutes from './routes/gnap.js';
 import setupGnapGroupRoutes from './routes/gnap-group.js';
+import setupGnapMemberRoutes from './routes/gnap-member.js';
 import { sweepExpiredGnapPayments } from './gnap/payments.js';
 import setupPolicyRoutes from './routes/policies.js';
 import setupEditionRoutes from './routes/edition.js';
@@ -1647,6 +1648,8 @@ const { runDailyGroupMaintenance, runHourlyMailPull, pullSameHostMembers } = set
 // The group routes go first: gnap.js ends with a catch-all OPTIONS /gnap/*.
 setupGnapGroupRoutes(app, { cloudant, auditLog, sendEmail: sendPlainEmail, pullNow: pullSameHostMembers });
 Object.assign(gnapHooks, setupGnapRoutes(app, { cloudant, auditLog, sendEmail: sendPlainEmail }));
+// A member's MAIA asking its groups, after the member clicks Send (P6b).
+const { pollSentRequests } = setupGnapMemberRoutes(app, { cloudant, auditLog, sendEmail: sendPlainEmail });
 
 // Groups daily maintenance (Groups.md §6.1/§6.3/§7.3): renew 24h membership
 // credentials, reconcile registry-side revocation, pull relay mail, and
@@ -1677,6 +1680,10 @@ const GROUP_MAIL_PULL_INTERVAL_MS = 60 * 60 * 1000;
 setTimeout(() => {
   setInterval(() => {
     runHourlyMailPull().catch((e) => console.warn('[groups-mail] run failed:', e?.message || e));
+    // Members' sent GNAP requests: new answers, and an email when some arrive.
+    if (isFeatureEnabled('gnap')) {
+      pollSentRequests().catch((e) => console.warn('[gnap-member] poll failed:', e?.message || e));
+    }
   }, GROUP_MAIL_PULL_INTERVAL_MS);
 }, 15 * 60 * 1000);
 
