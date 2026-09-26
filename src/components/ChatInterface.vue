@@ -1183,6 +1183,7 @@ import { advancePipeline, fetchPipeline, waitForStageDone, type PipelineNext } f
 import { logModalEvent } from '../utils/modalLog';
 import SummaryProgress from './SummaryProgress.vue';
 import { useEdition } from '../composables/useEdition';
+import { summaryIntent } from '../utils/summaryIntent';
 import { extractFeatureProposals, featureCardText, setFeature, type FeatureProposal } from '../utils/advisorProposals';
 import { startRecordsIndexing, INDEX_WORDS } from '../utils/recordsSearch';
 import {
@@ -3634,8 +3635,10 @@ const sendMessage = async () => {
   // inference on the SELECTED Private AI instead. We still persist the
   // result as the patient summary for an explicit summary request.
   const isUntouchedDefault = inputMessage.value.trim() === PRIVATE_AI_DEFAULT_PROMPT.trim();
-  const mentionsSummary = /patient\s+summary/i.test(inputMessage.value);
-  const isPatientSummaryRequest = isUntouchedDefault || mentionsSummary;
+  // Only an explicit request counts: a question that merely mentions the
+  // summary gets an ordinary answer (utils/summaryIntent.ts).
+  const typedSummaryIntent = isUntouchedDefault ? null : summaryIntent(inputMessage.value);
+  const isPatientSummaryRequest = isUntouchedDefault || typedSummaryIntent !== null;
   // Detect "list all / show all / history / trend / timeline / over time"
   // + a recognizable analyte (TSH, A1c, glucose, LDL, …). When matched,
   // the chat handler routes through /api/labs/history below instead of
@@ -3850,15 +3853,15 @@ const sendMessage = async () => {
       }
     }
 
-    // TYPED message mentioning "patient summary" (Phase 1 of the PS/CM
-    // redesign): NEVER generate. The old behavior ran a fresh AI draft off a
-    // regex — even a question like "what's in my patient summary?" kicked off
-    // a multi-minute generation. Now: return the STORED summary if one exists,
-    // otherwise point the user at the governed paths (the untouched-default
-    // SEND or the Patient Summary tab, both of which end in the review dialog).
+    // A TYPED request to SEE the summary (Phase 1 of the PS/CM redesign):
+    // NEVER generate. Return the STORED summary if one exists, otherwise
+    // point the user at the governed paths (the untouched-default SEND or
+    // the Patient Summary tab, both of which end in the review dialog). Only
+    // a message that is just that request qualifies: any other question
+    // that mentions the summary goes to the AI.
     {
       const providerKeyForCheck = getProviderKey(selectedProvider.value);
-      if (mentionsSummary && !isUntouchedDefault && providerKeyForCheck === 'digitalocean' && props.user?.userId) {
+      if (typedSummaryIntent === 'show' && providerKeyForCheck === 'digitalocean' && props.user?.userId) {
         try {
           const pk = getProviderKey(selectedProvider.value);
           const pl = assistantLabelForKey(pk);
@@ -4041,7 +4044,7 @@ const sendMessage = async () => {
               // Save patient summary if this was a summary request
               if (isPatientSummaryRequest && props.user?.userId && assistantMessage.content) {
                 // NO auto-save (review gate owns saving). Offer the tab.
-                if (mentionsSummary && !isUntouchedDefault) {
+                if (typedSummaryIntent === 'write') {
                   chatDraftSummary.value = assistantMessage.content;
                   showNewSummaryDialog.value = true;
                 }
@@ -4076,7 +4079,7 @@ const sendMessage = async () => {
     // Save patient summary if this was a summary request
     if (isPatientSummaryRequest && props.user?.userId && assistantMessage.content) {
       // NO auto-save (review gate owns saving). Offer the tab.
-      if (mentionsSummary && !isUntouchedDefault) {
+      if (typedSummaryIntent === 'write') {
         chatDraftSummary.value = assistantMessage.content;
         showNewSummaryDialog.value = true;
       }

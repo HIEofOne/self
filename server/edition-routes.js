@@ -93,6 +93,8 @@ export const ROUTE_FEATURES = Object.freeze({
   'POST /api/wizard/quick-start-complete': 'account',
   'POST /api/welcome-email': 'account',
   'POST /api/user-features': 'account',
+  'POST /api/welcome-activity/token': 'account',
+  'GET /api/welcome-activity': 'account',
   'GET /api/setup-status': 'account',
   'POST /api/setup/folder-connected': 'account',
 

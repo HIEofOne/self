@@ -46,6 +46,7 @@ import setupGnapGroupRoutes from './routes/gnap-group.js';
 import setupGnapMemberRoutes from './routes/gnap-member.js';
 import setupRequestLogRoutes from './routes/requests-log.js';
 import setupReceivedRoutes from './routes/received.js';
+import setupWelcomeActivityRoutes from './routes/welcome-activity.js';
 import { createSpacesHoldStore, sweepExpiredHolds } from './gnap/documents.js';
 import { sweepExpiredGnapPayments } from './gnap/payments.js';
 import setupPolicyRoutes from './routes/policies.js';
@@ -1687,6 +1688,8 @@ const { pollSentRequests } = setupGnapMemberRoutes(app, { cloudant, auditLog, se
 setupRequestLogRoutes(app, { cloudant, notices: gnapHooks.notices });
 // The folder key and the sealed holds the patient's browser opens (P9).
 setupReceivedRoutes(app, { cloudant, holds: documentHolds, auditLog });
+// Activity counts on the welcome page's account badges, before sign-in.
+setupWelcomeActivityRoutes(app, { cloudant, secret: SESSION_SECRET });
 
 // Groups daily maintenance (Groups.md §6.1/§6.3/§7.3): renew 24h membership
 // credentials, reconcile registry-side revocation, pull relay mail, and
