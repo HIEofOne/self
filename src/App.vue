@@ -186,7 +186,11 @@
                         <strong>{{ du.displayName }}</strong>
                         <span v-if="du.displayName.toLowerCase() !== du.userId.toLowerCase()" class="text-grey-7"> ({{ du.userId }})</span>
                         <span v-if="du.folderName" class="text-grey-6"> &mdash; {{ du.folderName }}</span>
-                        <div v-if="welcomeUserCloudStatus[du.userId] === 'ready'" class="text-caption text-green-8">
+                        <div v-if="welcomeUserCloudStatus[du.userId] === 'ready' && welcomeUserActivity[du.userId]?.total" class="text-caption text-orange-10 row items-center no-wrap">
+                          <q-badge rounded color="orange-8" :label="welcomeUserActivity[du.userId].total" class="q-mr-xs" />
+                          <span>New: {{ welcomeUserActivity[du.userId].text }}</span>
+                        </div>
+                        <div v-else-if="welcomeUserCloudStatus[du.userId] === 'ready'" class="text-caption text-green-8">
                           Cloud account ready
                         </div>
                         <div v-else-if="welcomeUserCloudStatus[du.userId] === 'loading'" class="text-caption text-grey-6">
@@ -1188,6 +1192,7 @@ import {
   type MaiaState, type DiscoveredUser
 } from './utils/localFolder';
 import { ensureFolderKey, forgetFolderKey, FOLDER_KEY_FILE } from './utils/folderKey';
+import { rememberActivityToken, forgetActivityToken, fetchActivity, activitySummary, readSeenMessages } from './utils/welcomeActivity';
 import { LOG_DIR } from './utils/requestLog';
 import packageJson from '../package.json';
 
@@ -1945,7 +1950,28 @@ const checkAllUserCloudStatus = async () => {
     }
     welcomeUserCloudStatus.value = { ...statusMap };
   }));
+  void loadWelcomeActivity();
 };
+
+/** New activity per account, on its badge (counts only; utils/welcomeActivity.ts). */
+const welcomeUserActivity = ref<Record<string, { total: number; text: string }>>({});
+const loadWelcomeActivity = async () => {
+  const next: Record<string, { total: number; text: string }> = {};
+  await Promise.all(discoveredUsers.value.map(async (u) => {
+    next[u.userId] = activitySummary(await fetchActivity(u.userId), readSeenMessages(u.userId));
+  }));
+  welcomeUserActivity.value = next;
+};
+// Signed in: this device keeps the account's activity token for the badge.
+watch([authenticated, () => user.value?.userId], ([signedIn, uid]) => {
+  if (signedIn && uid && !user.value?.isDeepLink) void rememberActivityToken(uid);
+}, { immediate: true });
+// On the welcome page, refresh the badges every two minutes.
+let welcomeActivityTimer: ReturnType<typeof setInterval> | null = null;
+watch(authenticated, (signedIn) => {
+  if (welcomeActivityTimer) { clearInterval(welcomeActivityTimer); welcomeActivityTimer = null; }
+  if (!signedIn) welcomeActivityTimer = setInterval(() => { void loadWelcomeActivity(); }, 2 * 60 * 1000);
+}, { immediate: true });
 
 /** Handle RESTORE on a discovered user card — uses /api/account/recreate to preserve original userId */
 const handleUserCardRestore = async (du: DiscoveredUser) => {
@@ -3501,6 +3527,7 @@ const confirmDeleteLocalUser = async () => {
     }
     await clearUserSnapshot(localId);
     await forgetFolderKey(localId);
+    forgetActivityToken(localId);
     clearWizardPendingKey(localId);
     if (getActiveUserId() === localId) {
       setActiveUserId(null);

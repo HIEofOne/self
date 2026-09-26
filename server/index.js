@@ -47,6 +47,7 @@ import setupGnapMemberRoutes from './routes/gnap-member.js';
 import setupRequestLogRoutes from './routes/requests-log.js';
 import setupReceivedRoutes from './routes/received.js';
 import setupGnapOutRoutes from './routes/gnap-out.js';
+import setupWelcomeActivityRoutes from './routes/welcome-activity.js';
 import { createSpacesHoldStore, sweepExpiredHolds } from './gnap/documents.js';
 import { sweepExpiredGnapPayments } from './gnap/payments.js';
 import setupPolicyRoutes from './routes/policies.js';
@@ -1690,6 +1691,8 @@ setupRequestLogRoutes(app, { cloudant, notices: gnapHooks.notices });
 setupReceivedRoutes(app, { cloudant, holds: documentHolds, auditLog });
 // This MAIA asking another MAIA for its user, after the user's Send (P11).
 const { pollOutRequests } = setupGnapOutRoutes(app, { cloudant, auditLog, sendEmail: sendPlainEmail, holds: documentHolds });
+// Activity counts on the welcome page's account badges, before sign-in.
+setupWelcomeActivityRoutes(app, { cloudant, secret: SESSION_SECRET });
 
 // Groups daily maintenance (Groups.md §6.1/§6.3/§7.3): renew 24h membership
 // credentials, reconcile registry-side revocation, pull relay mail, and
