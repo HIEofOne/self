@@ -2115,6 +2115,7 @@ import PoliciesPanel from './PoliciesPanel.vue';
 import RequestsPanel from './RequestsPanel.vue';
 import FeaturesPanel from './FeaturesPanel.vue';
 import { syncRequestLog } from '../utils/requestLog';
+import { readSeenMessages, writeSeenMessages } from '../utils/welcomeActivity';
 import { ensureFolderKey } from '../utils/folderKey';
 import { deliverReceived } from '../utils/received';
 import SecondaryModelChooser from './SecondaryModelChooser.vue';
@@ -2467,15 +2468,13 @@ watch(currentTab, (v) => {
 // Distinct from the orange `alertOutline` ("needs verification"): this is
 // informational/blue. Cheap to poll: one GET /api/user-groups/alerts.
 const INVITE_LS_KEY = 'maiaGroupInvite';
-const GROUPS_SEEN_LS_KEY = 'maia.groupsMessagesSeen';
 const groupsHasInvite = ref(false);
 const groupsPendingRequests = ref(0);
 const groupsMessageCount = ref(0);
-const readGroupsSeen = (): number => {
-  try { return parseInt(window.localStorage.getItem(GROUPS_SEEN_LS_KEY) || '0', 10) || 0; }
-  catch { return 0; }
-};
+// Per account, so the welcome page's badge can tell new messages apart.
+const readGroupsSeen = (): number => readSeenMessages(props.userId || '');
 const groupsSeenMessages = ref<number>(readGroupsSeen());
+watch(() => props.userId, () => { groupsSeenMessages.value = readGroupsSeen(); });
 const groupsNewMessages = computed(() =>
   Math.max(0, groupsMessageCount.value - groupsSeenMessages.value)
 );
@@ -2516,7 +2515,7 @@ const refreshGroupsAlert = async () => {
 // seen (invite/requests clear on their own once acted on).
 const markGroupsSeen = () => {
   groupsSeenMessages.value = groupsMessageCount.value;
-  try { window.localStorage.setItem(GROUPS_SEEN_LS_KEY, String(groupsMessageCount.value)); } catch { /* ignore */ }
+  if (props.userId) writeSeenMessages(props.userId, groupsMessageCount.value);
 };
 let groupsAlertTimer: ReturnType<typeof setInterval> | null = null;
 onMounted(() => {

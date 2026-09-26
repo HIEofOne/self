@@ -57,6 +57,7 @@ export const PRE_AUTH_ROUTES = new Set([
   '/api/cloud-health',        // welcome page: restore status for a local folder
   '/api/client-log',
   '/api/local/delete',        // welcome page's delete: checks provesAccount itself
+  '/api/welcome-activity',    // welcome page: activity counts; checks its own token or the session
   '/api/admin/provision',     // legacy emailed admin link: token-checked
   '/api/admin/provision/confirm'
 ]);
