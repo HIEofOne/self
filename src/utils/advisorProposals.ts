@@ -61,3 +61,52 @@ export async function setFeature(userId: string, feature: string, on: boolean, v
   const d = await res.json().catch(() => ({}));
   return res.ok && d.success === true;
 }
+
+// ── Requests to another MAIA (P11, I-33) ─────────────────────────────────
+// A fenced `maia-request` block is a DRAFT: a card with what sending
+// reveals and a Send button. Parsing sends nothing.
+
+export interface RequestDraft {
+  link: string;
+  to: string;
+  what: string;
+  why: string;
+  message: string;
+  state?: 'idle' | 'busy' | 'sent' | 'discarded' | 'error';
+  note?: string;
+  verifyUrl?: string | null;
+}
+
+export const DRAFT_WHAT = ['patient-summary', 'meds-allergies', 'notification-only', 'not-sensitive', 'everything'];
+export const DRAFT_WHY = ['clinical', 'peer-support', 'research', 'public-health', 'marketing'];
+const REQUEST_FENCE = /```maia-request\s*\n([\s\S]*?)```/g;
+
+/** A personal request link, as a patient hands it out: https://<host>/r/<32 hex>. */
+export function isRequestLink(link: string, { allowLocal = false } = {}): boolean {
+  try {
+    const u = new URL(String(link || '').trim());
+    if (!/^\/r\/[0-9a-f]{32}\/?$/.test(u.pathname) || u.search) return false;
+    return u.protocol === 'https:' || (allowLocal && u.protocol === 'http:' && /^(localhost|127\.0\.0\.1)$/.test(u.hostname));
+  } catch { return false; }
+}
+
+const oneLine = (s: unknown, max: number) => cleanReason(s).slice(0, max);
+
+export function extractRequestDrafts(content: string, { allowLocal = false } = {}): { drafts: RequestDraft[]; content: string } {
+  const drafts: RequestDraft[] = [];
+  let found = false;
+  const text = String(content || '').replace(REQUEST_FENCE, (whole, body: string) => {
+    let p: Record<string, unknown> | null = null;
+    try { p = JSON.parse(body); } catch { return whole; }
+    found = true;
+    const link = String(p?.link || '').trim();
+    if (isRequestLink(link, { allowLocal }) && DRAFT_WHAT.includes(String(p?.what)) && DRAFT_WHY.includes(String(p?.why))) {
+      drafts.push({
+        link, to: oneLine(p?.to, 60), what: String(p?.what), why: String(p?.why),
+        message: String(p?.message ?? '').replace(/\r/g, '').trim().slice(0, 1000), state: 'idle'
+      });
+    }
+    return '';
+  });
+  return { drafts, content: found ? text.replace(/\n{3,}/g, '\n\n').trim() : content };
+}

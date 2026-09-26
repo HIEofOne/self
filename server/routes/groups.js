@@ -3607,6 +3607,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
           route: r.route || null,
           stoppedAt: r.stoppedAt || null,
           recognized: !!r.recognized,
+          origin: r.origin || null,
           forgottenAt: r.forgottenAt || null,
           gnapPayment: r.route ? (r.payment || null) : null,
           // A document someone added (§10.12): what they described and where

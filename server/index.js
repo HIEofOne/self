@@ -46,6 +46,7 @@ import setupGnapGroupRoutes from './routes/gnap-group.js';
 import setupGnapMemberRoutes from './routes/gnap-member.js';
 import setupRequestLogRoutes from './routes/requests-log.js';
 import setupReceivedRoutes from './routes/received.js';
+import setupGnapOutRoutes from './routes/gnap-out.js';
 import { createSpacesHoldStore, sweepExpiredHolds } from './gnap/documents.js';
 import { sweepExpiredGnapPayments } from './gnap/payments.js';
 import setupPolicyRoutes from './routes/policies.js';
@@ -1687,6 +1688,8 @@ const { pollSentRequests } = setupGnapMemberRoutes(app, { cloudant, auditLog, se
 setupRequestLogRoutes(app, { cloudant, notices: gnapHooks.notices });
 // The folder key and the sealed holds the patient's browser opens (P9).
 setupReceivedRoutes(app, { cloudant, holds: documentHolds, auditLog });
+// This MAIA asking another MAIA for its user, after the user's Send (P11).
+const { pollOutRequests } = setupGnapOutRoutes(app, { cloudant, auditLog, sendEmail: sendPlainEmail, holds: documentHolds });
 
 // Groups daily maintenance (Groups.md §6.1/§6.3/§7.3): renew 24h membership
 // credentials, reconcile registry-side revocation, pull relay mail, and
@@ -1728,6 +1731,8 @@ setTimeout(() => {
     // Members' sent GNAP requests: new answers, and an email when some arrive.
     if (isFeatureEnabled('gnap')) {
       pollSentRequests().catch((e) => console.warn('[gnap-member] poll failed:', e?.message || e));
+      // Requests to other MAIAs: new answers are sealed to the folder key (P11).
+      if (isFeatureEnabled('requests-out')) pollOutRequests().catch((e) => console.warn('[gnap-out] poll failed:', e?.message || e));
       // Asks that waited out the 6-hour quiet period (P8).
       gnapHooks.notices.sendDueAsks().catch((e) => console.warn('[gnap-notices] asks failed:', e?.message || e));
     }

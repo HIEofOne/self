@@ -201,6 +201,12 @@ export const ROUTE_FEATURES = Object.freeze({
   'POST /api/gnap/member-requests/:id/refresh': 'requests-out',
   'POST /api/gnap/member-requests/:id/answers/:aid/read': 'requests-out',
   'POST /api/gnap/member-requests/:id/withdraw': 'requests-out',
+  // P11: this MAIA asks another MAIA for its user (routes/gnap-out.js)
+  'POST /api/gnap/out': 'requests-out',
+  'GET /api/gnap/out': 'requests-out',
+  'POST /api/gnap/out/:id/refresh': 'requests-out',
+  'POST /api/gnap/out/:id/withdraw': 'requests-out',
+  'GET /gnap/client/finish/:id': 'requests-out',
   'GET /api/gnap/request-link': 'gnap',
   'POST /api/gnap/request-link/rotate': 'gnap',
   'POST /api/user-policies/:id/confirm': 'policies',

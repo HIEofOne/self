@@ -134,6 +134,20 @@ export function capExceeded(requests, { size, senderEmail, now }) {
 export async function sweepExpiredHolds({ cloudant, holds, now = Date.now() }) {
   const all = ((await cloudant.getAllDocuments('maia_as_requests').catch(() => [])) || []).filter(isLiveHold);
   let swept = 0;
+  // Answers collected from other MAIAs (P11) that never reached the folder.
+  const answers = ((await cloudant.getAllDocuments('maia_gnap').catch(() => [])) || [])
+    .filter((d) => d?.type === 'gnap_out_request' && d.hold?.state === 'accepted');
+  for (const og of answers) {
+    if (now - Date.parse(og.hold.heldAt) < HOLD_TTL_MS) continue;
+    try {
+      await holds.del(og.hold.holdKey);
+      og.hold = { ...og.hold, state: 'expired', expiredAt: new Date(now).toISOString(), holdKey: null };
+      await cloudant.saveDocument('maia_gnap', og);
+      swept++;
+    } catch (e) {
+      console.warn('[documents] answer hold sweep failed:', e?.message || e);
+    }
+  }
   for (const r of all) {
     if (now - Date.parse(r.document.heldAt || r.receivedAt) < HOLD_TTL_MS) continue;
     try {

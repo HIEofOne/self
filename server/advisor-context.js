@@ -18,7 +18,7 @@
  * request message and no document title (an injection channel, §9); a
  * requester's self-reported name is quoted as data.
  */
-import { policySentence, POLICY_SCOPES, POLICY_PURPOSES } from './routes/policies.js';
+import { policySentence, POLICY_SCOPES, POLICY_PURPOSES, READ_SCOPES } from './routes/policies.js';
 import { FEATURES, featureMode, isFeatureEnabled, getEdition } from './edition.js';
 import { KIND_WORDS } from './gnap/documents.js';
 
@@ -172,6 +172,19 @@ export function unlockableFeatureLines(userDoc) {
     .map(([key, f]) => `- ${key} — "${f.name}" [${isFeatureEnabled(key, userDoc) ? 'ON' : 'OFF'}]: ${f.description}${f.whatItMeans ? ` Turning it on: ${f.whatItMeans}` : ''}`);
 }
 
+/** One of the patient's own requests to another MAIA (P11). */
+export function advisorOutLine(og) {
+  let host = '';
+  try { host = new URL(og.grantEndpoint).host; } catch { /* unknown */ }
+  const state = { verify: 'waiting for the patient to confirm their email on the other MAIA', waiting: 'waiting for their answer',
+    answered: og.hold?.state === 'delivered' ? 'answered; saved in Received/' : 'answered; saved in Received/ when MAIA is next open',
+    declined: 'declined', expired: 'expired unanswered', withdrawn: 'withdrawn by the patient', failed: 'could not be sent' }[og.state] || og.state;
+  return `- ${String(og.createdAt || '').slice(0, 10)}: to ${quoted(og.label || host, 60)} (${host}) for ${og.access?.datatypes?.[0]} (${og.access?.purpose} use) → ${state}`;
+}
+
+const REQUEST_SCOPES = READ_SCOPES.filter((s) => s !== 'ah-category');
+const REQUEST_PURPOSES = POLICY_PURPOSES.filter((p) => p !== 'any');
+
 export async function buildEditionAdvisorContext(cloudant, userDoc) {
   const cards = Array.isArray(userDoc.sharingPolicies) ? userDoc.sharingPolicies : [];
   const cardLines = cards.length
@@ -195,6 +208,15 @@ export async function buildEditionAdvisorContext(cloudant, userDoc) {
       .sort((a, b) => String(b.receivedAt).localeCompare(String(a.receivedAt)))
       .slice(0, MAX_REQUESTS);
     if (mine.length) requestLines = mine.map(advisorRequestLine).join('\n');
+  } catch { /* the list stays generic */ }
+
+  let outLines = '(none yet)';
+  try {
+    const out = ((await cloudant.getAllDocuments('maia_gnap')) || [])
+      .filter((d) => d && d.type === 'gnap_out_request' && d.userId === userDoc.userId)
+      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+      .slice(0, 10);
+    if (out.length) outLines = out.map(advisorOutLine).join('\n');
   } catch { /* the list stays generic */ }
 
   const summary = String(userDoc.patientSummary || '').trim();
@@ -247,6 +269,16 @@ export async function buildEditionAdvisorContext(cloudant, userDoc) {
     '{"feature":"<key>","reason":"<one sentence tied to what they asked>"}. The patient sees MAIA\'s',
     'own description of the feature and a button. Never claim a feature is on, never propose one',
     'that is ON, and propose at most one at a time.',
+    '',
+    'ASKING SOMEONE ELSE\'S MAIA: when the patient wants information from another person who gave',
+    'them their MAIA request link (it looks like https://<host>/r/<32 letters and digits>), you may',
+    'draft the request. Output one fenced code block, language tag `maia-request`, containing ONLY',
+    `{"link":"<the link exactly as the patient gave it>","to":"<who it is, for the patient's records>","what":one of ${JSON.stringify(REQUEST_SCOPES)},`,
+    ` "why":one of ${JSON.stringify(REQUEST_PURPOSES)},"message":"<a short, polite message to that person>"}.`,
+    'Use only a link the patient gave you. The patient sees a card saying what sending reveals, and a',
+    'Send button: you never send, and never claim a request was sent.',
+    'THE PATIENT\'S REQUESTS TO OTHER MAIAS (newest first):',
+    outLines,
     '=== END MAIA CONTEXT ==='
   ].join('\n');
 }

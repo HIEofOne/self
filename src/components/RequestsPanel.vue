@@ -44,6 +44,9 @@
       <div class="row items-center q-mb-sm">
         <div class="text-subtitle2">Requests</div>
         <q-space />
+        <q-btn dense flat no-caps size="sm" color="primary" icon="outgoing_mail" label="Ask someone's MAIA" class="q-mr-xs" @click="openOut">
+          <q-tooltip>Ask another person's MAIA, with the request link they gave you.</q-tooltip>
+        </q-btn>
         <q-btn v-if="groups.length" dense flat no-caps size="sm" color="primary" icon="forum" label="Ask your group" class="q-mr-xs" @click="openAsk" />
         <q-btn dense flat round size="sm" icon="refresh" :loading="loading" @click="load"><q-tooltip>Refresh</q-tooltip></q-btn>
       </div>
@@ -95,6 +98,10 @@
           </template>
           <template v-else><q-icon name="help_outline" color="grey-6" size="14px" /> Email not verified</template>
           <template v-if="r.recognized"> · recognized from an earlier verified request</template>
+        </div>
+        <div v-if="r.origin" class="text-caption text-grey-7 q-mt-xs">
+          <q-icon name="smart_toy" size="14px" /> Sent by their MAIA<template v-if="r.origin.drafted_by === 'private-ai'">, drafted by their private AI</template>
+          (self-reported)
         </div>
         <div v-if="r.gnapPayment" class="text-caption q-mt-xs">
           <q-icon name="toll" color="amber-9" size="14px" /> Came with {{ PAYMENT_WORDS[r.gnapPayment.type] || r.gnapPayment.type }} ({{ r.gnapPayment.amount }} credits)
@@ -197,9 +204,35 @@
       </q-card>
     </q-dialog>
 
-    <!-- Requests this member sent to their groups (§10.9, §8.4 "Sent") -->
-    <div v-if="sent.length" class="rp__list">
+    <!-- Requests this member sent: to other MAIAs (P11) and to their groups (§10.9, §8.4 "Sent") -->
+    <div v-if="sent.length || outs.length" class="rp__list">
       <div class="text-subtitle2 q-mb-sm">Sent</div>
+      <div v-for="o in outs" :key="o.id" class="rp__item">
+        <div class="row items-center no-wrap">
+          <q-badge :color="OUT_STATE[o.state]?.color || 'grey'" :label="OUT_STATE[o.state]?.label || o.state" />
+          <span class="text-caption text-grey-7 q-ml-sm">{{ when(o.createdAt) }} · to {{ o.host }}</span>
+        </div>
+        <div class="q-mt-xs">
+          You asked <strong>{{ o.label || o.host }}</strong> for <strong>{{ scopeLabel(o.what) }}</strong> for <strong>{{ purposeLabel(o.why) }}</strong>.
+          <span v-if="o.draftedBy === 'private-ai'" class="text-caption text-grey-7">(drafted by your private AI)</span>
+        </div>
+        <div v-if="o.message" class="rp__message">{{ o.message }}</div>
+        <div v-if="o.state === 'verify' && o.verifyUrl" class="text-caption q-mt-xs">
+          The first time, they need to know it's you:
+          <a :href="o.verifyUrl" target="_blank" rel="noopener">confirm your email on their MAIA</a>.
+        </div>
+        <div v-else-if="o.state === 'answered'" class="text-caption q-mt-xs">
+          <q-icon name="check_circle" color="green-7" size="14px" />
+          <template v-if="typeof o.saved === 'string'"> Saved in your folder: Received/{{ o.saved }}</template>
+          <template v-else-if="o.saved === true"> Saved in your MAIA folder, in Received.</template>
+          <template v-else> They shared it. MAIA saves it in your MAIA folder, in Received.</template>
+        </div>
+        <div v-else-if="o.state === 'failed' && o.error" class="text-caption text-negative q-mt-xs">{{ o.error }}</div>
+        <div v-if="o.state === 'waiting' || o.state === 'verify'" class="q-mt-sm q-gutter-sm">
+          <q-btn v-if="o.state === 'waiting'" dense flat no-caps size="sm" color="primary" icon="refresh" label="Check now" :loading="busyId === o.id" @click="refreshOutOne(o)" />
+          <q-btn dense flat no-caps size="sm" color="grey-8" label="Withdraw" :disable="busyId === o.id" @click="withdrawOutOne(o)" />
+        </div>
+      </div>
       <div v-for="s in sent" :key="s.id" class="rp__item">
         <div class="row items-center no-wrap">
           <q-badge :color="s.state === 'sent' ? 'primary' : 'grey-6'" :label="s.state === 'sent' ? 'Open' : s.state === 'withdrawn' ? 'Withdrawn' : 'Closed'" />
@@ -255,6 +288,37 @@
         </q-card-actions>
       </q-card>
     </q-dialog>
+
+    <!-- Ask someone's MAIA (P11): your MAIA sends it, waits, and saves the answer to Received/ -->
+    <q-dialog v-model="outOpen">
+      <q-card style="min-width: 360px; max-width: 540px">
+        <q-card-section>
+          <div class="text-h6">Ask someone's MAIA</div>
+          <div class="text-caption text-grey-7">
+            Paste the request link they gave you. Your MAIA sends the request, waits for their answer
+            (for days if need be) and saves it in your MAIA folder, in Received. Their own rules decide.
+          </div>
+        </q-card-section>
+        <q-card-section class="q-pt-none q-gutter-sm">
+          <q-input v-model="out.link" dense outlined label="Their request link" placeholder="https://…/r/…" />
+          <q-input v-model="out.label" dense outlined maxlength="60" label="Who is this? (for your records)" />
+          <q-select v-model="out.what" :options="WHAT" emit-value map-options dense outlined label="What you're asking for" />
+          <q-select v-model="out.why" :options="WHY" emit-value map-options dense outlined label="What it is for" />
+          <q-input v-model="out.message" dense outlined autogrow type="textarea" maxlength="1000" label="Message (optional)" />
+          <q-input v-model="out.fromName" dense outlined maxlength="80" label="Your name, as they will see it" />
+          <div class="text-caption text-grey-7">
+            Sending tells them your name, your message, and that your MAIA sent it. The first time, you confirm
+            your email on their MAIA's page, and they see it.
+          </div>
+          <div v-if="outError" class="text-negative text-caption">{{ outError }}</div>
+          <div v-if="outNote" class="text-caption text-green-8">{{ outNote }}</div>
+        </q-card-section>
+        <q-card-actions align="right">
+          <q-btn flat no-caps label="Close" v-close-popup />
+          <q-btn unelevated no-caps color="primary" label="Send" :loading="outSending" :disable="!out.link.trim() || !out.fromName.trim()" @click="sendOutRequest" />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
   </div>
 </template>
 
@@ -272,6 +336,7 @@ import { WHAT, WHY, answerToHtml } from '../gnap/requestForm';
 import { syncRequestLog, type LogSyncResult } from '../utils/requestLog';
 import { reconnectLocalFolderWithGesture } from '../utils/localFolder';
 import { deliverReceived, openReceived, readReceivedText, quotedDocumentForAi, KIND_LABELS, type DeliverResult } from '../utils/received';
+import { sendOut, listOut, refreshOut, withdrawOut, afterSendNote, OUT_STATE, type OutRequest } from '../utils/requestsOut';
 import { ensureFolderKey } from '../utils/folderKey';
 import { useFolderPdfs } from '../composables/useFolderPdfs';
 
@@ -294,6 +359,7 @@ interface RequestRow {
   recognized?: boolean;
   forgottenAt?: string | null;
   gnapPayment?: { type: string; amount: number } | null;
+  origin?: { software: string; version: string; drafted_by: 'user' | 'private-ai'; sent_by: 'user' } | null;
   autonomous?: boolean;
   decidedBySentence?: string | null;
   document?: {
@@ -401,7 +467,7 @@ const deliver = async (reload = false) => {
   delivering.value = true;
   try {
     receivedResult.value = await deliverReceived(props.userId);
-    if (receivedResult.value === 'delivered' || reload) { await load(); void syncLog(); }
+    if (receivedResult.value === 'delivered' || reload) { await load(); await loadOuts(); void syncLog(); }
   } finally { delivering.value = false; }
 };
 
@@ -679,18 +745,59 @@ const readAnswer = async (s: SentRequest, answerId: string) => {
   }
 };
 
+// ── Requests to other MAIAs (P11) ──────────────────────────────────────
+const outs = ref<OutRequest[]>([]);
+const outOpen = ref(false);
+const outSending = ref(false);
+const outError = ref('');
+const outNote = ref('');
+const FROM_NAME_KEY = 'maia.requestFromName';
+const out = reactive({ link: '', label: '', what: 'patient-summary', why: 'clinical', message: '', fromName: '' });
+const loadOuts = async () => { if (props.userId) outs.value = await listOut(props.userId); };
+const openOut = () => {
+  outError.value = '';
+  outNote.value = '';
+  try { out.fromName = out.fromName || localStorage.getItem(FROM_NAME_KEY) || ''; } catch { /* private window */ }
+  outOpen.value = true;
+};
+const sendOutRequest = async () => {
+  outSending.value = true;
+  outError.value = '';
+  outNote.value = '';
+  try {
+    try { localStorage.setItem(FROM_NAME_KEY, out.fromName.trim()); } catch { /* private window */ }
+    const r = await sendOut(props.userId, { ...out, link: out.link.trim(), fromName: out.fromName.trim(), draftedBy: 'user' });
+    await loadOuts();
+    if (r.state === 'verify' && r.verifyUrl) window.open(r.verifyUrl, '_blank', 'noopener');
+    outNote.value = afterSendNote(r);
+    Object.assign(out, { link: '', label: '', message: '' });
+  } catch (e) {
+    outError.value = e instanceof Error ? e.message : 'The request couldn’t be sent.';
+  } finally { outSending.value = false; }
+};
+const replaceOut = (next: OutRequest | null) => { if (next) outs.value = outs.value.map((x) => (x.id === next.id ? next : x)); };
+const refreshOutOne = async (o: OutRequest) => {
+  busyId.value = o.id;
+  try { replaceOut(await refreshOut(props.userId, o.id)); if (o.state !== 'answered') await deliver(true); } finally { busyId.value = ''; }
+};
+const withdrawOutOne = async (o: OutRequest) => {
+  busyId.value = o.id;
+  try { replaceOut(await withdrawOut(props.userId, o.id)); } finally { busyId.value = ''; }
+};
+
 let timer: ReturnType<typeof setInterval> | null = null;
 onMounted(() => {
   void loadLink();
   void load();
   void loadSent();
+  void loadOuts();
   void deliver().then(() => syncLog());
-  // While the tab is open: new requests, documents into the folder, and the
-  // folder log kept in step.
-  timer = setInterval(() => { void load(); void loadSent(); void deliver().then(() => syncLog()); }, 60000);
+  // While the tab is open: new requests, documents and answers into the
+  // folder, and the folder log kept in step.
+  timer = setInterval(() => { void load(); void loadSent(); void loadOuts(); void deliver().then(() => syncLog()); }, 60000);
 });
 onUnmounted(() => { if (timer) clearInterval(timer); });
-watch(() => props.userId, () => { void loadLink(); void load(); void loadSent(); });
+watch(() => props.userId, () => { void loadLink(); void load(); void loadSent(); void loadOuts(); });
 </script>
 
 <style scoped>

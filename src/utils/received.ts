@@ -16,7 +16,8 @@ export const RECEIVED_DIR = 'Received';
 
 export const KIND_LABELS: Record<string, string> = {
   'radiology-report': 'Radiology report', 'lab-report': 'Lab report', 'visit-note': 'Visit note',
-  'discharge-summary': 'Discharge summary', imaging: 'Image', other: 'Document'
+  'discharge-summary': 'Discharge summary', imaging: 'Image', other: 'Document',
+  answer: 'Answer'
 };
 const EXT: Record<string, string> = { 'application/pdf': 'pdf', 'image/jpeg': 'jpg', 'image/png': 'png', 'text/plain': 'txt' };
 
@@ -30,6 +31,8 @@ export interface ReceivedDocument {
   receivedAt: string;
   acceptedAt?: string | null;
   sender: { name: string | null; email: string | null; emailVerified: boolean };
+  /** An answer collected from another MAIA names itself ("Patient Summary (requested)"). */
+  label?: string;
 }
 
 export type DeliverResult = 'none' | 'delivered' | 'no-folder' | 'no-permission' | 'no-key' | 'failed';
@@ -46,10 +49,11 @@ export const safeNamePart = (s: string, max = 60) => String(s || '')
   .trim();
 
 /** "2026-09-24 Radiology report - Dr Jane Smith.pdf", with " (2)"… when taken. */
-export function receivedFileName(d: Pick<ReceivedDocument, 'kind' | 'mediaType' | 'receivedAt' | 'sender'>, taken: Set<string>): string {
+export function receivedFileName(d: Pick<ReceivedDocument, 'kind' | 'mediaType' | 'receivedAt' | 'sender' | 'label'>, taken: Set<string>): string {
   const date = String(d.receivedAt || '').slice(0, 10) || new Date().toISOString().slice(0, 10);
   const sender = safeNamePart(d.sender?.name || d.sender?.email || '') || 'unknown sender';
-  const stem = `${date} ${KIND_LABELS[d.kind] || 'Document'} - ${sender}`;
+  const what = safeNamePart(d.label || '', 50) || KIND_LABELS[d.kind] || 'Document';
+  const stem = `${date} ${what} - ${sender}`;
   const ext = EXT[d.mediaType] || 'bin';
   let name = `${stem}.${ext}`;
   for (let n = 2; taken.has(name.toLowerCase()); n++) name = `${stem} (${n}).${ext}`;

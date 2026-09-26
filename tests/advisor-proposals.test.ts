@@ -81,3 +81,37 @@ describe('a received document, as quoted data', () => {
     expect(t).toContain('[marker removed]');
   });
 });
+
+describe('request drafts (P11, I-33)', () => {
+  const link = 'https://maia.example/r/' + 'a'.repeat(32);
+  const rfence = (o: unknown) => '```maia-request\n' + JSON.stringify(o) + '\n```';
+
+  it('a draft with a request link becomes a card; the fence leaves the text; nothing is sent', async () => {
+    const { extractRequestDrafts } = await import('../src/utils/advisorProposals');
+    const spy = vi.spyOn(globalThis, 'fetch');
+    const out = extractRequestDrafts(`Here is a draft.\n\n${rfence({ link, to: 'Dr. Smith', what: 'meds-allergies', why: 'clinical', message: 'Before my visit.' })}`);
+    expect(out.drafts).toEqual([{ link, to: 'Dr. Smith', what: 'meds-allergies', why: 'clinical', message: 'Before my visit.', state: 'idle' }]);
+    expect(out.content).toBe('Here is a draft.');
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('only a personal request link, a known what and why; http only on this machine', async () => {
+    const { extractRequestDrafts, isRequestLink } = await import('../src/utils/advisorProposals');
+    for (const bad of [{ link: 'https://maia.example/admin', what: 'patient-summary', why: 'clinical' },
+      { link: 'http://maia.example/r/' + 'a'.repeat(32), what: 'patient-summary', why: 'clinical' },
+      { link, what: 'genome', why: 'clinical' }, { link, what: 'patient-summary', why: 'any' }]) {
+      expect(extractRequestDrafts(rfence(bad)).drafts).toEqual([]);
+    }
+    expect(isRequestLink('http://localhost:5173/r/' + 'b'.repeat(32))).toBe(false);
+    expect(isRequestLink('http://localhost:5173/r/' + 'b'.repeat(32), { allowLocal: true })).toBe(true);
+  });
+});
+
+describe('an answer collected from another MAIA, in Received/', () => {
+  it('is named by what was asked and whom', async () => {
+    const { receivedFileName } = await import('../src/utils/received');
+    expect(receivedFileName({ kind: 'answer', label: 'Patient Summary (requested)', mediaType: 'text/plain', receivedAt: '2026-09-26T10:00:00Z', sender: { name: 'Bo', email: null, emailVerified: false } }, new Set()))
+      .toBe('2026-09-26 Patient Summary (requested) - Bo.txt');
+  });
+});
