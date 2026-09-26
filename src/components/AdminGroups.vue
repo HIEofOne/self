@@ -233,6 +233,20 @@
           <div v-else-if="form.joinMode !== 'invite-only'" class="text-caption text-grey-7">
             The link and QR code appear after the group is created (edit the group to see them).
           </div>
+          <!-- GNAP group routing (§10.9): anyone outside the group can ask
+               every member at once; each member's own rules answer. -->
+          <div v-if="has('gnap') && editingGroupId" class="q-mt-md">
+            <div class="text-caption text-grey-7">
+              Request page, for people outside the group (a clinician, a researcher). Their request
+              reaches every member; each member's own rules answer, and they never see who the members are.
+            </div>
+            <div class="text-caption q-mt-xs" style="word-break: break-all">
+              {{ groupRequestLink }}
+              <q-btn dense flat size="sm" icon="content_copy" @click="copyRequestLink">
+                <q-tooltip>Copy link</q-tooltip>
+              </q-btn>
+            </div>
+          </div>
         </q-card-section>
         <q-card-actions align="right">
           <q-btn flat label="Cancel" v-close-popup :disable="saving" />
@@ -355,6 +369,7 @@ import { useQuasar } from 'quasar';
 import QRCode from 'qrcode';
 import { sentenceFor, type PolicyCard } from '../utils/policyCards';
 import PolicyCardBuilder from './PolicyCardBuilder.vue';
+import { useEdition } from '../composables/useEdition';
 
 const $q = useQuasar();
 
@@ -505,6 +520,18 @@ watch(editingJoinLink, async (link) => {
   joinLinkQr.value = link ? await QRCode.toDataURL(link, { width: 320, margin: 1 }).catch(() => '') : '';
 }, { immediate: true });
 const rotatingLink = ref(false);
+
+const { has } = useEdition();
+const groupRequestLink = computed(() => (editingGroupId.value
+  ? `${window.location.origin}/g/${encodeURIComponent(editingGroupId.value)}/request` : ''));
+const copyRequestLink = async () => {
+  try {
+    await navigator.clipboard.writeText(groupRequestLink.value);
+    $q.notify({ type: 'positive', message: 'Link copied.' });
+  } catch {
+    $q.notify({ type: 'warning', message: 'Copy failed — select and copy the link manually.' });
+  }
+};
 
 const copyJoinLink = async () => {
   if (!editingJoinLink.value) return;

@@ -21,6 +21,8 @@ import { recordPatientDecision as recordGnapDecision, stopSharing as stopGnapSha
 import { settleGrantPayment } from '../gnap/payments.js';
 import { forgetRequester } from '../gnap/instances.js';
 import { isVerified as emailTokenVerified } from '../emailVerification.js';
+import { sealTo, openFrom } from '../utils/sealed-box.js';
+import { GNAP_COPY } from '../gnap/group.js';
 import { CREDIT_PRICES, holdCredits, chargeCredits, resolveHold, getAccount } from '../credits.js';
 import {
   generateRegistrationOptions, verifyRegistrationResponse,
@@ -29,8 +31,7 @@ import {
 import { isoBase64URL } from '@simplewebauthn/server/helpers';
 import {
   generateKeyPairSync, createHash, createPrivateKey, createPublicKey,
-  randomBytes, sign as edSign, verify as edVerify,
-  diffieHellman, hkdfSync, createCipheriv, createDecipheriv
+  randomBytes, sign as edSign, verify as edVerify
 } from 'crypto';
 
 const GROUPS_DB = 'maia_groups';
@@ -59,39 +60,7 @@ const OUTBOX_MAX = 200;
 const sha256hex = (s) => createHash('sha256').update(s).digest('hex');
 const b64u = (buf) => Buffer.from(buf).toString('base64url');
 
-// ── E2E sealed box (Groups.md §6.3) ────────────────────────────────
-// X25519 ECDH → HKDF-SHA256 → AES-256-GCM. The sender seals to the
-// recipient's per-group X25519 public key using an ephemeral keypair; the
-// relay stores only the resulting opaque box + routing envelope and never
-// holds a key. The recipient's MAIA opens it with its private key.
-const RELAY_HKDF_INFO = Buffer.from('maia-group-relay-v1');
-
-const sealTo = (recipientEncPubJwk, plaintext) => {
-  const eph = generateKeyPairSync('x25519');
-  const recipientPub = createPublicKey({ key: recipientEncPubJwk, format: 'jwk' });
-  const secret = diffieHellman({ privateKey: eph.privateKey, publicKey: recipientPub });
-  const key = Buffer.from(hkdfSync('sha256', secret, Buffer.alloc(0), RELAY_HKDF_INFO, 32));
-  const iv = randomBytes(12);
-  const cipher = createCipheriv('aes-256-gcm', key, iv);
-  const ct = Buffer.concat([cipher.update(Buffer.from(plaintext, 'utf8')), cipher.final()]);
-  return {
-    v: 1,
-    epk: eph.publicKey.export({ format: 'jwk' }),
-    iv: iv.toString('base64url'),
-    ct: ct.toString('base64url'),
-    tag: cipher.getAuthTag().toString('base64url')
-  };
-};
-
-const openFrom = (recipientEncPrivJwk, box) => {
-  const priv = createPrivateKey({ key: recipientEncPrivJwk, format: 'jwk' });
-  const epk = createPublicKey({ key: box.epk, format: 'jwk' });
-  const secret = diffieHellman({ privateKey: priv, publicKey: epk });
-  const key = Buffer.from(hkdfSync('sha256', secret, Buffer.alloc(0), RELAY_HKDF_INFO, 32));
-  const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(box.iv, 'base64url'));
-  decipher.setAuthTag(Buffer.from(box.tag, 'base64url'));
-  return Buffer.concat([decipher.update(Buffer.from(box.ct, 'base64url')), decipher.final()]).toString('utf8');
-};
+// ── E2E sealed box (Groups.md §6.3): server/utils/sealed-box.js ──────
 
 /** Verify a detached Ed25519 signature (base64url) over `payload` (string)
  *  against a JWK public key. Returns the parsed claim on success, else null. */
@@ -234,7 +203,7 @@ const publicGroupView = (doc) => ({
   activeMemberCount: memberCounts(doc).active
 });
 
-export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, webauthn } = {}) {
+export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, webauthn, gnapHooks = {} } = {}) {
   // Same admin gate as GET /api/admin/users: localhost bypass for local
   // development; otherwise the session user must be the admin.
   const requireAdmin = (req, res) => {
@@ -3304,6 +3273,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
     const seenRequestIds = new Set(membership.seenRequestRelayIds || []);
     let added = 0;
     const asRequests = [];
+    const gnapCopies = [];
     // One alias lookup per unique sender per refresh (best-effort).
     const aliasCache = new Map();
     for (const m of data.messages || []) {
@@ -3320,11 +3290,21 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
       // Broadcast envelope? ('broadcast' — an Everyone message)
       let envelope = null;
       let broadcast = null;
+      let gnapCopy = null;
       try {
         const parsed = JSON.parse(text);
         if (parsed && parsed.maiaType === 'as-request') envelope = parsed;
         else if (parsed && parsed.maiaType === 'broadcast' && typeof parsed.text === 'string') broadcast = parsed;
+        else if (parsed && parsed.maiaType === GNAP_COPY) gnapCopy = parsed;
       } catch { /* plain text message */ }
+
+      // A copy of a GNAP group request (§10.9): handed to this member's AS
+      // by the caller; acked like an AS request, never an inbox message.
+      if (gnapCopy) {
+        gnapCopies.push({ copy: gnapCopy, fromPairwiseId: m.fromPairwiseId });
+        membership.seenRequestRelayIds = [...(membership.seenRequestRelayIds || []), m.id].slice(-500);
+        continue;
+      }
 
       // Outsider requests (W3) are sealed by the REGISTRY itself under a
       // reserved 'outsider:' sender id (members can never push under one:
@@ -3379,7 +3359,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
     if (membership.inbox && membership.inbox.length > INBOX_MAX) {
       membership.inbox = membership.inbox.slice(-INBOX_MAX);
     }
-    return { revoked: false, newMessages: added, asRequests };
+    return { revoked: false, newMessages: added, asRequests, gnapCopies };
   };
 
   // POST /api/user-groups/refresh — refresh all of a user's memberships
@@ -3752,6 +3732,11 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
         // ignored request settles only when it expires (I-29).
         if (changed && decision !== 'block') {
           await settleGrantPayment(cloudant, reqDoc.gnapGrant, decision === 'accept' ? 'accepted' : 'declined');
+          // A group request: the answer goes back through the group, sealed
+          // to the requester (§10.9); the group emails them, not this host.
+          if (grant?.route === 'group' && typeof gnapHooks.answerGroupGrant === 'function') {
+            await gnapHooks.answerGroupGrant(reqDoc.gnapGrant, decision === 'accept' ? 'shared' : 'declined');
+          }
         }
         // "Answer ready" (§8.2): only to an address the requester verified,
         // only that there is an answer, and never for block (I-29, I-31).
@@ -4342,6 +4327,12 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
         if (Array.isArray(r.asRequests) && r.asRequests.length) {
           newRequests += await ingestAsRequests(userDoc, membership, r.asRequests);
         }
+        for (const c of r.gnapCopies || []) {
+          if (typeof gnapHooks.receiveGroupCopy !== 'function') break;
+          const out = await gnapHooks.receiveGroupCopy(userDoc, membership, c.copy, { fromPairwiseId: c.fromPairwiseId });
+          if (out?.ok && !out.duplicate) newRequests++;
+          else if (!out?.ok) console.warn(`[user-groups] group request copy refused for ${userDoc.userId}: ${out?.error}`);
+        }
         // asRequests count toward newMessages in refreshMembership, but the
         // inbox itself only grew by plain messages.
         newMessages += r.newMessages - (r.asRequests ? r.asRequests.length : 0);
@@ -4441,5 +4432,30 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
     if (mails > 0) console.log(`[groups-mail] pulled ${mails} new message(s) across ${processed} users`);
   };
 
-  return { runDailyGroupMaintenance, runHourlyMailPull };
+  /**
+   * Members on this host pull their relay mail now (a GNAP group request was
+   * just sent to them, §10.9): their cards may answer at once, and an ask
+   * reaches them without waiting for the hourly pull. Best-effort per member.
+   */
+  const pullSameHostMembers = async (groupId, pairwiseIds) => {
+    for (const pairwiseId of pairwiseIds) {
+      let doc = null;
+      try {
+        const rr = await cloudant.findDocuments(USERS_DB, {
+          selector: { groupMemberships: { $elemMatch: { groupId: { $eq: groupId }, pairwiseId: { $eq: pairwiseId } } } },
+          limit: 1
+        });
+        doc = rr?.docs?.[0] || null;
+      } catch { doc = null; }
+      if (!doc) continue; // on another host: it pulls on its own
+      try {
+        const r = await refreshUserMemberships(doc);
+        if (r.changed) await cloudant.saveDocument(USERS_DB, doc);
+      } catch (e) {
+        console.warn(`[user-groups] same-host pull for ${doc.userId} failed (it pulls later):`, e?.message || e);
+      }
+    }
+  };
+
+  return { runDailyGroupMaintenance, runHourlyMailPull, pullSameHostMembers };
 }

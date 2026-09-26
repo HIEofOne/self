@@ -33,7 +33,9 @@ import {
 } from '../gnap/grants.js';
 import { GNAP_DB, getDoc, updateDoc } from '../gnap/store.js';
 import { issueInstance, resolveInstance } from '../gnap/instances.js';
-import { attachPayment, settleGrantPayment, creditsFor } from '../gnap/payments.js';
+import { attachPayment, settleGrantPayment, creditsFor, GNAP_PAYMENTS } from '../gnap/payments.js';
+import { verifyAttestation, bodySha256, COPY_SENDER_PREFIX } from '../gnap/group.js';
+import { sealTo, isX25519PublicJwk } from '../utils/sealed-box.js';
 import { scopeCovers } from './policies.js';
 
 const USERS_DB = 'maia_users';
@@ -42,7 +44,7 @@ const MAX_BODY = 64 * 1024;
 const MAX_PENDING_PER_AS = 50;
 const GRANTS_PER_IP_PER_10MIN = 30;
 
-const SCOPE_WORDS = {
+export const SCOPE_WORDS = {
   'notification-only': 'a notification', 'meds-allergies': 'current medications and allergies',
   'patient-summary': 'the patient summary', 'not-sensitive': 'non-sensitive records',
   everything: 'all records', 'ah-category': 'Apple Health records'
@@ -166,9 +168,10 @@ export default function setupGnapRoutes(app, {
   const recordRequest = async (grant, status, extra = {}) => {
     const id = `asreq_gnap_${grant._id.slice(3)}`;
     const doc = (await cloudant.getDocument(AS_REQUESTS_DB, id).catch(() => null)) || { _id: id };
+    const viaGroup = grant.route === 'group';
     Object.assign(doc, {
-      type: 'as_request', userId: grant.userId, route: 'gnap-direct', gnapGrant: grant._id.slice(3),
-      groupId: null, groupName: 'Direct request', fromOutsider: true,
+      type: 'as_request', userId: grant.userId, route: viaGroup ? 'gnap-group' : 'gnap-direct', gnapGrant: grant._id.slice(3),
+      groupId: viaGroup ? grant.groupId : null, groupName: viaGroup ? grant.groupName : 'Direct request', fromOutsider: true,
       requester: {
         name: grant.displayName || null, nameVerified: false,
         email: grant.requester?.email || null, emailVerified: !!grant.requester?.emailVerified
@@ -216,6 +219,134 @@ export default function setupGnapRoutes(app, {
       void notifyPatient(userDoc, 'ask');
     }
     return { status: 200, body: await waitResponse(await getDoc(cloudant, grant._id), extra) };
+  };
+
+  // ── Group requests: the member's side (§10.9) ──────────────────────────
+
+  /**
+   * Post this member's answer to a group request, sealed to the requester:
+   * "ready" (a continuation only the requester's key can use) or "denied".
+   * The group learns an outcome count and nothing else. A failed post is
+   * kept and retried by the daily sweep.
+   */
+  const answerGroupGrant = async (handle, kind) => {
+    const grant = await getDoc(cloudant, `gr_${handle}`);
+    if (!grant || grant.route !== 'group' || !grant.answerUri || !grant.sealJwk) return false;
+    let payload;
+    if (kind === 'shared') {
+      const value = newTokenValue();
+      await updateDoc(cloudant, grant._id, (g) => { g.continueTokenHash = hashToken(value); g.nextPollAt = 0; return true; });
+      payload = { kind: 'ready', access: grant.access, continue: { uri: `${base()}/gnap/continue/${handle}`, access_token: { value } } };
+    } else {
+      payload = { kind: 'denied' };
+    }
+    const box = sealTo(grant.sealJwk, JSON.stringify(payload));
+    let ok = false;
+    try {
+      const r = await fetch(grant.answerUri, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ outcome: kind, box })
+      });
+      // A refusal (the request was withdrawn, closed or expired) is final.
+      ok = r.ok || (r.status >= 400 && r.status < 500);
+    } catch { ok = false; }
+    await updateDoc(cloudant, grant._id, (g) => {
+      if (ok) { g.answerPostedAt = new Date(now()).toISOString(); g.answerPending = null; } else g.answerPending = kind;
+      return true;
+    });
+    if (!ok) console.warn(`[gnap] group answer for ${handle} not delivered; will retry`);
+    return ok;
+  };
+
+  /**
+   * A copy of a group request, pulled from the relay by this member's MAIA.
+   * Both signatures must hold: the group's attestation, and the requester's
+   * own signature on the exact request (fresh as of the group's receipt, since
+   * a cross-host pull can lag). Then this member's cards decide, as for any
+   * request (I-30). → { ok, outcome?, error? }
+   */
+  const receiveGroupCopy = async (userDoc, membership, copy, { fromPairwiseId = null } = {}) => {
+    try {
+      if (!on()) return { ok: false, error: 'gnap off' };
+      if (fromPairwiseId !== null && !String(fromPairwiseId).startsWith(COPY_SENDER_PREFIX)) return { ok: false, error: 'not from the group' };
+      const claim = verifyAttestation(copy?.attestation, membership.groupPublicKeyJwk);
+      const r = copy?.request || {};
+      if (!claim || claim.groupId !== membership.groupId || claim.bcast !== copy.bcast
+        || claim.targetUri !== r.targetUri || claim.bodySha256 !== bodySha256(r.body || '')) {
+        return { ok: false, error: 'attestation does not match' };
+      }
+      if (!(Date.parse(claim.expiresAt) > now())) return { ok: false, error: 'expired' };
+      let body;
+      try { body = JSON.parse(String(r.body)); } catch { return { ok: false, error: 'bad body' }; }
+      const parsed = parseGrantRequest(body);
+      if (!parsed.clientKey || !isX25519PublicJwk(body.maia_seal_jwk)) return { ok: false, error: 'no key' };
+      const headers = Object.fromEntries(Object.entries(r.headers || {}).map(([k, v]) => [k.toLowerCase(), String(v)]));
+      const sig = verifyGnapRequest(
+        { method: 'POST', targetUri: r.targetUri, headers, rawBody: Buffer.from(String(r.body)) },
+        parsed.clientKey, { now: Date.parse(claim.receivedAt) }
+      );
+      if (!sig.ok) return { ok: false, error: `signature: ${sig.error}` };
+
+      // One grant per request and member, however often the copy arrives.
+      const seenId = `gc_${hashToken(`${copy.bcast}|${userDoc.userId}`)}`;
+      if (await getDoc(cloudant, seenId)) return { ok: true, duplicate: true };
+      const handle = newHandle();
+      await saveNew({ _id: seenId, type: 'gnap_group_copy', grant: handle });
+      const createdAt = new Date(now()).toISOString();
+      const verifiedEmail = !!claim.requester?.emailVerified;
+      const grant = {
+        _id: `gr_${handle}`, type: 'gnap_grant', route: 'group', userId: userDoc.userId, asId: null,
+        groupId: membership.groupId, groupName: membership.groupName || membership.groupId,
+        bcast: copy.bcast, answerUri: claim.answerUri, sealJwk: body.maia_seal_jwk,
+        clientKey: parsed.clientKey, keyThumbprint: sig.thumbprint, displayName: parsed.displayName,
+        message: parsed.message, access: parsed.access,
+        policyRequest: { ...toPolicyRequest(parsed.access, { verifiedEmail }), payment: GNAP_PAYMENTS.includes(claim.payment) ? claim.payment : 'none' },
+        requester: { email: verifiedEmail ? claim.requester.email : null, emailVerified: verifiedEmail },
+        state: 'pending', decision: null, silent: false, asRequestId: null,
+        continueTokenHash: null, polls: 0, nextPollAt: 0, interact: null,
+        rsHandle: newHandle(), tokenIds: [], createdAt, expiresAt: claim.expiresAt
+      };
+      await saveNew(grant);
+      await saveNew({ _id: `rs_${grant.rsHandle}`, type: 'gnap_rs', grant: handle });
+      log('gnap_grant_received', { grant: handle, userId: userDoc.userId, route: 'group', groupId: membership.groupId, datatype: parsed.access.datatypes[0] });
+
+      const d = decideGrant(userDoc, grant.policyRequest);
+      const at = createdAt;
+      if (d.outcome === 'allow') {
+        const g = await updateDoc(cloudant, grant._id, (x) => { x.state = 'approved'; x.decision = { outcome: 'allow', by: 'policy', policyId: d.policyId, at }; return true; });
+        await recordRequest(g, 'accepted', { autonomous: true, decidedAt: at });
+        void notifyPatient(userDoc, 'shared');
+        await answerGroupGrant(handle, 'shared');
+      } else if (d.outcome === 'deny-respond') {
+        const g = await updateDoc(cloudant, grant._id, (x) => { x.state = 'denied'; x.decision = { outcome: 'deny-respond', by: 'policy', policyId: d.policyId, at }; return true; });
+        await recordRequest(g, 'declined', { autonomous: true, decidedAt: at });
+        await answerGroupGrant(handle, 'declined');
+      } else if (d.outcome === 'deny-silent') {
+        const g = await updateDoc(cloudant, grant._id, (x) => { x.silent = true; x.decision = { outcome: 'deny-silent', by: 'policy', policyId: d.policyId, at }; return true; });
+        await recordRequest(g, 'declined', { autonomous: true, decidedAt: at });
+      } else {
+        const asRequestId = await recordRequest(grant, 'pending');
+        await updateDoc(cloudant, grant._id, (x) => { x.asRequestId = asRequestId; return true; });
+        void notifyPatient(userDoc, 'ask');
+      }
+      log('gnap_decided', { grant: handle, userId: userDoc.userId, outcome: d.outcome, policyId: d.policyId, route: 'group' });
+      return { ok: true, outcome: d.outcome };
+    } catch (e) {
+      return { ok: false, error: e?.message || String(e) };
+    }
+  };
+
+  /** Daily: answers that couldn't be posted to the group are tried again. */
+  const retryPendingGroupAnswers = async () => {
+    let all = [];
+    try { all = (await cloudant.getAllDocuments(GNAP_DB)) || []; } catch { return 0; }
+    let sent = 0;
+    for (const g of all) {
+      if (g?.type !== 'gnap_grant' || g.route !== 'group' || !g.answerPending) continue;
+      if (Date.parse(g.expiresAt) < now()) continue;
+      if (await answerGroupGrant(g._id.slice(3), g.answerPending)) sent++;
+    }
+    return sent;
   };
 
   // ── Discovery and the grant request ────────────────────────────────────
@@ -646,13 +777,18 @@ export default function setupGnapRoutes(app, {
       res.status(500).json({ success: false, error: 'ROTATE_FAILED' });
     }
   });
+
+  // For groups.js: copies of group requests pulled from the relay, and the
+  // patient's later decisions on them.
+  return { receiveGroupCopy, answerGroupGrant, retryPendingGroupAnswers };
 }
+
 
 // The requester's interaction page: verify an email, then go back to the
 // requesting app. Everything shown is data from the request (no PHI).
 const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-function interactionPage({ what, purpose, verified }) {
+export function interactionPage({ what, purpose, verified, audience = 'a MAIA' }) {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MAIA — verify your email</title>
@@ -668,8 +804,8 @@ function interactionPage({ what, purpose, verified }) {
 </style></head>
 <body>
   <h1 id="title">${verified ? 'Add credits to your request?' : 'Verify your email'}</h1>
-  <p>You asked a MAIA for <strong>${escapeHtml(what)}</strong> for <strong>${escapeHtml(purpose)}</strong> use.
-     <span id="why-email"${verified ? ' hidden' : ''}>The patient's rules may answer a request from a verified email that an unverified one can't get.</span></p>
+  <p>You asked ${escapeHtml(audience)} for <strong>${escapeHtml(what)}</strong> for <strong>${escapeHtml(purpose)}</strong> use.
+     <span id="why-email"${verified ? ' hidden' : ''}>Their rules may answer a request from a verified email that an unverified one can't get.</span></p>
   <div id="step-email"${verified ? ' hidden' : ''}>
     <label>Your email<input id="email" type="email" autocomplete="email"></label>
     <button id="send">Send code</button>
