@@ -47,11 +47,19 @@ export const evaluationOptionsFor = (userDoc) => ({
  *   v1 (through 1.5.172): original vocabulary, including signature 'npi'.
  *   v2 (1.5.173): 'npi' removed from the authorable vocabulary. Legacy
  *      cards keep rank + validity (removal must never weaken a card).
+ *   v3 (1.6.35): the `action` element — 'read' (the default) or 'add' —
+ *      and the scope 'document' that pairs with 'add' (group_requests.md
+ *      §10.12). A card without an action means read, so no stored card
+ *      changes meaning and none of them accepts an add (I-32).
  */
-export const POLICY_VOCAB_VERSION = 2;
+export const POLICY_VOCAB_VERSION = 3;
 
 const PURPOSES = ['any', 'peer-support', 'clinical', 'research', 'public-health', 'marketing'];
-const SCOPES = ['notification-only', 'meds-allergies', 'patient-summary', 'not-sensitive', 'everything', 'ah-category'];
+const SCOPES = ['notification-only', 'meds-allergies', 'patient-summary', 'not-sensitive', 'everything', 'ah-category', 'document'];
+// v3: 'add' pairs only with the scope 'document', and 'document' only with
+// 'add'. Adding always needs at least a verified email (D15), so an add card
+// that asks for no identity check is refused rather than stored.
+const ACTIONS = ['read', 'add'];
 // 'npi' was removed from the AUTHORABLE vocabulary (v1.5.173) — no UI
 // offers it — but stays accepted here so legacy stored cards remain
 // editable/toggleable, and stays ranked so they keep their strict meaning.
@@ -76,6 +84,10 @@ export const normalizeCard = (raw) => {
   if (!SCOPES.includes(e.scope)) return null;
   if (!SIGNATURES.includes(e.signature)) return null;
   if (!PAYMENTS.includes(e.payment)) return null;
+  const action = e.action === undefined ? 'read' : e.action;
+  if (!ACTIONS.includes(action)) return null;
+  if ((action === 'add') !== (e.scope === 'document')) return null;
+  if (action === 'add' && e.signature === 'unverified') return null;
   const card = {
     outcome: raw.outcome,
     // For deny cards: 'respond' sends a reason for the decline; anything
@@ -97,6 +109,7 @@ export const normalizeCard = (raw) => {
           alias: String(party.alias || '').slice(0, 60)
         } : {})
       },
+      ...(action === 'add' ? { action: 'add' } : {}),
       purpose: e.purpose,
       scope: e.scope,
       ...(e.scope === 'ah-category' && e.ahCategory ? { ahCategory: String(e.ahCategory).slice(0, 60) } : {}),
@@ -115,7 +128,10 @@ export const normalizeCard = (raw) => {
   const incomingVocab = Number.isInteger(raw.vocabVersion)
     && raw.vocabVersion >= 1 && raw.vocabVersion <= POLICY_VOCAB_VERSION
     ? raw.vocabVersion : null;
-  card.vocabVersion = card.elements.signature === 'npi' ? 1 : (incomingVocab ?? POLICY_VOCAB_VERSION);
+  // An add card exists only from edition 3.
+  card.vocabVersion = card.elements.signature === 'npi' ? 1
+    : action === 'add' ? Math.max(3, incomingVocab ?? POLICY_VOCAB_VERSION)
+      : (incomingVocab ?? POLICY_VOCAB_VERSION);
   // Consent-language snapshot: the sentence for these elements as rendered
   // at last write. Request docs already snapshot the DECIDING sentence at
   // decision time; this preserves what the card said when the patient
@@ -131,6 +147,9 @@ export const normalizeCard = (raw) => {
 // the sentence as it read when it decided).
 
 export const POLICY_SCOPES = SCOPES;
+/** The scopes a request can READ — every scope but 'document', which only
+ *  an add request uses (v3). The older request paths accept only these. */
+export const READ_SCOPES = SCOPES.filter((s) => s !== 'document');
 export const POLICY_PURPOSES = PURPOSES;
 
 const SIGNATURE_RANK = { unverified: 0, 'verified-email': 1, 'group-member': 2, npi: 3, doximity: 3, 'verified-by-me': 4 };
@@ -139,7 +158,8 @@ const SCOPE_LABELS = {
   everything: 'everything in my record',
   'not-sensitive': 'my record except sensitive categories',
   'meds-allergies': 'Current Medications and Allergies',
-  'patient-summary': 'my Patient Summary'
+  'patient-summary': 'my Patient Summary',
+  document: 'documents'
 };
 const PAYMENT_LABELS = {
   'spam-deposit': 'a returnable spam deposit',
@@ -153,17 +173,24 @@ export const policySentence = (card) => {
   const who = e.party.type === 'group' ? `Anyone in ${e.party.groupName || 'the group'}`
     : e.party.type === 'peer' ? (e.party.alias || 'This member') : 'Anyone';
   const sig = e.signature === 'unverified' ? '(no identity check)' : `with ${e.signature} identity or stronger`;
+  if (e.action === 'add') return `${who} ${sig} ${addVerb(card)} ${purposeWords(e.purpose)}${paymentWords(e.payment)}.`;
   const verb = card.outcome === 'allow'
     ? 'may receive'
     : card.outcome === 'ask'
       ? 'needs my approval to receive'
       : (card.denyMode === 'respond' ? 'is declined, with a reason, for' : 'is silently denied');
   const what = e.scope === 'ah-category' ? `my ${e.ahCategory || 'Apple Health'} data` : (SCOPE_LABELS[e.scope] || e.scope);
-  const why = e.purpose === 'any' ? 'for any purpose' : `for ${e.purpose} use`;
   const filt = card.outcome === 'allow' ? (e.filtered !== false ? ', privacy-filtered' : ', unfiltered') : '';
-  const pay = e.payment === 'none' ? '' : `, if they provide ${PAYMENT_LABELS[e.payment] || e.payment}`;
-  return `${who} ${sig} ${verb} ${what} ${why}${filt}${pay}.`;
+  return `${who} ${sig} ${verb} ${what} ${purposeWords(e.purpose)}${filt}${paymentWords(e.payment)}.`;
 };
+const purposeWords = (p) => (p === 'any' ? 'for any purpose' : `for ${p} use`);
+const paymentWords = (p) => (p === 'none' ? '' : `, if they provide ${PAYMENT_LABELS[p] || p}`);
+/** v3: what an add card does, in the sentence (mirrors utils/policyCards.ts). */
+const addVerb = (card) => (card.outcome === 'allow'
+  ? 'may add documents to my MAIA'
+  : card.outcome === 'ask'
+    ? 'needs my approval to add documents to my MAIA'
+    : (card.denyMode === 'respond' ? 'is declined, with a reason, for adding documents to my MAIA' : 'is silently denied adding documents to my MAIA'));
 
 // Scope containment for card matching (kept in sync with utils/policyCards.ts).
 const SCOPE_COVERS = {
@@ -172,7 +199,8 @@ const SCOPE_COVERS = {
   'patient-summary': ['patient-summary', 'meds-allergies'],
   'meds-allergies': ['meds-allergies'],
   'notification-only': ['notification-only'],
-  'ah-category': ['ah-category']
+  'ah-category': ['ah-category'],
+  document: ['document']
 };
 
 /** Does a grant for scope `granted` cover a read of scope `requested`?
@@ -181,6 +209,8 @@ export const scopeCovers = (granted, requested) => (SCOPE_COVERS[granted] || [gr
 
 const cardMatches = (card, req) => {
   const e = card.elements;
+  // v3: reading and adding never match each other; no action means read (I-32).
+  if ((e.action || 'read') !== (req.action || 'read')) return false;
   // A card imported from a group (provenance 'group:<id>') belongs to THAT
   // group, whatever groupId its elements embed — heals cards imported with a
   // stale id from a recreated group's policy file (trustee-0zujj2 bug).

@@ -19,7 +19,8 @@ const b64 = (bytes: ArrayBuffer | Uint8Array) => {
 export const b64url = (bytes: ArrayBuffer | Uint8Array) =>
   b64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 
-export const sha256 = async (data: string) => new Uint8Array(await crypto.subtle.digest('SHA-256', utf8(data)));
+export const sha256 = async (data: string | Uint8Array) =>
+  new Uint8Array(await crypto.subtle.digest('SHA-256', typeof data === 'string' ? utf8(data) : (data as BufferSource)));
 
 export const randomToken = (bytes = 16) => b64url(crypto.getRandomValues(new Uint8Array(bytes)));
 
@@ -27,8 +28,8 @@ export const randomToken = (bytes = 16) => b64url(crypto.getRandomValues(new Uin
 export const jwkThumbprint = async (jwk: { crv: string; kty: string; x: string }) =>
   b64url(await sha256(JSON.stringify({ crv: jwk.crv, kty: jwk.kty, x: jwk.x })));
 
-/** Content-Digest (RFC 9530), sha-256. */
-export const contentDigest = async (body: string) => `sha-256=:${b64(await sha256(body))}:`;
+/** Content-Digest (RFC 9530), sha-256 — of text, or of a document's bytes. */
+export const contentDigest = async (body: string | Uint8Array) => `sha-256=:${b64(await sha256(body))}:`;
 
 type Param = [string, string | number];
 const serializeParams = (components: string[], params: Param[]) =>
@@ -40,7 +41,7 @@ export interface SignInput {
   url: string;
   /** Lower-case header names. */
   headers: Record<string, string>;
-  body?: string | null;
+  body?: string | Uint8Array | null;
   privateKey: CryptoKey;
   kid: string;
   created?: number;
@@ -57,8 +58,8 @@ export async function signRequest({
   created = Math.floor(Date.now() / 1000), nonce = randomToken()
 }: SignInput): Promise<Record<string, string>> {
   const h: Record<string, string> = { ...headers };
-  const hasBody = !!body;
-  if (hasBody) h['content-digest'] = await contentDigest(body as string);
+  const hasBody = typeof body === 'string' ? body.length > 0 : !!body && body.length > 0;
+  if (hasBody) h['content-digest'] = await contentDigest(body as string | Uint8Array);
   const components = ['@method', '@target-uri', ...(hasBody ? ['content-digest'] : []), ...(h.authorization ? ['authorization'] : [])];
   const params: Param[] = [['created', created], ['nonce', nonce], ['keyid', kid], ['tag', 'gnap']];
   const value = (c: string) => (c === '@method' ? method.toUpperCase() : c === '@target-uri' ? new URL(url).href : h[c].trim());

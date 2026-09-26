@@ -1187,6 +1187,7 @@ import {
   bufferLogEvent, pickLocalFolder, readStateFile, writeWeblocFile, MAIA_FOLDER_PDFS,
   type MaiaState, type DiscoveredUser
 } from './utils/localFolder';
+import { ensureFolderKey } from './utils/folderKey';
 import packageJson from '../package.json';
 
 const appVersion = packageJson.version;
@@ -3010,6 +3011,8 @@ const checklistChooseFolder = async () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId: uid })
     });
+    // The folder key (§7): documents others add are sealed to it.
+    await ensureFolderKey(uid).catch(() => null);
     await setupChecklist.refresh();
     if (picked.conflict?.severity === 'warn') {
       $q.notify({ type: 'warning', message: picked.conflict.message, timeout: 8000 });

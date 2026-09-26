@@ -17,6 +17,7 @@
  * Per-patient state: nt_<userId> in maia_gnap.
  */
 import { GNAP_DB, getDoc, updateDoc } from './store.js';
+import { KIND_WORDS, isLiveHold } from './documents.js';
 
 const USERS_DB = 'maia_users';
 const AS_REQUESTS_DB = 'maia_as_requests';
@@ -38,6 +39,9 @@ const SCOPE_WORDS = {
   'ah-category': 'Apple Health data'
 };
 const scopeWords = (s) => SCOPE_WORDS[s] || 'information';
+/** A document's kind, never its title: a title can carry health information (I-31). */
+const kindWords = (r) => KIND_WORDS[r.document?.kind] || 'a document';
+const askWords = (r) => (r.document ? `wants to add ${kindWords(r)}` : `asks for ${scopeWords(r.resource)} for ${purposeWords(r.purpose)}`);
 const purposeWords = (p) => (p && p !== 'any' ? `${String(p).replace(/-/g, ' ')} use` : 'any purpose');
 
 /** "Dr. Test, Local Clinic (email verified: dr@x.org)" — who asked, and how sure. */
@@ -50,13 +54,25 @@ export function requesterLine(r) {
   return `${name} (${proof}${via})`;
 }
 
-const eventTime = (r) => [r.receivedAt, r.decidedAt, r.withdrawnAt, r.stoppedAt, r.forgottenAt]
+const eventTime = (r) => [r.receivedAt, r.decidedAt, r.withdrawnAt, r.stoppedAt, r.forgottenAt,
+  r.document?.acceptedAt, r.document?.deliveredAt, r.document?.expiredAt]
   .filter(Boolean).sort().pop() || r.receivedAt || '';
 const decided = (r) => r.status && r.status !== 'pending';
 
 // ── Email bodies (pure) ─────────────────────────────────────────────────
 
 export function renderShared(r, appUrl) {
+  if (r.document) {
+    return {
+      subject: 'A document was added to your MAIA',
+      text: [
+        `${requesterLine(r)} added ${kindWords(r)} to your MAIA, under one of your rules.`,
+        'MAIA saves it in your MAIA folder, in Received, the next time you open MAIA. Until then only your folder’s key can open it.',
+        '',
+        `Open MAIA: ${appUrl}`
+      ].join('\n')
+    };
+  }
   return {
     subject: 'Your MAIA shared information',
     text: [
@@ -73,10 +89,12 @@ export function renderAsks(asks, appUrl) {
   return {
     subject: n === 1 ? 'A request is waiting for you in MAIA' : `${n} requests are waiting for you in MAIA`,
     text: [
-      n === 1 ? 'Someone asked your MAIA for information. Your rules didn’t decide it, so it is waiting for you:'
+      n === 1
+        ? (asks[0].document ? 'Someone wants to add a document to your MAIA. Your rules didn’t decide it, so it is waiting for you:'
+          : 'Someone asked your MAIA for information. Your rules didn’t decide it, so it is waiting for you:')
         : `${n} requests reached your MAIA that your rules didn’t decide. They are waiting for you:`,
       '',
-      ...asks.slice(0, 20).map((r) => `- ${requesterLine(r)} asks for ${scopeWords(r.resource)} for ${purposeWords(r.purpose)}.`),
+      ...asks.slice(0, 20).map((r) => `- ${requesterLine(r)} ${askWords(r)}.`),
       ...(n > 20 ? [`- and ${n - 20} more`] : []),
       '',
       `Decide in MAIA → Requests: ${appUrl}`
@@ -102,15 +120,18 @@ export function summarize(requests, { since, now, logSyncedThrough = '' }) {
   const newest = requests.map(eventTime).filter(Boolean).sort().pop() || '';
   return {
     received: received.length,
-    sharedByRule: count((r) => r.status === 'accepted' && r.autonomous),
-    sharedByYou: count((r) => r.status === 'accepted' && !r.autonomous),
+    sharedByRule: count((r) => r.status === 'accepted' && r.autonomous && !r.document),
+    sharedByYou: count((r) => r.status === 'accepted' && !r.autonomous && !r.document),
+    documentsAccepted: count((r) => r.status === 'accepted' && !!r.document),
+    // Accepted documents the folder doesn't have yet: deleted after 90 days.
+    documentsUnsaved: requests.filter((r) => r.document?.state === 'accepted').length,
     declined: count((r) => r.status === 'declined'),
     ignored: count((r) => r.status === 'blocked'),
     withdrawn: count((r) => r.status === 'withdrawn'),
     stopped: count((r) => r.status === 'stopped'),
     waiting,
     expired: expired.length,
-    autoShares: decidedNow.filter((r) => r.status === 'accepted' && r.autonomous),
+    autoShares: decidedNow.filter((r) => r.status === 'accepted' && r.autonomous && !r.document),
     topRequesters: [...byWho.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3),
     logBehind: requests.filter((r) => eventTime(r) > (logSyncedThrough || '')).length,
     logEverSynced: !!logSyncedThrough,
@@ -118,13 +139,15 @@ export function summarize(requests, { since, now, logSyncedThrough = '' }) {
   };
 }
 
-export const hasActivity = (s) => s.received > 0 || s.waiting.length > 0 || s.sharedByRule + s.sharedByYou + s.declined + s.ignored + s.withdrawn + s.stopped > 0;
+export const hasActivity = (s) => s.received > 0 || s.waiting.length > 0 || s.documentsUnsaved > 0
+  || s.sharedByRule + s.sharedByYou + s.documentsAccepted + s.declined + s.ignored + s.withdrawn + s.stopped > 0;
 
 export function renderDigest(s, { appUrl, sharing }) {
   const lines = ['Your MAIA this week:', ''];
   lines.push(`- ${s.received} new request${s.received === 1 ? '' : 's'}`);
   if (s.sharedByRule) lines.push(`- ${s.sharedByRule} shared automatically by your rules`);
   if (s.sharedByYou) lines.push(`- ${s.sharedByYou} shared by you`);
+  if (s.documentsAccepted) lines.push(`- ${s.documentsAccepted} document${s.documentsAccepted === 1 ? '' : 's'} added to your MAIA`);
   if (s.declined) lines.push(`- ${s.declined} declined`);
   if (s.ignored) lines.push(`- ${s.ignored} ignored`);
   if (s.withdrawn) lines.push(`- ${s.withdrawn} withdrawn by the requester`);
@@ -132,7 +155,10 @@ export function renderDigest(s, { appUrl, sharing }) {
   if (s.expired) lines.push(`- ${s.expired} expired without an answer`);
   if (s.waiting.length) {
     lines.push('', `Waiting for your decision (${s.waiting.length}):`);
-    for (const r of s.waiting.slice(0, 10)) lines.push(`- ${requesterLine(r)}: ${scopeWords(r.resource)} for ${purposeWords(r.purpose)}`);
+    for (const r of s.waiting.slice(0, 10)) lines.push(`- ${requesterLine(r)}: ${r.document ? `wants to add ${kindWords(r)}` : `${scopeWords(r.resource)} for ${purposeWords(r.purpose)}`}`);
+  }
+  if (s.documentsUnsaved) {
+    lines.push('', `${s.documentsUnsaved} accepted document${s.documentsUnsaved === 1 ? ' is' : 's are'} waiting to be saved in your MAIA folder. Open MAIA to save ${s.documentsUnsaved === 1 ? 'it' : 'them'}: documents not saved within 90 days are deleted.`);
   }
   if (s.autoShares.length) {
     lines.push('', 'Shared automatically:');
@@ -284,7 +310,8 @@ export function createNotices({ cloudant, sendEmail = async () => false, now = (
     const synced = new Map((await states()).map((s) => [s.userId, s.logSyncedThrough || '']));
     let pruned = 0;
     for (const r of all) {
-      if (!decided(r)) continue;
+      // A document still waiting on the server is the hold sweep's to end.
+      if (!decided(r) || isLiveHold(r)) continue;
       const at = Date.parse(r.decidedAt || r.stoppedAt || r.withdrawnAt || r.receivedAt);
       if (!at) continue;
       const age = now() - at;
@@ -308,10 +335,26 @@ export function requestEvents(requests) {
       requester: r.fromOutsider === false
         ? { name: r.fromAlias || 'A member', member: true }
         : { name: r.requester?.name || null, email: r.requester?.emailVerified ? r.requester.email : null, emailVerified: !!r.requester?.emailVerified },
-      what: r.resource, why: r.purpose || 'any', message: typeof r.payload === 'string' ? r.payload : ''
+      what: r.resource, why: r.purpose || 'any', message: typeof r.payload === 'string' ? r.payload : '',
+      // A document: what the sender described. The folder is the patient's
+      // own, so its log keeps the title and the SHA-256 (§10.12).
+      ...(r.document ? {
+        document: { kind: r.document.kind, title: r.document.title || '', mediaType: r.document.mediaType, size: r.document.size, sha256: r.document.sha256 },
+        grant: r.gnapGrant || null
+      } : {})
     };
     const add = (type, at, extra = {}) => { if (at) events.push({ id: `${r._id}:${type}`, at, type, ...base, ...extra }); };
     add('received', r.receivedAt, r.payment ? { payment: r.payment.type || r.payment } : {});
+    if (r.document) {
+      const d = r.document;
+      if (d.acceptedAt || (r.status === 'accepted' && r.decidedAt)) add('accepted', d.acceptedAt || r.decidedAt, { by: r.autonomous ? 'rule' : 'you' });
+      if (r.status === 'declined') add('declined', r.decidedAt, { by: r.autonomous ? 'rule' : 'you' });
+      if (r.status === 'blocked') add('ignored', r.decidedAt, { by: 'you' });
+      if (d.deliveredAt) add('document_received', d.deliveredAt, { fileName: d.fileName || null });
+      if (d.expiredAt) add('expired', d.expiredAt);
+      if (r.forgottenAt) add('forgotten', r.forgottenAt);
+      continue;
+    }
     if (r.status === 'accepted') add('shared', r.decidedAt, { by: r.autonomous ? 'rule' : 'you' });
     if (r.status === 'declined') add('declined', r.decidedAt, { by: r.autonomous ? 'rule' : 'you' });
     if (r.status === 'blocked') add('ignored', r.decidedAt, { by: 'you' });

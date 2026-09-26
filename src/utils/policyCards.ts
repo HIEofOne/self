@@ -16,17 +16,22 @@
  *  server/routes/policies.js (parity-tested). Cards stamp the edition
  *  their elements are expressed in; absent = edition 1. Bumps require a
  *  Documentation/Policy_Vocab_Changelog.md entry (design doc §15.6).
- *  v1: original (incl. 'npi'); v2: 'npi' no longer authorable. */
-export const POLICY_VOCAB_VERSION = 2;
+ *  v1: original (incl. 'npi'); v2: 'npi' no longer authorable; v3: the
+ *  `action` element (read / add) and the scope 'document' (§10.12). */
+export const POLICY_VOCAB_VERSION = 3;
 
 export type PartyType = 'anyone' | 'group' | 'peer';
 export type Purpose = 'any' | 'peer-support' | 'clinical' | 'research' | 'public-health' | 'marketing';
-export type Scope = 'notification-only' | 'meds-allergies' | 'patient-summary' | 'not-sensitive' | 'everything' | 'ah-category';
+export type Scope = 'notification-only' | 'meds-allergies' | 'patient-summary' | 'not-sensitive' | 'everything' | 'ah-category' | 'document';
+/** v3: 'add' (someone gives the patient a document) pairs only with the
+ *  scope 'document'. Absent means 'read', so no older card ever adds (I-32). */
+export type Action = 'read' | 'add';
 export type Signature = 'unverified' | 'verified-email' | 'group-member' | 'npi' | 'doximity' | 'verified-by-me';
 export type Payment = 'none' | 'spam-deposit' | 'notification-deposit' | 'ai-prepay' | 'sharing-payment';
 
 export interface PolicyElements {
   party: { type: PartyType; groupId?: string; groupName?: string; pairwiseId?: string; alias?: string };
+  action?: Action;
   purpose: Purpose;
   scope: Scope;
   ahCategory?: string; // which Apple Health category, when scope === 'ah-category'
@@ -69,6 +74,7 @@ export type AsState = 'setup' | 'active' | 'paused';
  *  attributes policies can see. */
 export interface PolicyRequest {
   party: { type: PartyType; groupId?: string; pairwiseId?: string };
+  action?: Action;
   purpose: Purpose;
   scope: Scope;
   ahCategory?: string;  // which Apple Health category, when scope === 'ah-category'
@@ -103,7 +109,8 @@ const SCOPE_SENTENCES: Record<Scope, string> = {
   'patient-summary': 'my Patient Summary',
   'not-sensitive': 'my record except sensitive categories',
   everything: 'everything in my record',
-  'ah-category': 'a category of my Apple Health data'
+  'ah-category': 'a category of my Apple Health data',
+  document: 'documents'
 };
 
 export const SIGNATURE_OPTIONS: Array<{ value: Signature; label: string }> = [
@@ -176,6 +183,11 @@ export const POLICY_MATRIX: MatrixColumn[] = [
       tip: 'One Apple Health category (labs, vitals, immunizations…). A card names the exact category it covers.',
       disabledIn: {
         request: 'An outside requester can’t know which Apple Health categories a record contains — ask for a broader scope instead.'
+      } },
+    { v: 'document', label: 'Add a document', sub: 'they give you one',
+      tip: 'Someone gives you a document, such as a radiology report. It is saved in your MAIA folder, in Received. Cards about seeing your record never let anyone add, and adding always needs at least a verified email.',
+      disabledIn: {
+        request: 'A document is about one person: send it on that person’s own request page.'
       } }
   ]},
   { key: 'purpose', head: 'Claimed Purpose', headTip: 'Why the requester says they want it. MAIA can’t verify a purpose — but your cards decide what each claimed purpose is allowed to receive.', options: [
@@ -265,6 +277,13 @@ const scopePhrase = (e: PolicyElements): string =>
 const paymentPhrase = (p: Payment): string =>
   PAYMENT_OPTIONS.find((o) => o.value === p)?.label || p;
 
+/** v3: what an add card does (mirrors addVerb in server/routes/policies.js). */
+const addVerb = (card: PolicyCard): string => (card.outcome === 'allow'
+  ? 'may add documents to my MAIA'
+  : card.outcome === 'ask'
+    ? 'needs my approval to add documents to my MAIA'
+    : (card.denyMode === 'respond' ? 'is declined, with a reason, for adding documents to my MAIA' : 'is silently denied adding documents to my MAIA'));
+
 /** The deterministic plain-language projection of a card. */
 export const sentenceFor = (card: PolicyCard): string => {
   const e = card.elements;
@@ -272,15 +291,16 @@ export const sentenceFor = (card: PolicyCard): string => {
   const sig = e.signature === 'unverified'
     ? '(no identity check)'
     : `with ${SIGNATURE_OPTIONS.find((o) => o.value === e.signature)?.label} identity or stronger`;
+  const why = e.purpose === 'any' ? 'for any purpose' : `for ${PURPOSE_OPTIONS.find((o) => o.value === e.purpose)?.label} use`;
+  const pay = e.payment === 'none' ? '' : `, if they provide ${paymentPhrase(e.payment)}`;
+  if (e.action === 'add') return `${who} ${sig} ${addVerb(card)} ${why}${pay}.`;
   const verb = card.outcome === 'allow'
     ? 'may receive'
     : card.outcome === 'ask'
       ? 'needs my approval to receive'
       : (card.denyMode === 'respond' ? 'is declined, with a reason, for' : 'is silently denied');
   const what = e.scope === 'notification-only' ? 'a notification (no record data)' : scopePhrase(e);
-  const why = e.purpose === 'any' ? 'for any purpose' : `for ${PURPOSE_OPTIONS.find((o) => o.value === e.purpose)?.label} use`;
   const filt = card.outcome === 'allow' ? (e.filtered ? ', privacy-filtered' : ', unfiltered') : '';
-  const pay = e.payment === 'none' ? '' : `, if they provide ${paymentPhrase(e.payment)}`;
   return `${who} ${sig} ${verb} ${what} ${why}${filt}${pay}.`;
 };
 
@@ -295,11 +315,14 @@ const SCOPE_COVERS: Record<string, Scope[]> = {
   'patient-summary': ['patient-summary', 'meds-allergies'],
   'meds-allergies': ['meds-allergies'],
   'notification-only': ['notification-only'],
-  'ah-category': ['ah-category']
+  'ah-category': ['ah-category'],
+  document: ['document']
 };
 
 const matches = (card: PolicyCard, req: PolicyRequest): boolean => {
   const e = card.elements;
+  // v3: reading and adding never match each other; no action means read (I-32).
+  if ((e.action || 'read') !== (req.action || 'read')) return false;
   // A card imported from a group (provenance 'group:<id>') belongs to THAT
   // group, whatever groupId its elements embed — heals cards imported with a
   // stale id from a recreated group's policy file (trustee-0zujj2 bug).

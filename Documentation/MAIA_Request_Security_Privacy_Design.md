@@ -1,6 +1,6 @@
 # MAIA Request Security and Privacy Design
 
-- **Date:** 2026-08-07 (revised 2026-08-09: NPI removed from the signature vocabulary, v1.5.173; vocabulary editions + card stamping added, §15.6, v1.5.174; revised 2026-09-25: the Personal AS edition's GNAP request path, §6.3, and invariants I-24…I-31)
+- **Date:** 2026-08-07 (revised 2026-08-09: NPI removed from the signature vocabulary, v1.5.173; vocabulary editions + card stamping added, §15.6, v1.5.174; revised 2026-09-25: the Personal AS edition's GNAP request path, §6.3, and invariants I-24…I-31; revised 2026-09-26: documents others add, §6.3, and I-32)
 - **Status:** Comprehensive review — implemented behavior through **v1.5.169** (PRs #264–#301), plus the approved roadmap (VC/UCAN artifacts → federation → GNAP/MCP → external resource servers).
 - **Baseline:** `Groups_Design.md` (2026-07-05/06), the verbatim design conversation this document traces against.
 - **Audience:** MAIA maintainers; prospective **group administrators** evaluating whether to sponsor a group; **privacy and security experts** validating the design and its implementation.
@@ -204,6 +204,16 @@ Hardening:
 - **Failed deliveries** are retried daily.
 - **Email.** No email carries record data. Patients get "a request is waiting" and "your MAIA shared" notices; requesters get only "there is an answer", and only at an address they verified.
 - **Cross-origin access.** The `/gnap` paths are open to any origin, without cookies, and are exempt from the app's session CORS.
+
+**Documents others add (v1.6.35).** Someone can also *give* the patient a document, such as a radiology report, through the same door. Design: `group_requests.md` §10.12. Code: `server/gnap/documents.js`, `server/routes/received.js`, `src/utils/folderKey.ts`, `src/utils/received.ts`.
+- **A separate right.** The request says `actions: ["add"]` with the datatype `document`, and describes the document exactly: kind, title, media type, size and SHA-256. Policy vocabulary v3 adds the card element `action` (`read` or `add`). A card without it means read, so no card written before v3 can accept a document. An add card must require at least `verified-email`, and a new sender must pass the email check before anything is decided.
+- **Routes.** Only the direct route adds. A group endpoint refuses `add`, and so does a member's AS receiving a relayed copy.
+- **Outcomes.** An add card gives a single-use `add` token. No deciding card (or sharing off) gives a single-use `offer` token: the document is held for the patient. A deny card gives no token, exactly as for a read.
+- **The upload** (`PUT /gnap/rs/<handle>`) is signed over its bytes with `content-digest`. Its size, SHA-256 and declared type must match the descriptor, and the content must really be that type: magic bytes for PDF, JPEG and PNG, and valid UTF-8 without NUL for text. v1 accepts those four types, up to 20 MB. The cards are checked again when the document arrives.
+- **The sealed hold.** The server seals the bytes at once to the patient's **folder key** (X25519, HKDF label `maia-folder-document-v1`), stores only the sealed box in Spaces under the patient's prefix, and drops the readable bytes. They are never parsed, rendered, indexed or logged. The folder key is made in the patient's browser when the folder is connected. The server holds only its public half; the private half is in the folder (`maia-folder-key.json`) and in that browser's IndexedDB. It is never in `maia-state.json`, the account record or a backup. So a server or cloud-backup compromise can't open a waiting document.
+- **The patient.** The Requests tab can preview a held document: the browser opens the box with the folder key and shows it in the browser's own PDF or image viewer, or as text. Accept marks it for the folder; Decline or Ignore deletes the hold. Whenever MAIA is open with the folder connected, the browser writes accepted documents to `Received/`, checks each SHA-256, and tells the server, which then deletes the hold. The folder's request log records the delivery. A document never changes the Patient Summary, the cards or the private AI's instructions.
+- **Limits.** At most 10 documents and 100 MB wait per patient, and 5 a day from one sender (HTTP 429 beyond). A document neither decided nor saved within 90 days is deleted.
+- **Email.** Notices name the document's kind, never its title, which can carry health information. A verified sender hears Accept or Decline, and nothing for Ignore.
 
 ### 6.4 Reliability properties that carry security weight
 
@@ -487,6 +497,7 @@ Personal AS edition (§6.3; `group_requests.md` §3):
 - **I-29** Declines are indistinguishable: a policy decline and a human decline return the same `request_denied`; a silent deny behaves exactly like an ask the patient never answered (a direct client keeps getting "wait"; a group request gets no answer from that member).
 - **I-30** One door: every request reaches a patient's MAIA as a signed GNAP grant request, whether over HTTP or carried by the group relay; each member's AS verifies the requester's signature itself, relies on the group only for what the group attested (email, payment, membership), and every route builds the same evaluator input under the same privacy-filter ceiling.
 - **I-31** One exit: data leaves a patient's MAIA only as a response from the co-located resource server to a valid key-bound token; no email, relay message, notification or log line carries an artifact, and the group relay carries only signed requests, sealed answers and counts.
+- **I-32** Adding is separate from reading, and arrives sealed: only a confirmed card with `action: 'add'` accepts a document, and a card without an action means read. A document someone else adds is stored by the server only as a box sealed to the patient's folder key, whose private half the server never holds, and it is written only to the folder's `Received/` directory, never into the Patient Summary, the cards or the private AI's instructions.
 
 ## Appendix B. Glossary
 

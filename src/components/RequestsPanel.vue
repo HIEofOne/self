@@ -57,6 +57,11 @@
         <span>{{ logState.text }}</span>
         <q-btn v-if="logResult === 'no-permission'" dense flat no-caps size="sm" color="primary" label="Allow" @click="allowFolder" />
       </div>
+      <div v-if="receivedNote" class="rp__log text-caption">
+        <q-icon :name="receivedNote.icon" size="15px" :color="receivedNote.color" />
+        <span>{{ receivedNote.text }}</span>
+        <q-btn v-if="receivedResult === 'no-permission'" dense flat no-caps size="sm" color="primary" label="Allow" @click="allowFolder" />
+      </div>
       <div v-if="!loading && !requests.length" class="text-caption text-grey-7">
         No requests yet. When someone uses your link, the request appears here.
       </div>
@@ -64,14 +69,25 @@
 
       <div v-for="r in ordered" :key="r.id" class="rp__item" :class="{ 'rp__item--pending': r.status === 'pending' }">
         <div class="row items-center no-wrap">
-          <q-badge :color="STATUS[r.status]?.color || 'grey'" :label="STATUS[r.status]?.label || r.status" />
+          <q-badge :color="STATUS[r.status]?.color || 'grey'" :label="r.document && r.status === 'accepted' ? 'Accepted' : (STATUS[r.status]?.label || r.status)" />
           <span class="text-caption text-grey-7 q-ml-sm">{{ when(r.receivedAt) }} · {{ r.groupName || 'Direct request' }}</span>
         </div>
         <div class="q-mt-xs">
           <strong>{{ r.requester?.name || r.fromAlias || 'Someone' }}</strong>
           <span v-if="r.fromOutsider === false" class="text-caption text-grey-7"> (a member of {{ r.groupName }})</span>
           <span v-else class="text-caption text-grey-7"> (name not verified)</span>
-          asks for <strong>{{ scopeLabel(r.resource) }}</strong> for <strong>{{ purposeLabel(r.purpose) }}</strong>.
+          <template v-if="r.document">
+            wants to add <strong>{{ kindLabel(r.document.kind) }}</strong><template v-if="r.document.title">: “{{ r.document.title }}”</template>
+            for <strong>{{ purposeLabel(r.purpose) }}</strong>.
+          </template>
+          <template v-else>asks for <strong>{{ scopeLabel(r.resource) }}</strong> for <strong>{{ purposeLabel(r.purpose) }}</strong>.</template>
+        </div>
+        <div v-if="r.document" class="text-caption text-grey-7 q-mt-xs">
+          <q-icon name="description" size="14px" /> {{ TYPE_WORDS[r.document.mediaType || ''] || 'File' }}, {{ sizeText(r.document.size) }}
+          <template v-if="r.document.state === 'accepted'"> · waiting to be saved in your MAIA folder</template>
+          <template v-else-if="r.document.state === 'delivered'"> · saved in your folder: Received/{{ r.document.fileName }}</template>
+          <template v-else-if="r.document.state === 'expired'"> · deleted after 90 days, never saved</template>
+          <template v-else-if="r.document.state === 'no-key'"> · not received: your MAIA folder wasn't connected. Ask them to send it again.</template>
         </div>
         <div v-if="r.fromOutsider !== false" class="text-caption q-mt-xs">
           <template v-if="r.requester?.email && r.requester?.emailVerified">
@@ -88,7 +104,21 @@
           Decided by your rule: “{{ r.decidedBySentence }}”
         </div>
 
-        <div v-if="r.status === 'pending'" class="q-mt-sm q-gutter-sm">
+        <div v-if="r.status === 'pending' && r.document" class="q-mt-sm q-gutter-sm">
+          <q-btn dense outline no-caps size="sm" color="primary" icon="visibility" label="Preview" :loading="previewing === r.id" @click="preview(r)">
+            <q-tooltip>Open it here with your folder key. It isn't saved until you accept it.</q-tooltip>
+          </q-btn>
+          <q-btn dense unelevated no-caps size="sm" color="primary" label="Accept" :loading="busyId === r.id" @click="decide(r, 'accept')">
+            <q-tooltip>Save it in your MAIA folder, in Received.</q-tooltip>
+          </q-btn>
+          <q-btn dense flat no-caps size="sm" color="grey-8" label="Decline" :disable="busyId === r.id" @click="decide(r, 'decline')">
+            <q-tooltip>It is deleted, and they are told you declined it.</q-tooltip>
+          </q-btn>
+          <q-btn dense flat no-caps size="sm" color="negative" label="Ignore" :disable="busyId === r.id" @click="decide(r, 'block')">
+            <q-tooltip>It is deleted, and they are never told.</q-tooltip>
+          </q-btn>
+        </div>
+        <div v-else-if="r.status === 'pending'" class="q-mt-sm q-gutter-sm">
           <q-btn dense unelevated no-caps size="sm" color="primary" label="Share" :loading="busyId === r.id" @click="decide(r, 'accept')">
             <q-tooltip>Share your privacy-filtered {{ scopeLabel(r.resource) }}. Names are replaced before anything leaves.</q-tooltip>
           </q-btn>
@@ -99,7 +129,10 @@
             <q-tooltip>They are never told. To them it looks like no answer yet.</q-tooltip>
           </q-btn>
         </div>
-        <div v-else-if="r.status === 'accepted' && r.route" class="q-mt-sm">
+        <div v-else-if="r.document?.state === 'accepted'" class="q-mt-sm">
+          <q-btn dense flat no-caps size="sm" color="primary" icon="save_alt" label="Save to my folder now" :loading="delivering" @click="deliver(true)" />
+        </div>
+        <div v-else-if="r.status === 'accepted' && r.route && !r.document" class="q-mt-sm">
           <q-btn dense flat no-caps size="sm" color="negative" icon="stop_circle" label="Stop sharing" :loading="busyId === r.id" @click="stop(r)">
             <q-tooltip>They can't read it again from now on.</q-tooltip>
           </q-btn>
@@ -126,7 +159,7 @@
           <div class="text-caption text-grey-7">A rule made from this request. It applies from the next request, and you can change or turn it off in Sharing Policies.</div>
         </q-card-section>
         <q-card-section class="q-pt-none">
-          <q-option-group v-model="ruleOutcome" :options="RULE_OUTCOMES" dense />
+          <q-option-group v-model="ruleOutcome" :options="ruleFrom?.document ? RULE_OUTCOMES_ADD : RULE_OUTCOMES" dense />
           <div class="rp__sentence">{{ ruleSentence }}</div>
           <div v-if="asState !== 'active'" class="text-caption text-orange-9 q-mt-sm">
             Sharing isn't on yet, so rules don't act until you turn it on in Sharing Policies.
@@ -137,6 +170,25 @@
           <q-btn flat no-caps label="Cancel" v-close-popup />
           <q-btn unelevated no-caps color="primary" label="Add this rule" :loading="ruleSaving" @click="saveRule" />
         </q-card-actions>
+      </q-card>
+    </q-dialog>
+
+    <!-- A held document, opened here with the folder key (§10.12). Only the
+         browser's own viewers show it; nothing in it runs or is saved. -->
+    <q-dialog v-model="previewOpen" @hide="closePreview">
+      <q-card class="rp__preview">
+        <q-card-section class="row items-center q-pb-sm">
+          <div class="text-subtitle1 ellipsis">{{ previewTitle }}</div>
+          <q-space />
+          <q-btn flat round dense icon="close" v-close-popup />
+        </q-card-section>
+        <q-card-section class="q-pt-none">
+          <div v-if="previewError" class="text-negative text-caption">{{ previewError }}</div>
+          <iframe v-else-if="previewUrl && previewType === 'application/pdf'" :src="previewUrl" class="rp__preview-frame" title="Document preview"></iframe>
+          <img v-else-if="previewUrl && previewType.startsWith('image/')" :src="previewUrl" class="rp__preview-img" alt="Document preview" />
+          <pre v-else-if="previewText !== null" class="rp__preview-text">{{ previewText }}</pre>
+          <div class="text-caption text-grey-7 q-mt-sm">Sent by someone else. It isn't saved in your folder until you accept it.</div>
+        </q-card-section>
       </q-card>
     </q-dialog>
 
@@ -214,6 +266,8 @@ import { SCOPE_OPTIONS, PURPOSE_OPTIONS, sentenceFor, type PolicyCard, type AsSt
 import { WHAT, WHY, answerToHtml } from '../gnap/requestForm';
 import { syncRequestLog, type LogSyncResult } from '../utils/requestLog';
 import { reconnectLocalFolderWithGesture } from '../utils/localFolder';
+import { deliverReceived, openReceived, KIND_LABELS, type DeliverResult } from '../utils/received';
+import { ensureFolderKey } from '../utils/folderKey';
 import { useFolderPdfs } from '../composables/useFolderPdfs';
 
 const props = defineProps<{ userId: string }>();
@@ -237,6 +291,10 @@ interface RequestRow {
   gnapPayment?: { type: string; amount: number } | null;
   autonomous?: boolean;
   decidedBySentence?: string | null;
+  document?: {
+    kind: string | null; title: string; mediaType: string | null; size: number; sha256: string | null;
+    state: string | null; fileName: string | null; deliveredAt: string | null;
+  } | null;
 }
 
 const STATUS: Record<string, { label: string; color: string }> = {
@@ -245,8 +303,12 @@ const STATUS: Record<string, { label: string; color: string }> = {
   declined: { label: 'Declined', color: 'grey-7' },
   blocked: { label: 'Ignored', color: 'grey-7' },
   withdrawn: { label: 'Withdrawn', color: 'grey-6' },
-  stopped: { label: 'Sharing stopped', color: 'blue-grey-6' }
+  stopped: { label: 'Sharing stopped', color: 'blue-grey-6' },
+  expired: { label: 'Expired', color: 'grey-6' }
 };
+const TYPE_WORDS: Record<string, string> = { 'application/pdf': 'PDF', 'image/jpeg': 'JPEG image', 'image/png': 'PNG image', 'text/plain': 'Text' };
+const kindLabel = (k: string | null) => (KIND_LABELS[k || ''] || 'Document').replace(/^./, (c) => `a ${c.toLowerCase()}`).replace(/^a ([aeiou])/i, 'an $1');
+const sizeText = (n: number) => (n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
 
 const PAYMENT_WORDS: Record<string, string> = {
   'spam-deposit': 'a spam deposit', 'notification-deposit': 'an evaluation fee', 'sharing-payment': 'a sharing payment'
@@ -312,13 +374,74 @@ const syncLog = async () => {
   try { logResult.value = await syncRequestLog(props.userId); } catch { logResult.value = 'failed'; } finally { syncing = false; }
 };
 const allowFolder = async () => {
-  if (await reconnectLocalFolderWithGesture(props.userId)) await syncLog();
+  if (await reconnectLocalFolderWithGesture(props.userId)) {
+    await ensureFolderKey(props.userId);
+    await deliver();
+    await syncLog();
+  }
+};
+
+// ── Documents others added: into Received/ in the folder (§10.12) ───────
+const receivedResult = ref<DeliverResult | ''>('');
+const delivering = ref(false);
+const receivedNote = computed(() => ({
+  '': null, none: null, failed: null,
+  delivered: { icon: 'check_circle', color: 'green-7', text: 'New documents saved in your MAIA folder, in Received.' },
+  'no-permission': { icon: 'lock', color: 'orange-8', text: 'MAIA needs your permission to save documents you accepted in your MAIA folder.' },
+  'no-folder': { icon: 'folder_off', color: 'grey-6', text: 'Connect your MAIA folder to save documents you accepted.' },
+  'no-key': { icon: 'key_off', color: 'orange-8', text: 'This browser doesn’t have your folder key, so documents you accepted can’t be opened here. Open MAIA in the browser where you set up your folder.' }
+}[receivedResult.value] || null));
+const deliver = async (reload = false) => {
+  if (delivering.value || !props.userId) return;
+  delivering.value = true;
+  try {
+    receivedResult.value = await deliverReceived(props.userId);
+    if (receivedResult.value === 'delivered' || reload) { await load(); void syncLog(); }
+  } finally { delivering.value = false; }
+};
+
+// Preview a held document: opened in this browser with the folder key.
+const previewOpen = ref(false);
+const previewing = ref('');
+const previewTitle = ref('');
+const previewType = ref('');
+const previewUrl = ref('');
+const previewText = ref<string | null>(null);
+const previewError = ref('');
+const closePreview = () => {
+  if (previewUrl.value) URL.revokeObjectURL(previewUrl.value);
+  previewUrl.value = '';
+  previewText.value = null;
+};
+const preview = async (r: RequestRow) => {
+  if (!r.document) return;
+  previewing.value = r.id;
+  closePreview();
+  previewError.value = '';
+  previewType.value = r.document.mediaType || '';
+  previewTitle.value = r.document.title || (KIND_LABELS[r.document.kind || ''] || 'Document');
+  try {
+    const bytes = await openReceived(props.userId, r.id, r.document.sha256 || undefined);
+    if (previewType.value === 'text/plain') previewText.value = new TextDecoder().decode(bytes);
+    else previewUrl.value = URL.createObjectURL(new Blob([bytes as BlobPart], { type: previewType.value }));
+  } catch (e) {
+    previewError.value = e instanceof Error ? e.message : 'The document couldn’t be opened.';
+  } finally {
+    previewing.value = '';
+    previewOpen.value = true;
+  }
 };
 
 // ── "Always handle requests like this…" ────────────────────────────────
 type RuleChoice = 'allow' | 'ask' | 'deny-respond' | 'deny-silent';
 const RULE_OUTCOMES: Array<{ value: RuleChoice; label: string }> = [
   { value: 'allow', label: 'Share automatically' },
+  { value: 'ask', label: 'Always ask me first' },
+  { value: 'deny-respond', label: 'Decline, and tell them' },
+  { value: 'deny-silent', label: 'Ignore, without telling them' }
+];
+const RULE_OUTCOMES_ADD: Array<{ value: RuleChoice; label: string }> = [
+  { value: 'allow', label: 'Accept automatically' },
   { value: 'ask', label: 'Always ask me first' },
   { value: 'deny-respond', label: 'Decline, and tell them' },
   { value: 'deny-silent', label: 'Ignore, without telling them' }
@@ -341,10 +464,12 @@ const ruleCard = (r: RequestRow, choice: RuleChoice): PolicyCard => {
     createdFrom: 'request',
     elements: {
       party: member ? { type: 'group', groupId: r.groupId || '', groupName: r.groupName || '' } : { type: 'anyone' },
+      // A document: an add card (vocabulary v3), never weaker than a verified email.
+      ...(r.document ? { action: 'add' as const } : {}),
       purpose: (r.purpose || 'any') as PolicyCard['elements']['purpose'],
-      scope: r.resource as PolicyCard['elements']['scope'],
+      scope: (r.document ? 'document' : r.resource) as PolicyCard['elements']['scope'],
       filtered: true,
-      signature: member ? 'group-member' : (r.requester?.emailVerified ? 'verified-email' : 'unverified'),
+      signature: member ? 'group-member' : (r.requester?.emailVerified || r.document ? 'verified-email' : 'unverified'),
       payment: (r.gnapPayment?.type || 'none') as PolicyCard['elements']['payment']
     }
   } as PolicyCard;
@@ -422,6 +547,8 @@ const decide = async (r: RequestRow, decision: 'accept' | 'decline' | 'block') =
     if (!res.ok) throw new Error();
     await load();
     emit('changed');
+    // An accepted document goes into the folder now, while the patient is here.
+    if (r.document && decision === 'accept') await deliver(true);
     void syncLog();
   } catch { error.value = "That decision couldn't be saved. Try again."; } finally { busyId.value = ''; }
 };
@@ -531,9 +658,10 @@ onMounted(() => {
   void loadLink();
   void load();
   void loadSent();
-  void syncLog();
-  // While the tab is open: new requests, and the folder log kept in step.
-  timer = setInterval(() => { void load(); void loadSent(); void syncLog(); }, 60000);
+  void deliver().then(() => syncLog());
+  // While the tab is open: new requests, documents into the folder, and the
+  // folder log kept in step.
+  timer = setInterval(() => { void load(); void loadSent(); void deliver().then(() => syncLog()); }, 60000);
 });
 onUnmounted(() => { if (timer) clearInterval(timer); });
 watch(() => props.userId, () => { void loadLink(); void load(); void loadSent(); });
@@ -553,5 +681,9 @@ watch(() => props.userId, () => { void loadLink(); void load(); void loadSent();
 .rp__item { border: 1px solid #e0e0e0; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
 .rp__item--pending { border-color: #ffb74d; background: #fffaf2; }
 .rp__answer { white-space: pre-wrap; word-break: break-word; font-size: 13px; line-height: 1.45; background: #fafafa; border: 1px solid #eee; border-radius: 6px; padding: 8px 10px; margin-top: 4px; }
+.rp__preview { width: min(900px, 94vw); max-width: 94vw; }
+.rp__preview-frame { width: 100%; height: 70vh; border: 1px solid #e0e0e0; border-radius: 6px; }
+.rp__preview-img { max-width: 100%; max-height: 70vh; display: block; margin: 0 auto; }
+.rp__preview-text { white-space: pre-wrap; word-break: break-word; max-height: 70vh; overflow: auto; background: #fafafa; border: 1px solid #eee; border-radius: 6px; padding: 10px 12px; font-size: 13px; }
 .rp__message { white-space: pre-wrap; word-break: break-word; font-size: 13px; background: #fafafa; border-left: 3px solid #e0e0e0; padding: 4px 8px; margin-top: 6px; }
 </style>

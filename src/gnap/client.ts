@@ -4,9 +4,10 @@
  * here, non-extractable, and kept in this browser's IndexedDB: an answer
  * can be collected only from the browser that asked (D13). The request's
  * progress is kept there too, so the requester can close the page and
- * come back.
+ * come back. It also adds a document for the patient (§10.12): the file is
+ * kept here until the patient's MAIA gives an upload token, then sent once.
  */
-import { signRequest, jwkThumbprint, randomToken, interactionHash, type PublicJwk } from './httpsig';
+import { signRequest, jwkThumbprint, randomToken, interactionHash, sha256, type PublicJwk } from './httpsig';
 import { newSealingKeyPair, openSealed, type SealedBox } from './sealedBox';
 
 export const ACCESS_TYPE = 'urn:maia:access:record:v1';
@@ -81,7 +82,11 @@ async function signedCall(key: ClientKey, method: string, url: string, { body = 
 
 // ── A request's saved progress ───────────────────────────────────────────
 
-export type RequestStatus = 'verify' | 'waiting' | 'ready' | 'declined' | 'withdrawn' | 'expired';
+export type RequestStatus = 'verify' | 'waiting' | 'ready' | 'declined' | 'withdrawn' | 'expired'
+  // Adding a document: an upload token is here / the document was accepted / it waits for the patient.
+  | 'upload' | 'delivered' | 'held';
+
+export interface DocumentDescriptor { kind: string; title: string; mediaType: string; size: number; sha256: string }
 
 export interface SavedRequest {
   id: string;
@@ -97,6 +102,8 @@ export interface SavedRequest {
   nextPollAt?: number;
   interact?: { redirect: string; clientNonce: string; serverNonce?: string };
   token?: { value: string; location: string; expiresAt: number };
+  /** Set when this request adds a document rather than asks for information. */
+  document?: DocumentDescriptor;
 }
 
 const requestsKey = (asId: string) => `requests:${asId}`;
@@ -129,7 +136,7 @@ export function applyResponse(r: SavedRequest, res: GnapResult, now = Date.now()
   const b = res.body || {};
   if (b.access_token?.value) {
     return {
-      ...r, status: 'ready', continueToken: undefined,
+      ...r, status: r.document ? 'upload' : 'ready', continueToken: undefined,
       token: { value: b.access_token.value, location: b.access_token.access?.[0]?.locations?.[0], expiresAt: now + (b.access_token.expires_in || 3600) * 1000 }
     };
   }
@@ -195,6 +202,89 @@ export async function startRequest(asId: string, form: RequestForm, returnUrl: s
   };
   const next = applyResponse(saved, res);
   if (!res.body?.interact && next.status === 'verify') next.status = 'waiting';
+  await saveRequest(next);
+  return next;
+}
+
+// ── Adding a document (§10.12) ──────────────────────────────────────────
+
+export interface DocumentForm {
+  name: string;
+  organization: string;
+  purpose: string;
+  message: string;
+  kind: string;
+  title: string;
+}
+
+const uploadKey = (id: string) => `upload:${id}`;
+const hexOf = (bytes: Uint8Array) => [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+
+/**
+ * Offer a document. The file stays in this browser until the patient's MAIA
+ * answers with an upload token (after the email check, for a new sender);
+ * the grant request describes it exactly, SHA-256 included.
+ */
+export async function startDocument(asId: string, form: DocumentForm, file: File, returnUrl: string): Promise<SavedRequest> {
+  const key = await getClientKey();
+  const grantEndpoint = `${location.origin}/gnap/as/${asId}`;
+  const clientNonce = randomToken();
+  const known = await loadInstance(asId);
+  const display = known ? known.displayName : [form.name.trim(), form.organization.trim()].filter(Boolean).join(', ');
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const document: DocumentDescriptor = {
+    kind: form.kind, title: form.title.trim(), mediaType: file.type, size: bytes.length, sha256: hexOf(await sha256(bytes))
+  };
+  const id = randomToken(9);
+  // Kept here across the email check (a page load away).
+  await kvSet(uploadKey(id), new Blob([bytes as BlobPart], { type: file.type }));
+  const res = await signedCall(key, 'POST', grantEndpoint, {
+    body: {
+      access_token: { access: [{ type: ACCESS_TYPE, actions: ['add'], datatypes: ['document'], purpose: form.purpose, document }] },
+      client: known ? known.id : { key: { proof: 'httpsig', jwk: key.jwk }, display: { name: display } },
+      ...(known ? {} : { interact: { start: ['redirect'], finish: { method: 'redirect', uri: returnUrl, nonce: clientNonce } } }),
+      ...(form.message.trim() ? { maia_message: form.message.trim() } : {})
+    }
+  });
+  if (known && res.status === 401 && res.body?.error?.code === 'invalid_client') {
+    await forgetInstance(asId);
+    await kvSet(uploadKey(id), null);
+    const named = form.name.trim() ? form : { ...form, name: known.displayName, organization: '' };
+    return startDocument(asId, named, file, returnUrl);
+  }
+  if (res.status >= 400 && res.body?.error?.code !== 'request_denied') {
+    await kvSet(uploadKey(id), null);
+    throw new Error(res.body?.error?.description || `The document couldn't be offered (HTTP ${res.status})`);
+  }
+  const saved: SavedRequest = {
+    id, asId, displayName: display, grantEndpoint, createdAt: new Date().toISOString(),
+    what: 'document', why: form.purpose, status: 'verify', document,
+    ...(res.body?.interact?.redirect
+      ? { interact: { redirect: res.body.interact.redirect, clientNonce, serverNonce: res.body.interact.finish } }
+      : {})
+  };
+  const next = applyResponse(saved, res);
+  if (!res.body?.interact && next.status === 'verify') next.status = 'waiting';
+  await saveRequest(next);
+  return next;
+}
+
+/** Send the document once, on the upload token the patient's MAIA gave. */
+export async function uploadDocument(r: SavedRequest): Promise<SavedRequest> {
+  if (r.status !== 'upload' || !r.token?.location || !r.document) return r;
+  const blob = await kvGet<Blob | null>(uploadKey(r.id));
+  if (!blob) throw new Error('This browser no longer has the file. Offer the document again.');
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  const key = await getClientKey();
+  const headers: Record<string, string> = { 'content-type': r.document.mediaType, authorization: `GNAP ${r.token.value}` };
+  const sig = await signRequest({ method: 'PUT', url: r.token.location, headers, body: bytes, privateKey: key.privateKey, kid: key.jwk.kid });
+  const res = await fetch(r.token.location, { method: 'PUT', headers: { ...headers, ...sig }, body: bytes as BodyInit, credentials: 'omit', cache: 'no-store' });
+  const out = await res.json().catch(() => ({}));
+  let next: SavedRequest;
+  if (res.status === 201) next = { ...r, status: out.status === 'accepted' ? 'delivered' : 'held', token: undefined };
+  else if (res.status === 403 || (res.status === 401 && r.token.expiresAt < Date.now())) next = { ...r, status: 'declined', token: undefined };
+  else throw new Error(out?.error?.description || `The document couldn't be sent (HTTP ${res.status})`);
+  await kvSet(uploadKey(r.id), null);
   await saveRequest(next);
   return next;
 }

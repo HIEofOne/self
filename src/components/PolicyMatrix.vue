@@ -1,6 +1,6 @@
 <template>
   <div class="pm-matrix">
-    <div v-for="col in POLICY_MATRIX" :key="col.key" class="pm-col">
+    <div v-for="col in columns" :key="col.key" class="pm-col">
       <div class="pm-col-head">
         {{ col.head }}
         <q-tooltip class="pm-tip" max-width="280px" :delay="300">{{ col.headTip }}</q-tooltip>
@@ -43,6 +43,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { POLICY_MATRIX, type MatrixCell, type MatrixColumn, type MatrixContext } from '../utils/policyCards';
+import { useEdition } from '../composables/useEdition';
 
 const props = withDefaults(defineProps<{
   context: MatrixContext;
@@ -58,6 +59,13 @@ const props = withDefaults(defineProps<{
 }>(), { ahCategory: '', ahCategories: undefined, unlock: () => [] });
 
 const emit = defineEmits<{ pick: [key: string, value: string]; 'update:ahCategory': [value: string] }>();
+
+// Adding documents exists only in the Personal AS edition (§10.12): the
+// full edition's table stays as it was.
+const { isPersonalAs } = useEdition();
+const columns = computed(() => (isPersonalAs.value ? POLICY_MATRIX : POLICY_MATRIX.map((col) => (col.key === 'scope'
+  ? { ...col, options: col.options.filter((o) => o.v !== 'document') }
+  : col))));
 
 const DEFAULT_AH = ['Lab Results', 'Clinical Vitals', 'Immunizations', 'Conditions', 'Procedures', 'Allergies'];
 const ahCategoryList = computed(() => (props.ahCategories?.length ? props.ahCategories : DEFAULT_AH));

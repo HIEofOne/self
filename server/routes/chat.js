@@ -6,7 +6,7 @@ import { ChatClient } from '../../lib/chat-client/index.js';
 import { DigitalOceanProvider } from '../../lib/chat-client/providers/digitalocean.js';
 import { getOrCreateAgentApiKey, recreateAgentApiKey } from '../utils/agent-helper.js';
 import { ensureUserAgent, ensureSecondaryAgent } from './auth.js';
-import { policySentence, POLICY_SCOPES, POLICY_PURPOSES } from './policies.js';
+import { policySentence, POLICY_SCOPES, READ_SCOPES, POLICY_PURPOSES } from './policies.js';
 import { isVerified as emailTokenVerified } from '../emailVerification.js';
 import { chargeCredits, ADVISOR_QUESTION_CREDITS } from '../credits.js';
 import { isFeatureEnabled } from '../edition.js';
@@ -96,6 +96,8 @@ async function buildPolicyAdvisorContext(cloudant, userDoc) {
     ` "elements":{"party":{"type":"anyone"}|{"type":"group","groupId":"<their group id>","groupName":"<name>"},`,
     ` "purpose":one of ${JSON.stringify(POLICY_PURPOSES)},`,
     ` "scope":one of ${JSON.stringify(POLICY_SCOPES)}, "ahCategory":"<only when scope is ah-category>",`,
+    ' "action":"add" ONLY with scope "document" (someone adding a document, such as a radiology report, to the',
+    '  patient\'s folder) and then signature "verified-email" or stronger; omit "action" for every other card,',
     ' "filtered":true,"signature":"unverified"|"verified-email"|"group-member"|"doximity"|"verified-by-me",',
     ' "payment":"none"|"spam-deposit"|"notification-deposit"|"sharing-payment"}}',
     'Propose at most a few cards at a time, each with a one-sentence reason OUTSIDE the fence.',
@@ -753,7 +755,7 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient, app
       'only when a member accepts). Attaching one can satisfy member cards that',
       'require it; a card requiring no payment matches any request. One payment',
       'covers the whole request regardless of member count.',
-      `Scopes a request may name: ${JSON.stringify(POLICY_SCOPES.filter((s) => s !== 'ah-category'))}.`,
+      `Scopes a request may name: ${JSON.stringify(READ_SCOPES.filter((s) => s !== 'ah-category'))}.`,
       `Purposes: ${JSON.stringify(POLICY_PURPOSES.filter((p) => p !== 'any'))}.`,
       'Broader scopes are HARDER to get; narrow, well-explained requests with a clear',
       'purpose do best. A short personal message helps members trust the request.',

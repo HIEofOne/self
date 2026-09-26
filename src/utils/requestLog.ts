@@ -6,13 +6,16 @@
  * MAIA is open with folder permission (sign-in, and the Requests tab). Events
  * are deduplicated by id, and a Web Lock keeps two tabs from writing at once.
  * No artifact is ever in the log — only who asked, what, why and the outcome.
+ * For a document someone added, the log keeps what they described (kind,
+ * title, SHA-256) and the file it was saved as in Received/.
  */
 import { reconnectLocalFolder, getLocalFolderStatus } from './localFolder';
 
 export interface RequestEvent {
   id: string;
   at: string;
-  type: 'received' | 'shared' | 'declined' | 'ignored' | 'withdrawn' | 'stopped' | 'forgotten';
+  type: 'received' | 'shared' | 'declined' | 'ignored' | 'withdrawn' | 'stopped' | 'forgotten'
+    | 'accepted' | 'document_received' | 'expired';
   requestId: string;
   route: string | null;
   groupName: string | null;
@@ -22,6 +25,9 @@ export interface RequestEvent {
   message?: string;
   by?: 'rule' | 'you';
   payment?: string;
+  document?: { kind: string; title: string; mediaType: string; size: number; sha256: string };
+  grant?: string | null;
+  fileName?: string | null;
 }
 
 export type LogSyncResult = 'written' | 'unchanged' | 'no-folder' | 'no-permission' | 'failed';
@@ -55,7 +61,12 @@ export const toJsonl = (events: RequestEvent[]) => events.map((e) => JSON.string
 const esc = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string));
 const WHAT: Record<string, string> = {
   'notification-only': 'A note that they would like to be in touch', 'meds-allergies': 'Current medications and allergies',
-  'patient-summary': 'Patient Summary', 'not-sensitive': 'Record except sensitive categories', everything: 'Whole record', 'ah-category': 'Apple Health data'
+  'patient-summary': 'Patient Summary', 'not-sensitive': 'Record except sensitive categories', everything: 'Whole record', 'ah-category': 'Apple Health data',
+  document: 'To add a document'
+};
+const KIND: Record<string, string> = {
+  'radiology-report': 'Radiology report', 'lab-report': 'Lab report', 'visit-note': 'Visit note',
+  'discharge-summary': 'Discharge summary', imaging: 'Image', other: 'Document'
 };
 const OUTCOME: Record<string, (e: RequestEvent) => string> = {
   received: () => 'Received',
@@ -64,7 +75,10 @@ const OUTCOME: Record<string, (e: RequestEvent) => string> = {
   ignored: () => 'Ignored',
   withdrawn: () => 'Withdrawn by the requester',
   stopped: () => 'Sharing stopped',
-  forgotten: () => 'Requester forgotten'
+  forgotten: () => 'Requester forgotten',
+  accepted: (e) => (e.by === 'rule' ? 'Accepted by your rule' : 'Accepted by you'),
+  document_received: (e) => `Saved in your folder${e.fileName ? `: Received/${e.fileName}` : ''}`,
+  expired: () => 'Deleted after 90 days, never saved'
 };
 const when = (iso: string) => { try { return new Date(iso).toLocaleString(); } catch { return iso; } };
 const who = (e: RequestEvent) => (e.requester.member
@@ -84,7 +98,7 @@ export function renderLogHtml(events: RequestEvent[], generatedAt = new Date().t
       return `<tr>
   <td>${esc(when(first.at))}</td>
   <td>${esc(who(first))}<div class="m">${esc(via)}</div></td>
-  <td>${esc(WHAT[first.what] || first.what)}<div class="m">for ${esc(String(first.why).replace(/-/g, ' '))} use</div></td>
+  <td>${esc(WHAT[first.what] || first.what)}${first.document ? `<div>${esc(KIND[first.document.kind] || 'Document')}${first.document.title ? ` “${esc(first.document.title)}”` : ''}</div>` : ''}<div class="m">for ${esc(String(first.why).replace(/-/g, ' '))} use</div></td>
   <td>${list.map((e) => `<div>${esc(OUTCOME[e.type]?.(e) || e.type)} <span class="m">${esc(when(e.at))}</span></div>`).join('')}</td>
   <td>${first.message ? esc(first.message) : ''}</td>
 </tr>`;
@@ -99,7 +113,7 @@ export function renderLogHtml(events: RequestEvent[], generatedAt = new Date().t
   th { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: #586675; } .m { color: #586675; font-size: 12px; }
 </style></head><body>
 <h1>MAIA Request Log</h1>
-<p>Every request to your MAIA and what happened to it. Written by MAIA from Requests/requests.jsonl on ${esc(when(generatedAt))}. No health information is in this log.</p>
+<p>Every request to your MAIA and what happened to it. Written by MAIA from Requests/requests.jsonl on ${esc(when(generatedAt))}. No health information from your records is in this log; documents others added are saved in Received/.</p>
 <table><thead><tr><th>Received</th><th>Who</th><th>What</th><th>What happened</th><th>Their message</th></tr></thead>
 <tbody>
 ${rows || '<tr><td colspan="5">No requests yet.</td></tr>'}

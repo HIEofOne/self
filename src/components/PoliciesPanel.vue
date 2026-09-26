@@ -680,6 +680,7 @@ const pickSim = (key: string, value: string) => {
 };
 const toRequest = (partyKind: string, purpose: Purpose, scope: Scope, signature: Signature, payment: Payment): PolicyRequest => ({
   party: partyKind.startsWith('group:') ? { type: 'group', groupId: partyKind.slice(6) } : { type: 'anyone' },
+  ...(scope === 'document' ? { action: 'add' as const } : {}),
   purpose, scope, signature, payment
 });
 const simPartyKind = computed(() =>
@@ -756,6 +757,10 @@ const loadSharePreview = async () => {
     const scope = simSel.scope;
     if (scope === 'notification-only') {
       sharePreviewText.value = 'No record data is shared — the requester’s message is delivered to you, and you decide whether to reply.';
+      return;
+    }
+    if (scope === 'document') {
+      sharePreviewText.value = 'Nothing leaves your MAIA. The document is accepted and saved in your MAIA folder, in Received, the next time you open MAIA.';
       return;
     }
     if (scope === 'meds-allergies') {

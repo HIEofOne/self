@@ -10,6 +10,7 @@ import {
 import { applyPseudonymMapping } from '../privacyFilter.js';
 import { medsAllergiesArtifact } from '../utils/summary-sections.js';
 import { isAcceptableClientKey, publicJwk } from './httpsig.js';
+import { parseDocumentDescriptor } from './documents.js';
 
 /** MAIA's access type (§10.3, D8). */
 export const ACCESS_TYPE = 'urn:maia:access:record:v1';
@@ -64,8 +65,13 @@ export function parseGrantRequest(body) {
   const scope = a.datatypes[0];
   if (!Array.isArray(a.actions) || a.actions.length !== 1) throw new GnapError('invalid_request', 'Exactly one action is supported');
   const action = a.actions[0];
-  if (action === 'add') throw new GnapError('invalid_request', 'Adding documents is not supported yet');
-  if (action === 'notify' ? scope !== 'notification-only' : (action !== 'read' || scope === 'notification-only')) {
+  // Adding a document (§10.12): "add" pairs with the datatype "document"
+  // and carries a descriptor of exactly what will be uploaded.
+  let document = null;
+  if (action === 'add' || scope === 'document') {
+    if (action !== 'add' || scope !== 'document') throw new GnapError('invalid_request', 'Use actions ["add"] with datatypes ["document"]');
+    document = parseDocumentDescriptor(a.document);
+  } else if (action === 'notify' ? scope !== 'notification-only' : (action !== 'read' || scope === 'notification-only')) {
     throw new GnapError('invalid_request', 'Use actions ["notify"] for notification-only and ["read"] otherwise');
   }
   if (!POLICY_PURPOSES.includes(a.purpose)) throw new GnapError('invalid_request', `purpose must be one of: ${POLICY_PURPOSES.join(', ')}`);
@@ -115,7 +121,10 @@ export function parseGrantRequest(body) {
 
   const message = typeof body.maia_message === 'string' ? body.maia_message.trim().slice(0, MAX_MESSAGE) : '';
   return {
-    access: { type: ACCESS_TYPE, actions: [action], datatypes: [scope], purpose: a.purpose, ...(ahCategory ? { ahCategory } : {}) },
+    access: {
+      type: ACCESS_TYPE, actions: [action], datatypes: [scope], purpose: a.purpose,
+      ...(ahCategory ? { ahCategory } : {}), ...(document ? { document } : {})
+    },
     clientKey: clientInstance ? null : publicJwk(client.key.jwk),
     clientInstance,
     displayName,
@@ -124,9 +133,12 @@ export function parseGrantRequest(body) {
   };
 }
 
+export const isAddAccess = (access) => access?.actions?.[0] === 'add';
+
 /** The evaluator input (I-30: every route builds the same shape). */
 export const toPolicyRequest = (access, { verifiedEmail = false } = {}) => ({
   party: { type: 'anyone' },
+  ...(isAddAccess(access) ? { action: 'add' } : {}),
   purpose: access.purpose,
   scope: access.datatypes[0],
   ...(access.ahCategory ? { ahCategory: access.ahCategory } : {}),
@@ -159,6 +171,8 @@ export function decideGrant(userDoc, policyRequest) {
   if (d.outcome === 'deny') {
     return { outcome: d.decidedBy?.denyMode === 'respond' ? 'deny-respond' : 'deny-silent', policyId: d.decidedBy?.id || null };
   }
+  // Adding has no artifact to check: allow means "accept it" (§10.12).
+  if (d.outcome === 'allow' && policyRequest.action === 'add') return { outcome: 'allow', policyId: d.decidedBy?.id || null };
   if (d.outcome === 'allow') {
     if (!artifactFor(userDoc, policyRequest.scope)) return { outcome: 'ask', policyId: null, reason: 'no-artifact' };
     return { outcome: 'allow', policyId: d.decidedBy?.id || null };
@@ -179,6 +193,21 @@ export function mayStillRead(userDoc, grant) {
   if (d.outcome === 'deny') return false;
   if (grant.decision?.by === 'patient') return true;
   return opts.asState === 'active' && d.outcome === 'allow';
+}
+
+/**
+ * At the resource server, as a document arrives on an add or offer token:
+ * 'accept' (the cards still allow it, sharing on), 'hold' (the patient
+ * decides), or 'refuse' (a card denies it now, or it arrived on an offer
+ * token the patient has since been denied by a card). §15.4: invocation
+ * re-checks policy.
+ */
+export function uploadVerdict(userDoc, grant, tokenKind) {
+  const opts = evaluationOptionsFor(userDoc);
+  const d = evaluatePolicies(userDoc?.sharingPolicies || [], grant.policyRequest, { ...opts, asState: 'active' });
+  if (d.outcome === 'deny') return 'refuse';
+  if (tokenKind === 'add' && opts.asState === 'active' && d.outcome === 'allow') return 'accept';
+  return 'hold';
 }
 
 /** Wait before the next poll: 60 s, doubling to an hour. */
