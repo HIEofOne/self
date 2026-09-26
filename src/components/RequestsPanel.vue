@@ -91,7 +91,7 @@
             <q-tooltip>They can't read it again from now on.</q-tooltip>
           </q-btn>
         </div>
-        <div v-if="r.route && r.requester?.emailVerified && !r.forgottenAt && r.status !== 'pending'" class="q-mt-xs">
+        <div v-if="r.route === 'gnap-direct' && r.requester?.emailVerified && !r.forgottenAt && r.status !== 'pending'" class="q-mt-xs">
           <q-btn dense flat no-caps size="sm" color="grey-8" icon="person_off" label="Forget this requester" :disable="busyId === r.id" @click="forget(r)">
             <q-tooltip>Their next request will need a new email check.</q-tooltip>
           </q-btn>

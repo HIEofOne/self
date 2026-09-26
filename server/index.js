@@ -42,6 +42,7 @@ import setupFileRoutes from './routes/files.js';
 import { getUserBucketSize } from './routes/files.js';
 import setupGroupRoutes from './routes/groups.js';
 import setupGnapRoutes from './routes/gnap.js';
+import setupGnapGroupRoutes from './routes/gnap-group.js';
 import { sweepExpiredGnapPayments } from './gnap/payments.js';
 import setupPolicyRoutes from './routes/policies.js';
 import setupEditionRoutes from './routes/edition.js';
@@ -1635,12 +1636,17 @@ const sendPlainEmail = async (to, subject, text) => {
   await resend.emails.send({ from, to, subject, text });
   return true;
 };
-const { runDailyGroupMaintenance, runHourlyMailPull } = setupGroupRoutes(app, cloudant, auditLog, {
-  sendEmail: sendPlainEmail
+// GNAP hooks the group routes call once both are set up: a member's AS
+// receives copies of group requests pulled from the relay (§10.9).
+const gnapHooks = {};
+const { runDailyGroupMaintenance, runHourlyMailPull, pullSameHostMembers } = setupGroupRoutes(app, cloudant, auditLog, {
+  sendEmail: sendPlainEmail, gnapHooks
 });
 // GNAP: the personal AS's only external API in the Personal AS edition
-// (group_requests.md §10, P4). Its paths don't exist in the full edition.
-setupGnapRoutes(app, { cloudant, auditLog, sendEmail: sendPlainEmail });
+// (group_requests.md §10, P4–P6). Its paths don't exist in the full edition.
+// The group routes go first: gnap.js ends with a catch-all OPTIONS /gnap/*.
+setupGnapGroupRoutes(app, { cloudant, auditLog, sendEmail: sendPlainEmail, pullNow: pullSameHostMembers });
+Object.assign(gnapHooks, setupGnapRoutes(app, { cloudant, auditLog, sendEmail: sendPlainEmail }));
 
 // Groups daily maintenance (Groups.md §6.1/§6.3/§7.3): renew 24h membership
 // credentials, reconcile registry-side revocation, pull relay mail, and
@@ -1650,9 +1656,12 @@ setupGnapRoutes(app, { cloudant, auditLog, sendEmail: sendPlainEmail });
 const GROUP_MAINTENANCE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 // GNAP (personal-as): credits held on direct requests that expired
 // unanswered are settled (a spam deposit forfeited, a sharing payment returned).
+// Group answers a member's AS couldn't post to the group are tried again.
 const sweepGnapPayments = () => (isFeatureEnabled('gnap') ? sweepExpiredGnapPayments(cloudant) : Promise.resolve(0))
   .then((n) => { if (n) console.log(`[gnap-cron] settled ${n} expired request payment(s)`); })
-  .catch((e) => console.warn('[gnap-cron] payment sweep failed:', e?.message || e));
+  .then(() => (isFeatureEnabled('gnap') ? gnapHooks.retryPendingGroupAnswers?.() : 0))
+  .then((n) => { if (n) console.log(`[gnap-cron] delivered ${n} pending group answer(s)`); })
+  .catch((e) => console.warn('[gnap-cron] sweep failed:', e?.message || e));
 setTimeout(() => {
   runDailyGroupMaintenance().catch((e) => console.warn('[groups-cron] initial run failed:', e?.message || e));
   void sweepGnapPayments();

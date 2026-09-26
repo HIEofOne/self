@@ -7,6 +7,7 @@
  * come back.
  */
 import { signRequest, jwkThumbprint, randomToken, interactionHash, type PublicJwk } from './httpsig';
+import { newSealingKeyPair, openSealed, type SealedBox } from './sealedBox';
 
 export const ACCESS_TYPE = 'urn:maia:access:record:v1';
 
@@ -249,3 +250,167 @@ export async function readAnswer(r: SavedRequest): Promise<Answer> {
   }
   return res.body as Answer;
 }
+
+// ── Group requests (§10.9) ───────────────────────────────────────────────
+// One request to every member of a group. The group verifies the email and
+// carries the request; each member's MAIA decides and answers sealed to this
+// browser's X25519 key, which never leaves it. An answer that says "ready"
+// holds a continuation at that member's MAIA, which this key alone can use.
+
+
+export interface SealingKey { privateKey: CryptoKey; jwk: { kty: 'OKP'; crv: 'X25519'; x: string } }
+
+/** This browser's sealing key, made on first use (private half non-extractable). */
+export async function getSealingKey(): Promise<SealingKey> {
+  const saved = await kvGet<SealingKey>('sealing-key');
+  if (saved?.privateKey && saved.jwk?.x) return saved;
+  let pair: CryptoKeyPair;
+  try {
+    pair = await newSealingKeyPair();
+  } catch {
+    throw new UnsupportedBrowserError('This browser cannot make the key a group request needs. Use a current Chrome, Edge, Safari or Firefox.');
+  }
+  const pub = await crypto.subtle.exportKey('jwk', pair.publicKey);
+  const key: SealingKey = { privateKey: pair.privateKey, jwk: { kty: 'OKP', crv: 'X25519', x: String(pub.x) } };
+  await kvSet('sealing-key', key);
+  return key;
+}
+
+export interface GroupAnswer {
+  id: string;
+  status: 'ready' | 'unreadable';
+  token?: { value: string; location: string; expiresAt: number };
+  error?: string;
+}
+
+export interface GroupRequest {
+  id: string;
+  groupId: string;
+  grantEndpoint: string;
+  createdAt: string;
+  what: string;
+  why: string;
+  status: 'verify' | 'sent' | 'withdrawn' | 'expired';
+  continueUri?: string;
+  continueToken?: string;
+  nextPollAt?: number;
+  interact?: { redirect: string; clientNonce: string; serverNonce?: string };
+  counts?: { delivered: number; shared: number; declined: number };
+  answers: GroupAnswer[];
+}
+
+const groupKey = (groupId: string) => `group-requests:${groupId}`;
+export const loadGroupRequests = async (groupId: string) => (await kvGet<GroupRequest[]>(groupKey(groupId))) || [];
+export async function saveGroupRequest(r: GroupRequest) {
+  const plain: GroupRequest = JSON.parse(JSON.stringify(r));
+  const all = await loadGroupRequests(plain.groupId);
+  const i = all.findIndex((x) => x.id === plain.id);
+  if (i >= 0) all[i] = plain; else all.push(plain);
+  await kvSet(groupKey(plain.groupId), all);
+}
+
+export async function startGroupRequest(groupId: string, form: RequestForm, returnUrl: string): Promise<GroupRequest> {
+  const key = await getClientKey();
+  const seal = await getSealingKey();
+  const grantEndpoint = `${location.origin}/gnap/group/${encodeURIComponent(groupId)}`;
+  const clientNonce = randomToken();
+  const display = [form.name.trim(), form.organization.trim()].filter(Boolean).join(', ');
+  const res = await signedCall(key, 'POST', grantEndpoint, {
+    body: {
+      access_token: { access: [{ type: ACCESS_TYPE, actions: [form.datatype === 'notification-only' ? 'notify' : 'read'], datatypes: [form.datatype], purpose: form.purpose }] },
+      client: { key: { proof: 'httpsig', jwk: key.jwk }, display: { name: display } },
+      interact: { start: ['redirect'], finish: { method: 'redirect', uri: returnUrl, nonce: clientNonce } },
+      maia_seal_jwk: seal.jwk,
+      ...(form.message.trim() ? { maia_message: form.message.trim() } : {})
+    }
+  });
+  if (res.status >= 400 || !res.body?.continue) throw new Error(res.body?.error?.description || `The request failed (HTTP ${res.status})`);
+  const r: GroupRequest = {
+    id: randomToken(9), groupId, grantEndpoint, createdAt: new Date().toISOString(),
+    what: form.datatype, why: form.purpose, status: 'verify',
+    continueUri: res.body.continue.uri, continueToken: res.body.continue.access_token?.value,
+    nextPollAt: Date.now() + (res.body.continue.wait || 30) * 1000,
+    interact: { redirect: res.body.interact?.redirect, clientNonce, serverNonce: res.body.interact?.finish },
+    answers: []
+  };
+  await saveGroupRequest(r);
+  return r;
+}
+
+/** Open new sealed answers and, for each "ready" one, trade its continuation
+ *  for a key-bound token at that member's MAIA right away. */
+async function collectAnswers(r: GroupRequest, boxes: Array<{ id: string; box: SealedBox }>): Promise<GroupAnswer[]> {
+  const known = new Set(r.answers.map((a) => a.id));
+  const fresh = boxes.filter((b) => !known.has(b.id));
+  if (!fresh.length) return r.answers;
+  const seal = await getSealingKey();
+  const key = await getClientKey();
+  const out = [...r.answers];
+  for (const b of fresh) {
+    try {
+      const msg = JSON.parse(await openSealed(seal.privateKey, b.box));
+      const uri = String(msg?.continue?.uri || '');
+      // Only an https continuation (http on this machine, for development).
+      if (msg?.kind !== 'ready' || !/^https:\/\/|^http:\/\/(localhost|127\.0\.0\.1)[:/]/.test(uri)) throw new Error('not a ready answer');
+      const res = await signedCall(key, 'POST', uri, { token: msg.continue.access_token?.value });
+      const at = res.body?.access_token;
+      if (!at?.value) throw new Error(res.body?.error?.description || 'no token');
+      out.push({ id: b.id, status: 'ready', token: { value: at.value, location: at.access?.[0]?.locations?.[0], expiresAt: Date.now() + (at.expires_in || 3600) * 1000 } });
+    } catch (e) {
+      out.push({ id: b.id, status: 'unreadable', error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+  return out;
+}
+
+async function applyGroupResponse(r: GroupRequest, res: GnapResult): Promise<GroupRequest> {
+  const b = res.body || {};
+  if (b.continue) {
+    const g = b.maia_group || {};
+    return {
+      ...r,
+      status: g.state === 'sent' ? 'sent' : r.status,
+      continueUri: b.continue.uri,
+      continueToken: b.continue.access_token?.value,
+      nextPollAt: Date.now() + (b.continue.wait || 60) * 1000,
+      counts: g.counts || r.counts,
+      answers: await collectAnswers(r, Array.isArray(g.answers) ? g.answers : [])
+    };
+  }
+  if (b.error?.code === 'invalid_continuation') return { ...r, status: 'expired', continueToken: undefined };
+  return r; // too_fast and transient errors: keep waiting
+}
+
+export async function finishGroupInteraction(r: GroupRequest, interactRef: string, hash: string): Promise<GroupRequest> {
+  if (!r.interact?.serverNonce || !r.continueUri || !r.continueToken) throw new Error('This request is not waiting for an email check');
+  const expected = await interactionHash(r.interact.clientNonce, r.interact.serverNonce, interactRef, r.grantEndpoint);
+  if (expected !== hash) throw new Error('The email check came back altered. Make the request again.');
+  const key = await getClientKey();
+  const res = await signedCall(key, 'POST', r.continueUri, { token: r.continueToken, body: { interact_ref: interactRef } });
+  const next = await applyGroupResponse({ ...r, interact: undefined }, res);
+  await saveGroupRequest(next).catch(() => {});
+  return next;
+}
+
+export async function pollGroup(r: GroupRequest): Promise<GroupRequest> {
+  if (!r.continueUri || !r.continueToken) return r;
+  const key = await getClientKey();
+  const res = await signedCall(key, 'POST', r.continueUri, { token: r.continueToken });
+  const next = await applyGroupResponse(r, res);
+  await saveGroupRequest(next).catch(() => {});
+  return next;
+}
+
+export async function withdrawGroup(r: GroupRequest): Promise<GroupRequest> {
+  if (r.continueUri && r.continueToken) {
+    const key = await getClientKey();
+    await signedCall(key, 'DELETE', r.continueUri, { token: r.continueToken }).catch(() => null);
+  }
+  const next: GroupRequest = { ...r, status: 'withdrawn', continueToken: undefined };
+  await saveGroupRequest(next);
+  return next;
+}
+
+/** Read one member's answer at their MAIA. */
+export const readGroupAnswer = (groupId: string, a: GroupAnswer): Promise<Answer> =>
+  readAnswer({ id: a.id, asId: groupId, grantEndpoint: '', createdAt: '', what: '', why: '', status: 'ready', token: a.token } as SavedRequest);

@@ -8,6 +8,8 @@ import { describe, it, expect } from 'vitest';
 import { signRequest, jwkThumbprint, interactionHash } from '../src/gnap/httpsig';
 import { verifyGnapRequest, createNonceCache } from '../server/gnap/httpsig.js';
 import { interactionHash as serverInteractionHash } from '../server/gnap/grants.js';
+import { newSealingKeyPair, openSealed } from '../src/gnap/sealedBox';
+import { sealTo, isX25519PublicJwk } from '../server/utils/sealed-box.js';
 
 const makeKey = async () => {
   const pair = await crypto.subtle.generateKey({ name: 'Ed25519' }, false, ['sign', 'verify']) as CryptoKeyPair;
@@ -62,5 +64,18 @@ describe('browser signatures verify on the server', () => {
   it('the interaction hash matches the server\'s', async () => {
     const args = ['client-nonce', 'server-nonce', 'ref-1', 'https://test.agropper.xyz/gnap/as/abc'] as const;
     expect(await interactionHash(...args)).toBe(serverInteractionHash(...args));
+  });
+});
+
+describe('sealed answers open in the browser', () => {
+  it('a box the server seals to a browser-made X25519 key opens with that key only', async () => {
+    const pair = await newSealingKeyPair();
+    const pub = await crypto.subtle.exportKey('jwk', pair.publicKey);
+    const jwk = { kty: 'OKP', crv: 'X25519', x: String(pub.x) };
+    expect(isX25519PublicJwk(jwk)).toBe(true);
+    const box = sealTo(jwk, JSON.stringify({ kind: 'ready', continue: { uri: 'https://h.example/gnap/continue/abc' } }));
+    expect(JSON.parse(await openSealed(pair.privateKey, box)).kind).toBe('ready');
+    const other = await newSealingKeyPair();
+    await expect(openSealed(other.privateKey, box)).rejects.toBeTruthy();
   });
 });

@@ -114,22 +114,7 @@ import {
   startRequest, finishInteraction, poll, withdraw, readAnswer, loadRequests, saveRequest, getClientKey,
   loadInstance, forgetInstance, UnsupportedBrowserError, type SavedRequest, type Answer, type SavedInstance
 } from '../gnap/client';
-
-const WHAT = [
-  { value: 'patient-summary', label: 'Their Patient Summary' },
-  { value: 'meds-allergies', label: 'Their current medications and allergies' },
-  { value: 'notification-only', label: "Just let them know I'd like to be in touch" }
-];
-const WHY = [
-  { value: 'clinical', label: 'Clinical care' },
-  { value: 'peer-support', label: 'Peer support' },
-  { value: 'research', label: 'Research' },
-  { value: 'public-health', label: 'Public health' }
-];
-const whatLabel = (v: string) => ({
-  'patient-summary': 'their Patient Summary', 'meds-allergies': 'their current medications and allergies',
-  'notification-only': 'a note that you would like to be in touch'
-} as Record<string, string>)[v] || v;
+import { WHAT, WHY, whatLabel, answerToHtml } from '../gnap/requestForm';
 
 type Phase = 'loading' | 'gone' | 'unsupported' | 'form' | SavedRequest['status'];
 
@@ -176,12 +161,7 @@ const loadAnswer = async (r: SavedRequest) => {
   try { answer.value = await readAnswer(r); } catch (e) { answerError.value = e instanceof Error ? e.message : String(e); }
 };
 
-const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string));
-// The summary is Markdown-ish text. Escape everything first, then allow bold
-// and headings only: nothing from the answer is ever markup.
-const answerHtml = computed(() => escapeHtml(answer.value?.text || '')
-  .replace(/^#{1,4}\s+(.+)$/gm, '<strong>$1</strong>')
-  .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>'));
+const answerHtml = computed(() => answerToHtml(answer.value?.text || ''));
 
 const send = async () => {
   if (!known.value && !form.name.trim()) return;
