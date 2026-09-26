@@ -13,6 +13,7 @@ import { serve } from '../helpers/serve.js';
 import setupGroupRoutes from '../../server/routes/groups.js';
 import setupGnapRoutes from '../../server/routes/gnap.js';
 import setupGnapGroupRoutes from '../../server/routes/gnap-group.js';
+import setupGnapMemberRoutes from '../../server/routes/gnap-member.js';
 import { signRequest } from '../../server/gnap/httpsig.js';
 import { ACCESS_TYPE } from '../../server/gnap/grants.js';
 import { openFrom } from '../../server/utils/sealed-box.js';
@@ -50,7 +51,7 @@ const card = (id, outcome, elements = {}, extra = {}) => ({
 });
 
 const GROUP = 'trustee-test';
-let server, cloudant, emails, baseUrl, hooks, pullSameHostMembers;
+let server, cloudant, emails, baseUrl, hooks, pullSameHostMembers, pollSentRequests;
 const user = (id) => cloudant.db('maia_users').get(id);
 
 beforeEach(async () => {
@@ -86,6 +87,7 @@ beforeEach(async () => {
   ({ pullSameHostMembers } = setupGroupRoutes(app, cloudant, { logEvent: () => {} }, { sendEmail, gnapHooks }));
   setupGnapGroupRoutes(app, { cloudant, sendEmail, pullNow: async () => {}, publicBaseUrl: () => baseUrl });
   hooks = Object.assign(gnapHooks, setupGnapRoutes(app, { cloudant, sendEmail, publicBaseUrl: () => baseUrl }));
+  ({ pollSentRequests } = setupGnapMemberRoutes(app, { cloudant, sendEmail, publicBaseUrl: () => baseUrl }));
 });
 
 // The requester: a signing key and a sealing key.
@@ -223,5 +225,67 @@ describe('a request to a whole group', () => {
     const polled = await askGroup(newRequester(), { email: 'payer@example.com', payment: 'spam-deposit' });
     expect(polled.body.maia_group.counts.shared).toBe(1); // pat01's card wanted the deposit
     expect((await getAccount(cloudant, 'payer@example.com')).balance).toBe(20);
+  });
+});
+
+describe('member to member (P6b)', () => {
+  const GROUP_CARD = (outcome = 'allow') => card('pol_group', outcome, {
+    party: { type: 'group', groupId: GROUP, groupName: 'Trustee Test' }, purpose: 'peer-support', signature: 'group-member'
+  });
+  const send = (userId, body) => request(server).post('/api/gnap/member-requests').set('x-test-user', userId)
+    .send({ userId, groupId: GROUP, datatype: 'patient-summary', purpose: 'peer-support', ...body });
+
+  it("a member asks the group; another member's group card shares; the asker reads it", async () => {
+    user('pat02').sharingPolicies = [GROUP_CARD()];
+    const sent = await send('pat01', { message: 'Anyone else on metformin?' });
+    expect(sent.status).toBe(200);
+    expect(sent.body.request.counts.delivered).toBe(1); // everyone but the asker
+    await pullSameHostMembers(GROUP, ['pw_pat02']);
+
+    // pat02's record of it: from a member, by alias, decided by the group card.
+    const got = await request(server).get('/api/user-groups/requests?userId=pat02').set('x-test-user', 'pat02');
+    expect(got.body.requests[0]).toMatchObject({ status: 'accepted', fromOutsider: false, fromAlias: 'pat01', route: 'gnap-group' });
+
+    const id = sent.body.request.id;
+    const refreshed = await request(server).post(`/api/gnap/member-requests/${id}/refresh`).set('x-test-user', 'pat01').send({ userId: 'pat01' });
+    expect(refreshed.body.request.counts).toMatchObject({ delivered: 1, shared: 1 });
+    const aid = refreshed.body.request.answers[0].id;
+    const read = await request(server).post(`/api/gnap/member-requests/${id}/answers/${aid}/read`).set('x-test-user', 'pat01').send({ userId: 'pat01' });
+    expect(read.body.answer.text).toContain('Ash11 Moor42');
+    // The asker's host keeps no copy of the answer.
+    expect(JSON.stringify([...cloudant.db('maia_gnap').values()])).not.toContain('Ash11 Moor42');
+  });
+
+  it('asks without a group card: the other member is asked, and the asker is told when they share', async () => {
+    const sent = await send('pat01', {});
+    await pullSameHostMembers(GROUP, ['pw_pat02']);
+    const got = await request(server).get('/api/user-groups/requests?userId=pat02').set('x-test-user', 'pat02');
+    const pending = got.body.requests.find((r) => r.status === 'pending');
+    await request(server).post(`/api/user-groups/requests/${pending.id}/decision`).set('x-test-user', 'pat02').send({ userId: 'pat02', decision: 'accept' });
+    // The hourly check finds the answer and emails the asker (no content).
+    const sr = cloudant.db('maia_gnap').get(`sr_${sent.body.request.id}`);
+    sr.nextPollAt = 0;
+    expect(await pollSentRequests()).toBe(1);
+    const told = emails.filter((e) => e.to === 'pat01@example.com' && /answered your request/.test(e.subject));
+    expect(told).toHaveLength(1);
+    expect(told[0].text).not.toMatch(/Metformin|Ash11/);
+  });
+
+  it('maia_to must name another active member; a key the group does not know is an outsider', async () => {
+    expect((await send('pat01', { to: 'pw_pat01' })).status).toBe(400);
+    expect((await send('pat01', { to: 'pw_nobody' })).status).toBe(400);
+    const one = await send('pat01', { to: 'pw_pat02', toAlias: 'pat02' });
+    expect(one.body.request).toMatchObject({ counts: { delivered: 1 }, toAlias: 'pat02' });
+    // An outsider's key, without the email check, is refused.
+    const c = newRequester();
+    expect((await groupRequest(c, { interact: undefined })).status).toBe(400);
+  });
+
+  it('a sender the member blocked is dropped', async () => {
+    user('pat02').groupMemberships[0].blockedSenders = ['pw_pat01'];
+    await send('pat01', {});
+    await pullSameHostMembers(GROUP, ['pw_pat02']);
+    const got = await request(server).get('/api/user-groups/requests?userId=pat02').set('x-test-user', 'pat02');
+    expect(got.body.requests).toHaveLength(0);
   });
 });

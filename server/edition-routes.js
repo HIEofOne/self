@@ -194,6 +194,12 @@ export const ROUTE_FEATURES = Object.freeze({
   'POST /gnap/group-interact/:ix/verify': 'gnap',
   'GET /gnap/group-interact/:ix/credits': 'gnap',
   'POST /gnap/group-interact/:ix/finish': 'gnap',
+  // P6b: a member's MAIA asks its group (routes/gnap-member.js)
+  'POST /api/gnap/member-requests': 'requests-out',
+  'GET /api/gnap/member-requests': 'requests-out',
+  'POST /api/gnap/member-requests/:id/refresh': 'requests-out',
+  'POST /api/gnap/member-requests/:id/answers/:aid/read': 'requests-out',
+  'POST /api/gnap/member-requests/:id/withdraw': 'requests-out',
   'GET /api/gnap/request-link': 'gnap',
   'POST /api/gnap/request-link/rotate': 'gnap',
   'POST /api/user-policies/:id/confirm': 'policies',

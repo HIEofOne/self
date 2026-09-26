@@ -13,6 +13,12 @@
  *
  * Once the email is verified, a copy of the exact signed request goes to each
  * member's relay inbox with the group's signed attestation (server/gnap/group.js).
+ *
+ * A MEMBER asks through the same endpoint (§10.9 "member to member"): its
+ * MAIA signs with the member's per-group key, which the group knows. No email
+ * check: the group attests `group-member` and who is asking (pairwise id and
+ * alias), and sends the request to every other member, or to one (`maia_to`).
+ * Answers are sealed to the member's per-group X25519 key.
  * Each member's AS decides with its own cards and answers sealed to the
  * requester's X25519 key: the group stores boxes it can't open, and counts.
  * Personal AS edition only (feature `gnap`).
@@ -36,6 +42,7 @@ const MAX_BODY = 64 * 1024;
 const MAX_STORED_ANSWERS = 500;
 const REQUESTS_PER_GROUP_PER_DAY = 100;
 const REQUESTS_PER_EMAIL_PER_DAY = 5;
+const REQUESTS_PER_MEMBER_PER_DAY = 20;
 const GRANTS_PER_IP_PER_10MIN = 30;
 const NOTIFY_QUIET_MS = 30 * 60 * 1000;
 const FIRST_GROUP_WAIT_S = 30;
@@ -101,17 +108,24 @@ export default function setupGnapGroupRoutes(app, {
 
   const fanOut = async (bcast) => {
     const gb = await getDoc(cloudant, `gb_${bcast}`);
-    if (!gb || gb.state !== 'pending' || !gb.requester?.emailVerified) return 0;
+    const memberRoute = gb?.route === 'member';
+    if (!gb || gb.state !== 'pending' || !(memberRoute || gb.requester?.emailVerified)) return 0;
     const group = await loadGroup(gb.groupId);
     if (!group?.signingKey?.privateKeyJwk) return 0;
     const attestation = signAttestation(group.signingKey.privateKeyJwk, {
       groupId: gb.groupId, bcast, receivedAt: gb.createdAt, expiresAt: gb.expiresAt,
       targetUri: gb.signed.targetUri, bodySha256: bodySha256(gb.signed.body),
       requester: gb.requester, payment: gb.payment?.type || null,
-      answerUri: `${groupEndpoint(gb.groupId)}/answer/${bcast}`
+      answerUri: `${groupEndpoint(gb.groupId)}/answer/${bcast}`,
+      // Who is asking, when a member asks: the group vouches for it.
+      route: memberRoute ? 'member' : 'outsider',
+      ...(memberRoute ? { from: gb.from, signature: 'group-member' } : {})
     });
     const copy = JSON.stringify({ maiaType: GNAP_COPY, v: 1, bcast, request: gb.signed, attestation });
-    const members = activeMembers(group);
+    // A member's request goes to every OTHER member, or to the one it names.
+    const members = activeMembers(group).filter((m) => (memberRoute
+      ? m.pairwiseId !== gb.from?.pairwiseId && (!gb.to || m.pairwiseId === gb.to)
+      : true));
     const t = now();
     let delivered = 0;
     for (const m of members) {
@@ -162,20 +176,38 @@ export default function setupGnapGroupRoutes(app, {
       if (rateLimited(req.ip || 'unknown')) throw new GnapError('too_many_attempts', 'Too many requests', 429);
       const parsed = parseGrantRequest(req.body);
       if (!parsed.clientKey) throw new GnapError('invalid_client', 'A group request presents its key, not an instance', 400);
-      if (!parsed.interact?.finish) throw new GnapError('invalid_request', 'A group request needs interact (redirect start and finish): the email check');
       if (!isX25519PublicJwk(req.body?.maia_seal_jwk)) throw new GnapError('invalid_request', 'maia_seal_jwk must be a public X25519 JWK');
+      // A member asking? Its key is one the group registered for an active member.
+      const sender = (group.members || []).find((m) => m.status === 'active' && m.signingPublicKeyJwk?.x === parsed.clientKey.x);
+      if (sender) {
+        if (req.body.maia_seal_jwk.x !== sender.encryptionPublicKeyJwk?.x) {
+          throw new GnapError('invalid_request', "maia_seal_jwk must be the member's registered sealing key");
+        }
+        const to = req.body.maia_to;
+        if (to !== undefined && (typeof to !== 'string' || to === sender.pairwiseId
+          || !activeMembers(group).some((m) => m.pairwiseId === to))) {
+          throw new GnapError('invalid_request', 'maia_to must name another active member');
+        }
+      } else if (!parsed.interact?.finish) {
+        throw new GnapError('invalid_request', 'A group request needs interact (redirect start and finish): the email check');
+      }
       const sig = checkSignature(req, parsed.clientKey);
       if (activeMembers(group).length === 0) throw new GnapError('invalid_request', 'This group has no members who can receive requests yet', 409);
       if (!(await countToday(`gg_${hashToken(group._id)}`, REQUESTS_PER_GROUP_PER_DAY))) {
         throw new GnapError('too_many_attempts', 'Too many requests to this group today', 429);
       }
+      if (sender && !(await countToday(`gm_${hashToken(`${group._id}|${sender.pairwiseId}`)}`, REQUESTS_PER_MEMBER_PER_DAY))) {
+        throw new GnapError('too_many_attempts', 'Too many requests from this member today', 429);
+      }
 
       const bcast = newHandle();
-      const ix = newHandle();
+      const ix = sender ? null : newHandle();
       const t = now();
       const value = newTokenValue();
       const gb = {
         _id: `gb_${bcast}`, type: 'gnap_group_request', groupId: group._id, groupName: group.name,
+        route: sender ? 'member' : 'outsider',
+        ...(sender ? { from: { pairwiseId: sender.pairwiseId, alias: sender.alias || null }, to: req.body.maia_to || null } : {}),
         clientKey: parsed.clientKey, keyThumbprint: sig.thumbprint, sealJwk: req.body.maia_seal_jwk,
         access: parsed.access, displayName: parsed.displayName, message: parsed.message,
         requester: { email: null, emailVerified: false },
@@ -185,14 +217,22 @@ export default function setupGnapGroupRoutes(app, {
           headers: Object.fromEntries(SIGNED_HEADERS.map((h) => [h, lowerHeaders(req)[h]]).filter(([, v]) => v !== undefined)),
           body: raw.toString('utf8')
         },
-        interact: { ix, finish: parsed.interact.finish, serverNonce: randomBytes(12).toString('base64url'), ref: null, verifiedAt: null },
+        interact: sender ? null : { ix, finish: parsed.interact.finish, serverNonce: randomBytes(12).toString('base64url'), ref: null, verifiedAt: null },
         state: 'pending', counts: { delivered: 0, shared: 0, declined: 0 }, answers: [],
         continueTokenHash: hashToken(value), polls: 0, nextPollAt: 0,
         createdAt: iso(t), expiresAt: iso(t + GRANT_TTL_MS)
       };
-      await saveNew({ _id: `gix_${ix}`, type: 'gnap_group_ix', bcast });
+      if (ix) await saveNew({ _id: `gix_${ix}`, type: 'gnap_group_ix', bcast });
       await saveNew(gb);
-      log('gnap_group_request_received', { groupId: group._id, bcast, datatype: parsed.access.datatypes[0], purpose: parsed.access.purpose });
+      log('gnap_group_request_received', { groupId: group._id, bcast, route: gb.route, datatype: parsed.access.datatypes[0], purpose: parsed.access.purpose });
+      if (sender) {
+        // A member's request goes out now: the group already knows who asks.
+        const delivered = await fanOut(bcast);
+        return res.json({
+          continue: { access_token: { value }, uri: `${groupEndpoint(group._id)}/continue/${bcast}`, wait: FIRST_GROUP_WAIT_S },
+          maia_group: { name: group.name, state: 'sent', counts: { delivered, shared: 0, declined: 0 }, answers: [] }
+        });
+      }
       return res.json({
         continue: { access_token: { value }, uri: `${groupEndpoint(group._id)}/continue/${bcast}`, wait: FIRST_GROUP_WAIT_S },
         interact: { redirect: `${base()}/gnap/group-interact/${ix}`, finish: gb.interact.serverNonce }

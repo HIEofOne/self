@@ -44,6 +44,7 @@
       <div class="row items-center q-mb-sm">
         <div class="text-subtitle2">Requests</div>
         <q-space />
+        <q-btn v-if="groups.length" dense flat no-caps size="sm" color="primary" icon="forum" label="Ask your group" class="q-mr-xs" @click="openAsk" />
         <q-btn dense flat round size="sm" icon="refresh" :loading="loading" @click="load"><q-tooltip>Refresh</q-tooltip></q-btn>
       </div>
       <div v-if="!loading && !requests.length" class="text-caption text-grey-7">
@@ -57,10 +58,11 @@
         </div>
         <div class="q-mt-xs">
           <strong>{{ r.requester?.name || r.fromAlias || 'Someone' }}</strong>
-          <span class="text-caption text-grey-7"> (name not verified)</span>
+          <span v-if="r.fromOutsider === false" class="text-caption text-grey-7"> (a member of {{ r.groupName }})</span>
+          <span v-else class="text-caption text-grey-7"> (name not verified)</span>
           asks for <strong>{{ scopeLabel(r.resource) }}</strong> for <strong>{{ purposeLabel(r.purpose) }}</strong>.
         </div>
-        <div class="text-caption q-mt-xs">
+        <div v-if="r.fromOutsider !== false" class="text-caption q-mt-xs">
           <template v-if="r.requester?.email && r.requester?.emailVerified">
             <q-icon name="verified" color="green-7" size="14px" /> Email verified: {{ r.requester.email }}
           </template>
@@ -99,6 +101,65 @@
       </div>
       <div v-if="error" class="text-negative text-caption q-mt-sm">{{ error }}</div>
     </div>
+
+    <!-- Requests this member sent to their groups (§10.9, §8.4 "Sent") -->
+    <div v-if="sent.length" class="rp__list">
+      <div class="text-subtitle2 q-mb-sm">Sent</div>
+      <div v-for="s in sent" :key="s.id" class="rp__item">
+        <div class="row items-center no-wrap">
+          <q-badge :color="s.state === 'sent' ? 'primary' : 'grey-6'" :label="s.state === 'sent' ? 'Open' : s.state === 'withdrawn' ? 'Withdrawn' : 'Closed'" />
+          <span class="text-caption text-grey-7 q-ml-sm">{{ when(s.createdAt) }} · {{ s.groupName }}</span>
+        </div>
+        <div class="q-mt-xs">
+          You asked <strong>{{ s.to ? (s.toAlias || 'one member') : 'everyone' }}</strong> in {{ s.groupName }}
+          for <strong>{{ scopeLabel(s.what) }}</strong> for <strong>{{ purposeLabel(s.why) }}</strong>.
+        </div>
+        <div class="text-caption text-grey-7 q-mt-xs">
+          Reached {{ s.counts.delivered }} · {{ s.counts.shared }} shared · {{ s.counts.declined }} declined
+        </div>
+        <div v-if="s.message" class="rp__message">{{ s.message }}</div>
+        <div v-for="(a, i) in s.answers" :key="a.id" class="q-mt-sm">
+          <div class="row items-center">
+            <span class="text-caption">Answer {{ i + 1 }}</span>
+            <q-btn v-if="a.status === 'ready' && !answerTexts[a.id]?.text" dense flat no-caps size="sm" color="primary" label="Read"
+                   :loading="answerTexts[a.id]?.loading" @click="readAnswer(s, a.id)" class="q-ml-sm" />
+            <span v-if="a.status !== 'ready'" class="text-caption text-grey-6 q-ml-sm">couldn't be opened</span>
+          </div>
+          <div v-if="answerTexts[a.id]?.error" class="text-caption text-grey-7">{{ answerTexts[a.id].error }}</div>
+          <div v-if="answerTexts[a.id]?.text !== undefined" class="rp__answer" v-html="answerToHtml(answerTexts[a.id].text || '')"></div>
+        </div>
+        <div v-if="s.state === 'sent'" class="q-mt-sm q-gutter-sm">
+          <q-btn dense flat no-caps size="sm" color="primary" icon="refresh" label="Check for answers" :loading="busyId === s.id" @click="refreshSent(s)" />
+          <q-btn dense flat no-caps size="sm" color="grey-8" label="Withdraw" :disable="busyId === s.id" @click="withdrawSent(s)" />
+        </div>
+      </div>
+      <div class="text-caption text-grey-7">
+        Answers stay at each member's MAIA: Read fetches one from there, and it can be read again for an hour.
+      </div>
+    </div>
+
+    <q-dialog v-model="askOpen">
+      <q-card style="min-width: 360px; max-width: 520px">
+        <q-card-section>
+          <div class="text-h6">Ask your group</div>
+          <div class="text-caption text-grey-7">
+            Your MAIA sends this to every other member. Each member's own rules decide:
+            they may share, ask the member first, or decline. They see your group alias, not your name.
+          </div>
+        </q-card-section>
+        <q-card-section class="q-pt-none q-gutter-sm">
+          <q-select v-model="ask.groupId" :options="groups" option-value="groupId" option-label="groupName" emit-value map-options dense outlined label="Group" />
+          <q-select v-model="ask.datatype" :options="WHAT" emit-value map-options dense outlined label="What you're asking for" />
+          <q-select v-model="ask.purpose" :options="WHY" emit-value map-options dense outlined label="What it is for" />
+          <q-input v-model="ask.message" dense outlined autogrow type="textarea" maxlength="1000" label="Message (optional)" />
+          <div v-if="askError" class="text-negative text-caption">{{ askError }}</div>
+        </q-card-section>
+        <q-card-actions align="right">
+          <q-btn flat no-caps label="Cancel" v-close-popup />
+          <q-btn unelevated no-caps color="primary" label="Send" :loading="asking" :disable="!ask.groupId" @click="sendAsk" />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
   </div>
 </template>
 
@@ -109,9 +170,10 @@
  * its decision. Share / Decline / Ignore decide a request the rules left
  * to the patient; Stop sharing revokes what was shared.
  */
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue';
 import QRCode from 'qrcode';
 import { SCOPE_OPTIONS, PURPOSE_OPTIONS } from '../utils/policyCards';
+import { WHAT, WHY, answerToHtml } from '../gnap/requestForm';
 
 const props = defineProps<{ userId: string }>();
 const emit = defineEmits<{ changed: [] }>();
@@ -127,6 +189,7 @@ interface RequestRow {
   receivedAt: string;
   status: string;
   route?: string | null;
+  fromOutsider?: boolean;
   recognized?: boolean;
   forgottenAt?: string | null;
   gnapPayment?: { type: string; amount: number } | null;
@@ -242,14 +305,92 @@ const forget = async (r: RequestRow) => {
   } catch { error.value = "That requester couldn't be forgotten. Try again."; } finally { busyId.value = ''; }
 };
 
+// ── Requests this member sent to their groups ──────────────────────────
+interface SentRequest {
+  id: string; groupId: string; groupName: string; to: string | null; toAlias: string | null;
+  what: string; why: string; message: string; state: string; createdAt: string;
+  counts: { delivered: number; shared: number; declined: number };
+  answers: Array<{ id: string; status: string }>;
+}
+const sent = ref<SentRequest[]>([]);
+const groups = ref<Array<{ groupId: string; groupName: string }>>([]);
+const answerTexts = reactive<Record<string, { text?: string; error?: string; loading?: boolean }>>({});
+const askOpen = ref(false);
+const asking = ref(false);
+const askError = ref('');
+const ask = reactive({ groupId: '', datatype: 'patient-summary', purpose: 'peer-support', message: '' });
+
+const loadSent = async () => {
+  if (!props.userId) return;
+  try {
+    const r = await fetch(`/api/gnap/member-requests?${q()}`, { credentials: 'include' });
+    const d = await r.json();
+    if (r.ok && d.success) { sent.value = d.sent || []; groups.value = d.groups || []; }
+  } catch { /* the Sent list stays as it was */ }
+};
+const replaceSent = (next: SentRequest) => { sent.value = sent.value.map((x) => (x.id === next.id ? next : x)); };
+const openAsk = () => {
+  askError.value = '';
+  ask.groupId = groups.value[0]?.groupId || '';
+  ask.message = '';
+  askOpen.value = true;
+};
+const sendAsk = async () => {
+  asking.value = true;
+  askError.value = '';
+  try {
+    const r = await post('/api/gnap/member-requests', { ...ask });
+    const d = await r.json();
+    if (!r.ok || !d.success) throw new Error(d.error || `HTTP ${r.status}`);
+    askOpen.value = false;
+    await loadSent();
+  } catch (e) {
+    askError.value = e instanceof Error && e.message !== 'TOO_MANY_TODAY' ? `Not sent: ${e.message}` : 'Not sent: you have asked a lot today. Try again tomorrow.';
+  } finally { asking.value = false; }
+};
+const refreshSent = async (s: SentRequest) => {
+  busyId.value = s.id;
+  try {
+    const r = await post(`/api/gnap/member-requests/${encodeURIComponent(s.id)}/refresh`);
+    const d = await r.json();
+    if (r.ok && d.success) replaceSent(d.request);
+  } finally { busyId.value = ''; }
+};
+const withdrawSent = async (s: SentRequest) => {
+  busyId.value = s.id;
+  try {
+    const r = await post(`/api/gnap/member-requests/${encodeURIComponent(s.id)}/withdraw`);
+    const d = await r.json();
+    if (r.ok && d.success) replaceSent(d.request);
+  } finally { busyId.value = ''; }
+};
+const READ_ERRORS: Record<string, string> = {
+  EXPIRED: 'This answer was readable for an hour after you first opened it.',
+  STOPPED: 'The member stopped sharing this.',
+  DECLINED: 'The member declined after all.'
+};
+const readAnswer = async (s: SentRequest, answerId: string) => {
+  answerTexts[answerId] = { loading: true };
+  try {
+    const r = await post(`/api/gnap/member-requests/${encodeURIComponent(s.id)}/answers/${encodeURIComponent(answerId)}/read`);
+    const d = await r.json();
+    answerTexts[answerId] = r.ok && d.success
+      ? { text: d.answer.text }
+      : { error: READ_ERRORS[d.error] || "This answer couldn't be read." };
+  } catch {
+    answerTexts[answerId] = { error: "This answer couldn't be read." };
+  }
+};
+
 let timer: ReturnType<typeof setInterval> | null = null;
 onMounted(() => {
   void loadLink();
   void load();
-  timer = setInterval(load, 60000);
+  void loadSent();
+  timer = setInterval(() => { void load(); void loadSent(); }, 60000);
 });
 onUnmounted(() => { if (timer) clearInterval(timer); });
-watch(() => props.userId, () => { void loadLink(); void load(); });
+watch(() => props.userId, () => { void loadLink(); void load(); void loadSent(); });
 </script>
 
 <style scoped>
@@ -259,5 +400,6 @@ watch(() => props.userId, () => { void loadLink(); void load(); });
 .rp__url { background: #f5f5f5; border-radius: 4px; padding: 4px 8px; font-size: 12px; word-break: break-all; }
 .rp__item { border: 1px solid #e0e0e0; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
 .rp__item--pending { border-color: #ffb74d; background: #fffaf2; }
+.rp__answer { white-space: pre-wrap; word-break: break-word; font-size: 13px; line-height: 1.45; background: #fafafa; border: 1px solid #eee; border-radius: 6px; padding: 8px 10px; margin-top: 4px; }
 .rp__message { white-space: pre-wrap; word-break: break-word; font-size: 13px; background: #fafafa; border-left: 3px solid #e0e0e0; padding: 4px 8px; margin-top: 6px; }
 </style>
