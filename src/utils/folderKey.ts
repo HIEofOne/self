@@ -127,6 +127,19 @@ async function ensure(userId: string): Promise<FolderKeyResult> {
   }
 }
 
+/** An account is deleted: this browser forgets its folder key. */
+export async function forgetFolderKey(userId: string): Promise<void> {
+  try {
+    const db = await openDb();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE, 'readwrite');
+      tx.objectStore(STORE).delete(userId);
+      tx.oncomplete = () => { db.close(); resolve(); };
+      tx.onerror = () => { db.close(); reject(tx.error); };
+    });
+  } catch { /* nothing to forget */ }
+}
+
 /** The private folder key, for opening a sealed document (null if this
  *  browser and the folder don't have it). */
 export async function getFolderPrivateKey(userId: string): Promise<CryptoKey | null> {

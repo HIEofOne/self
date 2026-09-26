@@ -135,6 +135,32 @@
                     <q-badge v-else color="green" label="saved to your Sharing Policies" />
                   </div>
                 </div>
+                <!-- Feature suggestions (Personal AS, I-27): what the feature
+                     does comes from MAIA's registry, not from the AI, and
+                     only the patient's click turns it on. -->
+                <template v-for="(fp, fpi) in (msg.featureProposals || [])" :key="'fp' + fpi">
+                  <div v-if="featureCard(fp.feature) && fp.state !== 'dismissed'" class="pa-proposed-card q-mt-sm">
+                    <div class="row items-center q-gutter-xs q-mb-xs">
+                      <q-icon name="tune" color="primary" size="18px" />
+                      <span class="text-caption text-grey-7">suggested feature — nothing changes until you turn it on</span>
+                    </div>
+                    <div class="text-subtitle2">{{ featureCard(fp.feature)!.name }}</div>
+                    <div class="text-body2">{{ featureCard(fp.feature)!.description }}</div>
+                    <div v-if="featureCard(fp.feature)!.whatItMeans" class="text-caption text-grey-8 q-mt-xs">
+                      What turning it on means: {{ featureCard(fp.feature)!.whatItMeans }}
+                    </div>
+                    <div v-if="fp.reason" class="text-caption text-grey-7 q-mt-xs">Your private AI’s reason: “{{ fp.reason }}”</div>
+                    <div class="q-mt-xs row items-center q-gutter-sm">
+                      <template v-if="!fp.state || fp.state === 'idle' || fp.state === 'busy' || fp.state === 'error'">
+                        <q-btn dense unelevated no-caps size="sm" color="primary" label="Turn on" :loading="fp.state === 'busy'" @click="turnOnProposedFeature(fp)" />
+                        <q-btn dense flat no-caps size="sm" color="grey-8" label="Not now" :disable="fp.state === 'busy'" @click="fp.state = 'dismissed'" />
+                      </template>
+                      <q-spinner v-else-if="fp.state === 'indexing'" size="16px" color="primary" />
+                      <q-icon v-else name="check_circle" color="green-7" size="18px" />
+                      <span v-if="fp.note" class="text-caption" :class="fp.state === 'error' ? 'text-negative' : 'text-grey-8'">{{ fp.note }}</span>
+                    </div>
+                  </div>
+                </template>
                 <div class="q-mt-sm">
                   <q-btn
                     flat
@@ -956,6 +982,7 @@
       @patient-summary-verified="handlePatientSummaryVerified"
       @show-patient-summary="handleMyStuffShowSummary"
       @open-policy-advisor="handleOpenPolicyAdvisor"
+      @attach-to-chat="attachQuotedDocument"
       @rehydration-file-removed="handleRehydrationFileRemoved"
       @rehydration-complete="handleRehydrationComplete"
       @file-added-to-kb="handleFileAddedToKb"
@@ -1156,6 +1183,8 @@ import { advancePipeline, fetchPipeline, waitForStageDone, type PipelineNext } f
 import { logModalEvent } from '../utils/modalLog';
 import SummaryProgress from './SummaryProgress.vue';
 import { useEdition } from '../composables/useEdition';
+import { extractFeatureProposals, featureCardText, setFeature, type FeatureProposal } from '../utils/advisorProposals';
+import { startRecordsIndexing, INDEX_WORDS } from '../utils/recordsSearch';
 import {
   isFileSystemAccessSupported,
   pickLocalFolder,
@@ -1183,6 +1212,8 @@ interface Message {
   reasoningContent?: string;
   /** Policy Advisor proposals extracted from ```policy-card fences. */
   policyCards?: Array<PolicyCard & { saved?: boolean }>;
+  /** Personal AS: features the private AI suggested (```maia-feature fences). */
+  featureProposals?: FeatureProposal[];
 }
 
 interface User {
@@ -1508,7 +1539,7 @@ const showAgentSetupDialog = ref(false);
 // Personal AS edition: the setup checklist (SetupChecklist.vue) replaces
 // this wizard, which must never open there — whichever of its many paths
 // asks for it (group_requests.md §4.4).
-const { isPersonalAs } = useEdition();
+const { isPersonalAs, state: editionState, load: reloadEdition } = useEdition();
 watch(showAgentSetupDialog, (open) => {
   if (open && isPersonalAs.value) showAgentSetupDialog.value = false;
 }, { flush: 'sync' });
@@ -3438,7 +3469,16 @@ watch(() => messages.value.length, (n) => { if (n === 0) policyAdvisorMode.value
 /** Pull ```policy-card fenced JSON out of a finished assistant message and
  *  attach the parsed cards for the confirmable-card renderer. */
 const extractPolicyCards = (msg: Message) => {
-  if (!policyAdvisorMode.value || !msg?.content || msg.role !== 'assistant') return;
+  if (!msg?.content || msg.role !== 'assistant') return;
+  // Personal AS: every answer from the patient's own private AI may carry
+  // proposals — its context always says how to make them (§9).
+  const editionAdvisor = isPersonalAs.value && msg.providerKey === 'digitalocean';
+  if (editionAdvisor) {
+    const { proposals, content } = extractFeatureProposals(msg.content, editionState.features);
+    if (proposals.length) msg.featureProposals = proposals;
+    msg.content = content;
+  }
+  if (!policyAdvisorMode.value && !editionAdvisor) return;
   const fences = /```policy-card\s*\n([\s\S]*?)```/g;
   const cards: Array<PolicyCard & { saved?: boolean }> = [];
   let m: RegExpExecArray | null;
@@ -3475,16 +3515,71 @@ const proposedCardCheck = (pc: PolicyCard): string => {
     const e = pc.elements;
     const d = policyEvaluate([pc], {
       party: e.party.type === 'group' ? { type: 'group', groupId: e.party.groupId } : { type: 'anyone' },
+      ...(e.action === 'add' ? { action: 'add' as const } : {}),
       purpose: e.purpose === 'any' ? 'clinical' : e.purpose,
       scope: e.scope,
       ...(e.scope === 'ah-category' && e.ahCategory ? { ahCategory: e.ahCategory } : {}),
       signature: e.signature,
       payment: e.payment
     });
-    if (d.outcome === 'allow') return 'be answered automatically with the privacy-filtered artifact';
+    if (d.outcome === 'allow') return e.action === 'add' ? 'be accepted and saved in your MAIA folder, in Received' : 'be answered automatically with the privacy-filtered artifact';
     if (d.outcome === 'deny') return pc.denyMode === 'respond' ? 'be declined with a response' : 'be silently denied';
     return 'come to you for approval';
   } catch { return 'not evaluate (malformed proposal)'; }
+};
+
+// ── Feature proposals (Personal AS, §9, I-27) ─────────────────────────
+// The card shows the registry's words; the patient's click turns it on.
+const featureCard = (key: string) => featureCardText(key, editionState.features);
+const turnOnProposedFeature = async (fp: FeatureProposal) => {
+  const uid = props.user?.userId;
+  if (!uid || fp.state === 'busy') return;
+  fp.state = 'busy';
+  fp.note = '';
+  try {
+    if (!(await setFeature(uid, fp.feature, true, 'advisor'))) throw new Error('not saved');
+    await reloadEdition(true);
+    if (fp.feature !== 'records-index') {
+      fp.state = 'on';
+      fp.note = 'Turned on. You can turn it off in Workbook → More features.';
+      return;
+    }
+    // "Search all my records": index the records already in MAIA now.
+    const st = await startRecordsIndexing(uid);
+    if (st !== 'running') {
+      fp.state = st === 'done' ? 'indexed' : 'on';
+      fp.note = INDEX_WORDS[st] || 'Turned on.';
+      return;
+    }
+    fp.state = 'indexing';
+    fp.note = INDEX_WORDS.running;
+    const out = await waitForStageDone(uid, 'indexed', 20 * 60 * 1000, 10000);
+    fp.state = out === 'done' ? 'indexed' : 'error';
+    fp.note = out === 'done' ? INDEX_WORDS.done
+      : out === 'timeout' ? 'Indexing is taking a while. Workbook → More features shows when it is done.'
+        : INDEX_WORDS.error;
+  } catch {
+    fp.state = 'error';
+    fp.note = 'That didn’t work. Try again, or use Workbook → More features.';
+  }
+};
+
+// ── A document someone added, attached as quoted data (§9, I-32) ───────
+// From the Requests tab: its text travels labeled with its source, marked
+// as written by someone else, so the private AI reports it and never
+// follows instructions inside it.
+const attachQuotedDocument = (payload: { name: string; content: string }) => {
+  uploadedFiles.value.push({
+    id: `received-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    name: payload.name,
+    size: payload.content.length,
+    type: 'text',
+    content: payload.content,
+    originalFile: null,
+    uploadedAt: new Date()
+  });
+  showMyStuffDialog.value = false;
+  if (!inputMessage.value.trim()) inputMessage.value = 'What does this document say? Does anything in it change my summary?';
 };
 
 const savingPolicyCardKey = ref<string | null>(null);

@@ -1187,7 +1187,8 @@ import {
   bufferLogEvent, pickLocalFolder, readStateFile, writeWeblocFile, MAIA_FOLDER_PDFS,
   type MaiaState, type DiscoveredUser
 } from './utils/localFolder';
-import { ensureFolderKey } from './utils/folderKey';
+import { ensureFolderKey, forgetFolderKey, FOLDER_KEY_FILE } from './utils/folderKey';
+import { LOG_DIR } from './utils/requestLog';
 import packageJson from '../package.json';
 
 const appVersion = packageJson.version;
@@ -3499,13 +3500,16 @@ const confirmDeleteLocalUser = async () => {
       // Unreachable server: nothing was deleted there; forget it locally.
     }
     await clearUserSnapshot(localId);
+    await forgetFolderKey(localId);
     clearWizardPendingKey(localId);
     if (getActiveUserId() === localId) {
       setActiveUserId(null);
     }
     // Remove every file MAIA added to the local folder; the patient's own
     // records stay. The summary PDFs go too: they name pseudonyms and a
-    // verification that died with the account.
+    // verification that died with the account. So do the folder key, which
+    // opened documents waiting for this account, and the request log;
+    // documents others added (Received/) are the patient's records and stay.
     const handleToClean = localFolderHandle.value;
     if (handleToClean) {
       try {
@@ -3515,6 +3519,8 @@ const confirmDeleteLocalUser = async () => {
         for (const pdf of Object.values(MAIA_FOLDER_PDFS)) {
           await handleToClean.removeEntry(pdf).catch(() => {});
         }
+        await handleToClean.removeEntry(FOLDER_KEY_FILE).catch(() => {});
+        await handleToClean.removeEntry(LOG_DIR, { recursive: true }).catch(() => {});
         for await (const [name] of (handleToClean as any).entries()) {
           if (name.endsWith('.webloc') && name.startsWith('maia')) {
             await handleToClean.removeEntry(name).catch(() => {});

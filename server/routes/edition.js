@@ -8,7 +8,9 @@
  * POST /api/user-features — the user turns an unlockable feature on or
  * off. Only the user's own click writes this (I-27): the private AI can
  * suggest a feature, never turn it on. Turning a feature off hides it
- * again; it deletes nothing.
+ * again; it deletes nothing. `onFeatureChanged` lets the host follow a
+ * change (records-index: the private AI stops, or resumes, searching an
+ * index that already exists); it never blocks or undoes the user's choice.
  */
 import { describeEdition, featureMode } from '../edition.js';
 import { requestedUserId } from '../utils/api-guard.js';
@@ -16,7 +18,7 @@ import { testEmailAddress } from '../emailVerification.js';
 
 const USERS_DB = 'maia_users';
 
-export default function setupEditionRoutes(app, cloudant, auditLog = null) {
+export default function setupEditionRoutes(app, cloudant, auditLog = null, { onFeatureChanged = null } = {}) {
   app.get('/api/edition', async (req, res) => {
     let userDoc = null;
     const userId = req.session?.userId;
@@ -69,6 +71,11 @@ export default function setupEditionRoutes(app, cloudant, auditLog = null) {
           ip: req.ip,
           details: { feature, via }
         });
+        if (typeof onFeatureChanged === 'function') {
+          try { await onFeatureChanged({ userId, feature, on, userDoc: doc }); } catch (e) {
+            console.warn(`[edition] follow-up for ${feature} failed:`, e?.message || e);
+          }
+        }
         return res.json({ success: true, ...describeEdition(doc) });
       }
       return res.status(409).json({ success: false, error: 'CONFLICT' });

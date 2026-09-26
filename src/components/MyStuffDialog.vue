@@ -1149,7 +1149,12 @@
 
           <!-- Requests Tab (Personal AS edition, group_requests.md §8.4) -->
           <q-tab-panel name="requests" class="q-pa-none" style="overflow-y: auto;">
-            <RequestsPanel :userId="userId" @changed="refreshGroupsAlert" />
+            <RequestsPanel :userId="userId" @changed="refreshGroupsAlert" @ask-ai="emit('attach-to-chat', $event)" />
+          </q-tab-panel>
+
+          <!-- More features (Personal AS edition, §4.2): what the patient can turn on -->
+          <q-tab-panel name="features" class="q-pa-none" style="overflow-y: auto;">
+            <FeaturesPanel :userId="userId" />
           </q-tab-panel>
 
           <!-- Privacy Filter Tab -->
@@ -2108,6 +2113,7 @@ import Lists from './Lists.vue';
 import GroupsPanel from './GroupsPanel.vue';
 import PoliciesPanel from './PoliciesPanel.vue';
 import RequestsPanel from './RequestsPanel.vue';
+import FeaturesPanel from './FeaturesPanel.vue';
 import { syncRequestLog } from '../utils/requestLog';
 import { ensureFolderKey } from '../utils/folderKey';
 import { deliverReceived } from '../utils/received';
@@ -2260,6 +2266,8 @@ const emit = defineEmits<{
   'open-peer-thread': [payload: { groupId: string; peerId: string; alias: string | null; groupName: string }];
   // Sharing Policies tab → chat-based Policy Advisor (ChatInterface owns the chat).
   'open-policy-advisor': [];
+  // Requests tab → a document someone added, attached to the chat as quoted data.
+  'attach-to-chat': [payload: { name: string; content: string }];
   'provisioning-event': [data: Record<string, any>];
 }>();
 
@@ -2551,6 +2559,8 @@ const tabVisible = (name: string) => (name === 'lists'
   ? !isPersonalAs.value || has('lists-full')
   : name === 'requests'
     ? isPersonalAs.value && has('requests')
+  : name === 'features'
+    ? isPersonalAs.value
   : name === 'chats' && isPersonalAs.value && !((props.savedChatCount || 0) > 0)
     ? false
     : !TAB_FEATURES[name] || has(TAB_FEATURES[name]));
@@ -2570,7 +2580,8 @@ const railTabs = computed(() => [
   { name: 'requests',   icon: 'move_to_inbox', label: 'Requests',       alertCount: groupsPendingRequests.value, alertOutline: false, infoAlert: false, infoTitle: '' },
   { name: 'privacy',    icon: 'privacy_tip',  label: 'Privacy Filter',  alertCount: 0, alertOutline: false, infoAlert: false,             infoTitle: '' },
   { name: 'diary',      icon: 'book',         label: 'Patient Diary',   alertCount: 0, alertOutline: false, infoAlert: false,             infoTitle: '' },
-  { name: 'references', icon: 'link',         label: 'References',      alertCount: 0, alertOutline: false, infoAlert: false,             infoTitle: '' }
+  { name: 'references', icon: 'link',         label: 'References',      alertCount: 0, alertOutline: false, infoAlert: false,             infoTitle: '' },
+  { name: 'features',   icon: 'tune',         label: 'More features',   alertCount: 0, alertOutline: false, infoAlert: false,             infoTitle: '' }
 ].filter((t) => tabVisible(t.name)));
 
 // Click a rail icon: open the content panel AND jump to that section.

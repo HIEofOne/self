@@ -1,6 +1,6 @@
 # MAIA Request Security and Privacy Design
 
-- **Date:** 2026-08-07 (revised 2026-08-09: NPI removed from the signature vocabulary, v1.5.173; vocabulary editions + card stamping added, §15.6, v1.5.174; revised 2026-09-25: the Personal AS edition's GNAP request path, §6.3, and invariants I-24…I-31; revised 2026-09-26: documents others add, §6.3, and I-32)
+- **Date:** 2026-08-07 (revised 2026-08-09: NPI removed from the signature vocabulary, v1.5.173; vocabulary editions + card stamping added, §15.6, v1.5.174; revised 2026-09-25: the Personal AS edition's GNAP request path, §6.3, and invariants I-24…I-31; revised 2026-09-26: documents others add, §6.3, and I-32; the edition's private AI context, §9)
 - **Status:** Comprehensive review — implemented behavior through **v1.5.169** (PRs #264–#301), plus the approved roadmap (VC/UCAN artifacts → federation → GNAP/MCP → external resource servers).
 - **Baseline:** `Groups_Design.md` (2026-07-05/06), the verbatim design conversation this document traces against.
 - **Audience:** MAIA maintainers; prospective **group administrators** evaluating whether to sponsor a group; **privacy and security experts** validating the design and its implementation.
@@ -278,6 +278,10 @@ The standing rule from the baseline, kept absolute: **AI output never grants acc
 
 1. **Autonomous responses** contain no AI at decision time — the deterministic evaluator decides; AI is not consulted (baseline §4's "on the permit path there is no AI", implemented literally).
 2. **Patient-side policy advisor**: a private AI that reviews the patient's own cards, request log, and record profile, and *drafts* cards. Proposals travel as fenced JSON, are re-checked by the deterministic evaluator in front of the user, and are saved only by explicit user action through `normalizeCard`. Context is server-assembled and **never injected for deep-link or shared-chat sessions**.
+   - **In the Personal AS edition (v1.6.36)** the same server-assembled context goes with every turn to the patient's own private AI, and never to a public AI's provider. Code: `server/advisor-context.js`. It holds the Patient Summary, each rule with whether it is confirmed, whether sharing is on, the recent requests, and the features the patient can turn on.
+   - **Requester text stays out.** Request messages and document titles are never included, and a requester's self-reported name appears only as a quoted string.
+   - **Feature suggestions.** The AI may propose a feature in a fenced `maia-feature` block. The client shows it as a card in the feature registry's own words and drops any description the AI wrote. Only the patient's click on `POST /api/user-features` turns it on (I-27), and the audit log records whether the click came from a suggestion.
+   - **Received documents.** When the patient asks about a document someone added, its text is attached between BEGIN/END QUOTED DOCUMENT markers, labelled with who added it and how well their identity was checked. The marker strings inside the text are neutralized, so the document can't end its own quote.
 3. **Group request advisor**: a public assistant on the join page fed **only** what the join page already publishes (description, posting policy, suggested cards, mechanics). It cannot see any member's policies, records, or history — and its system prompt instructs it to say so. Gated by verified email; rate-limited; metered by credits past the free tier.
 4. **Summary drafting** (single-player substrate) is consent-gated by the CM/PS invariants: a verified Patient Summary is **never overwritten without explicit confirmation**, and list edits clear verification stamps honestly.
 

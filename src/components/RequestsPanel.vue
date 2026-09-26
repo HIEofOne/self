@@ -132,6 +132,11 @@
         <div v-else-if="r.document?.state === 'accepted'" class="q-mt-sm">
           <q-btn dense flat no-caps size="sm" color="primary" icon="save_alt" label="Save to my folder now" :loading="delivering" @click="deliver(true)" />
         </div>
+        <div v-else-if="r.document?.state === 'delivered' && r.document.fileName && !r.document.mediaType?.startsWith('image/')" class="q-mt-sm">
+          <q-btn dense flat no-caps size="sm" color="primary" icon="smart_toy" label="Ask my private AI about this" :loading="askingAi === r.id" @click="askAi(r)">
+            <q-tooltip>Your private AI reads it as a document someone else wrote, and never follows instructions in it.</q-tooltip>
+          </q-btn>
+        </div>
         <div v-else-if="r.status === 'accepted' && r.route && !r.document" class="q-mt-sm">
           <q-btn dense flat no-caps size="sm" color="negative" icon="stop_circle" label="Stop sharing" :loading="busyId === r.id" @click="stop(r)">
             <q-tooltip>They can't read it again from now on.</q-tooltip>
@@ -266,12 +271,12 @@ import { SCOPE_OPTIONS, PURPOSE_OPTIONS, sentenceFor, type PolicyCard, type AsSt
 import { WHAT, WHY, answerToHtml } from '../gnap/requestForm';
 import { syncRequestLog, type LogSyncResult } from '../utils/requestLog';
 import { reconnectLocalFolderWithGesture } from '../utils/localFolder';
-import { deliverReceived, openReceived, KIND_LABELS, type DeliverResult } from '../utils/received';
+import { deliverReceived, openReceived, readReceivedText, quotedDocumentForAi, KIND_LABELS, type DeliverResult } from '../utils/received';
 import { ensureFolderKey } from '../utils/folderKey';
 import { useFolderPdfs } from '../composables/useFolderPdfs';
 
 const props = defineProps<{ userId: string }>();
-const emit = defineEmits<{ changed: [] }>();
+const emit = defineEmits<{ changed: []; 'ask-ai': [payload: { name: string; content: string }] }>();
 
 interface RequestRow {
   id: string;
@@ -398,6 +403,27 @@ const deliver = async (reload = false) => {
     receivedResult.value = await deliverReceived(props.userId);
     if (receivedResult.value === 'delivered' || reload) { await load(); void syncLog(); }
   } finally { delivering.value = false; }
+};
+
+// Ask the private AI about a saved document: its text from the folder,
+// labeled with who added it, as quoted data (§9, I-32).
+const askingAi = ref('');
+const askAi = async (r: RequestRow) => {
+  if (!r.document?.fileName) return;
+  askingAi.value = r.id;
+  error.value = '';
+  try {
+    const text = await readReceivedText(props.userId, r.document.fileName, r.document.mediaType || '');
+    emit('ask-ai', {
+      name: r.document.fileName,
+      content: quotedDocumentForAi({
+        kind: r.document.kind || 'other', title: r.document.title, receivedAt: r.receivedAt,
+        sender: { name: r.requester?.name || null, email: r.requester?.email || null, emailVerified: !!r.requester?.emailVerified }
+      }, text)
+    });
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : 'The document couldn’t be read.';
+  } finally { askingAi.value = ''; }
 };
 
 // Preview a held document: opened in this browser with the folder key.
