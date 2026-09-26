@@ -85,6 +85,7 @@ export type RequestStatus = 'verify' | 'waiting' | 'ready' | 'declined' | 'withd
 export interface SavedRequest {
   id: string;
   asId: string;
+  displayName?: string;
   grantEndpoint: string;
   createdAt: string;
   what: string;
@@ -98,6 +99,19 @@ export interface SavedRequest {
 }
 
 const requestsKey = (asId: string) => `requests:${asId}`;
+
+// ── Recognition (§10.6) ──────────────────────────────────────────────────
+// After an email check the AS gives this browser an instance_id; the next
+// request to the same link presents it instead of a new code.
+
+export interface SavedInstance { id: string; displayName: string }
+const instanceKey = (asId: string) => `instance:${asId}`;
+export const loadInstance = async (asId: string) => (await kvGet<SavedInstance>(instanceKey(asId))) || null;
+export const forgetInstance = (asId: string) => kvSet(instanceKey(asId), null);
+const rememberInstance = async (r: SavedRequest, res: GnapResult) => {
+  const id = res.body?.instance_id;
+  if (typeof id === 'string' && id) await kvSet(instanceKey(r.asId), { id, displayName: r.displayName || '' }).catch(() => {});
+};
 export const loadRequests = async (asId: string) => (await kvGet<SavedRequest[]>(requestsKey(asId))) || [];
 export async function saveRequest(r: SavedRequest) {
   // A plain copy: the page hands in Vue-reactive objects, which IndexedDB
@@ -143,26 +157,36 @@ export interface RequestForm {
   message: string;
 }
 
-/** Ask. The page then sends the requester to verify an email, and the AS
- *  brings them back to `returnUrl`. */
-export async function startRequest(asId: string, form: RequestForm, returnUrl: string): Promise<SavedRequest> {
+/** Ask. A first-time requester is then sent to verify an email (and may
+ *  add credits there), and the AS brings them back to `returnUrl`. A
+ *  recognized one skips that, unless they want to add credits. */
+export async function startRequest(asId: string, form: RequestForm, returnUrl: string, { withCredits = false } = {}): Promise<SavedRequest> {
   const key = await getClientKey();
   const grantEndpoint = `${location.origin}/gnap/as/${asId}`;
   const clientNonce = randomToken();
-  const display = [form.name.trim(), form.organization.trim()].filter(Boolean).join(', ');
+  const known = await loadInstance(asId);
+  const display = known ? known.displayName : [form.name.trim(), form.organization.trim()].filter(Boolean).join(', ');
+  const interact = !known || withCredits;
   const res = await signedCall(key, 'POST', grantEndpoint, {
     body: {
       access_token: { access: [{ type: ACCESS_TYPE, actions: [form.datatype === 'notification-only' ? 'notify' : 'read'], datatypes: [form.datatype], purpose: form.purpose }] },
-      client: { key: { proof: 'httpsig', jwk: key.jwk }, display: { name: display } },
-      interact: { start: ['redirect'], finish: { method: 'redirect', uri: returnUrl, nonce: clientNonce } },
+      client: known ? known.id : { key: { proof: 'httpsig', jwk: key.jwk }, display: { name: display } },
+      ...(interact ? { interact: { start: ['redirect'], finish: { method: 'redirect', uri: returnUrl, nonce: clientNonce } } } : {}),
       ...(form.message.trim() ? { maia_message: form.message.trim() } : {})
     }
   });
+  // No longer recognized (the patient chose Forget, or changed the link):
+  // start over as a first-time requester.
+  if (known && res.status === 401 && res.body?.error?.code === 'invalid_client') {
+    await forgetInstance(asId);
+    const named = form.name.trim() ? form : { ...form, name: known.displayName, organization: '' };
+    return startRequest(asId, named, returnUrl);
+  }
   if (res.status >= 400 && res.body?.error?.code !== 'request_denied') {
     throw new Error(res.body?.error?.description || `The request failed (HTTP ${res.status})`);
   }
   const saved: SavedRequest = {
-    id: randomToken(9), asId, grantEndpoint, createdAt: new Date().toISOString(),
+    id: randomToken(9), asId, displayName: display, grantEndpoint, createdAt: new Date().toISOString(),
     what: form.datatype, why: form.purpose, status: 'verify',
     ...(res.body?.interact?.redirect
       ? { interact: { redirect: res.body.interact.redirect, clientNonce, serverNonce: res.body.interact.finish } }
@@ -181,6 +205,7 @@ export async function finishInteraction(r: SavedRequest, interactRef: string, ha
   if (expected !== hash) throw new Error('The email check came back altered. Make the request again.');
   const key = await getClientKey();
   const res = await signedCall(key, 'POST', r.continueUri, { token: r.continueToken, body: { interact_ref: interactRef } });
+  await rememberInstance(r, res);
   const next = applyResponse({ ...r, status: 'waiting', interact: undefined }, res);
   await saveRequest(next).catch(() => { /* the answer is still shown now */ });
   return next;
@@ -191,6 +216,7 @@ export async function poll(r: SavedRequest): Promise<SavedRequest> {
   if (!r.continueUri || !r.continueToken) return r;
   const key = await getClientKey();
   const res = await signedCall(key, 'POST', r.continueUri, { token: r.continueToken });
+  await rememberInstance(r, res);
   const next = applyResponse(r, res);
   await saveRequest(next).catch(() => { /* the answer is still shown now */ });
   return next;

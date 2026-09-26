@@ -21,17 +21,27 @@
 
       <!-- The request form -->
       <form v-else-if="phase === 'form'" class="rq__form" @submit.prevent="send">
-        <q-input v-model="form.name" outlined dense label="Your name" maxlength="60" :rules="[(v) => !!v.trim() || 'Your name is needed']" />
-        <q-input v-model="form.organization" outlined dense label="Organization (optional)" maxlength="60" />
+        <div v-if="known" class="rq__known">
+          You're asking as <strong>{{ known.displayName || 'your earlier self' }}</strong>, recognized from the email you
+          verified before, so there's no code this time.
+          <a href="#" @click.prevent="notMe">Not you?</a>
+        </div>
+        <template v-else>
+          <q-input v-model="form.name" outlined dense label="Your name" maxlength="60" :rules="[(v) => !!v.trim() || 'Your name is needed']" />
+          <q-input v-model="form.organization" outlined dense label="Organization (optional)" maxlength="60" />
+        </template>
         <q-select v-model="form.datatype" outlined dense emit-value map-options :options="WHAT" label="What are you asking for?" />
         <q-select v-model="form.purpose" outlined dense emit-value map-options :options="WHY" label="What is it for?" class="q-mt-md" />
         <q-input v-model="form.message" outlined dense autogrow type="textarea" maxlength="1000" counter
                  label="Message to the person (optional)" class="q-mt-md" />
-        <p class="rq__note">
+        <q-checkbox v-if="known" v-model="withCredits" dense class="q-mt-md" label="Offer credits with this request (you'll choose on the next page)" />
+        <p v-if="!known" class="rq__note">
           Next you'll verify your email, so the person knows who is asking and
-          MAIA can tell you when there's an answer. Your browser makes a
-          private key for this request: see the answer in this same browser.
+          MAIA can tell you when there's an answer. You can also offer credits
+          there. Your browser makes a private key for this request: see the
+          answer in this same browser.
         </p>
+        <p v-else class="rq__note">MAIA emails you when there's an answer. See it in this same browser.</p>
         <p v-if="error" class="rq__err">{{ error }}</p>
         <q-btn type="submit" color="primary" unelevated no-caps label="Continue" :loading="busy" />
       </form>
@@ -102,7 +112,7 @@
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue';
 import {
   startRequest, finishInteraction, poll, withdraw, readAnswer, loadRequests, saveRequest, getClientKey,
-  UnsupportedBrowserError, type SavedRequest, type Answer
+  loadInstance, forgetInstance, UnsupportedBrowserError, type SavedRequest, type Answer, type SavedInstance
 } from '../gnap/client';
 
 const WHAT = [
@@ -132,6 +142,10 @@ const note = ref('');
 const answer = ref<Answer | null>(null);
 const answerError = ref('');
 const form = reactive({ name: '', organization: '', datatype: 'patient-summary', purpose: 'clinical', message: '' });
+/** Recognized from an earlier verified email at this link (§10.6). */
+const known = ref<SavedInstance | null>(null);
+const withCredits = ref(false);
+const notMe = async () => { await forgetInstance(asId); known.value = null; };
 
 let pollTimer: ReturnType<typeof setTimeout> | null = null;
 const stopTimer = () => { if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; } };
@@ -170,11 +184,12 @@ const answerHtml = computed(() => escapeHtml(answer.value?.text || '')
   .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>'));
 
 const send = async () => {
-  if (!form.name.trim()) return;
+  if (!known.value && !form.name.trim()) return;
   error.value = '';
   busy.value = true;
   try {
-    const r = await startRequest(asId, form, `${window.location.origin}/r/${asId}`);
+    const r = await startRequest(asId, form, `${window.location.origin}/r/${asId}`, { withCredits: withCredits.value });
+    known.value = await loadInstance(asId).catch(() => null); // cleared if no longer recognized
     if (r.status === 'verify' && r.interact?.redirect) {
       window.location.href = r.interact.redirect;
       return;
@@ -218,7 +233,9 @@ const doWithdraw = async () => {
   try { await show(await withdraw(current.value)); } finally { busy.value = false; }
 };
 
-const newRequest = () => {
+const newRequest = async () => {
+  known.value = await loadInstance(asId).catch(() => null);
+  withCredits.value = false;
   stopTimer();
   answer.value = null;
   answerError.value = '';
@@ -242,6 +259,7 @@ onMounted(async () => {
     if (e instanceof UnsupportedBrowserError) { error.value = e.message; phase.value = 'unsupported'; return; }
   }
 
+  known.value = await loadInstance(asId).catch(() => null);
   const saved = (await loadRequests(asId)).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   const latest = saved[saved.length - 1] || null;
 
@@ -277,6 +295,7 @@ onMounted(async () => {
 .rq__lead { color: #555; line-height: 1.5; margin-bottom: 20px; }
 .rq__form :deep(.q-field) { margin-bottom: 4px; }
 .rq__note { color: #666; font-size: 13px; line-height: 1.45; margin: 12px 0 16px; }
+.rq__known { background: #f1f8e9; border-radius: 8px; padding: 10px 12px; margin-bottom: 14px; line-height: 1.45; }
 .rq__muted { color: #777; font-size: 13px; line-height: 1.45; }
 .rq__err { color: #b00020; margin-top: 8px; }
 .rq__status { display: flex; align-items: center; gap: 8px; font-weight: 600; margin-bottom: 10px; }

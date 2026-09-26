@@ -11,10 +11,15 @@
       <div v-if="link" class="rp__link-row">
         <code class="rp__url">{{ link.pageUrl }}</code>
         <q-btn dense flat no-caps color="primary" :icon="copied ? 'check' : 'content_copy'" :label="copied ? 'Copied' : 'Copy'" @click="copyLink" />
+        <q-btn dense flat no-caps color="primary" icon="qr_code_2" :label="qr ? 'Hide QR code' : 'QR code'" @click="toggleQr" />
         <q-btn dense flat no-caps color="grey-8" icon="autorenew" label="Change link" @click="confirmRotate = true" />
       </div>
       <div v-else-if="linkError" class="text-negative text-caption">{{ linkError }}</div>
       <q-spinner v-else size="18px" color="primary" />
+      <div v-if="qr" class="rp__qr">
+        <img :src="qr" alt="QR code for your request link" width="200" height="200" />
+        <div class="text-caption text-grey-7">Someone can scan this with their phone's camera to open your request page.</div>
+      </div>
     </div>
 
     <q-dialog v-model="confirmRotate">
@@ -60,6 +65,10 @@
             <q-icon name="verified" color="green-7" size="14px" /> Email verified: {{ r.requester.email }}
           </template>
           <template v-else><q-icon name="help_outline" color="grey-6" size="14px" /> Email not verified</template>
+          <template v-if="r.recognized"> · recognized from an earlier verified request</template>
+        </div>
+        <div v-if="r.gnapPayment" class="text-caption q-mt-xs">
+          <q-icon name="toll" color="amber-9" size="14px" /> Came with {{ PAYMENT_WORDS[r.gnapPayment.type] || r.gnapPayment.type }} ({{ r.gnapPayment.amount }} credits)
         </div>
         <div v-if="r.payload && typeof r.payload === 'string'" class="rp__message">{{ r.payload }}</div>
         <div v-if="r.decidedBySentence && r.autonomous" class="text-caption text-grey-7 q-mt-xs">
@@ -82,6 +91,11 @@
             <q-tooltip>They can't read it again from now on.</q-tooltip>
           </q-btn>
         </div>
+        <div v-if="r.route && r.requester?.emailVerified && !r.forgottenAt && r.status !== 'pending'" class="q-mt-xs">
+          <q-btn dense flat no-caps size="sm" color="grey-8" icon="person_off" label="Forget this requester" :disable="busyId === r.id" @click="forget(r)">
+            <q-tooltip>Their next request will need a new email check.</q-tooltip>
+          </q-btn>
+        </div>
       </div>
       <div v-if="error" class="text-negative text-caption q-mt-sm">{{ error }}</div>
     </div>
@@ -96,6 +110,7 @@
  * to the patient; Stop sharing revokes what was shared.
  */
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
+import QRCode from 'qrcode';
 import { SCOPE_OPTIONS, PURPOSE_OPTIONS } from '../utils/policyCards';
 
 const props = defineProps<{ userId: string }>();
@@ -112,6 +127,9 @@ interface RequestRow {
   receivedAt: string;
   status: string;
   route?: string | null;
+  recognized?: boolean;
+  forgottenAt?: string | null;
+  gnapPayment?: { type: string; amount: number } | null;
   autonomous?: boolean;
   decidedBySentence?: string | null;
 }
@@ -125,7 +143,16 @@ const STATUS: Record<string, { label: string; color: string }> = {
   stopped: { label: 'Sharing stopped', color: 'blue-grey-6' }
 };
 
+const PAYMENT_WORDS: Record<string, string> = {
+  'spam-deposit': 'a spam deposit', 'notification-deposit': 'an evaluation fee', 'sharing-payment': 'a sharing payment'
+};
+
 const link = ref<{ pageUrl: string } | null>(null);
+const qr = ref('');
+const toggleQr = async () => {
+  if (qr.value || !link.value) { qr.value = ''; return; }
+  qr.value = await QRCode.toDataURL(link.value.pageUrl, { width: 400, margin: 1 }).catch(() => '');
+};
 const linkError = ref('');
 const copied = ref(false);
 const confirmRotate = ref(false);
@@ -179,7 +206,7 @@ const rotate = async () => {
   try {
     const r = await post('/api/gnap/request-link/rotate');
     const d = await r.json();
-    if (r.ok && d.success) { link.value = d; confirmRotate.value = false; await load(); }
+    if (r.ok && d.success) { link.value = d; qr.value = ''; confirmRotate.value = false; await load(); }
   } finally { rotating.value = false; }
 };
 
@@ -205,6 +232,16 @@ const stop = async (r: RequestRow) => {
   } catch { error.value = "Sharing couldn't be stopped. Try again."; } finally { busyId.value = ''; }
 };
 
+const forget = async (r: RequestRow) => {
+  busyId.value = r.id;
+  error.value = '';
+  try {
+    const res = await post(`/api/user-groups/requests/${encodeURIComponent(r.id)}/forget-requester`);
+    if (!res.ok) throw new Error();
+    await load();
+  } catch { error.value = "That requester couldn't be forgotten. Try again."; } finally { busyId.value = ''; }
+};
+
 let timer: ReturnType<typeof setInterval> | null = null;
 onMounted(() => {
   void loadLink();
@@ -218,6 +255,7 @@ watch(() => props.userId, () => { void loadLink(); void load(); });
 <style scoped>
 .rp { padding: 16px; display: flex; flex-direction: column; gap: 20px; }
 .rp__link-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.rp__qr { margin-top: 10px; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
 .rp__url { background: #f5f5f5; border-radius: 4px; padding: 4px 8px; font-size: 12px; word-break: break-all; }
 .rp__item { border: 1px solid #e0e0e0; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
 .rp__item--pending { border-color: #ffb74d; background: #fffaf2; }

@@ -15,6 +15,8 @@ import setupGnapRoutes from '../../server/routes/gnap.js';
 import setupGroupRoutes from '../../server/routes/groups.js';
 import { signRequest } from '../../server/gnap/httpsig.js';
 import { ACCESS_TYPE } from '../../server/gnap/grants.js';
+import { grantCredits, getAccount } from '../../server/credits.js';
+import { sweepExpiredGnapPayments } from '../../server/gnap/payments.js';
 import { getEdition, setEditionForTests } from '../../server/edition.js';
 
 const originalEdition = getEdition();
@@ -335,6 +337,120 @@ describe('P5: the requester hears back; the patient can stop sharing', () => {
     emailMode = 'off';
     const dev = await request(server).post(`${ix}/code`).send({ email: 'dr2@example.com' });
     expect(dev.body.devCode).toMatch(/^\d{6}$/);
+  });
+});
+
+describe('P5b: a returning requester is recognized', () => {
+  const INTERACT = { interact: { start: ['redirect'], finish: { method: 'redirect', uri: 'https://client.example/r', nonce: 'client-nonce-123' } } };
+  const firstContact = async (c, email = 'dr@example.com') => {
+    const first = await ask(c, INTERACT);
+    const ix = new URL(first.body.interact.redirect).pathname;
+    await request(server).post(`${ix}/code`).send({ email });
+    const code = emails.filter((e) => e.to === email).pop().text.match(/\d{6}/)[0];
+    const v = await request(server).post(`${ix}/verify`).send({ code });
+    const ref = new URL(v.body.redirect).searchParams.get('interact_ref');
+    const done = await cont(c, first.body.continue, { interact_ref: ref });
+    return done.body.instance_id;
+  };
+  const again = (c, instanceId, over = {}) => call(c, 'POST', `/gnap/as/${AS_ID}`, {
+    body: { access_token: grantBody(c).access_token, client: instanceId, ...over }
+  });
+
+  it('gets an instance_id, and the next request is judged verified without a code', async () => {
+    const c = newClient();
+    const id = await firstContact(c);
+    expect(id).toMatch(/^[A-Za-z0-9_-]{16,64}$/);
+    patient().sharingPolicies = [card('pol_allow', 'allow', { signature: 'verified-email' })];
+    const r = await again(c, id);
+    expect(r.status).toBe(200);
+    expect(r.body.access_token).toBeTruthy();
+    const reqs = await request(server).get('/api/user-groups/requests?userId=pat01').set('x-test-user', 'pat01');
+    const latest = reqs.body.requests.find((x) => x.status === 'accepted');
+    expect(latest).toMatchObject({ recognized: true, requester: { email: 'dr@example.com', emailVerified: true } });
+  });
+
+  it('only the key it was issued to can present it', async () => {
+    const id = await firstContact(newClient('k1'));
+    expect((await again(newClient('k2'), id)).status).toBe(401);
+  });
+
+  it('Forget, or a new request link, stops the recognition', async () => {
+    const c = newClient();
+    const id = await firstContact(c);
+    const reqs = await request(server).get('/api/user-groups/requests?userId=pat01').set('x-test-user', 'pat01');
+    const f = await request(server).post(`/api/user-groups/requests/${reqs.body.requests[0].id}/forget-requester`).set('x-test-user', 'pat01').send({ userId: 'pat01' });
+    expect(f.body.forgotten).toBe(1);
+    expect((await again(c, id)).body.error.code).toBe('invalid_client');
+
+    const c2 = newClient('k3');
+    const id2 = await firstContact(c2, 'two@example.com');
+    const rotated = await request(server).post('/api/gnap/request-link/rotate').set('x-test-user', 'pat01').send({ userId: 'pat01' });
+    const r = await call(c2, 'POST', `/gnap/as/${rotated.body.asId}`, { body: { access_token: grantBody(c2).access_token, client: id2 } });
+    expect(r.status).toBe(401);
+  });
+});
+
+describe('P5b: credits on a direct request', () => {
+  const INTERACT = { interact: { start: ['redirect'], finish: { method: 'redirect', uri: 'https://client.example/r', nonce: 'client-nonce-123' } } };
+  const EMAIL = 'payer@example.com';
+  /** Ask, verify, attach `payment` on the credits step; → the first continue. */
+  const payAndAsk = async (c, payment) => {
+    const first = await ask(c, INTERACT);
+    const ix = new URL(first.body.interact.redirect).pathname;
+    await request(server).post(`${ix}/code`).send({ email: EMAIL });
+    const code = emails.filter((e) => e.to === EMAIL).pop().text.match(/\d{6}/)[0];
+    const v = await request(server).post(`${ix}/verify`).send({ code });
+    expect(v.body.credits.balance).toBeGreaterThan(0); // the credits step is offered
+    const fin = await request(server).post(`${ix}/finish`).send({ payment });
+    if (!fin.body.redirect) return { first, fin };
+    const ref = new URL(fin.body.redirect).searchParams.get('interact_ref');
+    return { first, fin, done: await cont(c, first.body.continue, { interact_ref: ref }) };
+  };
+  const balance = async () => (await getAccount(cloudant, EMAIL)).balance;
+  beforeEach(async () => { await grantCredits(cloudant, EMAIL, 100, 'test'); });
+
+  it('a sharing payment a card asks for → shared, and the payment is captured', async () => {
+    patient().sharingPolicies = [card('pol_pay', 'allow', { signature: 'verified-email', payment: 'sharing-payment' })];
+    const { done } = await payAndAsk(newClient(), 'sharing-payment');
+    expect(done.body.access_token).toBeTruthy();
+    expect(await balance()).toBe(75);
+    expect((await getAccount(cloudant, EMAIL)).held).toBe(0);
+  });
+
+  it('a spam deposit comes back when the patient declines', async () => {
+    await payAndAsk(newClient(), 'spam-deposit');
+    expect(await balance()).toBe(95);
+    await decide('decline');
+    expect(await balance()).toBe(100);
+  });
+
+  it('a spam deposit on an ignored request is forfeited when it expires; a withdrawal returns one', async () => {
+    await payAndAsk(newClient('a'), 'spam-deposit');
+    await decide('block');
+    clock += 31 * 24 * 60 * 60 * 1000;
+    expect(await sweepExpiredGnapPayments(cloudant, clock)).toBe(1);
+    expect(await balance()).toBe(95);
+
+    clock = Date.parse('2026-09-25T12:00:00Z');
+    const c = newClient('b');
+    const { done } = await payAndAsk(c, 'spam-deposit');
+    expect(await balance()).toBe(90);
+    clock += 10 * 1000;
+    const w = await call(c, 'DELETE', done.body.continue.uri, { token: done.body.continue.access_token.value });
+    expect(w.status).toBe(204);
+    expect(await balance()).toBe(95);
+  });
+
+  it('more than the balance is refused', async () => {
+    await grantCredits(cloudant, EMAIL, 1, 'x'); // 101
+    const first = await ask(newClient(), INTERACT);
+    const ix = new URL(first.body.interact.redirect).pathname;
+    await request(server).post(`${ix}/code`).send({ email: 'poor@example.com' });
+    await grantCredits(cloudant, 'poor@example.com', 3, 'test');
+    const code = emails.filter((e) => e.to === 'poor@example.com').pop().text.match(/\d{6}/)[0];
+    await request(server).post(`${ix}/verify`).send({ code });
+    const fin = await request(server).post(`${ix}/finish`).send({ payment: 'spam-deposit' });
+    expect(fin.status).toBe(402);
   });
 });
 

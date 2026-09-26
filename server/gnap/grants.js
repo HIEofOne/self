@@ -15,6 +15,8 @@ import { isAcceptableClientKey, publicJwk } from './httpsig.js';
 export const ACCESS_TYPE = 'urn:maia:access:record:v1';
 
 export const GRANT_TTL_MS = 30 * 24 * 60 * 60 * 1000; // same as relay / tally
+/** A client instance that verified an email is recognized this long (§10.6). */
+export const INSTANCE_TTL_MS = 365 * 24 * 60 * 60 * 1000;
 export const TOKEN_TTL_S = 3600;
 export const FIRST_WAIT_S = 60;
 export const MAX_WAIT_S = 3600;
@@ -75,15 +77,22 @@ export function parseGrantRequest(body) {
     ahCategory = a.ahCategory.trim();
   }
 
+  // A returning client presents the instance_id it was given (RFC 9635
+  // §2.3); the route looks up its key and checks the signature with it.
   const client = body.client;
-  if (typeof client === 'string') throw new GnapError('invalid_client', 'Client instance identifiers are not supported yet');
-  if (!client || typeof client !== 'object' || !client.key || client.key.proof !== 'httpsig') {
-    throw new GnapError('invalid_client', 'client.key with proof "httpsig" is required');
+  let clientInstance = null;
+  if (typeof client === 'string') {
+    if (!/^[A-Za-z0-9_-]{16,64}$/.test(client)) throw new GnapError('invalid_client', 'Unknown client instance', 401);
+    clientInstance = client;
+  } else {
+    if (!client || typeof client !== 'object' || !client.key || client.key.proof !== 'httpsig') {
+      throw new GnapError('invalid_client', 'client.key with proof "httpsig" is required');
+    }
+    if (!isAcceptableClientKey(client.key.jwk)) {
+      throw new GnapError('invalid_client', 'client.key.jwk must be a public Ed25519 JWK with a kid');
+    }
   }
-  if (!isAcceptableClientKey(client.key.jwk)) {
-    throw new GnapError('invalid_client', 'client.key.jwk must be a public Ed25519 JWK with a kid');
-  }
-  const displayName = typeof client.display?.name === 'string'
+  const displayName = typeof client?.display?.name === 'string'
     ? client.display.name.trim().slice(0, MAX_DISPLAY_NAME) : '';
 
   let interact = null;
@@ -107,7 +116,8 @@ export function parseGrantRequest(body) {
   const message = typeof body.maia_message === 'string' ? body.maia_message.trim().slice(0, MAX_MESSAGE) : '';
   return {
     access: { type: ACCESS_TYPE, actions: [action], datatypes: [scope], purpose: a.purpose, ...(ahCategory ? { ahCategory } : {}) },
-    clientKey: publicJwk(client.key.jwk),
+    clientKey: clientInstance ? null : publicJwk(client.key.jwk),
+    clientInstance,
     displayName,
     interact,
     message
