@@ -141,8 +141,29 @@ export const isFeatureEnabled = (key, userDoc = null, edition = currentEdition) 
 };
 
 /** The body of GET /api/edition. */
+// ── Host role (MAIA_HOST_ROLE) ──────────────────────────────────────────
+// 'patients' (default): a host for patients' MAIAs. 'group-only': a host
+// that runs groups and nothing else — no patient accounts, no private AIs,
+// no health records (trustee.ai as a demonstration host). Members join its
+// groups from their own MAIA host; MAIA_MEMBER_HOSTS names the hosts its
+// welcome page offers for that (comma-separated https URLs).
+export const HOST_ROLES = Object.freeze(['patients', 'group-only']);
+export const resolveHostRole = (raw) => (String(raw ?? '').trim().toLowerCase() === 'group-only' ? 'group-only' : 'patients');
+let currentHostRole = resolveHostRole(process.env.MAIA_HOST_ROLE);
+export const getHostRole = () => currentHostRole;
+export const isGroupOnlyHost = () => currentHostRole === 'group-only';
+/** Tests only. */
+export const setHostRoleForTests = (role) => { currentHostRole = resolveHostRole(role); return currentHostRole; };
+
+export const parseMemberHosts = (raw) => String(raw || '').split(',')
+  .map((s) => s.trim().replace(/\/$/, ''))
+  .filter((s) => { try { const u = new URL(s); return u.protocol === 'https:' || /^(localhost|127\.0\.0\.1)$/.test(u.hostname); } catch { return false; } })
+  .slice(0, 5);
+
 export const describeEdition = (userDoc = null, edition = currentEdition) => ({
   edition,
+  hostRole: currentHostRole,
+  ...(currentHostRole === 'group-only' ? { memberHosts: parseMemberHosts(process.env.MAIA_MEMBER_HOSTS) } : {}),
   features: Object.fromEntries(Object.entries(FEATURES).map(([key, f]) => {
     const mode = f.modes[edition] || 'off';
     return [key, {
@@ -163,7 +184,7 @@ export const describeEdition = (userDoc = null, edition = currentEdition) => ({
  * visitor (or a bot) never creates a DO resource (§9, I-26).
  */
 export const mayCreatePrimaryAgent = (userDoc, edition = currentEdition) =>
-  edition !== 'personal-as' || !!userDoc?.emailVerified;
+  !isGroupOnlyHost() && (edition !== 'personal-as' || !!userDoc?.emailVerified);
 
 /**
  * P7d: Current Medications are reviewed and verified as a section of the

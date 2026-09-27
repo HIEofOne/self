@@ -29,9 +29,13 @@ interface EditionState {
   error: string;
   /** Test apps only (MAIA_EMAIL_VERIFY_BYPASS): the sign-up address to use. */
   testEmail: string | null;
+  /** 'group-only': this host runs groups only, with no patients' MAIAs (MAIA_HOST_ROLE). */
+  hostRole: 'patients' | 'group-only';
+  /** On a group-only host: the MAIA hosts its welcome page offers for joining. */
+  memberHosts: string[];
 }
 
-const state = reactive<EditionState>({ loaded: false, edition: 'full', features: {}, error: '', testEmail: null });
+const state = reactive<EditionState>({ loaded: false, edition: 'full', features: {}, error: '', testEmail: null, hostRole: 'patients', memberHosts: [] });
 let inflight: Promise<void> | null = null;
 
 /** Fetch the edition. Call again with `force` after sign-in or sign-out,
@@ -47,6 +51,8 @@ const load = (force = false): Promise<void> => {
       state.edition = data.edition === 'personal-as' ? 'personal-as' : 'full';
       state.features = data.features || {};
       state.testEmail = typeof data.testEmail === 'string' ? data.testEmail : null;
+      state.hostRole = data.hostRole === 'group-only' ? 'group-only' : 'patients';
+      state.memberHosts = Array.isArray(data.memberHosts) ? data.memberHosts.filter((h: unknown) => typeof h === 'string') : [];
       state.loaded = true;
       state.error = '';
     } catch (e) {
@@ -65,13 +71,14 @@ const has = (key: string): boolean => {
 };
 
 const isPersonalAs = computed(() => state.loaded && state.edition === 'personal-as');
+const isGroupOnlyHost = computed(() => state.loaded && state.hostRole === 'group-only');
 
 export function useEdition() {
-  return { state: readonly(state), load, has, isPersonalAs };
+  return { state: readonly(state), load, has, isPersonalAs, isGroupOnlyHost };
 }
 
 /** Tests only. */
 export const _resetEditionForTests = () => {
-  state.loaded = false; state.edition = 'full'; state.features = {}; state.error = ''; state.testEmail = null;
+  state.loaded = false; state.edition = 'full'; state.features = {}; state.error = ''; state.testEmail = null; state.hostRole = 'patients'; state.memberHosts = [];
   inflight = null;
 };

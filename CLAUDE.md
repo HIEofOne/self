@@ -59,7 +59,7 @@ The goal is to minimize secrets. Several values are **derived from the DO token*
 | `SPACES_AWS_SECRET_ACCESS_KEY` | S3-compatible secret key for DO Spaces. |
 | `PUBLIC_APP_URL` | The public URL of the app (e.g. `https://test.agropper.xyz`). Controls secure cookies, trust proxy, and passkey origin. |
 
-Optional: `MAIA_EDITION` = `full` (default) or `personal-as`, read once at startup (see `Documentation/Environment.md`).
+Optional: `MAIA_EDITION` = `full` (default) or `personal-as`, read once at startup (see `Documentation/Environment.md`). `MAIA_HOST_ROLE=group-only` makes an app a group-only host (no patient accounts, no private AIs, no health records; welcome page = `GroupHostWelcome.vue`), as for trustee.ai (`Documentation/Trustee_Host.md`).
 
 Chat provider keys (`ANTHROPIC_API_KEY`, `CHATGPT_API_KEY`, `DEEPSEEK_API_KEY`) are **not needed** in production. All three providers are routed through DO Serverless Inference automatically. `GEMINI_API_KEY` is optional (Gemini is not available on DO Inference).
 

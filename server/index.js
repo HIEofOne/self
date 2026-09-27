@@ -55,7 +55,7 @@ import setupPolicyRoutes from './routes/policies.js';
 import setupEditionRoutes from './routes/edition.js';
 import setupSetupRoutes from './routes/setup.js';
 import setupInterviewRoutes from './routes/interview.js';
-import { combinedSummaryReview, getEdition, isFeatureEnabled } from './edition.js';
+import { combinedSummaryReview, getEdition, isFeatureEnabled, getHostRole, isGroupOnlyHost } from './edition.js';
 import { medsFromSummary } from './utils/summary-sections.js';
 import { createFeatureGuard } from './edition-routes.js';
 import {
@@ -818,7 +818,10 @@ try {
   deployedVersion = JSON.parse(readFileSync(path.join(__dirname, '../package.json'), 'utf8')).version || '';
 } catch { /* version stays blank; the client then never prompts */ }
 app.get('/health', (req, res) => res.json({ status: 'ok', app: 'maia-cloud-user-app', version: deployedVersion, edition: getEdition() }));
-app.listen(PORT, () => console.log(`User app server listening on port ${PORT} (startup in progress, edition: ${getEdition()})`));
+app.listen(PORT, () => console.log(`User app server listening on port ${PORT} (startup in progress, edition: ${getEdition()}, host role: ${getHostRole()})`));
+if (isGroupOnlyHost() && getEdition() !== 'personal-as') {
+  console.warn('[edition] MAIA_HOST_ROLE=group-only expects MAIA_EDITION=personal-as: its group request page and routing use GNAP.');
+}
 
 // Auto-provision CouchDB droplet for cloud deployments (any non-localhost URL = cloud)
 const appUrl = process.env.PUBLIC_APP_URL || '';
