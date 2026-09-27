@@ -90,8 +90,10 @@
                 aria-label="Welcome to MAIA"
                 style="flex: 1; overflow-y: auto; display: flex; flex-direction: column;"
               >
-                <!-- A group-only host (MAIA_HOST_ROLE=group-only): its groups, no sign-up. -->
-                <GroupHostWelcome v-if="isGroupOnlyHost" :member-hosts="[...editionState.memberHosts]" :version="appVersion" />
+                <!-- A group-only host (MAIA_HOST_ROLE=group-only): its groups, no sign-up.
+                     Its only sign-in is the group admin's, at /admin. -->
+                <GroupHostWelcome v-if="isGroupOnlyHost && !showAuth" :member-hosts="[...editionState.memberHosts]" :version="appVersion" />
+                <div v-else-if="isGroupOnlyHost" class="text-h6 text-center q-mb-md">Group admin sign-in</div>
                 <template v-else>
                 <template v-if="isPersonalAs">
                   <div class="text-h6 text-center q-mb-xs">{{ hostGroup?.name || 'MAIA' }}</div>
@@ -470,6 +472,7 @@
                 <p v-if="showAuth && welcomeBackPasskeyUserId" class="text-body2 text-center text-primary q-mb-md">
                   Welcome back. Sign in with your passkey for <strong>{{ welcomeBackPasskeyUserId }}</strong>.
                 </p>
+                </template>
                 <PasskeyAuth
                   v-if="showAuth"
                   :prefill-user-id="passkeyPrefillUserId"
@@ -477,7 +480,6 @@
                   @authenticated="handleAuthenticated"
                   @cancelled="onPasskeyAuthCancelled"
                 />
-                </template>
               </q-card-section>
             </q-card>
           </template>
