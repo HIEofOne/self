@@ -6,9 +6,9 @@
       <a href="/ask" target="_blank" rel="noopener" class="ask__full-link">Open the full page <q-icon name="open_in_new" size="13px" /></a>
     </div>
     <div class="ask__sub">
-      Claude researches your question in MAIA's code and documents, then answers with links
-      to what it read. It can take up to a minute. This box isn't private, so please don't type
-      health information.
+      Claude answers from a map of MAIA's code, documents and change history, reading what it
+      needs and linking to it. It can take up to a minute. This box isn't private, so please
+      don't type health information.
     </div>
 
     <div v-if="turns.length" ref="logRef" class="ask__log" aria-live="polite">
@@ -31,7 +31,7 @@
           <div v-if="t.looked.length" class="ask__src">
             Read:
             <template v-for="(l, j) in t.looked" :key="`${l.path}:${l.start}`">
-              <a :href="l.url" target="_blank" rel="noopener">{{ l.path }}{{ l.start > 1 || l.end ? ` ${l.start}–${l.end}` : '' }}</a><span v-if="j < t.looked.length - 1"> · </span>
+              <a :href="l.url" target="_blank" rel="noopener" :title="l.title || l.path">{{ l.path }}{{ l.start ? ` ${l.start}–${l.end}` : '' }}</a><span v-if="j < t.looked.length - 1"> · </span>
             </template>
           </div>
           <div v-if="t.error" class="ask__err">{{ t.error }}</div>
@@ -68,9 +68,9 @@
 <script setup lang="ts">
 /**
  * "Ask about MAIA" (server/routes/ask-maia.js): anyone can ask how MAIA
- * works, before any account exists. Claude researches the question in the
- * repository (what it looks up shows as it goes), then answers with links
- * to the code and documents it read. The conversation lives only in this
+ * works, before any account exists. Claude answers from a knowledge pack
+ * (the brief, maps of the code and documents, the PR history), reads what
+ * it needs (each lookup shows as it goes), and links to what it read. The conversation lives only in this
  * page; nothing is saved. Hidden when this host can't reach Claude.
  *
  * `full`: the page at /ask, with more room and questions for each kind of
@@ -81,7 +81,7 @@ import MarkdownIt from 'markdown-it';
 
 defineProps<{ full?: boolean }>();
 
-interface Looked { path: string; start: number; end: number; url: string }
+interface Looked { path: string; start?: number; end?: number; title?: string; url: string }
 interface Turn { role: 'user' | 'assistant'; content: string; steps: string[]; looked: Looked[]; error?: string }
 
 const QUICK = ['What is MAIA?', 'How do groups work?', 'Who can see my records?', 'How do I get started?'];
@@ -89,7 +89,7 @@ const suggestionGroups = [
   { who: 'Patients', items: ['What is MAIA, and what does it cost me?', 'Who can see my records, and how do I control it?', 'How do I get started?'] },
   { who: 'Clinicians', items: ['How do I ask a patient\'s MAIA for their medication list?', 'How can I send a patient a radiology report?', 'Is MAIA regulated as a medical device?'] },
   { who: 'Group organizers', items: ['How do I start a group?', 'What does a group see about its members?', 'How do suggested rules work?'] },
-  { who: 'Developers', items: ['Where is the GNAP grant endpoint, and how are requests signed?', 'How is a document someone adds kept sealed until the patient accepts it?', 'How do I run MAIA locally?'] }
+  { who: 'Developers', items: ['Where is the GNAP grant endpoint, and how are requests signed?', 'How is a document someone adds kept sealed until the patient accepts it?', 'How big is the code, and how is it organized?', 'What changed in the last week?'] }
 ];
 
 const md = new MarkdownIt({ html: false, linkify: true, breaks: false });
