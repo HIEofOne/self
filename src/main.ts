@@ -7,6 +7,7 @@ import { Quasar, Dialog, Notify } from 'quasar';
 import App from './App.vue';
 import RequestPage from './components/RequestPage.vue';
 import GroupRequestPage from './components/GroupRequestPage.vue';
+import AskPage from './components/AskPage.vue';
 
 // Quasar components and styles
 import '@quasar/extras/material-icons/material-icons.css';
@@ -14,11 +15,12 @@ import 'quasar/src/css/index.sass';
 
 // A patient's personal request link (/r/<asId>) and a group's request page
 // (/g/<groupId>/request) open the requester's pages, never the patient app
-// (group_requests.md §10.10).
+// (group_requests.md §10.10). /ask is the full "Ask about MAIA" page.
 const path = window.location.pathname;
 const isRequestPage = /^\/r\/[0-9a-f]{32}\/?$/.test(path);
 const isGroupRequestPage = /^\/g\/[^/]+\/request\/?$/.test(path);
-const app = createApp(isRequestPage ? RequestPage : isGroupRequestPage ? GroupRequestPage : App);
+const isAskPage = /^\/ask\/?$/.test(path);
+const app = createApp(isRequestPage ? RequestPage : isGroupRequestPage ? GroupRequestPage : isAskPage ? AskPage : App);
 
 app.use(Quasar, {
   plugins: {

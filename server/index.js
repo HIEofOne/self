@@ -48,8 +48,8 @@ import setupRequestLogRoutes from './routes/requests-log.js';
 import setupReceivedRoutes from './routes/received.js';
 import setupGnapOutRoutes from './routes/gnap-out.js';
 import setupWelcomeActivityRoutes from './routes/welcome-activity.js';
-import setupAskMaiaRoutes from './routes/ask-maia.js';
-import { enablePublicAis } from './public-ais.js';
+import setupAskMaiaRoutes, { DEFAULT_ASK_MODEL, FALLBACK_ASK_MODEL } from './routes/ask-maia.js';
+import { enablePublicAis, probePublicAi } from './public-ais.js';
 import { recordFilesForLegend } from './advisor-context.js';
 import { createSpacesHoldStore, sweepExpiredHolds } from './gnap/documents.js';
 import { sweepExpiredGnapPayments } from './gnap/payments.js';
@@ -1702,8 +1702,10 @@ setupReceivedRoutes(app, { cloudant, holds: documentHolds, auditLog });
 const { pollOutRequests } = setupGnapOutRoutes(app, { cloudant, auditLog, sendEmail: sendPlainEmail, holds: documentHolds });
 // Activity counts on the welcome page's account badges, before sign-in.
 setupWelcomeActivityRoutes(app, { cloudant, secret: SESSION_SECRET });
-// "Ask about MAIA" on the welcome page: Claude answers from the public docs.
-setupAskMaiaRoutes(app, { chatClient, rootDir: path.join(__dirname, '..') });
+// "Ask about MAIA" on the welcome page: Claude researches the repository.
+// The model is chosen once the inference key is known (end of startup).
+let askInference = null;
+setupAskMaiaRoutes(app, { rootDir: path.join(__dirname, '..'), getInference: () => askInference });
 
 // Groups daily maintenance (Groups.md §6.1/§6.3/§7.3): renew 24h membership
 // credentials, reconcile registry-side revocation, pull relay mail, and
@@ -15457,6 +15459,11 @@ if (isProduction) {
     // Public AIs in the chat's AI menu (Personal AS edition): the most
     // expensive models serverless inference offers (server/public-ais.js).
     if (getEdition() === 'personal-as' && !isGroupOnlyHost()) await enablePublicAis(chatClient, inferenceKey);
+    // "Ask about MAIA": MAIA_ASK_MODEL (Claude Opus 5.5 by default), else Claude Sonnet 4.6.
+    for (const model of [...new Set([process.env.MAIA_ASK_MODEL || DEFAULT_ASK_MODEL, FALLBACK_ASK_MODEL])]) {
+      if (await probePublicAi(inferenceKey, model)) { askInference = { key: inferenceKey, model }; break; }
+    }
+    console.log(`[ask-maia] model: ${askInference?.model || 'none available'}`);
   }
 }
 

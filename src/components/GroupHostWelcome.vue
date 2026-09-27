@@ -35,6 +35,8 @@
       </div>
     </div>
 
+    <AskMaia class="q-mt-lg" />
+
     <WelcomeMaps class="q-mt-lg" />
 
     <div class="gh__foot">
@@ -56,6 +58,7 @@
  */
 import { ref, onMounted } from 'vue';
 import WelcomeMaps from './WelcomeMaps.vue';
+import AskMaia from './AskMaia.vue';
 
 defineProps<{ memberHosts: string[]; version: string }>();
 
