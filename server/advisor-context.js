@@ -23,6 +23,33 @@ import { FEATURES, featureMode, isFeatureEnabled, getEdition } from './edition.j
 import { KIND_WORDS } from './gnap/documents.js';
 
 const MAX_SUMMARY_CHARS = 16000;
+
+/**
+ * The record PDFs as "File N": the order the Patient Summary prompt's
+ * legend uses and the client resolves File N citations against
+ * (/api/user-files: References excluded, PDFs only, stored order).
+ */
+export const recordFilesForLegend = (userDoc) => {
+  const referencesPrefix = `${userDoc?.userId}/References/`;
+  return (Array.isArray(userDoc?.files) ? userDoc.files : [])
+    .filter((f) => f && f.fileName && /\.pdf$/i.test(f.fileName))
+    .filter((f) => !(f.bucketKey || '').startsWith(referencesPrefix))
+    .filter((f) => f.isReference !== true);
+};
+
+/** How the private AI cites records, so every citation becomes a page link. */
+const citationRules = (userDoc) => {
+  const files = recordFilesForLegend(userDoc);
+  if (!files.length) return [];
+  return [
+    'CITING RECORDS: cite the record a fact comes from right after it, as [File N p.<page>],',
+    'for example [File 1 p.42], with the page where the fact appears: the page of a record you',
+    'found by search, or the page the summary already cites. If you don\'t know the page, write',
+    '[File N] with no page. Never write a raw filename, a question mark or a guessed page.',
+    `FILES: ${files.map((f, i) => `File ${i + 1} = ${f.fileName}`).join('; ')}`,
+    ''
+  ];
+};
 const MAX_REQUESTS = 15;
 
 /** How to write a proposed rule (both contexts). */
@@ -245,6 +272,7 @@ export async function buildEditionAdvisorContext(cloudant, userDoc) {
     '',
     ...summaryBlock,
     '',
+    ...citationRules(userDoc),
     `GROUPS: ${groups.length ? groups.join(', ') : 'none'}`,
     `SHARING: ${sharing}.`,
     '',

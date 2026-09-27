@@ -78,13 +78,13 @@ export function processFileNCitations(
   }
 
   // Shared anchor builder for passes 1 & 2.
-  const buildAnchor = (n: string, p: string): string | null => {
+  const buildAnchor = (n: string, p: string, shownLabel?: string): string | null => {
     const idx = parseInt(n, 10) - 1;
     const target = pdfs[idx];
     if (!target) return null;
     referenced.add(idx);
     const pageNum = parseInt(p, 10);
-    const label = `File ${n} p.${p}`;
+    const label = shownLabel || `File ${n} p.${p}`;
     const escapedLabel = label.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const safeFileName = (target.fileName || '').replace(/"/g, '&quot;');
     const safeBucketKey = (target.bucketKey || '').replace(/"/g, '&quot;');
@@ -97,6 +97,10 @@ export function processFileNCitations(
 
   // Pass 1: bracketed `[File N p.<N>]` → anchor.
   out = out.replace(/\[\s*File\s+(\d+)\s+p\.?\s*(\d+)\s*\]/gi, (full, n, p) => buildAnchor(n, p) ?? full);
+
+  // Pass 1b: `[File N]` (the page unknown) and `[File N p.??]` → the file
+  // itself, opened at its first page, labeled `File N`.
+  out = out.replace(/\[\s*File\s+(\d+)(?:\s+p\.?\s*\?+)?\s*\]/gi, (full, n) => buildAnchor(n, '1', `File ${n}`) ?? full);
 
   // Pass 2: bare-form `File N p.<N>` → anchor. Conservative guards.
   out = out.replace(/(^|[^>"'\w])File\s+(\d+)\s+p\.?\s*(\d+)\b/gi, (full, pre, n, p) => {

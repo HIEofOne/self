@@ -26,6 +26,9 @@
         <q-btn v-if="['pending', 'error', 'done', 'no-records', 'no-permission', 'upload-failed'].includes(indexState)" dense flat no-caps size="sm" color="primary"
                :label="indexState === 'done' ? 'Add new records from my folder' : 'Index my records now'" :loading="busy === 'index'" @click="index" />
       </div>
+      <div v-if="f.key === 'records-index' && f.enabled" class="fp__files text-caption">
+        <a href="#" @click.prevent="emit('open-files')">See your record files in Saved Files</a>
+      </div>
     </div>
     <div v-if="error" class="text-negative text-caption q-mt-sm">{{ error }}</div>
   </div>
@@ -41,9 +44,10 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { useEdition } from '../composables/useEdition';
 import { setFeature } from '../utils/advisorProposals';
-import { recordsIndexState, startRecordsIndexing, uploadWords, INDEX_WORDS, type IndexState } from '../utils/recordsSearch';
+import { recordsIndexProgress, startRecordsIndexing, uploadWords, progressWords, INDEX_WORDS, type IndexState } from '../utils/recordsSearch';
 
 const props = defineProps<{ userId: string }>();
+const emit = defineEmits<{ 'open-files': [] }>();
 const { state, load } = useEdition();
 
 const features = computed(() => Object.entries(state.features)
@@ -53,13 +57,27 @@ const features = computed(() => Object.entries(state.features)
 const busy = ref('');
 const error = ref('');
 const indexState = ref<IndexState>('unknown');
+// While indexing runs: the job's start, tokens and files (polled), and a
+// clock that ticks every second.
+const progress = ref({ startedAt: null as string | null, tokens: 0, filesIndexed: 0 });
+const now = ref(Date.now());
 let timer: ReturnType<typeof setInterval> | null = null;
-const stopPolling = () => { if (timer) { clearInterval(timer); timer = null; } };
+let clock: ReturnType<typeof setInterval> | null = null;
+const stopPolling = () => {
+  if (timer) { clearInterval(timer); timer = null; }
+  if (clock) { clearInterval(clock); clock = null; }
+};
 const refreshIndex = async () => {
   if (!props.userId || !state.features['records-index']?.enabled) return;
-  indexState.value = await recordsIndexState(props.userId);
-  if (indexState.value === 'running' && !timer) timer = setInterval(refreshIndex, 10000);
-  if (indexState.value !== 'running') stopPolling();
+  const p = await recordsIndexProgress(props.userId);
+  indexState.value = p.state;
+  progress.value = { startedAt: p.startedAt, tokens: p.tokens, filesIndexed: p.filesIndexed };
+  if (indexState.value === 'running') {
+    if (!timer) timer = setInterval(refreshIndex, 5000);
+    if (!clock) clock = setInterval(() => { now.value = Date.now(); }, 1000);
+  } else {
+    stopPolling();
+  }
 };
 
 // Upload the folder's records MAIA doesn't have yet, then index them.
@@ -67,7 +85,7 @@ const uploadNote = ref('');
 const lastUpload = ref('');
 const indexLine = computed(() => (indexState.value === 'uploading' && uploadNote.value
   ? uploadNote.value
-  : [lastUpload.value, INDEX_WORDS[indexState.value]].filter(Boolean).join(' ')));
+  : [lastUpload.value, indexState.value === 'running' ? progressWords(progress.value, now.value) : INDEX_WORDS[indexState.value]].filter(Boolean).join(' ')));
 const index = async () => {
   busy.value = 'index';
   indexState.value = 'uploading';
@@ -105,4 +123,6 @@ watch(() => state.features['records-index']?.enabled, (on) => { if (on) void ref
 .fp__item { border: 1px solid #e0e0e0; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
 .fp__item--on { border-color: #90caf9; background: #f7fbff; }
 .fp__index { display: flex; align-items: center; gap: 6px; margin-top: 8px; color: #455a64; }
+.fp__files { margin-top: 4px; margin-left: 20px; }
+.fp__files a { color: #1976d2; }
 </style>

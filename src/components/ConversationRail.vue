@@ -13,16 +13,6 @@
       <q-icon name="smart_toy" size="16px" />
       <span class="conv-rail__label">{{ currentConversationLabel }}</span>
     </button>
-    <div class="conv-rail__save-row">
-      <q-btn v-if="has('saved-chats')" flat dense size="sm" color="primary" icon="save" label="SAVE"
-             :disable="!canSaveToGroup || savingDisabled" @click.stop="emit('save-group')">
-        <q-tooltip>Save this conversation into your Stored Chats</q-tooltip>
-      </q-btn>
-      <q-btn flat dense size="sm" color="primary" icon="download" label="LOCAL"
-             :disable="!canSaveLocally || savingDisabled" @click.stop="emit('save-local')">
-        <q-tooltip>Save this conversation to your local folder</q-tooltip>
-      </q-btn>
-    </div>
 
     <!-- Stored Chats (including deep links); `saved-chats` in the Personal AS edition -->
     <template v-if="has('saved-chats')">
@@ -102,7 +92,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { useQuasar } from 'quasar';
 import { useEdition } from '../composables/useEdition';
 
@@ -114,14 +104,11 @@ const props = defineProps<{
   activePeer: { groupId: string; peerId: string; alias?: string | null; groupName?: string } | null;
   activeStoredId: string | null;
   currentConversationLabel: string;
-  canSaveLocally: boolean;
-  canSaveToGroup: boolean;
-  savingDisabled: boolean;
 }>();
 const emit = defineEmits<{
   'open-current': [];
-  'save-local': [];
-  'save-group': [];
+  /** Whether the rail holds more than the current chat (see hasContent) */
+  'content': [hasContent: boolean];
   'open-peer': [payload: { groupId: string; peerId: string; alias: string | null; groupName: string }];
   'open-stored': [chat: any];
   'open-groups': [];
@@ -296,7 +283,16 @@ const railGroups = computed<RailGroup[]>(() => {
 
 // Personal AS edition: only the private AI conversation, unless the user
 // turned on saved chats or member messages (their routes are gated too).
-const { has } = useEdition();
+const { has, isPersonalAs } = useEdition();
+
+// Worth showing: a stored chat or peer thread is open, a group conversation
+// exists (not just the empty Everyone channel), or, in the full edition,
+// stored chats. The Personal AS edition's stored chats are in Workbook →
+// Saved Chats, so a rail with only the current chat is hidden.
+const hasContent = computed(() => props.activeKind !== 'ai'
+  || railGroups.value.some((g) => g.peers.some((p) => p.peerId !== '@everyone' || !!p.lastAt || p.unread > 0))
+  || (!isPersonalAs.value && storedChats.value.length > 0));
+watch(hasContent, (v) => emit('content', v), { immediate: true });
 const refresh = () => {
   if (has('saved-chats')) void loadStoredChats();
   if (has('peer-messaging')) void loadGroups();
@@ -335,12 +331,6 @@ onUnmounted(() => { if (timer) clearInterval(timer); });
   &--current    { color: #5e35b1; }   // deep-purple (AI conversation)
   &--stored     { color: #6d4c41; }   // brown
   &--group      { color: #00796b; }   // teal
-}
-.conv-rail__save-row {
-  display: flex;
-  gap: 4px;
-  padding: 2px 8px 8px;
-  border-bottom: 1px solid #f0f0f0;
 }
 // Group-name sub-header under the GROUP CHATS category label — same
 // vocabulary, one visual step down. Sticky just below the category header

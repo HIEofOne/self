@@ -10,6 +10,9 @@ export interface PipelineStage {
   at: string | null;
   error?: string | null;
   phase?: string | null;
+  /** indexed stage: the indexing job's counts so far */
+  tokens?: number;
+  filesIndexed?: number;
 }
 
 export interface RecordsPipeline {

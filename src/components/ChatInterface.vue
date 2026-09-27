@@ -17,13 +17,10 @@
           :activeKind="railActiveKind"
           :activePeer="activePeerKey"
           :activeStoredId="currentSavedChatId"
+          v-show="railHasContent"
           :currentConversationLabel="currentConversationLabel"
-          :canSaveLocally="canSaveLocally"
-          :canSaveToGroup="canSaveToGroup"
-          :savingDisabled="isStreaming"
           @open-current="handleOpenCurrent"
-          @save-local="saveLocally"
-          @save-group="saveToGroup"
+          @content="railHasContent = $event"
           @open-peer="handleOpenPeerThread"
           @open-stored="handleRailOpenStored"
           @open-groups="handleRailOpenGroups"
@@ -40,7 +37,7 @@
           :peerId="peerThread.peerId"
           :peerAlias="peerThread.alias"
           :groupName="peerThread.groupName"
-          :aiEntries="aiRailEntries"
+          :aiEntries="aiRailEntries.filter((e) => !e.locked)"
           :consult="consultAiOnce"
           style="flex: 1; min-height: 0;"
           @close="handlePeerThreadClose"
@@ -55,8 +52,14 @@
           Your local backup will not be updated in this session. Access MAIA from your original device to keep your local folder current.
         </q-banner>
         <!-- File Info Bar -->
-        <div v-if="uploadedFiles.length > 0" class="q-px-md q-pt-md q-pb-sm" style="flex-shrink: 0; border-bottom: 1px solid #eee;">
+        <div v-if="uploadedFiles.length > 0 || chatImages.length > 0" class="q-px-md q-pt-md q-pb-sm" style="flex-shrink: 0; border-bottom: 1px solid #eee;">
           <div class="row items-center q-gutter-xs">
+            <!-- Images: kept in this browser, read only by public AIs that read images -->
+            <q-chip v-for="img in chatImages" :key="img.id" icon="image" color="blue-grey" text-color="white" size="sm">
+              {{ img.name }}
+              <q-tooltip>Sent only to public AIs that read images ({{ imageReaders || 'none available' }}). Not saved with the chat.</q-tooltip>
+              <q-btn flat dense round size="xs" icon="close" color="white" @click="removeChatImage(img.id)" />
+            </q-chip>
             <q-chip
               v-for="file in uploadedFiles"
               :key="file.id"
@@ -87,7 +90,8 @@
         </div>
 
         <!-- Chat Area -->
-        <div ref="chatMessagesRef" class="chat-messages q-pa-md" style="flex: 1; overflow-y: auto; min-height: 0;">
+        <div class="chat-messages-wrap">
+        <div ref="chatMessagesRef" class="chat-messages q-pa-md" :class="{ 'chat-messages--save-bar': showChatSaveBar }" style="flex: 1; overflow-y: auto; min-height: 0;">
           <template v-for="(msg, idx) in messages" :key="idx">
             <!-- Normal Chat Message -->
             <div 
@@ -279,7 +283,38 @@
             </template>
           </div>
         </div>
+        <!-- Save this chat: floats at the bottom of the chat area while there
+             is something new to save (Saved Chats, or the local folder). -->
+        <div v-if="showChatSaveBar" class="chat-save-bar">
+          <q-btn v-if="canSaveToSavedChats" unelevated rounded dense no-caps color="primary" icon="save" label="Save" @click="saveToGroup">
+            <q-tooltip>Save this chat in your Saved Chats (Workbook)</q-tooltip>
+          </q-btn>
+          <q-btn v-if="canSaveLocally" outline rounded dense no-caps color="primary" icon="download" label="Local" class="bg-white" @click="saveLocally">
+            <q-tooltip>Save this chat to your MAIA folder</q-tooltip>
+          </q-btn>
+        </div>
+        </div>
         
+        <!-- Turn on Public AIs (Personal AS edition), from the AI menu -->
+        <q-dialog v-model="publicAiAsk.open">
+          <q-card style="max-width: 460px">
+            <q-card-section>
+              <div class="text-h6">Turn on Public AIs?</div>
+              <div class="text-body2 q-mt-sm">{{ publicAiFeatureWords.description }}</div>
+              <div class="text-body2 q-mt-sm"><strong>What turning it on means:</strong> {{ publicAiFeatureWords.whatItMeans }}</div>
+              <div class="text-caption text-grey-8 q-mt-sm">
+                {{ publicAiAsk.label }} is run by that company, not by your MAIA. Everything in this chat
+                so far, and what you send next, goes to it. Your summary and rules aren't sent unless
+                they're in the chat. You can turn Public AIs off in Workbook → More features.
+              </div>
+            </q-card-section>
+            <q-card-actions align="right">
+              <q-btn flat no-caps label="Cancel" v-close-popup />
+              <q-btn unelevated no-caps color="primary" :label="`Turn on and use ${publicAiAsk.label}`" :loading="publicAiAsk.busy" @click="confirmPublicAi" />
+            </q-card-actions>
+          </q-card>
+        </q-dialog>
+
         <!-- Delete Confirmation Dialog -->
         <q-dialog v-model="showDeleteDialog" persistent>
           <q-card style="min-width: 350px">
@@ -411,7 +446,7 @@
                 aria-label="Attach file"
               >
                 <q-tooltip v-if="isRequestSent">File import is disabled until your account is approved</q-tooltip>
-                <q-tooltip v-else>Attach files to add them to the chat context</q-tooltip>
+                <q-tooltip v-else>Attach a file to add it to the chat, or an image for the public AIs that read images</q-tooltip>
               </q-btn>
               <input
                 ref="fileInput"
@@ -484,19 +519,28 @@
                       <q-item-label header class="q-py-xs">Consult an AI (private — only you see the answer)</q-item-label>
                     </template>
                     <q-item-label v-else header class="q-py-xs">Ask a different AI</q-item-label>
-                    <q-item
-                      v-for="e in aiRailEntries"
-                      :key="e.label"
-                      clickable
-                      :active="!composerTargetIsPeer && e.label === composerTargetLabel"
-                      @click="peerThread ? (peerTarget = e.label) : handleConsultantPick(e.label)"
-                    >
-                      <q-item-section avatar style="min-width: 32px">
-                        <q-icon :name="e.kind === 'private' ? 'smart_toy' : 'public'"
-                                :color="e.kind === 'private' ? 'deep-purple' : 'blue-grey'" size="18px" />
-                      </q-item-section>
-                      <q-item-section>{{ e.label }}</q-item-section>
-                    </q-item>
+                    <template v-for="(e, ei) in aiRailEntries" :key="e.label">
+                      <q-item-label v-if="e.kind === 'public' && (ei === 0 || aiRailEntries[ei - 1]!.kind !== 'public')" header class="q-py-xs">
+                        Public AIs <span class="text-grey-6">· what you send goes to that company</span>
+                      </q-item-label>
+                      <q-item
+                        clickable
+                        :active="!composerTargetIsPeer && e.label === composerTargetLabel"
+                        @click="pickAi(e)"
+                      >
+                        <q-item-section avatar style="min-width: 32px">
+                          <q-icon :name="e.kind === 'private' ? 'smart_toy' : 'public'"
+                                  :color="e.kind === 'private' ? 'deep-purple' : 'blue-grey'" size="18px" />
+                        </q-item-section>
+                        <q-item-section>
+                          <q-item-label>{{ e.label }}</q-item-label>
+                          <q-item-label v-if="e.hint" caption>{{ e.hint }}</q-item-label>
+                        </q-item-section>
+                        <q-item-section v-if="e.locked" side>
+                          <q-icon name="lock" size="16px" color="grey-6"><q-tooltip>Off until you turn on Public AIs</q-tooltip></q-icon>
+                        </q-item-section>
+                      </q-item>
+                    </template>
                   </q-list>
                 </q-menu>
               </q-chip>
@@ -1220,7 +1264,7 @@ import {
 } from '../utils/advisorProposals';
 import { sendOut, afterSendNote } from '../utils/requestsOut';
 import { WHAT as REQUEST_WHAT, WHY as REQUEST_WHY } from '../gnap/requestForm';
-import { startRecordsIndexing, uploadWords, INDEX_WORDS } from '../utils/recordsSearch';
+import { startRecordsIndexing, uploadWords, INDEX_WORDS, recordsIndexProgress, progressWords, type IndexProgress } from '../utils/recordsSearch';
 import {
   isFileSystemAccessSupported,
   pickLocalFolder,
@@ -1354,6 +1398,13 @@ const toggleReasoning = (idx: number) => {
   expandedReasoning.value[idx] = !expandedReasoning.value[idx];
 };
 const uploadedFiles = ref<UploadedFile[]>([]);
+// Images attached to this chat: kept in the browser (never uploaded or
+// saved) and sent only to public AIs that read images.
+const chatImages = ref<Array<{ id: string; name: string; size: number; dataUrl: string }>>([]);
+const IMAGE_EXT = /\.(png|jpe?g|webp|gif)$/i;
+const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+const MAX_IMAGES_TOTAL = 6 * 1024 * 1024;
+const removeChatImage = (id: string) => { chatImages.value = chatImages.value.filter((i) => i.id !== id); };
 const fileInput = ref<HTMLInputElement | null>(null);
 /** Post-attach nudge: a chat upload is saved but NOT indexed, and the
  *  records tier (verified meds + patient summary) doesn't exist yet.
@@ -1411,10 +1462,15 @@ const conversationRailRef = ref<InstanceType<typeof ConversationRail> | null>(nu
 // from the AI and made the rail look "stuck / no AI selected".
 const railActiveKind = ref<'ai' | 'stored' | 'peer'>('ai');
 const aiRailEntries = computed(() =>
-  providerOptions.value.map((o) => ({
-    label: o.label,
-    kind: (isPrivateAiLabel(o.label) ? 'private' : 'public') as 'private' | 'public'
-  }))
+  providerOptions.value.map((o) => {
+    const pub = publicAiFor(o.label);
+    return {
+      label: o.label,
+      kind: (isPrivateAiLabel(o.label) ? 'private' : 'public') as 'private' | 'public',
+      hint: pub ? [pub.reasoning ? 'reasons before answering' : '', pub.images ? 'reads images' : ''].filter(Boolean).join(' · ') : '',
+      locked: !!pub && !publicAiOn.value
+    };
+  })
 );
 // alias + groupName ride along so the rail can synthesize a row for a
 // thread whose peer isn't in its polled list yet (e.g. "Reply privately"
@@ -1437,6 +1493,34 @@ const activePeerKey = computed(() =>
 const handleConsultantPick = (label: string) => {
   selectedProvider.value = label;
   if (railActiveKind.value === 'peer') { peerThread.value = null; railActiveKind.value = 'ai'; }
+};
+// Choosing a public AI while Public AIs are off asks first (the registry's
+// own words); the chat route refuses until the patient turns it on.
+const publicAiAsk = ref<{ open: boolean; label: string; busy: boolean; forPeer: boolean }>({ open: false, label: '', busy: false, forPeer: false });
+const publicAiFeatureWords = computed(() => ({
+  description: editionState.features['public-ai']?.description || 'Chat with commercial AI models.',
+  whatItMeans: editionState.features['public-ai']?.whatItMeans || 'What you send in those chats goes to that model\'s provider.'
+}));
+const pickAi = (e: { label: string; locked?: boolean }) => {
+  if (e.locked) { publicAiAsk.value = { open: true, label: e.label, busy: false, forPeer: !!peerThread.value }; return; }
+  if (peerThread.value) peerTarget.value = e.label; else handleConsultantPick(e.label);
+};
+const confirmPublicAi = async () => {
+  const { label, forPeer } = publicAiAsk.value;
+  const uid = props.user?.userId;
+  if (!uid) return;
+  publicAiAsk.value.busy = true;
+  try {
+    if (!(await setFeature(uid, 'public-ai', true, 'settings'))) throw new Error('not saved');
+    await reloadEdition(true);
+    await loadProviders();
+    publicAiAsk.value.open = false;
+    if (forPeer && peerThread.value) peerTarget.value = label; else handleConsultantPick(label);
+  } catch {
+    $q.notify({ type: 'negative', message: 'Public AIs couldn’t be turned on. Try again.', position: 'top' });
+  } finally {
+    publicAiAsk.value.busy = false;
+  }
 };
 // Global-composer target while a peer thread is open: 'peer' (E2E) or an
 // AI label (private consult rendered inline in the thread). Resets to
@@ -1577,7 +1661,7 @@ const showAgentSetupDialog = ref(false);
 // Personal AS edition: the setup checklist (SetupChecklist.vue) replaces
 // this wizard, which must never open there — whichever of its many paths
 // asks for it (group_requests.md §4.4).
-const { isPersonalAs, state: editionState, load: reloadEdition } = useEdition();
+const { isPersonalAs, state: editionState, load: reloadEdition, has: hasEditionFeature } = useEdition();
 watch(showAgentSetupDialog, (open) => {
   if (open && isPersonalAs.value) showAgentSetupDialog.value = false;
 }, { flush: 'sync' });
@@ -2755,6 +2839,14 @@ const currentChatSnapshot = computed(() => JSON.stringify(getComparableChatState
 
 const canSaveLocally = computed(() => currentChatSnapshot.value !== lastLocalSaveSnapshot.value);
 const canSaveToGroup = computed(() => currentChatSnapshot.value !== lastGroupSaveSnapshot.value);
+// The floating Save / Local buttons: only with a chat worth keeping and
+// something not yet saved.
+const canSaveToSavedChats = computed(() => canSaveToGroup.value && hasEditionFeature('saved-chats'));
+const showChatSaveBar = computed(() => !isStreaming.value && !isDeepLink.value
+  && messages.value.some((m) => m.role === 'assistant' && String(m.content || '').trim())
+  && (canSaveToSavedChats.value || canSaveLocally.value));
+// The conversation rail shows only when it holds more than the current chat.
+const railHasContent = ref(false);
 
 const userResourceStatus = ref<{
   hasAgent: boolean;
@@ -2977,6 +3069,16 @@ const modelDisplayNames: Record<string, string> = {
   'kimi-k2.5': 'Kimi K2.5',
   'gemini-3.5-flash': 'Gemini 3.5 Flash',
 };
+
+// Public AIs (server/public-ais.js), listed below the private AI(s). In
+// the Personal AS edition they stay locked until the patient turns on
+// Public AIs (publicAiOn).
+interface PublicAi { id: string; label: string; reasoning: boolean; images: boolean }
+const publicAis = ref<PublicAi[]>([]);
+const publicAiOn = ref(true);
+const publicAiFor = (label: string): PublicAi | null =>
+  publicAis.value.find((m) => (providerLabels[m.id] || m.label) === label) || null;
+const imageReaders = computed(() => publicAis.value.filter((m) => m.images).map((m) => m.label).join(', '));
 
 // Private AI profiles reported by /api/chat/providers. Each ready
 // profile (e.g. Deepseek, GPT) becomes its own dropdown entry; the
@@ -3214,7 +3316,8 @@ const parseEncounterLinkIntent = (text: string): { ref: string; displayHint: str
 };
 
 const selectFirstNonPrivateProvider = () => {
-  const fallback = providers.value.find(p => p !== 'digitalocean');
+  const fallback = providers.value.find(p => p !== 'digitalocean'
+    && !(!publicAiOn.value && publicAis.value.some((m) => m.id === p)));
   if (fallback) {
     selectedProvider.value = providerLabels[fallback] || fallback;
   }
@@ -3364,6 +3467,9 @@ const loadProviders = async () => {
     privateAiProfiles.value = normalizePrivateAiProfiles(
       Array.isArray(data.privateAiProfiles) ? data.privateAiProfiles : []
     );
+    publicAis.value = Array.isArray(data.publicAis) ? data.publicAis : [];
+    publicAiOn.value = data.publicAiOn !== false;
+    for (const m of publicAis.value) providerLabels[m.id] = m.label;
 
     // Keep wizard model name refs in sync whenever profiles are loaded
     if (privateAiProfiles.value.length > 0) {
@@ -3375,6 +3481,11 @@ const loadProviders = async () => {
     }
 
     if (providers.value.length > 0) {
+      // A mid-session reload keeps the patient's own pick while it's still
+      // offered: a specific Private AI, or a public AI that isn't locked.
+      const pickedLabel = normalizeProviderLabel(selectedProvider.value);
+      const pickStillOffered = !!publicAiFor(pickedLabel) && publicAiOn.value
+        && providerOptions.value.some((o) => o.label === pickedLabel);
       if (providers.value.includes('digitalocean')) {
         // Only reset the dropdown if the current selection isn't already
         // a valid Private AI label — otherwise a mid-session providers
@@ -3382,7 +3493,7 @@ const loadProviders = async () => {
         // secondary AI selection back to the primary.
         const currentLabel = normalizeProviderLabel(selectedProvider.value);
         const isSpecificProfile = privateAiProfiles.value.some(pr => pr.label === currentLabel);
-        if (!isSpecificProfile) {
+        if (!isSpecificProfile && !pickStillOffered) {
           selectedProvider.value = privateAiProfiles.value[0]?.label || providerLabels.digitalocean;
         }
         showPrivateUnavailableDialog.value = false; // clear in case it was shown before refetch
@@ -3393,7 +3504,7 @@ const loadProviders = async () => {
           // setup keeps the wizard closed; "unavailable" would be a lie).
           showPrivateUnavailableDialog.value = true;
         }
-        selectFirstNonPrivateProvider();
+        if (!pickStillOffered) selectFirstNonPrivateProvider();
       }
     }
   } catch (error) {
@@ -3597,8 +3708,24 @@ const turnOnProposedFeature = async (fp: FeatureProposal) => {
       fp.note = `${uploaded} ${INDEX_WORDS[st] || 'Turned on.'}`.trim();
       return;
     }
-    fp.note = `${uploaded} ${INDEX_WORDS.running}`.trim();
-    const out = await waitForStageDone(uid, 'indexed', 20 * 60 * 1000, 10000);
+    // Live progress on the card: a clock every second, the job's counts
+    // every five.
+    let last: Pick<IndexProgress, 'startedAt' | 'tokens' | 'filesIndexed'> = { startedAt: new Date().toISOString(), tokens: 0, filesIndexed: 0 };
+    const showProgress = () => { fp.note = `${uploaded} ${progressWords(last)} Your files are in Workbook → Saved Files.`.trim(); };
+    showProgress();
+    const clock = setInterval(showProgress, 1000);
+    let out: 'done' | 'error' | 'timeout' = 'timeout';
+    try {
+      for (const began = Date.now(); Date.now() - began < 20 * 60 * 1000;) {
+        const p = await recordsIndexProgress(uid);
+        if (p.startedAt) last = p;
+        else last = { ...last, tokens: p.tokens, filesIndexed: p.filesIndexed };
+        if (p.state === 'done' || p.state === 'error') { out = p.state; break; }
+        await new Promise((r) => setTimeout(r, 5000));
+      }
+    } finally {
+      clearInterval(clock);
+    }
     fp.state = out === 'done' ? 'indexed' : 'error';
     fp.note = out === 'done' ? INDEX_WORDS.done
       : out === 'timeout' ? 'Indexing is taking a while. Workbook → More features shows when it is done.'
@@ -4000,6 +4127,18 @@ const sendMessage = async () => {
     // the response arrives, mislabeling the response as primary.
     const providerKey = getProviderKey(selectedProvider.value);
     const providerLabel = assistantLabelForKey(providerKey);
+    // Images ride with the latest question, and only to a public AI that
+    // reads images (OpenAI-style content parts).
+    const imageTarget = publicAis.value.find((m) => m.id === providerKey && m.images);
+    const lastSanitized = sanitizedMessages[sanitizedMessages.length - 1] as { role: string; content: unknown } | undefined;
+    if (chatImages.value.length && imageTarget && lastSanitized?.role === 'user') {
+      lastSanitized.content = [
+        { type: 'text', text: String(lastSanitized.content || '') },
+        ...chatImages.value.map((i) => ({ type: 'image_url', image_url: { url: i.dataUrl } }))
+      ];
+    } else if (chatImages.value.length && !imageTarget) {
+      $q.notify({ type: 'info', message: `${providerLabel} doesn’t read images, so the attached image wasn’t sent.`, position: 'top' });
+    }
     const shareIdForRequest = deepLinkShareId.value || currentSavedChatShareId.value || null;
     const requestOptions: Record<string, unknown> = {
       stream: true
@@ -6542,6 +6681,31 @@ const handleFileSelect = async (event: Event) => {
   const file = input.files?.[0];
 
   if (!file) return;
+
+  // An image attached to the chat stays in this browser for the public AIs
+  // that read images; it isn't uploaded like a record.
+  if (!wizardUploadIntent.value && (IMAGE_EXT.test(file.name) || /^image\/(png|jpeg|webp|gif)$/.test(file.type))) {
+    input.value = '';
+    const total = chatImages.value.reduce((a, i) => a + i.size, 0);
+    if (file.size > MAX_IMAGE_BYTES || total + file.size > MAX_IMAGES_TOTAL) {
+      $q.notify({ type: 'warning', message: 'That image is too large. Images can be up to 4 MB each, 6 MB in all.', position: 'top' });
+      return;
+    }
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    }).catch(() => '');
+    if (!dataUrl) return;
+    chatImages.value.push({ id: `img-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, name: file.name, size: file.size, dataUrl });
+    if (!publicAis.value.some((m) => m.images)) {
+      $q.notify({ type: 'info', message: 'No AI on this host reads images yet.', position: 'top' });
+    } else if (!publicAiFor(normalizeProviderLabel(selectedProvider.value))?.images) {
+      $q.notify({ type: 'info', message: `Only public AIs that read images see it: ${imageReaders.value}. Choose one in the "To:" menu.`, position: 'top', timeout: 6000 });
+    }
+    return;
+  }
 
   // Reconnect local folder NOW while we still have user-gesture context
   // (requestPermission requires an active gesture; it'll be lost after the first await)
@@ -10541,6 +10705,22 @@ defineExpose({
   border-color: #5c6bc0;
 }
 
+.chat-messages-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.chat-messages--save-bar { padding-bottom: 56px !important; }
+.chat-save-bar {
+  position: absolute;
+  right: 16px;
+  bottom: 10px;
+  display: flex;
+  gap: 8px;
+}
+.chat-save-bar .q-btn { box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15); }
 .chat-messages {
   background-color: #fafafa;
 }

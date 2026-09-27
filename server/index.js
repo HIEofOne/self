@@ -49,6 +49,8 @@ import setupReceivedRoutes from './routes/received.js';
 import setupGnapOutRoutes from './routes/gnap-out.js';
 import setupWelcomeActivityRoutes from './routes/welcome-activity.js';
 import setupAskMaiaRoutes from './routes/ask-maia.js';
+import { enablePublicAis } from './public-ais.js';
+import { recordFilesForLegend } from './advisor-context.js';
 import { createSpacesHoldStore, sweepExpiredHolds } from './gnap/documents.js';
 import { sweepExpiredGnapPayments } from './gnap/payments.js';
 import setupPolicyRoutes from './routes/policies.js';
@@ -12502,11 +12504,7 @@ async function buildPatientSummaryPromptForUser(userId, userDoc, profileKey = 'd
   // isReference=true) so that File N in the prompt resolves to the
   // SAME index the client uses when matching against
   // availableUserFiles. Then PDF-only and stable insertion order.
-  const referencesPrefix = `${userId}/References/`;
-  const pdfFilesForLegend = (Array.isArray(userDoc?.files) ? userDoc.files : [])
-    .filter(f => f && f.fileName && /\.pdf$/i.test(f.fileName))
-    .filter(f => !(f.bucketKey || '').startsWith(referencesPrefix))
-    .filter(f => f.isReference !== true);
+  const pdfFilesForLegend = recordFilesForLegend(userDoc?.userId ? userDoc : { ...userDoc, userId });
   if (pdfFilesForLegend.length > 0) {
     const fileLegend = pdfFilesForLegend
       .map((f, i) => `File ${i + 1}=${f.fileName}`)
@@ -15456,6 +15454,9 @@ if (isProduction) {
     }));
     console.log(`[DO Inference] Accessible models: ${[...availableModels].join(', ') || 'none'}`);
     chatClient.enableDOInference(inferenceKey, availableModels);
+    // Public AIs in the chat's AI menu (Personal AS edition): the most
+    // expensive models serverless inference offers (server/public-ais.js).
+    if (getEdition() === 'personal-as' && !isGroupOnlyHost()) await enablePublicAis(chatClient, inferenceKey);
   }
 }
 

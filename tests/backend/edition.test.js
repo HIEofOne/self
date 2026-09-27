@@ -238,4 +238,45 @@ describe.each(EDITIONS)('GET /api/chat/providers, edition "%s"', (edition) => {
     expect(body.providers).toEqual(['digitalocean', 'anthropic', 'gemini']);
     expect(body.privateAiProfiles.map((p) => p.key)).toEqual(['default', 'gpt']);
   });
+
+  // The public AIs of server/public-ais.js: Personal AS lists them below the
+  // private AI, locked until the patient turns Public AIs on; the full
+  // edition is unchanged.
+  const PUBLIC = [{ id: 'openai-gpt-5.4-pro', label: 'GPT-5.4 Pro', reasoning: true, images: true }, { id: 'anthropic-claude-fable-5.1', label: 'Claude Fable 5.1', reasoning: false, images: true }];
+  const withPublic = {
+    ...chatClient,
+    getAvailableProviders: () => ['digitalocean', 'anthropic', 'gemini', ...PUBLIC.map((m) => m.id)],
+    getPublicModels: () => PUBLIC.map((m) => ({ ...m }))
+  };
+  const providersWithPublic = async (doc, { guest = false } = {}) => {
+    setEditionForTests(edition);
+    const app = express();
+    withSession(app);
+    if (guest) app.use((req, _res, next) => { req.session.isDeepLink = true; next(); });
+    setupChatRoutes(app, withPublic, new FakeCloudant({ frank06: doc }), doClient);
+    const r = request(await serve(app)).get('/api/chat/providers');
+    return (await (guest ? r : r.set('x-test-user', 'frank06'))).body;
+  };
+
+  it('lists the public AIs below the private AI, locked until Public AIs are on', async () => {
+    const off = await providersWithPublic(userWith());
+    const on = await providersWithPublic(userWith({ 'public-ai': { enabledAt: UNLOCKED_AT } }));
+    if (full) {
+      expect(off.providers).toEqual(['digitalocean', 'anthropic', 'gemini', 'openai-gpt-5.4-pro', 'anthropic-claude-fable-5.1']);
+      expect(off.publicAis).toEqual([]);
+      return;
+    }
+    expect(off.providers).toEqual(['digitalocean', 'openai-gpt-5.4-pro', 'anthropic-claude-fable-5.1']);
+    expect(off.publicAis.map((m) => m.label)).toEqual(['GPT-5.4 Pro', 'Claude Fable 5.1']);
+    expect(off.publicAiOn).toBe(false);
+    expect(on.providers).toEqual(off.providers);
+    expect(on.publicAiOn).toBe(true);
+  });
+
+  it('a clinician\'s guest session never sees locked public AIs', async () => {
+    if (full) return;
+    const body = await providersWithPublic(userWith(), { guest: true });
+    expect(body.providers).not.toContain('openai-gpt-5.4-pro');
+    expect(body.publicAis).toEqual([]);
+  });
 });

@@ -48,7 +48,11 @@ A group is a community, such as a patient group or a practice, that suggests rul
 
 ## Your private AI
 
-Each patient's private AI runs on DigitalOcean's AI platform, for that patient only. In the Personal AS edition it knows your Patient Summary, your rules and whether sharing is on. It helps you write rules, explains requests, drafts requests to other MAIAs and suggests features. It never decides who gets your information: your confirmed rules do, or you do. "Search all my records", which you can turn on, indexes the records in your folder so your private AI can search them.
+Each patient's private AI runs on DigitalOcean's AI platform, for that patient only. In the Personal AS edition it knows your Patient Summary, your rules and whether sharing is on. It helps you write rules, explains requests, drafts requests to other MAIAs and suggests features. It never decides who gets your information: your confirmed rules do, or you do. "Search all my records", which you can turn on, indexes the records in your folder so your private AI can search them; its answers cite the file and page they come from, as links. Workbook → More features and Saved Files show the indexing's progress.
+
+## Public AIs
+
+Below your private AI, the chat's "To:" menu lists four public AIs: commercial models such as GPT-5.4 Pro and Claude Fable 5.1, reached through DigitalOcean's serverless inference. They stay off until you turn on Public AIs; choosing one the first time asks. Everything in that chat goes to the company that runs the model you pick, and your summary and rules aren't sent unless they're in the chat. Some reason before they answer, and they can read an image you attach; an image stays in your browser, isn't saved with the chat, and goes only to a public AI that reads images.
 
 ## Privacy, trust and regulation
 

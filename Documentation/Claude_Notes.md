@@ -51,6 +51,7 @@ They leave out secrets and anything that would help an attacker: app and droplet
   - a MAIA never sends a request just because it received one;
   - the private half of the folder key never reaches the server.
 - The AI advises and drafts. The deterministic evaluator and the patient's own clicks are the only deciders.
+- Public AIs are listed in the chat's menu but stay locked until the patient turns on Public AIs, and a clinician's guest session sees them only when the patient did. A public AI never gets the private AI's context (summary, rules), only the chat. An image attached in chat stays in the browser, is never saved, and goes only to a model that reads images.
 - Credits are prepaid service fees: not refundable, not transferable, not cash.
 
 **Records and the Patient Summary**

@@ -46,6 +46,7 @@ const trimmed = (v) => String(v || '').trim();
  *   the full edition; in the Personal AS edition only once the user turns on
  *   "Search all my records". Without it the summary is drafted from the
  *   deterministic lists alone (group_requests.md §5, D11).
+ * @param {number} [opts.now] — the time, for tests
  */
 export function computeRecordsPipeline(userDoc, opts = {}) {
   const files = Array.isArray(userDoc?.files) ? userDoc.files : [];
@@ -96,12 +97,20 @@ export function computeRecordsPipeline(userDoc, opts = {}) {
   const docSaysIndexed = ks?.backendCompleted === true
     || (Array.isArray(userDoc?.kbIndexedBucketKeys) && userDoc.kbIndexedBucketKeys.length > 0);
   const indexedDone = opts.hasFilesInKB === true || (opts.hasFilesInKB == null && docSaysIndexed);
+  // A job under way counts as running even when earlier files are indexed
+  // (adding new records), unless it finished or went quiet two hours ago.
+  const now = opts.now ?? Date.now();
+  const jobLive = !!ks?.phase && !['complete', 'error', 'failed'].includes(ks.phase) && ks.backendCompleted !== true
+    && (!ks.startedAt || now - Date.parse(ks.startedAt) < 2 * 60 * 60 * 1000);
+  const progress = { tokens: Number(ks?.tokens) || 0, filesIndexed: Number(ks?.filesIndexed) || 0 };
   if (!indexing) {
     stages.indexed = { status: 'skipped', at: null };
+  } else if (jobLive) {
+    stages.indexed = { status: 'running', at: ks.startedAt || null, phase: ks.phase, ...progress };
   } else if (indexedDone) {
-    stages.indexed = { status: 'done', at: ks?.completedAt || null };
+    stages.indexed = { status: 'done', at: ks?.completedAt || null, ...progress };
   } else if (ks?.phase && ks.phase !== 'complete' && ks.phase !== 'error' && ks.phase !== 'failed') {
-    stages.indexed = { status: 'running', at: ks.startedAt || null, phase: ks.phase };
+    stages.indexed = { status: 'running', at: ks.startedAt || null, phase: ks.phase, ...progress };
   } else if (ks?.phase === 'error' || ks?.phase === 'failed') {
     stages.indexed = { status: 'error', at: null, error: ks.error || ks.phase };
   } else {
