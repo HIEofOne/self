@@ -4,14 +4,14 @@
       <q-page class="ap">
         <div class="ap__inner">
           <div class="ap__host"><a href="/">{{ host }}</a></div>
-          <h1 class="ap__title">Ask about MAIA</h1>
+          <h1 class="ap__title">Ask Claude about MAIA</h1>
           <p class="ap__lead">
             MAIA is open source. Claude, an AI made by Anthropic, answers questions from patients,
             clinicians, group organizers and developers using a map of MAIA's code, its documents and
             the history of every change, the same code this host runs. It can't see anyone's MAIA,
             records or account.
           </p>
-          <AskMaia full />
+          <AskMaia />
           <div class="ap__foot">
             <a href="/">Back to {{ host }}</a>
             · <a :href="REPO_URL" target="_blank" rel="noopener">The code on GitHub</a>
@@ -33,7 +33,7 @@ import AskMaia from './AskMaia.vue';
 
 const REPO_URL = 'https://github.com/HIEofOne/self';
 const host = window.location.host;
-document.title = `Ask about MAIA · ${host}`;
+document.title = `Ask Claude about MAIA · ${host}`;
 </script>
 
 <style scoped>

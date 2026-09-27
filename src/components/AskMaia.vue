@@ -1,10 +1,5 @@
 <template>
-  <section v-if="available" class="ask" :class="{ 'ask--full': full }" aria-labelledby="ask-maia-title">
-    <div v-if="!full" class="ask__head">
-      <q-icon name="forum" color="primary" size="20px" />
-      <span id="ask-maia-title" class="ask__title">Ask about MAIA</span>
-      <a href="/ask" target="_blank" rel="noopener" class="ask__full-link">Open the full page <q-icon name="open_in_new" size="13px" /></a>
-    </div>
+  <section v-if="available" class="ask" aria-label="Ask Claude about MAIA">
     <div class="ask__sub">
       Claude answers from a map of MAIA's code, documents and change history, reading what it
       needs and linking to it. It can take up to a minute. This box isn't private, so please
@@ -40,16 +35,11 @@
     </div>
 
     <template v-else>
-      <template v-if="full">
-        <div v-for="g in suggestionGroups" :key="g.who" class="ask__group">
-          <div class="ask__group-who">{{ g.who }}</div>
-          <div class="ask__chips">
-            <q-chip v-for="s in g.items" :key="s" clickable outline color="primary" size="md" @click="ask(s)">{{ s }}</q-chip>
-          </div>
+      <div v-for="g in suggestionGroups" :key="g.who" class="ask__group">
+        <div class="ask__group-who">{{ g.who }}</div>
+        <div class="ask__chips">
+          <q-chip v-for="s in g.items" :key="s" clickable outline color="primary" size="md" @click="ask(s)">{{ s }}</q-chip>
         </div>
-      </template>
-      <div v-else class="ask__chips">
-        <q-chip v-for="s in QUICK" :key="s" clickable outline color="primary" size="md" @click="ask(s)">{{ s }}</q-chip>
       </div>
     </template>
 
@@ -71,20 +61,16 @@
  * works, before any account exists. Claude answers from a knowledge pack
  * (the brief, maps of the code and documents, the PR history), reads what
  * it needs (each lookup shows as it goes), and links to what it read. The conversation lives only in this
- * page; nothing is saved. Hidden when this host can't reach Claude.
- *
- * `full`: the page at /ask, with more room and questions for each kind of
- * visitor.
+ * page; nothing is saved. Hidden when this host can't reach Claude. It
+ * is the page at /ask (AskPage.vue), with questions for each kind of
+ * visitor; the welcome page links to it (WelcomeMaps.vue).
  */
 import { ref, nextTick, onMounted } from 'vue';
 import MarkdownIt from 'markdown-it';
 
-defineProps<{ full?: boolean }>();
-
 interface Looked { path: string; start?: number; end?: number; title?: string; url: string }
 interface Turn { role: 'user' | 'assistant'; content: string; steps: string[]; looked: Looked[]; error?: string }
 
-const QUICK = ['What is MAIA?', 'How do groups work?', 'Who can see my records?', 'How do I get started?'];
 const suggestionGroups = [
   { who: 'Patients', items: ['What is MAIA, and what does it cost me?', 'Who can see my records, and how do I control it?', 'How do I get started?'] },
   { who: 'Clinicians', items: ['How do I ask a patient\'s MAIA for their medication list?', 'How can I send a patient a radiology report?', 'Is MAIA regulated as a medical device?'] },
@@ -172,19 +158,12 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.ask { max-width: 560px; width: 100%; margin: 0 auto; border: 1px solid #dde3e9; border-radius: 12px; padding: 14px 16px; background: #fff; text-align: left; }
-.ask--full { max-width: 860px; border: none; padding: 0; background: transparent; }
-.ask__head { display: flex; align-items: center; gap: 8px; }
-.ask__title { font-weight: 600; font-size: 1rem; }
-.ask__full-link { margin-left: auto; font-size: 0.8rem; color: #1976d2; text-decoration: none; white-space: nowrap; }
-.ask__full-link:hover { text-decoration: underline; }
+.ask { max-width: 860px; width: 100%; margin: 0 auto; text-align: left; }
 .ask__sub { color: #5f6b77; font-size: 0.85rem; margin: 4px 0 10px; line-height: 1.4; }
-.ask__log { max-height: 420px; overflow-y: auto; margin-bottom: 10px; display: flex; flex-direction: column; gap: 12px; }
-.ask--full .ask__log { max-height: calc(100vh - 300px); min-height: 200px; }
+.ask__log { max-height: calc(100vh - 300px); min-height: 200px; overflow-y: auto; margin-bottom: 10px; display: flex; flex-direction: column; gap: 12px; }
 .ask__q { align-self: flex-end; margin-left: auto; background: #e8f0fa; border-radius: 12px 12px 2px 12px; padding: 6px 10px; max-width: 85%; white-space: pre-wrap; width: fit-content; }
 .ask__turn--user { display: flex; }
-.ask__a { line-height: 1.5; font-size: 0.92rem; }
-.ask--full .ask__a { font-size: 0.97rem; }
+.ask__a { line-height: 1.5; font-size: 0.97rem; }
 .ask__a :deep(p) { margin: 0 0 6px; }
 .ask__a :deep(ul), .ask__a :deep(ol) { margin: 0 0 6px; padding-left: 20px; }
 .ask__a :deep(code) { background: #f2f4f7; border-radius: 4px; padding: 0 3px; font-size: 0.88em; }

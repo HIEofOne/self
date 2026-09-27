@@ -2,6 +2,9 @@
   <div class="gh">
     <div class="gh__host">{{ host }}</div>
     <h1 class="gh__title">Groups on this MAIA host</h1>
+    <p class="gh__intro">
+      MAIA serves <strong>patient communities</strong> creating private peer support networks powered by personalized, confidential AI; <strong>specialty clinics</strong> offering trusted support circles alongside clinician-recommended AI tools; and <strong>primary care practices</strong> that collaborate with patients who manage their most sensitive records with a personal AI assistant.
+    </p>
     <p class="gh__lead">
       This host runs groups only. It keeps no patients' MAIAs and no health
       records: each member's MAIA, with their records, stays on their own MAIA
@@ -35,8 +38,6 @@
       </div>
     </div>
 
-    <AskMaia class="q-mt-lg" />
-
     <WelcomeMaps class="q-mt-lg" />
 
     <div class="gh__foot">
@@ -58,7 +59,6 @@
  */
 import { ref, onMounted } from 'vue';
 import WelcomeMaps from './WelcomeMaps.vue';
-import AskMaia from './AskMaia.vue';
 
 defineProps<{ memberHosts: string[]; version: string }>();
 
@@ -95,6 +95,7 @@ onMounted(async () => {
 .gh { max-width: 640px; margin: 0 auto; width: 100%; }
 .gh__host { font-weight: 700; letter-spacing: 0.08em; color: #1976d2; font-size: 13px; text-transform: uppercase; }
 .gh__title { font-size: 22px; line-height: 1.3; margin: 6px 0 8px; font-weight: 600; }
+.gh__intro { color: #37424d; line-height: 1.55; margin: 0 0 12px; }
 .gh__lead { color: #555; line-height: 1.5; margin: 0 0 16px; }
 .gh__center { display: flex; justify-content: center; padding: 24px 0; }
 .gh__group { border: 1px solid #dde3e9; border-radius: 12px; padding: 14px 16px; margin-bottom: 12px; background: #fff; }

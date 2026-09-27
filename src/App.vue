@@ -97,6 +97,9 @@
                 <template v-else>
                 <template v-if="isPersonalAs">
                   <div class="text-h6 text-center q-mb-xs">{{ hostGroup?.name || 'MAIA' }}</div>
+                  <p class="welcome-lede">
+                    MAIA serves <strong>patient communities</strong> creating private peer support networks powered by personalized, confidential AI; <strong>specialty clinics</strong> offering trusted support circles alongside clinician-recommended AI tools; and <strong>primary care practices</strong> that collaborate with patients who manage their most sensitive records with a personal AI assistant.
+                  </p>
                   <div v-if="hostGroup?.description" class="text-body2 text-grey-8 text-center q-mb-md" style="max-width: 560px; margin-left: auto; margin-right: auto;">
                     {{ hostGroup.description }}
                   </div>
@@ -335,10 +338,8 @@
                       <a href="#" class="welcome-footer-link text-caption" @click.prevent="addingFamilyMember = false">Back to my MAIA</a>
                     </div>
                     </template>
-                    <!-- Ask about MAIA: Claude answers from the public docs. -->
-                    <AskMaia class="q-mt-lg" />
-                    <!-- The MAIA Request Map and Group Network (public/*.html): open to
-                         anyone, before any account exists. -->
+                    <!-- The MAIA Request Map, the Group Network (public/*.html) and Ask
+                         Claude about MAIA (/ask): open to anyone, before any account exists. -->
                     <WelcomeMaps class="q-mt-lg" />
                     <div class="text-center text-caption text-grey-6 q-mt-lg">
                       <a href="/page.html?doc=Privacy" target="_blank" class="welcome-footer-link">Privacy</a>
@@ -430,7 +431,6 @@
 
                     <!-- Footer: doc links, explore links, version -->
                     <template #footer>
-                      <AskMaia class="q-mb-lg" />
                       <div class="text-center q-mb-md">
                         <a href="/page.html?doc=Privacy" target="_blank" class="welcome-footer-link">Privacy</a>
                         <span class="text-grey-5 q-mx-sm">|</span>
@@ -439,6 +439,8 @@
                         <a href="/page.html?doc=faq" target="_blank" class="welcome-footer-link">FAQ</a>
                         <span class="text-grey-5 q-mx-sm">|</span>
                         <a href="/page.html?doc=about" target="_blank" class="welcome-footer-link">About</a>
+                        <span class="text-grey-5 q-mx-sm">|</span>
+                        <a href="/ask" target="_blank" class="welcome-footer-link">Ask Claude about MAIA</a>
                         <div class="text-caption text-grey-6 q-mt-sm">
                           Join the <a href="https://forum.agropper.xyz" target="_blank" class="welcome-footer-link">community forum</a>
                           · See the <a href="/MAIA-overview.pdf" target="_blank" class="welcome-footer-link">slide show</a>
@@ -1154,7 +1156,6 @@ import { useSetupChecklist } from './composables/useSetupChecklist';
 import EmailVerifyBox from './components/EmailVerifyBox.vue';
 import { useVerifiedEmail } from './composables/verifiedEmail';
 import DeepLinkAccess from './components/DeepLinkAccess.vue';
-import AskMaia from './components/AskMaia.vue';
 import AdminUsers from './components/AdminUsers.vue';
 import { useQuasar } from 'quasar';
 import { startAuthentication } from '@simplewebauthn/browser';
@@ -4685,6 +4686,14 @@ onMounted(async () => {
   td:nth-child(3) { color: #777; }
 }
 
+.welcome-lede {
+  max-width: 640px;
+  margin: 4px auto 12px;
+  text-align: center;
+  line-height: 1.55;
+  color: #37424d;
+  font-size: 0.95rem;
+}
 .edition-start {
   max-width: 460px;
   margin: 8px auto 0;
