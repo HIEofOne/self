@@ -6,9 +6,10 @@
           <div class="ap__host"><a href="/">{{ host }}</a></div>
           <h1 class="ap__title">Ask about MAIA</h1>
           <p class="ap__lead">
-            MAIA is open source. Claude, an AI made by Anthropic, can read all of its code and
-            documents, the same ones this host runs, to answer questions from patients, clinicians,
-            group organizers and developers. It can't see anyone's MAIA, records or account.
+            MAIA is open source. Claude, an AI made by Anthropic, answers questions from patients,
+            clinicians, group organizers and developers using a map of MAIA's code, its documents and
+            the history of every change, the same code this host runs. It can't see anyone's MAIA,
+            records or account.
           </p>
           <AskMaia full />
           <div class="ap__foot">

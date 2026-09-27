@@ -51,6 +51,7 @@ import setupWelcomeActivityRoutes from './routes/welcome-activity.js';
 import setupAskMaiaRoutes, { DEFAULT_ASK_MODEL, FALLBACK_ASK_MODEL } from './routes/ask-maia.js';
 import { enablePublicAis, probePublicAi } from './public-ais.js';
 import { recordFilesForLegend } from './advisor-context.js';
+import { createPrHistory } from './pr-history.js';
 import { createSpacesHoldStore, sweepExpiredHolds } from './gnap/documents.js';
 import { sweepExpiredGnapPayments } from './gnap/payments.js';
 import setupPolicyRoutes from './routes/policies.js';
@@ -1705,7 +1706,12 @@ setupWelcomeActivityRoutes(app, { cloudant, secret: SESSION_SECRET });
 // "Ask about MAIA" on the welcome page: Claude researches the repository.
 // The model is chosen once the inference key is known (end of startup).
 let askInference = null;
-setupAskMaiaRoutes(app, { rootDir: path.join(__dirname, '..'), getInference: () => askInference });
+// Its knowledge pack includes the repository's merged PRs, from GitHub:
+// fetched at startup and daily; the last good copy is kept in CouchDB.
+const askPrHistory = createPrHistory({ cloudant });
+void askPrHistory.refresh();
+setInterval(() => { if (askPrHistory.stale()) void askPrHistory.refresh(); }, 6 * 60 * 60 * 1000).unref?.();
+setupAskMaiaRoutes(app, { rootDir: path.join(__dirname, '..'), getInference: () => askInference, getPrs: () => askPrHistory.get() });
 
 // Groups daily maintenance (Groups.md §6.1/§6.3/§7.3): renew 24h membership
 // credentials, reconcile registry-side revocation, pull relay mail, and
