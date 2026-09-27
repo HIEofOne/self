@@ -175,7 +175,7 @@
       <p>Built pieces show their phase; planned ones the phase that brings them.</p>
     </div>
     <div class="people" id="people"></div>
-    <p class="note">One server can play both host roles: test.agropper.xyz does today, and trustee.ai will at launch. A Group Member is a patient acting inside a group, so their MAIA runs on a MAIA Host too.</p>
+    <p class="note">In the demonstration, maia.agropper.xyz is a MAIA Host, with patients’ MAIAs and their records, and trustee.ai is a Group Host, with demonstration groups and no health records. One server can also play both roles, as test.agropper.xyz does. A Group Member is a patient acting inside a group, so their MAIA runs on a MAIA Host too.</p>
   </section>
 
   <section aria-labelledby="how">
@@ -233,7 +233,7 @@ const PEOPLE = [
     ['Credits', 'built', 'P5b', 'A deposit, fee or sharing payment from a balance on the host'],
     ['Add a document', 'built', 'P9', 'A radiology report, say, sealed to the patient’s folder key']
   ]},
-  { name: 'Group Host', who: 'Runs a group’s registry and relay. Never decides a request.', items: [
+  { name: 'Group Host', who: 'Runs a group’s registry and relay. Never decides a request. For example trustee.ai, which hosts only demonstration groups.', items: [
     ['Registry', 'built', '', 'Pairwise ids, aliases, public keys; member emails deleted at join'],
     ['Join links and suggested rules', 'built', '', 'Open, approval or invite-only; a QR code for the link'],
     ['Relay', 'built', '', 'Sealed messages, 24-hour credentials, when members last checked in'],
@@ -242,7 +242,7 @@ const PEOPLE = [
     ['Signed rule updates with test requests', 'planned', '', ''],
     ['The group as a requester', 'other', 'later', '']
   ]},
-  { name: 'MAIA Host', who: 'Runs each patient’s authorization server, resource server and private AI.', items: [
+  { name: 'MAIA Host', who: 'Runs each patient’s authorization server, resource server and private AI. For example maia.agropper.xyz.', items: [
     ['Personal authorization server', 'built', 'P4', '/gnap/as/<asId>, one per patient'],
     ['Evaluator', 'built', 'P3', 'Confirmed cards only; sharing on or paused'],
     ['Resource server', 'built', 'P4', 'The only exit: privacy-filtered answers to key-bound tokens'],
@@ -341,7 +341,7 @@ const FLOWS = [
       { from: 'MH', to: 'GH', kind: 'signed', t: 'Signed with the member’s per-group key', d: 'No email check: the group already knows the key.' },
       { at: 'GH', kind: 'action', t: 'Attests “group member”, pairwise id and alias', d: 'Rate-limited per member per day.' },
       { from: 'GH', to: 'MH', kind: 'sealed', t: 'Copies to every other member, or one', d: 'maia_to names one member. Same relay and attestation as a group request.' },
-      { at: 'MH', kind: 'action', t: 'Recipients’ cards see a group member', d: 'e.g. “Anyone in Trustee Test with group-member identity may receive my Patient Summary for peer support.” A blocked sender is dropped.' },
+      { at: 'MH', kind: 'action', t: 'Recipients’ cards see a group member', d: 'e.g. “Anyone in Demo Patients with group-member identity may receive my Patient Summary for peer support.” A blocked sender is dropped.' },
       { from: 'MH', to: 'PT', kind: 'notice', t: 'Asks the member if no card decides', d: '' },
       { from: 'MH', to: 'GH', kind: 'sealed', t: 'Answer sealed to the asking member’s key', d: '' },
       { from: 'MH', to: 'GH', kind: 'signed', t: 'Asking MAIA polls, hourly or on Check', d: '' },
