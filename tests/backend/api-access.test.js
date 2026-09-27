@@ -10,7 +10,7 @@ import express from 'express';
 import session from 'express-session';
 import cookieParser from 'cookie-parser';
 import request from 'supertest';
-import { createApiGuard, isLocalDevRequest, provesAccount, TEMP_USER_COOKIE } from '../../server/utils/api-guard.js';
+import { createApiGuard, isLocalDevRequest, provesAccount, isInternalCall, INTERNAL_CALL_HEADER, TEMP_USER_COOKIE } from '../../server/utils/api-guard.js';
 import setupAuthRoutes from '../../server/routes/auth.js';
 import { serve } from '../helpers/serve.js';
 
@@ -47,6 +47,28 @@ describe('api guard', () => {
     expect(await run(guard, { path: '/api/patient-summary', query: { userId: 'owner01' }, session: dl })).toBe(403);
     expect(await run(guard, { method: 'POST', path: '/api/user-settings', body: { userId: 'owner01' }, session: dl })).toBe(403);
     expect(await run(guard, { path: '/api/user-settings', query: { userId: 'someone-else' }, session: dl })).toBe(403);
+  });
+});
+
+describe("the server's own loopback calls (the pipeline's indexing worker)", () => {
+  const secret = 's'.repeat(43);
+  const guard = createApiGuard({ internalSecret: secret });
+  const internal = (over = {}) => ({ method: 'POST', path: '/api/update-knowledge-base', body: { userId: 'alice01' }, session: {},
+    headers: { [INTERNAL_CALL_HEADER]: secret }, socket: { remoteAddress: '127.0.0.1' }, ...over });
+  it('pass with the secret, from loopback', async () => {
+    expect(await run(guard, internal())).toBe('next');
+    expect(await run(guard, internal({ socket: { remoteAddress: '::1' } }))).toBe('next');
+  });
+  it('are refused without it, with a wrong one, or from anywhere else', async () => {
+    expect(await run(guard, internal({ headers: {} }))).toBe(401);
+    expect(await run(guard, internal({ headers: { [INTERNAL_CALL_HEADER]: 'x'.repeat(43) } }))).toBe(401);
+    expect(await run(guard, internal({ socket: { remoteAddress: '203.0.113.9' } }))).toBe(401);
+    expect(await run(createApiGuard({}), internal())).toBe(401); // no secret configured: nothing is internal
+  });
+  it('isInternalCall needs both', () => {
+    expect(isInternalCall({ headers: { [INTERNAL_CALL_HEADER]: secret }, socket: { remoteAddress: '127.0.0.1' } }, secret)).toBe(true);
+    expect(isInternalCall({ headers: { [INTERNAL_CALL_HEADER]: secret }, socket: { remoteAddress: '10.0.0.2' } }, secret)).toBe(false);
+    expect(isInternalCall({ headers: {}, socket: { remoteAddress: '127.0.0.1' } }, null)).toBe(false);
   });
 });
 

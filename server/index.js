@@ -12,7 +12,7 @@ import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { readFileSync, existsSync, readdirSync } from 'fs';
-import { createHmac, createPrivateKey, sign as edSign } from 'crypto';
+import { createHmac, createPrivateKey, randomBytes, sign as edSign } from 'crypto';
 import * as emailVerification from './emailVerification.js';
 
 import { CloudantClient, CloudantSessionStore, AuditLogService } from '../lib/cloudant/index.js';
@@ -36,7 +36,7 @@ import { getChunkingForDataSource, getChunkingForStrategy, getRerankingModelName
 import { getProjectIdForGenAI } from './utils/project-config.js';
 import setupAuthRoutes from './routes/auth.js';
 import setupChatRoutes, { getOwnerIdForDeepLinkSession, getShareOwnerId } from './routes/chat.js';
-import { createApiGuard, isLocalDevRequest, isAdminUserId } from './utils/api-guard.js';
+import { createApiGuard, isLocalDevRequest, isAdminUserId, INTERNAL_CALL_HEADER } from './utils/api-guard.js';
 import { deletionProof } from './utils/delete-proof.js';
 import setupFileRoutes from './routes/files.js';
 import { getUserBucketSize } from './routes/files.js';
@@ -1592,7 +1592,10 @@ app.use(session({
 
 // Account-access guard: the session decides whose account a request acts
 // on (server/utils/api-guard.js). Must run before every route below.
-app.use('/api', createApiGuard({ getDeepLinkOwnerId: (req) => getOwnerIdForDeepLinkSession(req, cloudant) }));
+// The server's own loopback calls (the pipeline's indexing worker) carry a
+// secret made here at startup; it never leaves this process.
+const INTERNAL_CALL_SECRET = randomBytes(32).toString('base64url');
+app.use('/api', createApiGuard({ getDeepLinkOwnerId: (req) => getOwnerIdForDeepLinkSession(req, cloudant), internalSecret: INTERNAL_CALL_SECRET }));
 
 // Edition feature gate (I-26): every route belongs to a feature
 // (server/edition-routes.js); a feature that is off answers 403 FEATURE_OFF.
@@ -5298,6 +5301,24 @@ app.delete('/api/delete-chat/:chatId', async (req, res) => {
 });
 
 // User file metadata endpoint - updates user document with file info
+// The record files registered for this account, by name — what the browser
+// needs to upload only the folder's files MAIA doesn't have yet before
+// "Search all my records" indexes them (group_requests.md §9, P10).
+app.get('/api/records/files', async (req, res) => {
+  try {
+    const userId = req.query.userId || req.session?.userId;
+    if (!userId || req.session?.userId !== userId) return res.status(401).json({ success: false, error: 'NOT_AUTHENTICATED' });
+    const userDoc = await cloudant.getDocument('maia_users', userId);
+    const files = (Array.isArray(userDoc?.files) ? userDoc.files : [])
+      .filter((f) => f?.fileName && !f.isReference)
+      .map((f) => ({ fileName: f.fileName, fileSize: f.fileSize || null, inKnowledgeBase: !!f.inKnowledgeBase }));
+    res.set('Cache-Control', 'no-store');
+    res.json({ success: true, files });
+  } catch {
+    res.status(500).json({ success: false, error: 'FILES_FAILED' });
+  }
+});
+
 app.post('/api/user-file-metadata', async (req, res) => {
   try {
     const userId = resolveUserId(req, res);
@@ -10329,14 +10350,14 @@ const runStartIndexing = async (userId) => {
     for (const f of candidates) {
       const r = await fetch(`${base}/api/toggle-file-knowledge-base`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', [INTERNAL_CALL_HEADER]: INTERNAL_CALL_SECRET },
         body: JSON.stringify({ userId, bucketKey: f.bucketKey, inKnowledgeBase: true })
       });
       if (!r.ok) console.warn(`[pipeline] toggle→KB failed for ${f.fileName || f.bucketKey}: ${r.status}`);
     }
     const r2 = await fetch(`${base}/api/update-knowledge-base`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', [INTERNAL_CALL_HEADER]: INTERNAL_CALL_SECRET },
       body: JSON.stringify({ userId })
     });
     console.log(`[pipeline] indexing for ${userId}: update-knowledge-base ${r2.status}`);
@@ -10580,9 +10601,14 @@ app.post('/api/pipeline/advance', async (req, res) => {
     // gates meds before indexing for SUMMARY requests, but indexing
     // itself never needed verified meds (the wizard always indexed
     // first); the estimate the form showed covers this run.
+    // Also when the index is done but records added since aren't in it yet
+    // (the Personal AS edition's "Search all my records" uploads new files
+    // from the folder, then asks again).
+    const unindexed = (Array.isArray(userDoc.files) ? userDoc.files : []).some((f) => f?.bucketKey
+      && !f.inKnowledgeBase && !f.isReference && !/\/archived\//i.test(f.bucketKey) && !/references\//i.test(f.bucketKey));
     if (intent === 'index-records'
         && pipeline.stages.imported.status === 'done'
-        && pipeline.stages.indexed.status === 'pending') {
+        && (pipeline.stages.indexed.status === 'pending' || (pipeline.stages.indexed.status === 'done' && unindexed))) {
       await persistKbIndexingStatus(userId, { phase: 'starting', startedAt: new Date().toISOString(), backendCompleted: false, error: null });
       void runStartIndexing(userId)
         .then(() => console.log(`[pipeline] indexing kick (welcome) for ${userId} finished`))

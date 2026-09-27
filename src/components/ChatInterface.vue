@@ -1220,7 +1220,7 @@ import {
 } from '../utils/advisorProposals';
 import { sendOut, afterSendNote } from '../utils/requestsOut';
 import { WHAT as REQUEST_WHAT, WHY as REQUEST_WHY } from '../gnap/requestForm';
-import { startRecordsIndexing, INDEX_WORDS } from '../utils/recordsSearch';
+import { startRecordsIndexing, uploadWords, INDEX_WORDS } from '../utils/recordsSearch';
 import {
   isFileSystemAccessSupported,
   pickLocalFolder,
@@ -3584,15 +3584,20 @@ const turnOnProposedFeature = async (fp: FeatureProposal) => {
       fp.note = 'Turned on. You can turn it off in Workbook → More features.';
       return;
     }
-    // "Search all my records": index the records already in MAIA now.
-    const st = await startRecordsIndexing(uid);
+    // "Search all my records": upload the folder's records MAIA doesn't
+    // have yet, then index them now.
+    fp.state = 'indexing';
+    fp.note = INDEX_WORDS.uploading;
+    const { state: st, upload } = await startRecordsIndexing(uid, (done, total) => {
+      if (total) fp.note = `Uploading record files from your MAIA folder: ${done} of ${total}…`;
+    });
+    const uploaded = uploadWords(upload);
     if (st !== 'running') {
       fp.state = st === 'done' ? 'indexed' : 'on';
-      fp.note = INDEX_WORDS[st] || 'Turned on.';
+      fp.note = `${uploaded} ${INDEX_WORDS[st] || 'Turned on.'}`.trim();
       return;
     }
-    fp.state = 'indexing';
-    fp.note = INDEX_WORDS.running;
+    fp.note = `${uploaded} ${INDEX_WORDS.running}`.trim();
     const out = await waitForStageDone(uid, 'indexed', 20 * 60 * 1000, 10000);
     fp.state = out === 'done' ? 'indexed' : 'error';
     fp.note = out === 'done' ? INDEX_WORDS.done
