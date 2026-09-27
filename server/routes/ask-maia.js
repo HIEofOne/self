@@ -13,6 +13,7 @@
  * visitor types is stored or logged.
  */
 import { buildHandbook, buildAskPrompt } from '../ask-maia.js';
+import { describeEdition } from '../edition.js';
 
 export const ASK_LIMITS = Object.freeze({
   questionChars: 1000,
@@ -81,16 +82,22 @@ export const cleanHistory = (history, { historyTurns, historyChars }) => {
   return { messages: kept, questions: kept.filter((m) => m.role === 'user').map((m) => m.content) };
 };
 
+/** This host, as the answers describe it. */
+const thisHost = () => {
+  const { edition, hostRole } = describeEdition();
+  return { url: process.env.PUBLIC_APP_URL, edition, hostRole };
+};
+
 /**
  * @param {import('express').Express} app
  * @param {object} deps
  * @param {object} deps.chatClient     lib/chat-client ChatClient
  * @param {string} deps.rootDir        the repository, for the handbook
- * @param {() => object} [deps.describeHost]  { url, edition, hostRole }
+ * @param {() => object} [deps.describeHost]  { url, edition, hostRole }; this host by default
  * @param {object} [deps.limits]       overrides of ASK_LIMITS
  * @param {() => number} [deps.now]
  */
-export default function setupAskMaiaRoutes(app, { chatClient, rootDir, describeHost = () => ({}), limits = {}, now = Date.now }) {
+export default function setupAskMaiaRoutes(app, { chatClient, rootDir, describeHost = thisHost, limits = {}, now = Date.now }) {
   const L = { ...ASK_LIMITS, ...limits };
   const envCap = Number(process.env.MAIA_ASK_DAILY_LIMIT);
   if (Number.isFinite(envCap) && envCap >= 0 && limits.hostPerDay === undefined) L.hostPerDay = envCap;

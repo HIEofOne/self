@@ -202,8 +202,8 @@ both apps share the cluster safely.
 | Variable | Values | Purpose |
 |---|---|---|
 | `MAIA_EDITION` | `full` (default) \| `personal-as` | Which edition this app runs (`server/edition.js`; design in `Documentation/group_requests.md` §4). Read once at startup; `/health` and `GET /api/edition` report it. `personal-as` keeps unlockable features off until a user turns them on, and skips the startup OpenSearch step (see Vector Database). An unknown value falls back to `full`. |
-| `MAIA_ASK_DAILY_LIMIT` | `300` (default) | How many questions the welcome page's "Ask about MAIA" box answers per day on this host, for everyone together (`server/routes/ask-maia.js`). Each address may also ask 12 an hour and 40 a day. `0` hides the box. Answers use Claude through DigitalOcean's serverless inference, so they cost a few cents each; with no Claude model available, the box is hidden. |
 | `MAIA_EMAIL_VERIFY_BYPASS` | unset (default) \| `a@example.com,b@example.com` | **Test apps only — never set in production.** To speed up manual testing: the welcome page fills in the first listed address and verifies it at once, so there is nothing to type, and any listed address is verified without a code (no email is sent). Anyone can then create accounts on that app without verifying an email, so remove it when testing is done. |
+| `MAIA_ASK_DAILY_LIMIT` | `300` (default) | How many questions the welcome page's "Ask about MAIA" box answers per day on this host, for everyone together (`server/routes/ask-maia.js`). Each address may also ask 12 an hour and 40 a day. `0` hides the box. Answers use Claude through DigitalOcean's serverless inference, so they cost a few cents each; with no Claude model available, the box is hidden. |
 
 ### Local Development
 
