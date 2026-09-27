@@ -81,6 +81,6 @@ They leave out secrets and anything that would help an attacker: app and droplet
 - [group_requests.md](group_requests.md): the Personal AS edition, its design and a log of each phase.
 - [MAIA_Request_Security_Privacy_Design.md](MAIA_Request_Security_Privacy_Design.md): the security baseline and invariants. The PDF in `public/` is an older snapshot, regenerated only when the maintainer asks.
 - [Groups.md](Groups.md): how groups were built. [Groups_Design.md](Groups_Design.md) is the design conversation that started them, including adoption strategy, digital twins and payments.
-- [Ask_MAIA_Brief.md](Ask_MAIA_Brief.md): the current overview behind the welcome page's "Ask about MAIA" box. Update it when something a visitor would ask about changes.
+- [Ask_MAIA_Brief.md](Ask_MAIA_Brief.md): the current overview "Ask about MAIA" starts from before it researches the repository (the welcome page's box and `/ask`). Update it when something a visitor would ask about changes. The box's tools read only the allow-listed text files in `server/ask-maia.js`, so a new top-level folder needs adding there.
 - The diagrams, `public/MAIA_Request_Map.html` and `public/MAIA_Group_Network.html`: update them when a request path changes.
 - **The overview slide deck,** `public/MAIA-overview.pdf`, is exported from the maintainer's Keynote master. When generating slides with pptxgenjs, never emit connector lines with a negative width or height; use flipH/flipV instead.

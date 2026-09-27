@@ -74,4 +74,4 @@ The README has a Deploy to DigitalOcean button. Hosting costs roughly $10–40 a
 
 ## About the "Ask about MAIA" box
 
-Claude, an AI made by Anthropic, answers through DigitalOcean's serverless inference, using only MAIA's public documentation. It can't see anyone's MAIA, records or account. The box is not private, so don't type health information into it. Nothing you type is saved, but answers can be wrong: the documents themselves are the reference.
+Claude, an AI made by Anthropic, answers through DigitalOcean's serverless inference. It researches each question in MAIA's repository (the same code and documents the host runs), shows what it looks up as it goes, and links to the files and lines it read. There is also a full page at /ask. It can't see anyone's MAIA, records or account. The box is not private, so don't type health information into it. Nothing you type is saved, but answers can be wrong: the code and documents themselves are the reference.
