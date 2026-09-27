@@ -89,6 +89,8 @@
   .tag-onc rect { fill: var(--onc-soft); } .tag-onc text { fill: var(--onc); }
   .tag-tru rect { fill: var(--tru-soft); } .tag-tru text { fill: var(--tru); }
   .tag text { font: 600 11px var(--font-body); }
+  .group-t { font: 700 13px var(--font-body); letter-spacing: 0.02em; }
+  .group-onc { fill: var(--onc); } .group-tru { fill: var(--tru); }
 
   .edge { fill: none; stroke-width: 2.2; transition: opacity 0.2s ease; }
   .edge.relay { stroke-dasharray: 7 5; }
@@ -135,14 +137,14 @@
   <header>
     <div class="eyebrow">MAIA · Personal AS edition · how groups connect</div>
     <h1>MAIA Group Network</h1>
-    <p class="lede">Four MAIA servers: two host patients' MAIAs, and two host only a group, one of them run by an oncology practice. A radiologist with no MAIA and no group sends a report, and one patient's MAIA asks another's directly. Only the major links are drawn: the request, and the resource access.</p>
+    <p class="lede">Three MAIA servers. maia.agropper.xyz hosts patients' MAIAs and their records. trustee.ai hosts only two demonstration groups, Demo Clinic and Demo Patients, and no health records. Another host, such as your own, can run patients' MAIAs too. A radiologist with no MAIA and no group sends a report, and one patient's MAIA asks another's directly. Only the major links are drawn: the request, and the resource access.</p>
     <p class="lede" style="margin-top:6px"><a href="/MAIA_Request_Map.html" style="color: var(--accent)">The MAIA Request Map</a> shows each request step by step, from every perspective.</p>
   </header>
 
   <div class="controls" role="group" aria-label="Show a flow">
     <button class="chip" data-focus="" aria-pressed="true">All flows</button>
-    <button class="chip" data-focus="onc" aria-pressed="false"><span class="dot" style="background: var(--onc)"></span>The practice asks its group</button>
-    <button class="chip" data-focus="tru" aria-pressed="false"><span class="dot" style="background: var(--tru)"></span>A Trustee member asks the others</button>
+    <button class="chip" data-focus="onc" aria-pressed="false"><span class="dot" style="background: var(--onc)"></span>The clinic asks its patients</button>
+    <button class="chip" data-focus="tru" aria-pressed="false"><span class="dot" style="background: var(--tru)"></span>A member asks the others</button>
     <button class="chip" data-focus="rad" aria-pressed="false"><span class="dot" style="background: var(--rad)"></span>A radiologist sends a report</button>
     <button class="chip" data-focus="mm" aria-pressed="false"><span class="dot" style="background: var(--mm)"></span>Pat’s MAIA asks Bo’s</button>
   </div>
@@ -150,7 +152,7 @@
   <div class="canvas">
     <svg id="net" viewBox="0 0 1280 760" role="img" aria-labelledby="net-title net-desc">
       <title id="net-title">MAIA group network</title>
-      <desc id="net-desc">Two group-only MAIA hosts (Riverside Oncology, run by an oncology practice, and Trustee) above two patient hosts (host A with Ann and Pat, host B with Bo and Cy). An oncologist asks the Riverside group; a Trustee member, Cy, asks the Trustee group; an unaffiliated radiologist sends Ann a report; Pat's MAIA asks Bo's MAIA directly, with no shared group. Requests go to authorization servers; resource access goes to resource servers.</desc>
+      <desc id="net-desc">trustee.ai, a group-only host with two demonstration groups (Demo Clinic and Demo Patients) and no health records, above two patient hosts: maia.agropper.xyz with Ann and Pat, and another host with Bo and Cy. A clinician asks the Demo Clinic group; a Demo Patients member, Cy, asks that group; an unaffiliated radiologist sends Ann a report; Pat's MAIA asks Bo's MAIA directly, with no shared group. Requests go to authorization servers; resource access goes to resource servers.</desc>
       <defs>
         <marker id="h-onc" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="head-onc"/></marker>
         <marker id="h-tru" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="head-tru"/></marker>
@@ -163,40 +165,36 @@
         <g id="person"><circle cx="0" cy="-9" r="7"/><path d="M-12 12 C -12 1, 12 1, 12 12 Z"/></g>
       </defs>
 
-      <!-- ── Group-only hosts ── -->
-      <rect class="host-group" x="250" y="40" width="360" height="190" rx="16"/>
-      <text class="host-title" x="272" y="72">Riverside Oncology</text>
-      <text class="host-domain" x="272" y="92">riverside-oncology.example</text>
-      <text class="host-sub" x="272" y="112">A MAIA host run by an oncology practice.</text>
-      <text class="host-sub" x="272" y="130">Hosts only its patients' group: no patients' MAIAs.</text>
+      <!-- ── The group-only host: demonstration groups, no health records ── -->
+      <rect class="host-group" x="250" y="40" width="910" height="190" rx="16"/>
+      <text class="host-title" x="272" y="72">Demonstration groups</text>
+      <text class="host-domain" x="272" y="92">trustee.ai</text>
+      <text class="host-sub" x="1138" y="72" text-anchor="end">A group-only host: no patients' MAIAs, no health records.</text>
+      <text class="host-sub" x="1138" y="92" text-anchor="end">Members join from their own MAIA host and use made-up records.</text>
+      <text class="group-t group-onc" x="270" y="146">Demo Clinic</text>
+      <text class="group-t group-tru" x="820" y="146">Demo Patients</text>
       <rect class="box" x="270" y="160" width="150" height="52" rx="10"/><text class="chip-t" x="345" y="191" text-anchor="middle">Group endpoint</text>
       <rect class="box" x="440" y="160" width="150" height="52" rx="10"/><text class="chip-t" x="515" y="191" text-anchor="middle">Relay</text>
-
-      <rect class="host-group" x="800" y="40" width="360" height="190" rx="16"/>
-      <text class="host-title" x="822" y="72">Trustee</text>
-      <text class="host-domain" x="822" y="92">trustee.example</text>
-      <text class="host-sub" x="822" y="112">A MAIA host for a patient advocacy group.</text>
-      <text class="host-sub" x="822" y="130">Hosts only the group: no patients' MAIAs.</text>
       <rect class="box" x="820" y="160" width="150" height="52" rx="10"/><text class="chip-t" x="895" y="191" text-anchor="middle">Relay</text>
       <rect class="box" x="990" y="160" width="150" height="52" rx="10"/><text class="chip-t" x="1065" y="191" text-anchor="middle">Group endpoint</text>
 
       <!-- ── Patient hosts ── -->
       <rect class="host-patient" x="250" y="480" width="360" height="262" rx="16"/>
-      <text class="host-title" x="272" y="708">MAIA host A</text>
-      <text class="host-domain" x="272" y="728">maia-a.example</text>
-      <text class="host-sub" x="588" y="708" text-anchor="end">Hosts patients' MAIAs</text>
+      <text class="host-title" x="272" y="708">A patient host</text>
+      <text class="host-domain" x="272" y="728">maia.agropper.xyz</text>
+      <text class="host-sub" x="588" y="708" text-anchor="end">Patients' records</text>
 
       <rect class="host-patient" x="800" y="480" width="360" height="262" rx="16"/>
-      <text class="host-title" x="822" y="708">MAIA host B</text>
-      <text class="host-domain" x="822" y="728">maia-b.example</text>
-      <text class="host-sub" x="1138" y="708" text-anchor="end">Hosts patients' MAIAs</text>
+      <text class="host-title" x="822" y="708">Another patient host</text>
+      <text class="host-domain" x="822" y="728">for example, your own</text>
+      <text class="host-sub" x="1138" y="708" text-anchor="end">Patients' records</text>
       <g id="pods"></g>
 
       <!-- ── People without a MAIA ── -->
       <rect class="box" x="30" y="84" width="172" height="92" rx="12"/>
       <use href="#person" class="glyph" x="56" y="122"/>
-      <text class="name" x="78" y="112">Oncologist</text>
-      <text class="small" x="78" y="131">Riverside Oncology</text>
+      <text class="name" x="78" y="112">Clinician</text>
+      <text class="small" x="78" y="131">Demo Clinic</text>
       <text class="small" x="44" y="160">Asks on the group's page</text>
 
       <rect class="box" x="30" y="300" width="172" height="92" rx="12"/>
@@ -218,15 +216,15 @@
 
   <div class="flows" id="flows"></div>
 
-  <p class="foot">Group hosts are ordinary MAIA servers that host only a group: they never decide a request and can't read an answer, which travels back sealed to the requester (not drawn). A host can also run patients' MAIAs and a group at once. Tags on each patient show their group memberships; the lines show only what happens in these four examples.</p>
+  <p class="foot">A group host is an ordinary MAIA server that hosts only groups: it never decides a request and can't read an answer, which travels back sealed to the requester (not drawn). trustee.ai hosts nothing but demonstration groups, so it holds no health records; people try MAIA there with made-up records. A host can also run patients' MAIAs and a group at once. Tags on each patient show their group memberships; the lines show only what happens in these four examples.</p>
 </div>
 
 <script>
 const PODS = [
-  { name: 'Ann', x: 270, tags: [['onc', 'Riverside Oncology']], note: 'Report → Received/' },
-  { name: 'Pat', x: 440, tags: [['tru', 'Trustee']], note: 'Answer → Received/' },
-  { name: 'Bo', x: 820, tags: [['onc', 'Riverside Oncology']] },
-  { name: 'Cy', x: 990, tags: [['tru', 'Trustee']] }
+  { name: 'Ann', x: 270, tags: [['onc', 'Demo Clinic']], note: 'Report → Received/' },
+  { name: 'Pat', x: 440, tags: [['tru', 'Demo Patients']], note: 'Answer → Received/' },
+  { name: 'Bo', x: 820, tags: [['onc', 'Demo Clinic']] },
+  { name: 'Cy', x: 990, tags: [['tru', 'Demo Patients']] }
 ];
 
 // Each edge: flow, kind (request | relay | resource), path, badge point, label point + text.
@@ -249,14 +247,14 @@ const EDGES = [
 ];
 
 const FLOWS = [
-  { id: 'onc', title: 'The practice asks its group', status: 'Built · P6a', steps: [
-    ['Request', 'The oncologist sends one signed request to the practice’s group, after one email check on its request page.'],
-    ['Request carried by the group', 'A signed copy goes to each member’s MAIA, on whichever host it lives: Ann on host A, Bo on host B.'],
-    ['Resource access', 'The oncologist reads each shared answer at that member’s resource server.']
+  { id: 'onc', title: 'The clinic asks its patients', status: 'Built · P6a', steps: [
+    ['Request', 'The clinician sends one signed request to the Demo Clinic group, after one email check on its request page.'],
+    ['Request carried by the group', 'A signed copy goes to each member’s MAIA, on whichever host it lives: Ann on maia.agropper.xyz, Bo on another host.'],
+    ['Resource access', 'The clinician reads each shared answer at that member’s resource server.']
   ], note: 'Each member’s own rules decide. The group never learns who answered.' },
-  { id: 'tru', title: 'A Trustee member asks the others', status: 'Built · P6b', steps: [
-    ['Request', 'Cy’s MAIA asks the group, signed with Cy’s Trustee key, after Cy clicks Send.'],
-    ['Request carried by the group', 'A copy goes to Pat’s MAIA on the other host. Pat’s rules see a group member.'],
+  { id: 'tru', title: 'A member asks the others', status: 'Built · P6b', steps: [
+    ['Request', 'Cy’s MAIA asks the Demo Patients group, signed with Cy’s key for that group, after Cy clicks Send.'],
+    ['Request carried by the group', 'A copy goes to Pat’s MAIA on maia.agropper.xyz. Pat’s rules see a group member.'],
     ['Resource access', 'Cy’s MAIA reads Pat’s answer at Pat’s resource server when Cy opens it.']
   ], note: 'Cy reads it under Requests → Sent. Neither host keeps a copy.' },
   { id: 'rad', title: 'An unaffiliated radiologist sends a report', status: 'Built · P9', steps: [
@@ -264,7 +262,7 @@ const FLOWS = [
     ['Resource access', 'The report is uploaded to Ann’s resource server, sealed to her folder key.']
   ], note: 'Only a rule that allows adding documents can accept it. MAIA can’t read the report; Ann’s browser saves it to Received/ in her folder.' },
   { id: 'mm', title: 'Pat’s MAIA asks Bo’s MAIA', status: 'Built · P11', steps: [
-    ['Request', 'After Pat clicks Send, Pat’s MAIA signs a request to Bo’s MAIA, using the request link Bo gave Pat. The first time, Pat confirms an email on Bo’s MAIA.'],
+    ['Request', 'After Pat clicks Send, Pat’s MAIA on maia.agropper.xyz signs a request to Bo’s MAIA on another host, using the request link Bo gave Pat. The first time, Pat confirms an email on Bo’s MAIA.'],
     ['Resource access', 'When Bo’s rules, or Bo, say yes, Pat’s MAIA reads the answer at Bo’s resource server and seals it at once to Pat’s folder key.']
   ], note: 'No shared group is needed. Pat’s private AI can draft the request; only Pat sends it. The answer reaches Received/ in Pat’s folder the next time MAIA is open.' }
 ];
