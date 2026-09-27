@@ -13,6 +13,5 @@ KBs.txt
 .claude/worktrees/
 .claude/launch.json
 
-# Internal design docs — not for publication
-Documentation/Groups_Design.md
+# A local working copy; the published PDF is public/MAIA_Request_Security_Privacy_Design.pdf
 Documentation/MAIA_Request_Security_Privacy_Design.pdf

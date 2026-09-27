@@ -1,7 +1,7 @@
 # Group Requests — a simplified "Personal AS" edition of MAIA
 
 - **Date:** 2026-09-22. **Revised 2026-09-24:** one request path. In the edition, every request arrives over GNAP, including requests made from a web page (D12, §10.9–10.10).
-- **Status:** Proposal, not built. Nothing in this document is implemented yet.
+- **Status:** Built through P11 (v1.6.38, 2026-09-26); P12 (launch) is next. Each phase in §14 says what was built. The sections before §14 are the design as proposed; where they differ from what shipped, §14 is right.
 - **Base:** `HIEofOne/self` main at `8323936` (v1.5.175) when reviewed; both remotes are now at `f53580d` (v1.5.176, adds PR #309)
 - **Scope:** HIEofOne/self only. `agropper/self` and maia.agropper.xyz stay as the demo (tag `demo-v1.5.176`).
 - **Version line:** v1.6.0 starts the 1.6.x minor line for this work, as v1.5.1 did for Groups.

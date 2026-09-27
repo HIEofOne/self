@@ -330,6 +330,8 @@
                       <a href="#" class="welcome-footer-link text-caption" @click.prevent="addingFamilyMember = false">Back to my MAIA</a>
                     </div>
                     </template>
+                    <!-- Ask about MAIA: Claude answers from the public docs. -->
+                    <AskMaia class="q-mt-lg" />
                     <!-- The MAIA Request Map and Group Network (public/*.html): open to
                          anyone, before any account exists. -->
                     <div class="map-cards q-mt-lg">
@@ -462,6 +464,7 @@
 
                     <!-- Footer: doc links, explore links, version -->
                     <template #footer>
+                      <AskMaia class="q-mb-lg" />
                       <div class="text-center q-mb-md">
                         <a href="/page.html?doc=Privacy" target="_blank" class="welcome-footer-link">Privacy</a>
                         <span class="text-grey-5 q-mx-sm">|</span>
@@ -1175,6 +1178,7 @@ import RestoreWizard from './components/RestoreWizard.vue';
 import ChatInterface from './components/ChatInterface.vue';
 import PolicyCardBuilder from './components/PolicyCardBuilder.vue';
 import RequestBuilder from './components/RequestBuilder.vue';
+import AskMaia from './components/AskMaia.vue';
 import WelcomeContent from './components/WelcomeContent.vue';
 import { useEdition } from './composables/useEdition';
 import SetupChecklist from './components/SetupChecklist.vue';

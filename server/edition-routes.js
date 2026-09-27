@@ -35,6 +35,8 @@ export const ROUTE_FEATURES = Object.freeze({
   'GET /health': 'public',
   'GET /api/edition': 'public',
   'POST /api/client-log': 'public',
+  'GET /api/ask-maia': 'public',
+  'POST /api/ask-maia': 'public',
   'GET /api/admin-username': 'public',
   'GET /api/current-user': 'public',
   'POST /api/sign-out': 'public',

@@ -48,13 +48,14 @@ import setupRequestLogRoutes from './routes/requests-log.js';
 import setupReceivedRoutes from './routes/received.js';
 import setupGnapOutRoutes from './routes/gnap-out.js';
 import setupWelcomeActivityRoutes from './routes/welcome-activity.js';
+import setupAskMaiaRoutes from './routes/ask-maia.js';
 import { createSpacesHoldStore, sweepExpiredHolds } from './gnap/documents.js';
 import { sweepExpiredGnapPayments } from './gnap/payments.js';
 import setupPolicyRoutes from './routes/policies.js';
 import setupEditionRoutes from './routes/edition.js';
 import setupSetupRoutes from './routes/setup.js';
 import setupInterviewRoutes from './routes/interview.js';
-import { combinedSummaryReview, getEdition, isFeatureEnabled } from './edition.js';
+import { combinedSummaryReview, describeEdition, getEdition, isFeatureEnabled } from './edition.js';
 import { medsFromSummary } from './utils/summary-sections.js';
 import { createFeatureGuard } from './edition-routes.js';
 import {
@@ -1693,6 +1694,12 @@ setupReceivedRoutes(app, { cloudant, holds: documentHolds, auditLog });
 const { pollOutRequests } = setupGnapOutRoutes(app, { cloudant, auditLog, sendEmail: sendPlainEmail, holds: documentHolds });
 // Activity counts on the welcome page's account badges, before sign-in.
 setupWelcomeActivityRoutes(app, { cloudant, secret: SESSION_SECRET });
+// "Ask about MAIA" on the welcome page: Claude answers from the public docs.
+setupAskMaiaRoutes(app, {
+  chatClient,
+  rootDir: path.join(__dirname, '..'),
+  describeHost: () => ({ url: process.env.PUBLIC_APP_URL, edition: getEdition(), hostRole: describeEdition().hostRole })
+});
 
 // Groups daily maintenance (Groups.md §6.1/§6.3/§7.3): renew 24h membership
 // credentials, reconcile registry-side revocation, pull relay mail, and
