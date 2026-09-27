@@ -10,7 +10,7 @@ import { getProjectIdForGenAI } from '../utils/project-config.js';
 import { getDoRegion } from '../utils/new-agent-config.js';
 import { resolveSecondaryModel } from '../utils/secondary-models.js';
 import { isVerified as isEmailVerified } from '../emailVerification.js';
-import { mayCreatePrimaryAgent, getEdition } from '../edition.js';
+import { mayCreatePrimaryAgent, getEdition, isGroupOnlyHost } from '../edition.js';
 
 // Wizard-done workflow stages (mirrors WIZARD_DONE_STAGES in
 // ChatInterface.vue): agent-status writers must never downgrade these.
@@ -1271,7 +1271,19 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
   });
 
   // Recreate a destroyed account (user doc deleted but local folder has state)
+  // A group-only host (MAIA_HOST_ROLE=group-only) keeps no patients' MAIAs:
+  // no account is created or recreated here. Its admin signs in as always.
+  const refuseOnGroupOnlyHost = (res) => {
+    if (!isGroupOnlyHost()) return false;
+    res.status(403).json({
+      success: false, error: 'GROUP_ONLY_HOST', code: 'GROUP_ONLY_HOST',
+      message: 'This host runs groups only and keeps no health records. Join its groups from your own MAIA.'
+    });
+    return true;
+  };
+
   app.post('/api/account/recreate', async (req, res) => {
+    if (refuseOnGroupOnlyHost(res)) return;
     try {
       const { userId, displayName } = req.body || {};
       console.log(`[RECREATE] /api/account/recreate called for userId=${userId}`);
@@ -1369,6 +1381,7 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
   });
 
   app.post('/api/temporary/start', async (req, res) => {
+    if (refuseOnGroupOnlyHost(res)) return;
     try {
       const forceNew = req.body?.forceNew === true;
       // Welcome-form extras: the pre-shown MAIA ID (best-effort — falls
