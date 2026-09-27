@@ -13,7 +13,7 @@ import express from 'express';
 import request from 'supertest';
 import { serve } from '../helpers/serve.js';
 import {
-  advisorContextKind, buildEditionAdvisorContext, buildPolicyAdvisorContext, advisorRequestLine
+  advisorContextKind, buildEditionAdvisorContext, buildPolicyAdvisorContext, advisorRequestLine, recordFilesForLegend
 } from '../../server/advisor-context.js';
 import setupEditionRoutes from '../../server/routes/edition.js';
 import { FEATURES, getEdition, setEditionForTests } from '../../server/edition.js';
@@ -120,6 +120,30 @@ describe('the edition context', () => {
     expect(t).toContain('THE PATIENT\'S POLICY CARDS:');
     expect(t).toContain('PROPOSING A CARD: output one fenced code block per card');
     expect(t).not.toContain('maia-feature');
+  });
+});
+
+describe('citations the chat can link', () => {
+  it('lists the record files as File N, as the summary does, and asks for pages or none', async () => {
+    const doc = {
+      ...PATIENT,
+      files: [
+        { fileName: 'Health Records - Rowan.pdf', bucketKey: 'pat01/Health Records - Rowan.pdf' },
+        { fileName: 'notes.txt', bucketKey: 'pat01/notes.txt' },
+        { fileName: 'Guideline.pdf', bucketKey: 'pat01/References/Guideline.pdf' },
+        { fileName: 'Paper.pdf', bucketKey: 'pat01/Paper.pdf', isReference: true },
+        { fileName: 'MRI 2026.pdf', bucketKey: 'pat01/kb/MRI 2026.pdf' }
+      ]
+    };
+    const ctx = await buildEditionAdvisorContext(cloudant, doc);
+    expect(ctx).toContain('FILES: File 1 = Health Records - Rowan.pdf; File 2 = MRI 2026.pdf');
+    expect(ctx).toMatch(/\[File N p\.<page>\]/);
+    expect(ctx).toMatch(/write\s+\[File N\] with no page/);
+    expect(recordFilesForLegend(doc).map((f) => f.fileName)).toEqual(['Health Records - Rowan.pdf', 'MRI 2026.pdf']);
+  });
+
+  it('says nothing about citing when there are no record files', async () => {
+    expect(await buildEditionAdvisorContext(cloudant, PATIENT)).not.toContain('CITING RECORDS');
   });
 });
 

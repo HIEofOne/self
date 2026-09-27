@@ -446,7 +446,7 @@
                       </q-chip>
                       <!-- In KB, indexing active on server - show "Indexing in progress" -->
                       <q-chip
-                        v-else-if="file.inKnowledgeBase && !isFileIndexed(file.bucketKey) && (indexingKB || kbIndexingActiveOnServer)"
+                        v-else-if="file.inKnowledgeBase && !isFileIndexed(file.bucketKey) && (indexingKB || serverIndexing)"
                         color="blue"
                         text-color="white"
                         size="sm"
@@ -504,7 +504,20 @@
                 </span>.
               </div>
               
-              <div v-if="kbNeedsUpdate || hasCheckboxChanges || kbIndexingOutOfSync || hasPendingKbAdds" class="q-mt-md q-pt-md" style="border-top: 1px solid #e0e0e0;">
+              <!-- Indexing the server started ("Search all my records"): its clock
+                   and counts; nothing to click while it runs -->
+              <div v-if="serverIndexing" class="q-mt-md q-pa-md" style="background-color: #f5f5f5; border-radius: 4px;">
+                <q-linear-progress indeterminate color="primary" class="q-mb-sm" />
+                <div class="text-body2">Indexing your records so your private AI can search them…</div>
+                <div class="text-caption text-grey-7 q-mt-xs">
+                  <span v-if="serverIndexElapsed">Time: {{ serverIndexElapsed }} • </span>
+                  Files indexed: {{ serverIndex.filesIndexed }} •
+                  Tokens: {{ serverIndex.tokens ? serverIndex.tokens.toLocaleString() : 'counting…' }}
+                </div>
+                <div class="text-caption text-grey-6 q-mt-xs">It usually takes a few minutes. You can keep using MAIA.</div>
+              </div>
+
+              <div v-if="!serverIndexing && (kbNeedsUpdate || hasCheckboxChanges || kbIndexingOutOfSync || hasPendingKbAdds)" class="q-mt-md q-pt-md" style="border-top: 1px solid #e0e0e0;">
                 <div v-if="kbNeedsUpdate || hasCheckboxChanges || hasPendingKbAdds" class="q-mb-md text-body2 text-amber-9">
                   You have changed the files to be indexed into your knowledge base. Click "Update and Index KB" when ready.
                 </div>
@@ -1154,7 +1167,7 @@
 
           <!-- More features (Personal AS edition, §4.2): what the patient can turn on -->
           <q-tab-panel name="features" class="q-pa-none" style="overflow-y: auto;">
-            <FeaturesPanel :userId="userId" />
+            <FeaturesPanel :userId="userId" @open-files="currentTab = 'files'" />
           </q-tab-panel>
 
           <!-- Privacy Filter Tab -->
@@ -2114,6 +2127,7 @@ import GroupsPanel from './GroupsPanel.vue';
 import PoliciesPanel from './PoliciesPanel.vue';
 import RequestsPanel from './RequestsPanel.vue';
 import FeaturesPanel from './FeaturesPanel.vue';
+import { recordsIndexProgress, elapsedWords } from '../utils/recordsSearch';
 import { syncRequestLog } from '../utils/requestLog';
 import { readSeenMessages, writeSeenMessages } from '../utils/welcomeActivity';
 import { ensureFolderKey } from '../utils/folderKey';
@@ -3596,6 +3610,38 @@ const hasUnsavedSummaryChanges = computed(() => {
 const hasUnsavedChanges = computed(() => hasUnsavedAgentChanges.value || hasUnsavedSummaryChanges.value);
 
 const $q = useQuasar();
+
+// Indexing the server started (the pipeline's index-records step, e.g.
+// "Search all my records"), not this tab's own Update and Index KB: its
+// clock, tokens and files, polled while it runs; the files reload when it
+// finishes.
+const serverIndex = ref({ running: false, startedAt: null as string | null, tokens: 0, filesIndexed: 0 });
+const serverIndexNow = ref(Date.now());
+let serverIndexPoll: ReturnType<typeof setInterval> | null = null;
+let serverIndexClock: ReturnType<typeof setInterval> | null = null;
+const serverIndexing = computed(() => !indexingKB.value && (kbIndexingActiveOnServer.value || serverIndex.value.running));
+const serverIndexElapsed = computed(() => elapsedWords(serverIndex.value.startedAt, serverIndexNow.value));
+const stopServerIndexPoll = () => {
+  if (serverIndexPoll) { clearInterval(serverIndexPoll); serverIndexPoll = null; }
+  if (serverIndexClock) { clearInterval(serverIndexClock); serverIndexClock = null; }
+};
+const pollServerIndex = async () => {
+  if (!props.userId) return;
+  const p = await recordsIndexProgress(props.userId).catch(() => null);
+  if (!p) return;
+  const wasRunning = serverIndex.value.running;
+  serverIndex.value = { running: p.state === 'running', startedAt: p.startedAt, tokens: p.tokens, filesIndexed: p.filesIndexed };
+  if (serverIndex.value.running) {
+    if (!serverIndexPoll) serverIndexPoll = setInterval(() => { void pollServerIndex(); }, 5000);
+    if (!serverIndexClock) serverIndexClock = setInterval(() => { serverIndexNow.value = Date.now(); }, 1000);
+  } else {
+    stopServerIndexPoll();
+    if (wasRunning) void loadFiles();
+  }
+};
+watch(currentTab, (t) => { if (t === 'files') void pollServerIndex(); else stopServerIndexPoll(); }, { immediate: true });
+watch(kbIndexingActiveOnServer, (v) => { if (v && currentTab.value === 'files' && !serverIndexPoll) void pollServerIndex(); });
+onUnmounted(stopServerIndexPoll);
 
 const loadFiles = async () => {
   loadingFiles.value = true;

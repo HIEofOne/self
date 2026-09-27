@@ -10,7 +10,7 @@ import { policySentence, READ_SCOPES, POLICY_PURPOSES } from './policies.js';
 import { buildPolicyAdvisorContext, buildEditionAdvisorContext, advisorContextKind } from '../advisor-context.js';
 import { isVerified as emailTokenVerified } from '../emailVerification.js';
 import { chargeCredits, ADVISOR_QUESTION_CREDITS } from '../credits.js';
-import { isFeatureEnabled } from '../edition.js';
+import { isFeatureEnabled, getEdition } from '../edition.js';
 
 // One SSE event per streaming update. Intermediate updates carry only the
 // new delta: the provider's running totals (content / reasoningContent)
@@ -837,13 +837,29 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient, app
     return out;
   };
 
-  // Personal AS edition: public AIs and the secondary Private AI appear
-  // only when the account has them turned on (the feature guard refuses
-  // the chat calls too). No-op in the full edition.
-  const editionFiltered = (providers, profiles, doc) => ({
-    providers: isFeatureEnabled('public-ai', doc) ? providers : providers.filter((p) => p === 'digitalocean'),
-    privateAiProfiles: isFeatureEnabled('second-ai', doc) ? profiles : profiles.filter((p) => p.key !== 'gpt')
-  });
+  // Personal AS edition: the secondary Private AI appears only when the
+  // account has it turned on. The menu lists the public AIs
+  // (server/public-ais.js) below the private AI(s) even while 'public-ai'
+  // is off: choosing one asks the patient to turn it on, and the feature
+  // guard refuses the chat call until then. A clinician's guest session
+  // sees them only when the patient turned them on. Without public AIs
+  // registered (the full edition), vendor providers show when the feature
+  // is on, as before.
+  const editionFiltered = (providers, profiles, doc, { guest = false } = {}) => {
+    const publicOn = isFeatureEnabled('public-ai', doc);
+    const publicAis = getEdition() === 'personal-as' ? (chatClient.getPublicModels?.() || []) : [];
+    const publicIds = new Set(publicAis.map((m) => m.id));
+    const listPublic = publicAis.length > 0 && (publicOn || !guest);
+    const listed = publicAis.length
+      ? providers.filter((p) => p === 'digitalocean' || (listPublic && publicIds.has(p)))
+      : (publicOn ? providers : providers.filter((p) => p === 'digitalocean'));
+    return {
+      providers: listed,
+      privateAiProfiles: isFeatureEnabled('second-ai', doc) ? profiles : profiles.filter((p) => p.key !== 'gpt'),
+      publicAis: listPublic ? publicAis : [],
+      publicAiOn: publicOn
+    };
+  };
 
   app.get('/api/chat/providers', async (req, res) => {
     let providers = chatClient.getAvailableProviders();
@@ -872,7 +888,7 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient, app
             const ownerAllows = ownerDoc?.allowDeepLinkPrivateAI !== false;
             featureDoc = ownerDoc;
             if (ownerHasAgent && ownerAllows) {
-              res.json(editionFiltered(providers, await buildPrivateAiProfiles(ownerDoc), ownerDoc));
+              res.json(editionFiltered(providers, await buildPrivateAiProfiles(ownerDoc), ownerDoc, { guest: true }));
               return;
             }
           }
@@ -964,6 +980,6 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient, app
     } else {
       providers = providers.filter((p) => p !== 'digitalocean');
     }
-    res.json({ ...editionFiltered(providers, privateAiProfiles, featureDoc), providerModels: chatClient.getProviderModels() });
+    res.json({ ...editionFiltered(providers, privateAiProfiles, featureDoc, { guest: isDeepLink }), providerModels: chatClient.getProviderModels() });
   });
 }

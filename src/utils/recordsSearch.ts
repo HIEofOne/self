@@ -27,6 +27,31 @@ export const indexStateOf = (p: PipelineAdvance | null): IndexState => {
 
 export const recordsIndexState = async (userId: string): Promise<IndexState> => indexStateOf(await fetchPipeline(userId));
 
+/** The index's state plus the indexing job's progress (start, tokens, files). */
+export interface IndexProgress { state: IndexState; startedAt: string | null; tokens: number; filesIndexed: number }
+export async function recordsIndexProgress(userId: string): Promise<IndexProgress> {
+  const p = await fetchPipeline(userId);
+  const st = p?.pipeline.stages.indexed;
+  return { state: indexStateOf(p), startedAt: st?.status === 'running' ? st.at : null, tokens: st?.tokens || 0, filesIndexed: st?.filesIndexed || 0 };
+}
+
+/** "3m 07s" since `sinceIso`, or '' when unknown. */
+export const elapsedWords = (sinceIso: string | null, now = Date.now()): string => {
+  const t = sinceIso ? Date.parse(sinceIso) : NaN;
+  if (!Number.isFinite(t)) return '';
+  const sec = Math.max(0, Math.floor((now - t) / 1000));
+  return `${Math.floor(sec / 60)}m ${String(sec % 60).padStart(2, '0')}s`;
+};
+
+/** "Indexing your records: 3m 07s · 41,200 tokens · 1 file indexed so far" */
+export const progressWords = (p: Pick<IndexProgress, 'startedAt' | 'tokens' | 'filesIndexed'>, now = Date.now()): string => {
+  const parts = [elapsedWords(p.startedAt, now)];
+  if (p.tokens > 0) parts.push(`${p.tokens.toLocaleString()} tokens`);
+  if (p.filesIndexed > 0) parts.push(`${p.filesIndexed} file${p.filesIndexed === 1 ? '' : 's'} indexed so far`);
+  const detail = parts.filter(Boolean).join(' · ');
+  return `Indexing your records${detail ? `: ${detail}` : '…'}. It usually takes a few minutes; you can keep using MAIA.`;
+};
+
 export const MAX_RECORD_BYTES = 50 * 1024 * 1024; // the upload route's limit
 
 export interface FolderUpload { found: number; uploaded: number; alreadyInMaia: number; failed: number; tooLarge: number }
