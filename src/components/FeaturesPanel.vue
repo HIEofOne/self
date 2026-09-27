@@ -19,12 +19,12 @@
       </div>
       <!-- Search all my records: the index is built once turned on -->
       <div v-if="f.key === 'records-index' && f.enabled" class="fp__index text-caption">
-        <q-spinner v-if="indexState === 'running'" size="14px" color="primary" />
+        <q-spinner v-if="indexState === 'running' || indexState === 'uploading'" size="14px" color="primary" />
         <q-icon v-else-if="indexState === 'done'" name="check_circle" color="green-7" size="15px" />
         <q-icon v-else-if="indexState === 'error'" name="error_outline" color="orange-8" size="15px" />
-        <span>{{ INDEX_WORDS[indexState] }}</span>
-        <q-btn v-if="indexState === 'pending' || indexState === 'error'" dense flat no-caps size="sm" color="primary"
-               label="Index my records now" :loading="busy === 'index'" @click="index" />
+        <span>{{ indexLine }}</span>
+        <q-btn v-if="['pending', 'error', 'done', 'no-records', 'no-permission', 'upload-failed'].includes(indexState)" dense flat no-caps size="sm" color="primary"
+               :label="indexState === 'done' ? 'Add new records from my folder' : 'Index my records now'" :loading="busy === 'index'" @click="index" />
       </div>
     </div>
     <div v-if="error" class="text-negative text-caption q-mt-sm">{{ error }}</div>
@@ -41,7 +41,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { useEdition } from '../composables/useEdition';
 import { setFeature } from '../utils/advisorProposals';
-import { recordsIndexState, startRecordsIndexing, INDEX_WORDS, type IndexState } from '../utils/recordsSearch';
+import { recordsIndexState, startRecordsIndexing, uploadWords, INDEX_WORDS, type IndexState } from '../utils/recordsSearch';
 
 const props = defineProps<{ userId: string }>();
 const { state, load } = useEdition();
@@ -62,10 +62,23 @@ const refreshIndex = async () => {
   if (indexState.value !== 'running') stopPolling();
 };
 
+// Upload the folder's records MAIA doesn't have yet, then index them.
+const uploadNote = ref('');
+const lastUpload = ref('');
+const indexLine = computed(() => (indexState.value === 'uploading' && uploadNote.value
+  ? uploadNote.value
+  : [lastUpload.value, INDEX_WORDS[indexState.value]].filter(Boolean).join(' ')));
 const index = async () => {
   busy.value = 'index';
-  try { indexState.value = await startRecordsIndexing(props.userId); } finally { busy.value = ''; }
-  await refreshIndex();
+  indexState.value = 'uploading';
+  try {
+    const r = await startRecordsIndexing(props.userId, (done, total, name) => {
+      uploadNote.value = total ? `Uploading record files from your MAIA folder: ${done} of ${total}${name ? ` (${name})` : ''}…` : '';
+    });
+    lastUpload.value = uploadWords(r.upload);
+    indexState.value = r.state;
+  } finally { busy.value = ''; uploadNote.value = ''; }
+  if (!['no-folder', 'no-permission', 'upload-failed'].includes(indexState.value)) await refreshIndex();
 };
 
 const toggle = async (key: string, on: boolean) => {
