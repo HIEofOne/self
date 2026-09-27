@@ -72,6 +72,6 @@ The README has a Deploy to DigitalOcean button. Hosting costs roughly $10–40 a
 - The code and documentation: https://github.com/HIEofOne/self.
 - Essays on Substack: https://trustee.substack.com.
 
-## About the "Ask about MAIA" box
+## About "Ask Claude about MAIA"
 
-Claude, an AI made by Anthropic, answers through DigitalOcean's serverless inference. With every question it gets this overview, a map of MAIA's code and documents, and the history of every merged pull request; it reads the exact files, document sections or pull requests it needs, shows what it looks up as it goes, and links to them. There is also a full page at /ask. It can't see anyone's MAIA, records or account. The box is not private, so don't type health information into it. Nothing you type is saved, but answers can be wrong: the code and documents themselves are the reference.
+Claude, an AI made by Anthropic, answers through DigitalOcean's serverless inference. With every question it gets this overview, a map of MAIA's code and documents, and the history of every merged pull request; it reads the exact files, document sections or pull requests it needs, shows what it looks up as it goes, and links to them. It lives at /ask; the welcome page's "Ask Claude about MAIA" card opens it. It can't see anyone's MAIA, records or account. It is not private, so don't type health information into it. Nothing you type is saved, but answers can be wrong: the code and documents themselves are the reference.
