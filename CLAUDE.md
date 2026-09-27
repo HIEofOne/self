@@ -33,6 +33,7 @@ Line counts as of v1.6.4 (September 2026); whole repo ≈ 71,000 lines (`src/` 3
 - `server/credits.js` — credits ledger, Stripe webhook (~440 lines)
 - `server/routes/policies.js` — sharing-policy cards, vocabulary, evaluator (~300 lines)
 - `server/records-pipeline.js` — derived view of a user's records journey (~180 lines)
+- `server/ask-maia.js` + `server/routes/ask-maia.js` + `src/components/AskMaia.vue` — the welcome page's "Ask about MAIA" box: Claude answers from the public docs (`HANDBOOK_SOURCES`), led by `Documentation/Ask_MAIA_Brief.md`. **Keep the brief current** when something a visitor would ask about changes
 - `server/edition.js` — edition switch (`MAIA_EDITION`) and feature registry (~190 lines)
 - `server/edition-routes.js` — every route's feature, and the /api feature gate. **Adding a route? Add it to `ROUTE_FEATURES`**, or `tests/backend/edition-routes.test.js` fails
 - `server/utils/api-guard.js` — /api account-access guard: the session decides the account (~100 lines)
@@ -42,6 +43,7 @@ Line counts as of v1.6.4 (September 2026); whole repo ≈ 71,000 lines (`src/` 3
 - `server/gnap/documents.js` + `server/routes/received.js` — documents others add (P9): descriptor and type checks, holds sealed to the patient's folder key, limits; the folder key and the holds for the patient's browser (`src/utils/folderKey.ts`, `src/utils/received.ts` write them to `Received/`)
 - `server/routes/gnap-group.js` + `server/gnap/group.js` — GNAP group routing: the group's endpoint, fan-out of signed copies with a group attestation, sealed answers (the member's side is `receiveGroupCopy` in `routes/gnap.js`)
 - `src/gnap/` + `src/components/RequestPage.vue` / `GroupRequestPage.vue` — the browser GNAP client and the requester's pages at `/r/<asId>` and `/g/<groupId>/request` (mounted by `main.ts`); `RequestsPanel.vue` is the patient's side
+- `Documentation/Claude_Notes.md` — Claude's working notes (conventions, invariants, local test recipes), public; no secrets or vulnerability details there
 - `Documentation/group_requests.md` — design of the Personal AS edition (phases P0–P12); `public/MAIA_Request_Map.html` (who runs what, how requests travel) and `public/MAIA_Group_Network.html` (how hosts, groups and people connect), served at those paths and linked from the welcome page — update them when a request path changes
 
 ## Environment Variables

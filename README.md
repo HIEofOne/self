@@ -92,6 +92,10 @@ on "List this group publicly" — your welcome page is your group's front door.
 - [User Guide](public/User_Guide.html) — end-user guide to MAIA features
 - [Environment & Hosting](Documentation/Environment.md) — configuration, secrets, DO token derivation
 - [Account Lifecycle & Wizards](Documentation/Wizards.md) — welcome, setup, sign-out, destroy, and restore flows
+- [Personal AS edition](Documentation/group_requests.md) — design and phase log of the new edition
+- [MAIA in brief](Documentation/Ask_MAIA_Brief.md) — the current overview behind the welcome page's "Ask about MAIA" box
+- [Groups design conversation](Documentation/Groups_Design.md) — how the groups feature was designed: adoption, digital twins, payments
+- [Working notes](Documentation/Claude_Notes.md) — conventions, invariants and local test recipes kept while developing MAIA
 
 ---
 

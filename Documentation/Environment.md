@@ -205,6 +205,7 @@ both apps share the cluster safely.
 | `MAIA_HOST_ROLE` | `patients` (default) \| `group-only` | `group-only`: this app runs groups and nothing else — no patient accounts, no private AIs, no health records (trustee.ai as a demonstration host). Its welcome page lists its public groups, how to join them from your own MAIA host, and the group request page; the admin signs in at `/admin`. Needs `MAIA_EDITION=personal-as`. See `Documentation/Trustee_Host.md`. |
 | `MAIA_MEMBER_HOSTS` | `https://maia.agropper.xyz` | On a group-only host: the MAIA hosts its welcome page offers ("Join with …"), comma-separated https URLs, at most five. |
 | `MAIA_EMAIL_VERIFY_BYPASS` | unset (default) \| `a@example.com,b@example.com` | **Test apps only — never set in production.** To speed up manual testing: the welcome page fills in the first listed address and verifies it at once, so there is nothing to type, and any listed address is verified without a code (no email is sent). Anyone can then create accounts on that app without verifying an email, so remove it when testing is done. |
+| `MAIA_ASK_DAILY_LIMIT` | `300` (default) | How many questions the welcome page's "Ask about MAIA" box answers per day on this host, for everyone together (`server/routes/ask-maia.js`). Each address may also ask 12 an hour and 40 a day. `0` hides the box. Answers use Claude through DigitalOcean's serverless inference, so they cost a few cents each; with no Claude model available, the box is hidden. |
 
 ### Local Development
 
