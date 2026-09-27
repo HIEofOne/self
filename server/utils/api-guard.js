@@ -10,8 +10,27 @@
  * otherwise it is refused: 401 with no session, 403 for a different user.
  * A short allow-list covers routes that legitimately run before sign-in
  * and carry their own proof (passkey ceremonies, temporary-account
- * restore) or expose only non-sensitive status.
+ * restore) or expose only non-sensitive status. The server's own workers
+ * (the pipeline's indexing step) call its API over loopback with a secret
+ * made at startup, which never leaves the process.
  */
+import { timingSafeEqual } from 'crypto';
+
+/** Header carrying the server's per-process secret on its own loopback calls. */
+export const INTERNAL_CALL_HEADER = 'x-maia-internal';
+
+const isLoopback = (req) => {
+  const addr = String(req.socket?.remoteAddress || req.connection?.remoteAddress || '');
+  return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+};
+
+/** Is this one of the server's own calls (the secret, from loopback)? */
+export const isInternalCall = (req, secret) => {
+  if (!secret || !isLoopback(req)) return false;
+  const got = Buffer.from(String(req.headers?.[INTERNAL_CALL_HEADER] || ''));
+  const want = Buffer.from(String(secret));
+  return got.length === want.length && timingSafeEqual(got, want);
+};
 
 export const isAdminUserId = (userId) => {
   const admin = String(process.env.ADMIN_USERNAME || 'admin').trim().toLowerCase();
@@ -85,13 +104,14 @@ export const requestedUserId = (req) => {
  * @param {object} deps
  * @param {(req) => Promise<string|null>} deps.getDeepLinkOwnerId owner of the guest's shared chat
  */
-export function createApiGuard({ getDeepLinkOwnerId } = {}) {
+export function createApiGuard({ getDeepLinkOwnerId, internalSecret = null } = {}) {
   return async function apiAccessGuard(req, res, next) {
     const target = requestedUserId(req);
     if (!target) return next();
 
     const path = req.path.startsWith('/api') ? req.path : `/api${req.path}`;
     if (PRE_AUTH_ROUTES.has(path)) return next();
+    if (isInternalCall(req, internalSecret)) return next();
 
     const sessionUserId = req.session?.userId || null;
     if (sessionUserId) {
