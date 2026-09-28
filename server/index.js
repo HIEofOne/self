@@ -50,6 +50,7 @@ import setupReceivedRoutes from './routes/received.js';
 import setupGnapOutRoutes from './routes/gnap-out.js';
 import setupWelcomeActivityRoutes from './routes/welcome-activity.js';
 import setupAskMaiaRoutes, { DEFAULT_ASK_MODEL, FALLBACK_ASK_MODEL } from './routes/ask-maia.js';
+import { forumConfig, postAskQuestion, forumWebhookHandler } from './forum.js';
 import { enablePublicAis, probePublicAi } from './public-ais.js';
 import { recordFilesForLegend } from './advisor-context.js';
 import { createPrHistory } from './pr-history.js';
@@ -1575,13 +1576,13 @@ if ((process.env.PUBLIC_APP_URL || '').startsWith('https://')) {
 // signed — see setTempCookie in routes/auth.js).
 const SESSION_SECRET = process.env.SESSION_SECRET || deriveSessionSecret();
 app.use(cookieParser(SESSION_SECRET));
-// Stripe webhook signatures are computed over the EXACT bytes Stripe sent,
-// and GNAP requests are signed over their Content-Digest (RFC 9421), so
-// those routes keep the raw body alongside the parsed JSON.
+// Stripe and forum webhook signatures are computed over the EXACT bytes
+// sent, and GNAP requests are signed over their Content-Digest (RFC 9421),
+// so those routes keep the raw body alongside the parsed JSON.
 app.use(express.json({
   limit: '10mb',
   verify: (req, _res, buf) => {
-    if (req.originalUrl === '/api/stripe/webhook' || req.originalUrl.startsWith('/gnap/')) req.rawBody = buf;
+    if (req.originalUrl === '/api/stripe/webhook' || req.originalUrl === '/api/forum/webhook' || req.originalUrl.startsWith('/gnap/')) req.rawBody = buf;
   }
 }));
 app.use(express.urlencoded({ extended: true }));
@@ -1679,6 +1680,9 @@ const sendPlainEmail = async (to, subject, text) => {
   await resend.emails.send({ from, to, subject, text });
   return true;
 };
+// The Community Forum's webhook: sign-ins, new accounts and posts, by email
+// to the maintainer (server/forum.js; only where its secret is set).
+app.post('/api/forum/webhook', forumWebhookHandler({ sendEmail: sendPlainEmail }));
 // GNAP hooks the group routes call once both are set up: a member's AS
 // receives copies of group requests pulled from the relay (§10.9).
 const gnapHooks = {};
@@ -1722,7 +1726,20 @@ let askInference = null;
 const askPrHistory = createPrHistory({ cloudant });
 void askPrHistory.refresh();
 setInterval(() => { if (askPrHistory.stale()) void askPrHistory.refresh(); }, 6 * 60 * 60 * 1000).unref?.();
-setupAskMaiaRoutes(app, { rootDir: path.join(__dirname, '..'), getInference: () => askInference, getPrs: () => askPrHistory.get() });
+// Each question also goes to the Community Forum as a new topic, where
+// DISCOURSE_* is set (server/forum.js); the answer never does.
+const forum = forumConfig();
+let askHost = '';
+try { askHost = new URL(process.env.PUBLIC_APP_URL || '').host; } catch { askHost = ''; }
+setupAskMaiaRoutes(app, {
+  rootDir: path.join(__dirname, '..'), getInference: () => askInference, getPrs: () => askPrHistory.get(),
+  forum: forum.askPosting ? {
+    url: forum.url,
+    post: (question) => postAskQuestion(question, { cfg: forum, host: askHost }).then((r) => {
+      if (!r.ok) console.warn(`[ask-maia] forum post failed: ${r.status}`);
+    })
+  } : null
+});
 
 // Groups daily maintenance (Groups.md §6.1/§6.3/§7.3): renew 24h membership
 // credentials, reconcile registry-side revocation, pull relay mail, and
