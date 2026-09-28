@@ -37,6 +37,7 @@ export const ROUTE_FEATURES = Object.freeze({
   'POST /api/client-log': 'public',
   'GET /api/ask-maia': 'public',
   'POST /api/ask-maia': 'public',
+  'POST /api/forum/webhook': 'public',
   'GET /api/admin-username': 'public',
   'GET /api/current-user': 'public',
   'POST /api/sign-out': 'public',

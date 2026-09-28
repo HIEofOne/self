@@ -48,8 +48,17 @@
                :maxlength="1000" :disable="busy" aria-label="Your question about MAIA" />
       <q-btn type="submit" unelevated color="primary" icon="send" :loading="busy" :disable="!draft.trim()" aria-label="Ask" />
     </form>
+    <!-- Where this host posts questions to the Community Forum (server/forum.js) -->
+    <div v-if="postsToForum" class="ask__public" role="note">
+      <q-icon name="campaign" size="22px" class="ask__public-icon" />
+      <span>
+        Questions from this page are <strong>PUBLIC</strong> and automatically posted to the
+        <a v-if="forumUrl" :href="forumUrl" target="_blank" rel="noopener">Community Forum</a><template v-else>Community Forum</template>.
+      </span>
+    </div>
     <div class="ask__foot">
-      Answers can be wrong: the code and documents are the reference. Nothing you type is saved.
+      Answers can be wrong: the code and documents are the reference.
+      {{ postsToForum ? 'Claude’s answers aren’t saved or posted.' : 'Nothing you type is saved.' }}
       <a v-if="turns.length && !busy" href="#" class="welcome-footer-link" @click.prevent="turns = []">Start over</a>
     </div>
   </section>
@@ -61,7 +70,9 @@
  * works, before any account exists. Claude answers from a knowledge pack
  * (the brief, maps of the code and documents, the PR history), reads what
  * it needs (each lookup shows as it goes), and links to what it read. The conversation lives only in this
- * page; nothing is saved. Hidden when this host can't reach Claude. It
+ * page; nothing is saved, except that a host set up for it posts each
+ * question (never the answer) to the Community Forum, as the page says
+ * below the question box. Hidden when this host can't reach Claude. It
  * is the page at /ask (AskPage.vue), with questions for each kind of
  * visitor; the welcome page links to it (WelcomeMaps.vue).
  */
@@ -89,6 +100,8 @@ md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
 const render = (text: string) => md.render(text);
 
 const available = ref(false);
+const postsToForum = ref(false);
+const forumUrl = ref<string | null>(null);
 const turns = ref<Turn[]>([]);
 const draft = ref('');
 const busy = ref(false);
@@ -153,7 +166,12 @@ async function ask(text: string) {
 }
 
 onMounted(async () => {
-  try { available.value = !!(await (await fetch('/api/ask-maia')).json()).available; } catch { available.value = false; }
+  try {
+    const d = await (await fetch('/api/ask-maia')).json();
+    available.value = !!d.available;
+    postsToForum.value = !!d.postsToForum;
+    forumUrl.value = typeof d.forumUrl === 'string' ? d.forumUrl : null;
+  } catch { available.value = false; }
 });
 </script>
 
@@ -183,4 +201,11 @@ onMounted(async () => {
 .ask__form { display: flex; gap: 8px; align-items: center; }
 .ask__input { flex: 1; min-width: 0; }
 .ask__foot { color: #9aa6b2; font-size: 0.75rem; margin-top: 8px; }
+.ask__public {
+  display: flex; align-items: center; gap: 10px; margin-top: 10px; padding: 10px 14px;
+  background: #fff4d6; border: 1px solid #f5c542; border-left: 5px solid #e59a00; border-radius: 8px;
+  color: #4a3500; font-size: 0.95rem; font-weight: 500; line-height: 1.4;
+}
+.ask__public-icon { color: #b36b00; flex: none; }
+.ask__public a { color: #8a4b00; font-weight: 600; }
 </style>

@@ -14,7 +14,9 @@
  * 1,000 characters, a few earlier turns, per-address hourly and daily
  * counts, a daily cap for the whole host (MAIA_ASK_DAILY_LIMIT), and
  * per-question caps on rounds and lookups. Nothing a visitor types is
- * stored or logged.
+ * stored or logged here; where the host posts to the Community Forum
+ * (`forum`), each question, never the answer, becomes a public topic there
+ * (server/forum.js), and the page says so.
  */
 import { buildKnowledge, buildResearchPrompt, runResearchTool, RESEARCH_TOOLS } from '../ask-maia.js';
 import { summarize } from '../pr-history.js';
@@ -122,7 +124,7 @@ const thisHost = () => {
  * @param {Function} [deps.fetchImpl]
  * @param {() => number} [deps.now]
  */
-export default function setupAskMaiaRoutes(app, { rootDir, getInference = () => null, getPrs = () => ({ prs: [], fetchedAt: null }), describeHost = thisHost, limits = {}, fetchImpl = fetch, now = Date.now }) {
+export default function setupAskMaiaRoutes(app, { rootDir, getInference = () => null, getPrs = () => ({ prs: [], fetchedAt: null }), describeHost = thisHost, limits = {}, fetchImpl = fetch, now = Date.now, forum = null }) {
   const L = { ...ASK_LIMITS, ...limits };
   const envCap = Number(process.env.MAIA_ASK_DAILY_LIMIT);
   if (process.env.MAIA_ASK_DAILY_LIMIT !== undefined && Number.isFinite(envCap) && envCap >= 0 && limits.hostPerDay === undefined) L.hostPerDay = envCap;
@@ -141,7 +143,11 @@ export default function setupAskMaiaRoutes(app, { rootDir, getInference = () => 
 
   app.get('/api/ask-maia', (_req, res) => {
     const inf = getInference();
-    res.json({ available: !!(inf?.key && inf?.model) && L.hostPerDay > 0, model: inf?.model || null });
+    res.json({
+      available: !!(inf?.key && inf?.model) && L.hostPerDay > 0, model: inf?.model || null,
+      // Questions are posted to the Community Forum: the page says so.
+      postsToForum: !!forum, forumUrl: forum?.url || null
+    });
   });
 
   app.post('/api/ask-maia', async (req, res) => {
@@ -157,6 +163,10 @@ export default function setupAskMaiaRoutes(app, { rootDir, getInference = () => 
       res.set('Retry-After', String(slot.retryAfter));
       return res.status(429).json({ error: slot.scope === 'host' ? 'HOST_LIMIT' : 'TOO_MANY', retryAfter: slot.retryAfter });
     }
+
+    // The question (never the answer) goes to the forum as a new topic; the
+    // answer doesn't wait for it.
+    if (forum) void Promise.resolve().then(() => forum.post(question)).catch(() => {});
 
     let k;
     let system;

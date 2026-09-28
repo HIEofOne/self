@@ -185,13 +185,13 @@ function fakeModel(replies) {
 }
 const toolCall = (id, name, args) => ({ id, type: 'function', function: { name, arguments: JSON.stringify(args) } });
 
-async function makeServer({ replies, inference = { key: 'k', model: 'anthropic-claude-opus-5.5' }, limits = {}, prs = { prs: PRS, fetchedAt: '2026-09-27T00:00:00Z' } }) {
+async function makeServer({ replies, inference = { key: 'k', model: 'anthropic-claude-opus-5.5' }, limits = {}, prs = { prs: PRS, fetchedAt: '2026-09-27T00:00:00Z' }, forum = null }) {
   const model = fakeModel(replies);
   const app = express();
   app.use(express.json());
   setupAskMaiaRoutes(app, {
     rootDir: ROOT, limits, fetchImpl: model.fetchImpl, getInference: () => inference, getPrs: () => prs,
-    describeHost: () => ({ url: 'https://maia.example.org', edition: getEdition() }), now: () => Date.parse('2026-09-27T12:00:00Z')
+    describeHost: () => ({ url: 'https://maia.example.org', edition: getEdition() }), now: () => Date.parse('2026-09-27T12:00:00Z'), forum
   });
   return { server: await serve(app), model };
 }
@@ -201,9 +201,21 @@ describe.each(EDITIONS)('the route, edition "%s"', (edition) => {
 
   it('says whether this host can answer, and with which model', async () => {
     const { server } = await makeServer({ replies: [] });
-    expect((await request(server).get('/api/ask-maia')).body).toEqual({ available: true, model: 'anthropic-claude-opus-5.5' });
+    expect((await request(server).get('/api/ask-maia')).body).toEqual({ available: true, model: 'anthropic-claude-opus-5.5', postsToForum: false, forumUrl: null });
     const none = await makeServer({ replies: [], inference: null });
-    expect((await request(none.server).get('/api/ask-maia')).body).toEqual({ available: false, model: null });
+    expect((await request(none.server).get('/api/ask-maia')).body).toEqual({ available: false, model: null, postsToForum: false, forumUrl: null });
+  });
+
+  it('where the host posts to the forum: says so, and posts each question, never the answer', async () => {
+    const posted = [];
+    const { server } = await makeServer({ replies: [{ content: 'MAIA is a private AI.' }], forum: { url: 'https://forum.example', post: async (q) => { posted.push(q); } } });
+    expect((await request(server).get('/api/ask-maia')).body).toMatchObject({ postsToForum: true, forumUrl: 'https://forum.example' });
+    const res = await request(server).post('/api/ask-maia').send({ question: 'What is MAIA?' });
+    expect(events(res.text).find((e) => e.delta).delta).toBe('MAIA is a private AI.');
+    expect(posted).toEqual(['What is MAIA?']);
+    // A refused question (too long) isn't posted.
+    await request(server).post('/api/ask-maia').send({ question: 'x'.repeat(2000) });
+    expect(posted.length).toBe(1);
   });
 
   it('reads what it needs, shows each lookup, then answers with what it read', async () => {
