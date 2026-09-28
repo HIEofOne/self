@@ -36,6 +36,7 @@ import { getChunkingForDataSource, getChunkingForStrategy, getRerankingModelName
 import { getProjectIdForGenAI } from './utils/project-config.js';
 import setupAuthRoutes from './routes/auth.js';
 import setupChatRoutes, { getOwnerIdForDeepLinkSession, getShareOwnerId } from './routes/chat.js';
+import { bareDomainRedirect } from './utils/bare-domain-redirect.js';
 import { createApiGuard, isLocalDevRequest, isAdminUserId, INTERNAL_CALL_HEADER } from './utils/api-guard.js';
 import { deletionProof } from './utils/delete-proof.js';
 import setupFileRoutes from './routes/files.js';
@@ -782,6 +783,9 @@ function getMaiaInstructionText() {
 }
 
 const app = express();
+// trustee.ai → https://www.trustee.ai (when PUBLIC_APP_URL is a www address).
+const bareRedirect = bareDomainRedirect(process.env.PUBLIC_APP_URL);
+if (bareRedirect) app.use(bareRedirect);
 const PORT = getPort();
 
 // Derive passkey/app URLs from PUBLIC_APP_URL (single source of truth); override with PASSKEY_RPID if needed
