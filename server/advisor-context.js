@@ -8,7 +8,12 @@
  *                               P10): every conversation with the patient's
  *                               own private AI. Their Patient Summary, their
  *                               rules and whether sharing is on, their recent
- *                               requests, and the features they can turn on.
+ *                               requests, and the features they can turn on;
+ *                               and, to help with MAIA itself, the state of
+ *                               their MAIA (setup, saved files, the search
+ *                               index, the summary), their recent activity
+ *                               (the maia-log), "MAIA in brief", and the
+ *                               documentation sections for a how-to question.
  *
  * STRICT CONTRACT: the AI advises and drafts. A proposed rule is a fenced
  * `policy-card` block the patient saves (normalizeCard validates it); a
@@ -19,10 +24,14 @@
  * requester's self-reported name is quoted as data.
  */
 import { policySentence, POLICY_SCOPES, POLICY_PURPOSES, READ_SCOPES } from './routes/policies.js';
-import { FEATURES, featureMode, isFeatureEnabled, getEdition } from './edition.js';
+import { FEATURES, featureMode, isFeatureEnabled, getEdition, combinedSummaryReview } from './edition.js';
 import { KIND_WORDS } from './gnap/documents.js';
+import { helpKnowledge, search } from './ask-maia.js';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 const MAX_SUMMARY_CHARS = 16000;
+const REPO_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 /**
  * The record PDFs as "File N": the order the Patient Summary prompt's
@@ -212,7 +221,159 @@ export function advisorOutLine(og) {
 const REQUEST_SCOPES = READ_SCOPES.filter((s) => s !== 'ah-category');
 const REQUEST_PURPOSES = POLICY_PURPOSES.filter((p) => p !== 'any');
 
-export async function buildEditionAdvisorContext(cloudant, userDoc) {
+// ── Help with MAIA itself ───────────────────────────────────────────────
+
+const day = (iso) => (iso ? String(iso).slice(0, 10) : '');
+const kb = (bytes) => (Number(bytes) > 0 ? `${Math.max(1, Math.round(Number(bytes) / 1024)).toLocaleString('en-US')} KB` : '');
+
+/** What their MAIA has and hasn't done, from the account. */
+export function maiaStateLines(userDoc) {
+  const d = userDoc || {};
+  const groups = (d.groupMemberships || []).map((m) => m.groupName).filter(Boolean);
+  const pending = (d.pendingGroupJoins || []).map((p) => p.groupName || p.groupId).filter(Boolean);
+  const lines = [
+    `Setup: email ${d.emailVerified ? 'verified' : 'NOT verified'}; passkey ${d.credentialID ? 'created' : 'not created yet'}; MAIA folder ${d.folderConnectedAt ? `connected (${day(d.folderConnectedAt)})` : 'not connected yet'}; groups: ${groups.join(', ') || 'none'}${pending.length ? ` (waiting for approval: ${pending.join(', ')})` : ''}.`,
+    `Private AI: ${(d.agentEndpoint || d.agentProfiles?.default?.endpoint) ? 'ready' : (d.assignedAgentId || d.agentProfiles?.default?.agentId) ? 'being created' : 'not created yet'}${d.agentModelName ? ` (${d.agentModelName})` : ''}.`
+  ];
+
+  // The Patient Summary
+  const summary = [];
+  if (String(d.patientSummary || '').trim()) {
+    summary.push(`saved${d.patientSummaryVerifiedAt ? `, verified ${day(d.patientSummaryVerifiedAt)}` : ', NOT verified yet'}`);
+    summary.push(`privacy-filtered copy ${d.privacyFilteredSummary ? 'made' : 'not made yet'}`);
+    // In the Personal AS edition the medications are verified with the summary.
+    if (!combinedSummaryReview()) summary.push(`medications ${d.currentMedicationsVerifiedAt ? `verified ${day(d.currentMedicationsVerifiedAt)}` : 'not verified'}`);
+  } else {
+    summary.push('none yet');
+  }
+  if (d.draftJob?.status === 'running') summary.push(`a draft is being written (started ${day(d.draftJob.startedAt)})`);
+  else if (d.draftJob?.status === 'failed' || d.draftJob?.status === 'error') summary.push(`the last draft failed${d.draftJob.error ? ` (${String(d.draftJob.error).slice(0, 120)})` : ''}`);
+  if (String(d.draftPatientSummary?.text || '').trim()) summary.push('a draft is waiting for their review in Workbook → Patient Summary');
+  lines.push(`Patient Summary: ${summary.join('; ')}.`);
+
+  // Saved files and the search index
+  const files = Array.isArray(d.files) ? d.files.filter((f) => f?.fileName) : [];
+  const indexedNames = new Set((d.kbIndexedBucketKeys || []).map((k) => path.basename(String(k))));
+  const indexOn = isFeatureEnabled('records-index', d);
+  lines.push(`Saved record files in MAIA: ${files.length}.${files.length ? '' : ' They upload records from their MAIA folder, or with the paperclip in the chat.'}`);
+  for (const f of files.slice(0, 40)) {
+    const notes = [kb(f.fileSize), f.uploadedAt ? `uploaded ${day(f.uploadedAt)}` : '', f.isAppleHealth ? 'Apple Health export' : '',
+      indexedNames.has(path.basename(String(f.bucketKey || f.fileName))) ? 'in the search index' : (indexOn ? 'not in the search index' : '')].filter(Boolean);
+    lines.push(`  - ${f.fileName}${notes.length ? ` (${notes.join(', ')})` : ''}`);
+  }
+  if (files.length > 40) lines.push(`  - …and ${files.length - 40} more`);
+  const ks = d.kbIndexingStatus || null;
+  let index = `"Search all my records" is ${indexOn ? 'on' : 'off'}`;
+  if (ks?.phase === 'complete' || ks?.backendCompleted) index += `; last indexed ${day(ks.completedAt || ks.updatedAt)}${ks.tokens ? ` (${Number(ks.tokens).toLocaleString('en-US')} tokens${ks.filesIndexed ? `, ${ks.filesIndexed} files` : ''})` : ''}`;
+  else if (ks?.phase === 'error' || ks?.phase === 'failed') index += `; the last indexing failed on ${day(ks.updatedAt || ks.startedAt)}: ${String(ks.error || 'unknown error').slice(0, 160).replace(/[.\s]+$/, '')}`;
+  else if (ks?.phase) index += `; indexing is under way (${ks.phase}, started ${day(ks.startedAt)}${ks.tokens ? `, ${Number(ks.tokens).toLocaleString('en-US')} tokens so far` : ''})`;
+  lines.push(`${index}.`);
+  return lines;
+}
+
+// Routine UI events (and chat questions) tell the private AI nothing useful.
+const LOG_NOISE = new Set(['workbook-tab', 'workbook-opened', 'workbook-dismissed', 'chat-question', 'chat-response']);
+const MAX_LOG_EVENTS = 30;
+
+/**
+ * Their maia-log's recent events (the account's provisioningLog), one per
+ * line, oldest first; the same event repeated in a row is one line with a
+ * count and its latest time.
+ */
+export function recentActivityLines(userDoc, max = MAX_LOG_EVENTS) {
+  const log = Array.isArray(userDoc?.provisioningLog) ? userDoc.provisioningLog : [];
+  const runs = [];
+  for (const { id, time, event, userId, ...rest } of log) {
+    if (!event || LOG_NOISE.has(event)) continue;
+    const details = Object.entries(rest)
+      .filter(([, v]) => v !== null && v !== undefined && v !== '')
+      .map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`)
+      .join(', ')
+      .slice(0, 160);
+    const last = runs[runs.length - 1];
+    if (last && last.event === event && last.details === details) { last.count += 1; last.time = time; continue; }
+    runs.push({ event, details, time, count: 1 });
+  }
+  return runs.slice(-max).map((r) => `${String(r.time || '').slice(0, 16).replace('T', ' ')} ${r.event}${r.count > 1 ? ` ×${r.count} (the latest shown)` : ''}${r.details ? ` (${r.details})` : ''}`);
+}
+
+// A question about using MAIA itself, not about their health.
+const HELP_QUESTION = /\b(maia|how (do|can|should|would) i|how to|why (did|didn't|didnt|is|isn't|does|doesn't|won't|can't)|where (is|are|do|can)|set ?up|index(ing|ed)?|upload|folder|passkey|sign(ed)? ?in|log ?in|rules?|sharing|requests?|groups?|features?|workbook|log|error|fail(ed|ing|s)?|stuck|not working|can't|cannot|won't|button|tab|turn (on|off)|delete|restore|backup|agent|public ai|credits?|apple health)\b/i;
+export const isHelpQuestion = (q) => HELP_QUESTION.test(String(q || ''));
+
+/** The patient's latest question: their last message, after any attached file's text. */
+export const latestQuestion = (messages) => {
+  const lastUser = [...(Array.isArray(messages) ? messages : [])].reverse().find((m) => m?.role === 'user' && typeof m.content === 'string');
+  return String(lastUser?.content || '').split('\n\nUser query: ').pop().slice(0, 2000);
+};
+
+/** The documentation sections that best answer a how-to question. */
+export function helpSectionLines(question, { rootDir = REPO_ROOT, max = 3, chars = 2500 } = {}) {
+  if (!isHelpQuestion(question)) return [];
+  const hits = search(helpKnowledge(rootDir).index, question, { max });
+  return hits.map((s) => `--- ${s.path}${s.heading ? ` › ${s.heading}` : ''}\n${s.text.length > chars ? `${s.text.slice(0, chars)}…` : s.text}`);
+}
+
+/**
+ * Where things are in MAIA (the Personal AS edition), so the private AI
+ * points to real places. Keep in step with the Workbook's tabs
+ * (MyStuffDialog.vue railTabs) and the buttons named here.
+ */
+export const MAIA_SCREENS = [
+  'Workbook (the left sidebar; Sign out is at its bottom). Its tabs:',
+  '  - Saved Files: the record files in MAIA, and whether each is in the search index; shows indexing progress.',
+  '  - AI Agents: their private AI and its instructions; a second private AI (a More features option).',
+  '  - Saved Chats: appears once they save a chat.',
+  '  - Patient Summary: write it ("Use my Apple Health export", or "Answer a few questions instead" → "Write my summary"), review and Verify it with its medications; "Request New Summary"; the privacy-filtered copy.',
+  '  - Groups: their groups, invitations and join links.',
+  '  - Sharing Policies: their rules. Confirm each rule, "Test your rules", then "Turn on sharing" (or "Pause sharing").',
+  '  - Requests: requests to their MAIA (Share, Decline, Ignore, Stop sharing), their personal request link and QR code, "Ask your group", "Ask someone\'s MAIA", and what they sent.',
+  '  - More features: features they can turn on. "Search all my records" has "Index my records now" (or "Add new records from my folder" once indexed) and a link to Saved Files.',
+  '  - Privacy Filter, Patient Diary, References: only once turned on in More features.',
+  'The chat: the paperclip attaches a file (a PDF or text for this chat; an image only for public AIs that read images); the "To:" menu chooses their private AI or, once Public AIs are on, a public AI; Save and Local keep the chat.',
+  'Setup: after GET STARTED, a checklist (verify email, passkey, MAIA folder, join the group, Patient Summary, confirm rules and turn on sharing).'
+];
+
+/**
+ * The help block of the edition context: how to help with MAIA itself,
+ * their MAIA's state, their recent activity, MAIA in brief, and the
+ * documentation for this question.
+ */
+export function buildHelpBlock(userDoc, question = '', { rootDir = REPO_ROOT } = {}) {
+  const activity = recentActivityLines(userDoc);
+  const sections = helpSectionLines(question, { rootDir });
+  return [
+    '=== HELP WITH MAIA ITSELF ===',
+    'When the patient asks how MAIA works, how to do something in it, or why something didn\'t work,',
+    'answer for THEIR situation: what is done, what is next, and what failed and when, from their',
+    'MAIA\'s state and recent activity below and from MAIA IN BRIEF. Their state below is',
+    'authoritative: never contradict it. Point to the exact place in MAIA using only the names in',
+    'MAIA\'S SCREENS; if you aren\'t sure where something is, say so rather than guess. Explain the log',
+    'in plain words; don\'t paste it. Files the patient attached to this chat are in their message.',
+    'For general questions about MAIA they can also use "Ask Claude about MAIA" at /ask, which can\'t',
+    'see their account.',
+    '',
+    'MAIA\'S SCREENS:',
+    ...MAIA_SCREENS,
+    '',
+    'THEIR MAIA\'S STATE:',
+    ...maiaStateLines(userDoc),
+    '',
+    `THEIR RECENT ACTIVITY (their maia-log, oldest first):`,
+    ...(activity.length ? activity : ['(nothing recorded yet)']),
+    '',
+    'MAIA IN BRIEF:',
+    helpKnowledge(rootDir).brief.trim(),
+    ...(sections.length ? ['', 'DOCUMENTATION THAT MAY ANSWER THIS QUESTION:', ...sections] : [])
+  ];
+}
+
+/**
+ * @param {object} cloudant
+ * @param {object} userDoc
+ * @param {{ question?: string }} [opts]  the patient's latest message, for the help block
+ */
+export async function buildEditionAdvisorContext(cloudant, userDoc, { question = '' } = {}) {
   const cards = Array.isArray(userDoc.sharingPolicies) ? userDoc.sharingPolicies : [];
   const cardLines = cards.length
     ? cards.map((c, i) => {
@@ -307,6 +468,8 @@ export async function buildEditionAdvisorContext(cloudant, userDoc) {
     'Send button: you never send, and never claim a request was sent.',
     'THE PATIENT\'S REQUESTS TO OTHER MAIAS (newest first):',
     outLines,
+    '',
+    ...buildHelpBlock(userDoc, question),
     '=== END MAIA CONTEXT ==='
   ].join('\n');
 }
