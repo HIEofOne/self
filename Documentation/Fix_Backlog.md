@@ -4,8 +4,8 @@ Running list of regressions, small bugs, and incomplete features to work
 through. Captured 2026-07-26 (v1.5.110). Check items off and link the PR as
 they land. Pointers are starting points, not final scope.
 
-**Status: all 8 items shipped as of v1.5.124.** The only open action is a live
-delete→restore verification for #8 (see that item).
+**Status: items 1–8 shipped as of v1.5.124.** Open: a live delete→restore
+verification for #8 (see that item), and #9 (added 2026-09-28).
 
 ## Email & notifications
 
@@ -60,6 +60,16 @@ delete→restore verification for #8 (see that item).
   shows the deletion and the RestoreWizard restores cleanly; if it fails,
   re-disable the two controls. See `Setup_Sequence.md` →
   "Restore-after-deletion".
+
+- [ ] **9. Adding a passkey later fails in the Personal AS edition.** An account
+  started without a passkey ("This is my own computer") couldn't add one
+  afterwards on test.agropper.xyz (seen 2026-09-28, v1.6.52). The test and
+  production hosts were cleared to their admin accounts rather than fix it then.
+  Start from the passkey registration routes in `server/routes/auth.js`
+  (`/api/passkey/register`, `/api/passkey/register-verify`, which need the signed
+  temporary-account cookie or a session for that account) and
+  `src/components/PasskeyAuth.vue`, which the sign-out "set a passkey" step in
+  `src/App.vue` opens. Reproduce locally first.
 
 ---
 

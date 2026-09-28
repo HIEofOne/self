@@ -72,7 +72,7 @@ The README has a Deploy to DigitalOcean button. Hosting costs roughly $10–40 a
 - The community forum: https://forum.agropper.xyz. No personal health information there.
 - The code and documentation: https://github.com/HIEofOne/self.
 - Essays on Substack: https://trustee.substack.com.
-- The paper: MAIA is published in The New England Journal of Medicine AI Journal as "The Medical AI Assistant as Publication, Not Device: Why Peer-Reviewed, Open-Source AI Belongs in the Standard of Care", with a free access link on the welcome page.
+- The paper: MAIA is published in The New England Journal of Medicine AI Journal as "The Medical AI Assistant as Publication, Not Device: Why Peer-Reviewed, Open-Source AI Belongs in the Standard of Care" (June 2026), with a free access link on the welcome page.
 
 ## About "Ask Claude about MAIA"
 
