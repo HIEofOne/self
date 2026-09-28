@@ -5,6 +5,9 @@
     <p class="gh__intro">
       MAIA serves <strong>patient communities</strong> creating private peer support networks powered by personalized, confidential AI; <strong>specialty clinics</strong> offering trusted support circles alongside clinician-recommended AI tools; and <strong>primary care practices</strong> that collaborate with patients who manage their most sensitive records with a personal AI assistant.
     </p>
+    <p class="gh__intro">
+      Anyone, anywhere in the world can start a patient group, as defined by its suggested records access policies. The open source MAIA software is free and groups don’t have to host patient records, use AI, or see patient data. Any group can sell Credits to fund records hosting and personal AI. A patient needs one MAIA host but can be a member of many groups.
+    </p>
     <p class="gh__lead">
       This host runs groups only. It keeps no patients' MAIAs and no health
       records: each member's MAIA, with their records, stays on their own MAIA
@@ -92,7 +95,7 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.gh { max-width: 640px; margin: 0 auto; width: 100%; }
+.gh { max-width: 780px; margin: 0 auto; width: 100%; }
 .gh__host { font-weight: 700; letter-spacing: 0.08em; color: #1976d2; font-size: 13px; text-transform: uppercase; }
 .gh__title { font-size: 22px; line-height: 1.3; margin: 6px 0 8px; font-weight: 600; }
 .gh__intro { color: #37424d; line-height: 1.55; margin: 0 0 12px; }
