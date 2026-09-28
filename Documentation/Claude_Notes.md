@@ -21,8 +21,10 @@ They leave out secrets and anything that would help an attacker: app and droplet
 
 - **DigitalOcean apps:**
   - the test app (test.agropper.xyz, built from HIEofOne/self);
-  - production (maia.agropper.xyz, built from agropper/self);
-  - trustee.ai, being set up as a group-only host ([Trustee_Host.md](Trustee_Host.md)).
+  - production (maia.agropper.xyz, built from agropper/self), on the Personal AS edition since v2.0.0;
+  - trustee.ai, a group-only host ([Trustee_Host.md](Trustee_Host.md)).
+
+  All three set `MAIA_EDITION=personal-as`; no public host runs the full edition.
 - **Shared infrastructure.** The apps share one CouchDB droplet, one OpenSearch cluster (the code allows one per account) and one Spaces subscription.
   - Each app but production sets `COUCHDB_DB_PREFIX` and `SPACES_BUCKET` (`test_`/`maia-test`, `trustee_`/`maia-trustee`), so their data stays apart. Production sets neither.
   - Never parse the bucket name as a URL.

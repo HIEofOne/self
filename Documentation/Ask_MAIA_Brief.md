@@ -8,8 +8,8 @@ MAIA (Medical AI Assistant) is free, open-source software for patients. Each pat
 
 ## Two editions
 
-- **The Personal AS edition** is the new MAIA, running on test.agropper.xyz; maia.agropper.xyz is planned to switch to it. Your MAIA answers requests for your health information by rules you approve, and it can accept documents sent to you. It starts simple: other features stay hidden until you turn them on in Workbook → More features, or your private AI suggests one. "AS" stands for authorization server, the part that decides who may see what.
-- **The full edition** is the earlier MAIA, with the setup wizard, a searchable knowledge base of your records, lists, deep links for chatting with your doctors, and public AIs. The User Guide and the FAQ were written for the full edition.
+- **The Personal AS edition** is the MAIA that runs on maia.agropper.xyz (since MAIA 2.0.0, September 2026) and test.agropper.xyz; trustee.ai runs its groups. Your MAIA answers requests for your health information by rules you approve, and it can accept documents sent to you. It starts simple: other features stay hidden until you turn them on in Workbook → More features, or your private AI suggests one. "AS" stands for authorization server, the part that decides who may see what.
+- **The full edition** is the earlier MAIA, with the setup wizard, a searchable knowledge base of your records, lists, deep links for chatting with your doctors, and public AIs. The User Guide and the FAQ were written for the full edition. Its code is still in the repository, but no public MAIA host runs it now.
 
 ## Getting started (Personal AS edition)
 

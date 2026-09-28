@@ -1,9 +1,9 @@
 # Group Requests — a simplified "Personal AS" edition of MAIA
 
 - **Date:** 2026-09-22. **Revised 2026-09-24:** one request path. In the edition, every request arrives over GNAP, including requests made from a web page (D12, §10.9–10.10).
-- **Status:** Built through P11 (v1.6.38, 2026-09-26); P12 (launch) is next. Each phase in §14 says what was built. The sections before §14 are the design as proposed; where they differ from what shipped, §14 is right.
+- **Status:** Built through P11 (v1.6.38, 2026-09-26). maia.agropper.xyz switched to the edition at v2.0.0 (2026-09-28), with no user accounts to migrate; the rest of P12 (launch) is next. Each phase in §14 says what was built. The sections before §14 are the design as proposed; where they differ from what shipped, §14 is right.
 - **Base:** `HIEofOne/self` main at `8323936` (v1.5.175) when reviewed; both remotes are now at `f53580d` (v1.5.176, adds PR #309)
-- **Scope:** HIEofOne/self only. `agropper/self` and maia.agropper.xyz stay as the demo (tag `demo-v1.5.176`).
+- **Scope:** HIEofOne/self. `agropper/self` and maia.agropper.xyz stayed as the demo (tag `demo-v1.5.176`) until v2.0.0 (2026-09-28), when production was promoted and switched to the edition.
 - **Version line:** v1.6.0 starts the 1.6.x minor line for this work, as v1.5.1 did for Groups.
 - **Companion docs:** `MAIA_Request_Security_Privacy_Design.md` (the security baseline and invariants I-1…I-23 this design extends), `Groups.md` (implementation log), `Setup_Sequence.md` / `New_User_Flows.md` (onboarding lessons), `Policy_Vocab_Changelog.md`.
 
@@ -265,7 +265,7 @@ Admin surfaces (`/admin`, AdminUsers, AdminGroups, credits config) are unchanged
 
 ### 4.3 Migration when a deployment switches edition
 
-A fresh trustee.ai deployment needs no migration. When an existing deployment switches (for example the test app), a feature is treated as turned on for a user if they already have its artifacts (`kbId` → `records-index`, `sharingPolicies` saved by the user → those cards count as confirmed, and so on), so nothing a user relies on disappears. Test accounts are disposable anyway.
+A fresh trustee.ai deployment needs no migration. When an existing deployment switches (for example the test app), a feature is treated as turned on for a user if they already have its artifacts (`kbId` → `records-index`, `sharingPolicies` saved by the user → those cards count as confirmed, and so on), so nothing a user relies on disappears. Test accounts are disposable anyway. *(Not built: when maia.agropper.xyz switched at v2.0.0, its accounts had been deleted first, so nothing needed migrating. A host with users would need it.)*
 
 ### 4.4 Why new components rather than conditions in the wizard
 
@@ -889,7 +889,7 @@ A member who asks 1,000 advisor questions costs about $1. The secondary DeepSeek
 2. **One codebase, no fork, no long-lived branch.** Every phase lands in HIEofOne/self `main` as a small PR behind `MAIA_EDITION` (default `full`). The repo's own history shows the cost of long-lived branches (the 52-commit `wizard-spinner-verify-flow` divergence) and of stacked PRs (the PR-4 mis-merge). One short-lived branch per phase, cut fresh from `origin/main`, never stacked.
 3. **Test bed.** Set `MAIA_EDITION=personal-as` on the test app (claude-self → test.agropper.xyz) when P1 lands (D4). Accounts there are disposable. The alternative is a third DO app so test.agropper.xyz keeps exercising the full edition, which costs another App Platform instance.
 4. **trustee.ai production.** A new DO app, ideally in a DO account that Trustee pays for (§11 trust note), with its own CouchDB droplet and snapshots enabled (Environment.md: group keys exist only there). maia.agropper.xyz's `FEATURED_GROUP_REGISTRIES` can keep featuring it.
-5. **Keeping options open for agropper.** Because agropper stays a strict ancestor of HIEofOne main, a later fast-forward promotion is still clean. The demo would keep the full edition simply by not setting the flag. "Update agropper or not" stays a configuration decision, not a merge project.
+5. **Keeping options open for agropper.** Because agropper stays a strict ancestor of HIEofOne main, a later fast-forward promotion is still clean. The demo would keep the full edition simply by not setting the flag. "Update agropper or not" stays a configuration decision, not a merge project. *(Decided 2026-09-28: agropper was fast-forwarded to v2.0.0 and maia-self set `MAIA_EDITION=personal-as`.)*
 6. **Per-PR gates.** `npm run build` (vue-tsc; plain vite isn't enough), `npm run test:backend` green, version bump, and edition-parameterized tests: every new backend test runs under both `full` and `personal-as`, and `full` must behave exactly as before.
 
 ---
