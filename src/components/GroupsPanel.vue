@@ -328,6 +328,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { openMessages } from '../utils/memberMessages';
 import PendingJoinCard from './PendingJoinCard.vue';
 import { useQuasar } from 'quasar';
 
@@ -637,8 +638,9 @@ const loadMessages = async (groupId: string) => {
     );
     const data = await res.json();
     if (res.ok && data.success) {
-      messagesByGroup.value = { ...messagesByGroup.value, [groupId]: data.messages || [] };
-      sentByGroup.value = { ...sentByGroup.value, [groupId]: data.sent || [] };
+      // Sealed messages open here, with the folder key; the host can't.
+      messagesByGroup.value = { ...messagesByGroup.value, [groupId]: await openMessages(props.userId, data.messages || []) };
+      sentByGroup.value = { ...sentByGroup.value, [groupId]: await openMessages(props.userId, data.sent || []) };
     }
   } catch {
     /* keep prior list */

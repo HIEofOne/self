@@ -14,6 +14,10 @@ import setupGroupRoutes from '../../server/routes/groups.js';
 import { issueCode, checkCode } from '../../server/emailVerification.js';
 import { grantCredits, getAccount } from '../../server/credits.js';
 import { getEdition, setEditionForTests } from '../../server/edition.js';
+import { generateKeyPairSync } from 'crypto';
+import { sealBytesTo, openBytesFrom } from '../../server/utils/sealed-box.js';
+
+const MESSAGE_INFO = 'maia-member-message-v1'; // src/utils/memberMessages.ts
 
 const clone = (o) => (o == null ? o : JSON.parse(JSON.stringify(o)));
 
@@ -602,5 +606,105 @@ describe('Personal AS edition: only confirmed cards act, and only while sharing 
   it('paused: asks again', async () => {
     await updateJessica((d) => { d.asState = 'paused'; });
     expect(await visitorAsks('pa-paused@example.com')).toEqual({ status: 'pending', emailed: false });
+  });
+});
+
+// ── Member messages sealed in the browser ───────────────────────────────
+// Each member's message key is the public half of their MAIA folder key;
+// the private half never reaches a host. bob (Host A) writes to jessica
+// (Host B): both hosts and the relay carry only sealed boxes.
+describe('member messages sealed in the browser: hosts carry only sealed boxes', () => {
+  const folderKey = () => {
+    const { publicKey, privateKey } = generateKeyPairSync('x25519');
+    const pub = publicKey.export({ format: 'jwk' });
+    return { pub: { kty: 'OKP', crv: 'X25519', x: pub.x }, priv: privateKey.export({ format: 'jwk' }) };
+  };
+  const jessKey = folderKey();
+  const bobKey = folderKey();
+  let bobPw;
+  const setFolderKey = async (host, userId, key) => {
+    const d = await host.cloudant.getDocument('maia_users', userId);
+    d.folderKeyJwk = key.pub;
+    await host.cloudant.saveDocument('maia_users', d);
+  };
+  const everything = (host) => JSON.stringify([...host.cloudant.dbs.values()].map((m) => [...m.values()]));
+  const memberOnRegistry = async (alias) => (await A.cloudant.getDocument('maia_groups', groupId)).members.find((m) => m.alias === alias);
+
+  beforeAll(async () => {
+    bobPw = (await memberOnRegistry('bob')).pairwiseId;
+    await setFolderKey(B, 'jessica76', jessKey);
+    await setFolderKey(A, 'bob', bobKey);
+  });
+
+  it("a member's refresh registers their message key with the group", async () => {
+    expect((await memberOnRegistry('jessica76')).messagePublicKeyJwk).toBeFalsy();
+    await B.app.request('hostb.test', 'POST', '/api/user-groups/refresh', { userId: 'jessica76' });
+    expect((await memberOnRegistry('jessica76')).messagePublicKeyJwk).toEqual(jessKey.pub);
+    const jd = await B.cloudant.getDocument('maia_users', 'jessica76');
+    expect(jd.groupMemberships.find((m) => m.groupId === groupId).messageKeyX).toBe(jessKey.pub.x);
+  });
+
+  it('the registry takes a message key only signed by the member, and only an X25519 key', async () => {
+    const forged = await A.app.request('hosta.test', 'POST', `/api/groups/${groupId}/message-key`, {
+      pairwiseId: jessPw, messagePublicKeyJwk: bobKey.pub, payload: 'e30', signature: 'AAAA'
+    });
+    expect(forged.status).toBe(403);
+    const notX = await A.app.request('hosta.test', 'POST', `/api/groups/${groupId}/message-key`, {
+      pairwiseId: jessPw, messagePublicKeyJwk: { kty: 'OKP', crv: 'Ed25519', x: jessKey.pub.x }, payload: 'e30', signature: 'AAAA'
+    });
+    expect(notX.status).toBe(400);
+    expect((await memberOnRegistry('jessica76')).messagePublicKeyJwk).toEqual(jessKey.pub);
+  });
+
+  it("the sender's browser gets the recipient's key and its own; the relay and both hosts see only sealed boxes", async () => {
+    const keys = await A.app.request('hosta.test', 'GET', `/api/user-groups/recipient-keys?userId=bob&groupId=${groupId}&to=${jessPw}`);
+    expect(keys.body).toMatchObject({ success: true, selfKey: bobKey.pub, recipients: [{ pairwiseId: jessPw, messagePublicKeyJwk: jessKey.pub }] });
+    // Asking for keys registered bob's own, too.
+    expect((await memberOnRegistry('bob')).messagePublicKeyJwk).toEqual(bobKey.pub);
+
+    const payload = JSON.stringify({ maiaType: 'member-message', text: 'sealed hello from bob' });
+    const send = await A.app.request('hosta.test', 'POST', '/api/user-groups/send-sealed', {
+      userId: 'bob', groupId, toPairwiseId: jessPw,
+      boxes: [{ toPairwiseId: jessPw, box: sealBytesTo(jessKey.pub, Buffer.from(payload), MESSAGE_INFO) }],
+      selfBox: sealBytesTo(bobKey.pub, Buffer.from(payload), MESSAGE_INFO)
+    });
+    expect(send.body).toMatchObject({ success: true, locked: 1, hostReadable: 0 });
+    expect(send.body.sent.text).toBeUndefined();
+
+    await B.app.request('hostb.test', 'POST', '/api/user-groups/refresh', { userId: 'jessica76' });
+    const got = await B.app.request('hostb.test', 'GET', `/api/user-groups/messages?userId=jessica76&groupId=${groupId}`);
+    const msg = got.body.messages.find((m) => m.fromPairwiseId === bobPw && m.sealed);
+    expect(msg).toMatchObject({ fromAlias: 'bob' });
+    expect(msg.text).toBeUndefined();
+    expect(JSON.parse(openBytesFrom(jessKey.priv, msg.sealed, MESSAGE_INFO).toString('utf8')).text).toBe('sealed hello from bob');
+
+    const sent = await A.app.request('hosta.test', 'GET', `/api/user-groups/messages?userId=bob&groupId=${groupId}`);
+    const mine = sent.body.sent.at(-1);
+    expect(mine.text).toBeUndefined();
+    expect(JSON.parse(openBytesFrom(bobKey.priv, mine.sealed, MESSAGE_INFO).toString('utf8')).text).toBe('sealed hello from bob');
+
+    expect(everything(A)).not.toContain('sealed hello from bob');
+    expect(everything(B)).not.toContain('sealed hello from bob');
+  });
+
+  it('a member without a message key yet gets the message sealed by the host, and the sender is told', async () => {
+    const send = await A.app.request('hosta.test', 'POST', '/api/user-groups/send-sealed', {
+      userId: 'bob', groupId, toPairwiseId: jessPw, boxes: [], selfBox: null, hostSeal: { text: 'the old way', for: [jessPw] }
+    });
+    expect(send.body).toMatchObject({ success: true, locked: 0, hostReadable: 1, sent: { text: 'the old way', hostReadable: 1 } });
+    await B.app.request('hostb.test', 'POST', '/api/user-groups/refresh', { userId: 'jessica76' });
+    const got = await B.app.request('hostb.test', 'GET', `/api/user-groups/messages?userId=jessica76&groupId=${groupId}`);
+    expect(got.body.messages.some((m) => m.text === 'the old way')).toBe(true);
+  });
+
+  it('refuses boxes that are not sealed boxes, and another user acting for bob', async () => {
+    const bad = await A.app.request('hosta.test', 'POST', '/api/user-groups/send-sealed', {
+      userId: 'bob', groupId, toPairwiseId: jessPw, boxes: [{ toPairwiseId: jessPw, box: 'plain text' }]
+    });
+    expect(bad.status).toBe(400);
+    const other = await A.app.request('hosta.test', 'POST', '/api/user-groups/send-sealed', {
+      userId: 'bob', groupId, toPairwiseId: jessPw, boxes: []
+    }, { userId: 'mallory' });
+    expect(other.status).toBe(403);
   });
 });

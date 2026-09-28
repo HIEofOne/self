@@ -39,6 +39,7 @@ They leave out secrets and anything that would help an attacker: app and droplet
 - Never create a session without proof. The temporary-account cookie is signed.
 - Local-development shortcuts use `isLocalDevRequest(req)`, which checks for a non-https `PUBLIC_APP_URL` and a loopback socket, never the Host header.
 - Every route is listed in `ROUTE_FEATURES` (`server/edition-routes.js`). A test fails on a missing one.
+- In the Personal AS edition the admin session acts for another account only on `/api/admin/` and `/api/billing/` routes (`ADMIN_ACCOUNT_ROUTES`, `restrictAdmin`): the admin manages accounts and Credits but can't open a patient's data through the app. The full edition is unchanged.
 
 **Sharing**
 
@@ -50,6 +51,7 @@ They leave out secrets and anything that would help an attacker: app and droplet
   - every request enters through GNAP, and data leaves only from the resource server, to a key-bound token;
   - a MAIA never sends a request just because it received one;
   - the private half of the folder key never reaches the server.
+- Messages between group members are sealed in the browser (`src/utils/memberMessages.ts`, label `maia-member-message-v1`) to each recipient's message key, which is the public half of their folder key, registered with the group (`POST /api/groups/:groupId/message-key`, signed by the member). Hosts store the inbox and the sender's copy sealed. Host keys seal only for members who haven't registered a message key yet (`hostSeal`, reported as `hostReadable`), and for machine traffic (AS requests, GNAP group copies), so rules answer while the patient is offline. Never add a path where a host opens or stores a sealed member message's text.
 - The AI advises and drafts. The deterministic evaluator and the patient's own clicks are the only deciders.
 - Public AIs are listed in the chat's menu but stay locked until the patient turns on Public AIs, and a clinician's guest session sees them only when the patient did. A public AI never gets the private AI's context (summary, rules), only the chat. An image attached in chat stays in the browser, is never saved, and goes only to a model that reads images.
 - Credits are prepaid service fees: not refundable, not transferable, not cash.

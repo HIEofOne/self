@@ -25,7 +25,10 @@
         <div class="peer-thread__bubble" :class="item.direction === 'out' ? 'peer-thread__bubble--out' : 'peer-thread__bubble--in'">
           <div class="peer-thread__who">{{ item.direction === 'out' ? 'You' : (item.who || peerAlias || 'Member') }}</div>
           <div style="white-space: pre-wrap; word-break: break-word">{{ item.text }}</div>
-          <div class="peer-thread__time">{{ bubbleTime(item.at) }}</div>
+          <div class="peer-thread__time">
+            <q-icon v-if="item.sealed" name="lock" size="11px" class="q-mr-xs"><q-tooltip>Sealed in the browser: only your MAIA and theirs, with the MAIA folder, can read it</q-tooltip></q-icon>{{ bubbleTime(item.at) }}
+          </div>
+          <div v-if="item.hostReadable" class="peer-thread__note">Some recipients can't receive sealed messages yet, so their MAIA host could read this one.</div>
           <div v-if="isEveryone && item.direction === 'in' && item.fromId" class="q-mt-xs">
             <q-btn
               dense flat size="sm" color="primary" icon="reply" label="Reply privately"
@@ -143,6 +146,7 @@ import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue';
 import { useQuasar } from 'quasar';
 import { SCOPE_OPTIONS, PURPOSE_OPTIONS, type Scope, type Purpose } from '../utils/policyCards';
 import { useEdition } from '../composables/useEdition';
+import { openMessages, sendMemberMessage } from '../utils/memberMessages';
 
 const $q = useQuasar();
 const { isPersonalAs } = useEdition();
@@ -179,14 +183,15 @@ const deciding = ref(false);
 const scrollEl = ref<HTMLElement | null>(null);
 
 const threadItems = computed(() => {
-  const items: Array<{ id: string; direction: 'in' | 'out'; text: string; at: string; who?: string; fromId?: string }> = [];
+  const items: Array<{ id: string; direction: 'in' | 'out'; text: string; at: string; who?: string; fromId?: string; sealed?: boolean; hostReadable?: boolean }> = [];
+  const extra = (m: any) => ({ sealed: !!m.sealed, hostReadable: !!m.hostReadable });
   if (props.peerId === '@everyone') {
     // The Everyone thread: all broadcasts in, all your broadcasts out.
-    for (const m of inbox.value) if (m.broadcast) items.push({ id: m.id, direction: 'in', text: m.text, at: m.receivedAt, who: m.fromAlias || 'Member', fromId: m.fromPairwiseId });
-    for (const s of sent.value) if (s.toPairwiseId === '@everyone') items.push({ id: s.id, direction: 'out', text: s.text, at: s.sentAt });
+    for (const m of inbox.value) if (m.broadcast) items.push({ id: m.id, direction: 'in', text: m.text, at: m.receivedAt, who: m.fromAlias || 'Member', fromId: m.fromPairwiseId, ...extra(m) });
+    for (const s of sent.value) if (s.toPairwiseId === '@everyone') items.push({ id: s.id, direction: 'out', text: s.text, at: s.sentAt, ...extra(s) });
   } else {
-    for (const m of inbox.value) if (m.fromPairwiseId === props.peerId && !m.broadcast) items.push({ id: m.id, direction: 'in', text: m.text, at: m.receivedAt });
-    for (const s of sent.value) if (s.toPairwiseId === props.peerId) items.push({ id: s.id, direction: 'out', text: s.text, at: s.sentAt });
+    for (const m of inbox.value) if (m.fromPairwiseId === props.peerId && !m.broadcast) items.push({ id: m.id, direction: 'in', text: m.text, at: m.receivedAt, ...extra(m) });
+    for (const s of sent.value) if (s.toPairwiseId === props.peerId) items.push({ id: s.id, direction: 'out', text: s.text, at: s.sentAt, ...extra(s) });
   }
   return items.sort((a, b) => (a.at || '').localeCompare(b.at || ''));
 });
@@ -243,8 +248,9 @@ const loadThread = async () => {
     const mData = await mRes.json();
     if (mRes.ok && mData.success) {
       const hadNew = (mData.messages || []).length !== inbox.value.length;
-      inbox.value = mData.messages || [];
-      sent.value = mData.sent || [];
+      // Sealed messages open here, with the folder key; the host can't.
+      inbox.value = await openMessages(props.userId, mData.messages || []);
+      sent.value = await openMessages(props.userId, mData.sent || []);
       if (hadNew) { emit('thread-activity'); void scrollToBottom(); }
     }
     const rData = await rRes.json();
@@ -276,15 +282,9 @@ const sendToPeer = async (text: string) => {
   if (!body || sending.value) return;
   sending.value = true;
   try {
-    const res = await fetch('/api/user-groups/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({ userId: props.userId, groupId: props.groupId, toPairwiseId: props.peerId, text: body })
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
-    if (data.sent) sent.value = [...sent.value, data.sent];
+    // Sealed here, in the browser, to the recipient's key and a copy to ours.
+    const r = await sendMemberMessage(props.userId, props.groupId, props.peerId, body);
+    sent.value = [...sent.value, r.sent];
     void scrollToBottom();
   } catch (err) {
     $q.notify({ type: 'negative', message: err instanceof Error ? err.message : 'Failed to send message' });
@@ -327,13 +327,8 @@ const shareConsult = async (c: Consult) => {
     const fData = await fRes.json();
     const filtered = (fRes.ok && fData.success) ? fData.filtered : combined;
     const text = `🤖 AI consultation — ${c.aiLabel} (shared, privacy-filtered)\n${filtered}`;
-    const res = await fetch('/api/user-groups/send', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
-      body: JSON.stringify({ userId: props.userId, groupId: props.groupId, toPairwiseId: props.peerId, text })
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
-    if (data.sent) sent.value = [...sent.value, data.sent];
+    const r = await sendMemberMessage(props.userId, props.groupId, props.peerId, text);
+    sent.value = [...sent.value, r.sent];
     $q.notify({ type: 'positive', message: 'Consultation shared — attributed to the AI, privacy-filtered.' });
     void scrollToBottom();
   } catch (err) {
@@ -448,6 +443,11 @@ onUnmounted(() => { if (pullTimer) clearInterval(pullTimer); });
   display: flex;
   &.is-in { justify-content: flex-start; }
   &.is-out { justify-content: flex-end; }
+}
+.peer-thread__note {
+  font-size: 11px;
+  color: #8a6d3b;
+  margin-top: 2px;
 }
 .peer-thread__bubble {
   max-width: 72%;

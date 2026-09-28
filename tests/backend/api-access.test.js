@@ -36,6 +36,17 @@ describe('api guard', () => {
     expect(await run(guard, { query: { userId: 'alice01' }, session: { userId: 'alice01' } })).toBe('next');
     expect(await run(guard, { query: { userId: 'alice01' }, session: { userId: 'admin' } })).toBe('next');
   });
+  it('restricted (the Personal AS edition): the admin manages accounts, but can\'t open a patient\'s data', async () => {
+    const restricted = createApiGuard({ restrictAdmin: () => true });
+    const admin = { userId: 'admin' };
+    for (const path of ['/api/patient-summary', '/api/user-files', '/api/provisioning-log', '/api/user-settings', '/api/user-groups/requests']) {
+      expect(await run(restricted, { path, query: { userId: 'alice01' }, session: admin })).toBe(403);
+    }
+    expect(await run(restricted, { method: 'POST', path: '/api/admin/credits-grant', body: { userId: 'alice01' }, session: admin })).toBe('next');
+    expect(await run(restricted, { path: '/api/billing/balance', query: { userId: 'alice01' }, session: admin })).toBe('next');
+    expect(await run(restricted, { path: '/api/patient-summary', query: { userId: 'admin' }, session: admin })).toBe('next');
+    expect(await run(restricted, { path: '/api/patient-summary', query: { userId: 'alice01' }, session: { userId: 'alice01' } })).toBe('next');
+  });
   it('allows pre-sign-in routes that carry their own proof', async () => {
     expect(await run(guard, { path: '/api/passkey/check-user', query: { userId: 'alice01' }, session: {} })).toBe('next');
     expect(await run(guard, { path: '/api/passkey/registration-complete', body: { userId: 'alice01' }, session: {} })).toBe(401);

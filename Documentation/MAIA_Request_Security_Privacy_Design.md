@@ -83,7 +83,7 @@ One deviation to flag for reviewers: the baseline proposed **RFC 9421 HTTP Messa
 | Layer | Implemented with | Standard involved |
 |---|---|---|
 | Transport confidentiality | HTTPS (DO App Platform), secure cookies behind `PUBLIC_APP_URL` | TLS |
-| Message confidentiality (relay) | Per-recipient sealed boxes: ephemeral **X25519** ECDH → **HKDF-SHA256** → **AES-256-GCM** (`sealTo`/`openFrom`, `server/routes/groups.js`) | NIST-standard primitives via Node crypto; ECIES-style construction |
+| Message confidentiality (relay) | Per-recipient sealed boxes: ephemeral **X25519** ECDH → **HKDF-SHA256** → **AES-256-GCM** (`sealTo`/`openFrom`, `server/routes/groups.js`). Member-to-member messages are sealed in the browser with the same construction (`src/gnap/sealedBox.ts`, label `maia-member-message-v1`) to the recipient's folder key (v1.6.52) | NIST-standard primitives via Node crypto and WebCrypto; ECIES-style construction |
 | Message authenticity | **Ed25519** signed member claims (join, relay push, directory, vouch mint/revoke); group signing keys published at a public well-known endpoint | EdDSA |
 | Account identity | **Passkeys / WebAuthn** (`@simplewebauthn`), temporary no-passkey fallback for new users; admin bootstrap via secret then passkey | W3C WebAuthn |
 | Requester identity | Verified email (one-time code); **patient vouch bound to a passkey** (§4.1); signature-strength ladder (§4) | W3C WebAuthn; VC/UCAN projections pending (§15) |
@@ -167,7 +167,7 @@ Two design notes for reviewers. The credential is **host-locked by construction*
 
 ### 6.2 Member → member
 
-Sender's host seals to the recipient's pairwise key and pushes with a signed member claim; the registry relays ciphertext it cannot read. The recipient's own AS evaluates at ingest (party = group, signature = group-member). Autonomous replies travel as sealed relay messages (reaching any host) plus direct email when the recipient's host knows the requester. First-contact requests escalate unless a card decides; accepting writes the `acceptedSenders` fact.
+Sender's host seals to the recipient's pairwise key and pushes with a signed member claim; the registry relays ciphertext it cannot read. Since v1.6.52 a plain message between members is sealed in the sender's browser instead, to the recipient's message key: the public half of their MAIA folder key, registered with the group by a signed claim. Both hosts store it sealed, and only a browser holding the folder key opens it. A recipient with no message key registered yet gets it sealed host to host, as before, and the sender is told. The recipient's own AS evaluates at ingest (party = group, signature = group-member). Autonomous replies travel as sealed relay messages (reaching any host) plus direct email when the recipient's host knows the requester. First-contact requests escalate unless a card decides; accepting writes the `acceptedSenders` fact.
 
 ### 6.3 The Personal AS edition: every request is a GNAP grant request
 
@@ -316,7 +316,7 @@ Prompt-injection exposure is bounded by construction: advisor outputs are parsed
 | Policy cards | suggested only | ✓ canonical | rendered |
 | Membership (pairwise id, alias, pubkeys) | ✓ | ✓ (own memberships) | — |
 | Member email | **deleted at join** | ✓ | — |
-| Relay messages | ciphertext, ≤30 d | plaintext inbox (capped) after pull | rendered |
+| Relay messages | ciphertext, ≤30 d | member messages: sealed inbox and sent copy (capped); requests and older host-sealed messages: plaintext | opened with the folder key, rendered |
 | Request outcomes | counts only | full log incl. deciding card | rendered |
 | Vouch credentials | code hash (as id), credential public key, voucher pairwise id | the patient's labelled list (`vouchedParties`) | passkey private key in the requester's authenticator |
 | Credits | ✓ (payer email + ledger) | — | balance display |
@@ -482,7 +482,7 @@ Testable claims. Suites that pin them are named in §14.1.
 - **I-5** Silent deny is observationally indistinguishable from absence to the requester.
 - **I-6** No identity claim evaluates above its actual proof (Doximity claims score as unverified today; removing a signature level from the vocabulary never weakens a legacy card that required it).
 - **I-7** Members cannot forge outsider-attributed traffic; only the registry writes `outsider:` envelopes.
-- **I-8** Member-to-member content is end-to-end sealed; the registry relays ciphertext only.
+- **I-8** Member-to-member content is end-to-end sealed; the registry relays ciphertext only. Since v1.6.52 the ends are the members' browsers: a message sealed to a member's folder key is stored sealed by both hosts, and no host path opens it.
 - **I-9** Member emails do not exist at the registry after join; invite tokens are stored only as hashes.
 - **I-10** Ingest is idempotent: re-delivery can neither duplicate a request nor reset a decided one.
 - **I-11** A delivered message is never reported as failed.
