@@ -1602,7 +1602,13 @@ app.use(session({
 // The server's own loopback calls (the pipeline's indexing worker) carry a
 // secret made here at startup; it never leaves this process.
 const INTERNAL_CALL_SECRET = randomBytes(32).toString('base64url');
-app.use('/api', createApiGuard({ getDeepLinkOwnerId: (req) => getOwnerIdForDeepLinkSession(req, cloudant), internalSecret: INTERNAL_CALL_SECRET }));
+// In the Personal AS edition the admin manages accounts but can't open a
+// patient's own data through the app (restrictAdmin).
+app.use('/api', createApiGuard({
+  getDeepLinkOwnerId: (req) => getOwnerIdForDeepLinkSession(req, cloudant),
+  internalSecret: INTERNAL_CALL_SECRET,
+  restrictAdmin: () => getEdition() === 'personal-as'
+}));
 
 // Edition feature gate (I-26): every route belongs to a feature
 // (server/edition-routes.js); a feature that is off answers 403 FEATURE_OFF.

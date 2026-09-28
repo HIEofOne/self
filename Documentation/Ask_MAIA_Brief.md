@@ -1,6 +1,6 @@
 # MAIA in brief
 
-*A short, current overview. The "Ask about MAIA" box on the welcome page always reads this first, then the documentation sections that match the question. Reviewed 2026-09-26 (v1.6.x). When it disagrees with an older document, this one is right.*
+*A short, current overview. The "Ask about MAIA" box on the welcome page always reads this first, then the documentation sections that match the question. Reviewed 2026-09-28 (v1.6.x). When it disagrees with an older document, this one is right.*
 
 ## What MAIA is
 
@@ -44,7 +44,7 @@ Someone can also **add a document** to your MAIA, such as a radiology report. Ad
 
 ## Groups
 
-A group is a community, such as a patient group or a practice, that suggests rules to its members. The group keeps a membership list, not medical records. Each member confirms or changes every rule, and each member's own rules decide every request. A MAIA host can run patients' MAIAs, groups, or both. trustee.ai is a group-only host: it runs two demonstration groups, Demo Patients and Demo Clinic, and keeps no health records. You join its groups from your own MAIA host. Use made-up records there.
+A group is a community, such as a patient group or a practice, that suggests rules to its members. The group keeps a membership list, not medical records. Each member confirms or changes every rule, and each member's own rules decide every request. A MAIA host can run patients' MAIAs, groups, or both. trustee.ai is a group-only host: it runs two demonstration groups, Demo Patients and Demo Clinic, and keeps no health records. You join its groups from your own MAIA host. Use made-up records there. Members' messages to each other are sealed in the sender's browser to each recipient's MAIA folder key, so hosts and the group carry them sealed and they open only in MAIA on a computer with the member's MAIA folder (a member whose MAIA hasn't registered a folder key yet still gets them sealed host to host).
 
 ## Your private AI
 
@@ -58,6 +58,7 @@ Below your private AI, the chat's "To:" menu lists four public AIs: commercial m
 
 - Your folder holds your own copy of everything. The host keeps what your MAIA needs to answer while you're away, such as your summary, its privacy-filtered copy and your rules.
 - Whoever runs and pays for the hosting could, in principle, reach the data on it. For full control, host your own MAIA on your own account. The code's author needs no access to anyone's data.
+- The Privacy page (linked in the welcome page's footer, /page.html?doc=Privacy) opens with "Who can see what": what a group admin, a host's operator and MAIA's admin account can and can't see. In the Personal AS edition the admin account manages accounts and Credits but can't open a patient's data through the app. A group-only host's admin never sees records or message content.
 - MAIA is decision-support software. The FAQ explains why it falls outside FDA device regulation. It doesn't replace your clinicians.
 - The security and privacy design, with its numbered invariants, is published in the repository and as a PDF linked from the welcome page.
 
@@ -71,6 +72,7 @@ The README has a Deploy to DigitalOcean button. Hosting costs roughly $10–40 a
 - The community forum: https://forum.agropper.xyz. No personal health information there.
 - The code and documentation: https://github.com/HIEofOne/self.
 - Essays on Substack: https://trustee.substack.com.
+- The paper: MAIA is published in The New England Journal of Medicine AI Journal as "The Medical AI Assistant as Publication, Not Device: Why Peer-Reviewed, Open-Source AI Belongs in the Standard of Care", with a free access link on the welcome page.
 
 ## About "Ask Claude about MAIA"
 

@@ -26,7 +26,7 @@ Line counts as of v1.6.4 (September 2026); whole repo ≈ 71,000 lines (`src/` 3
 - `src/components/MyStuffDialog.vue` — Workbook: saved files, patient summary, lists, privacy filter (~8,300 lines)
 - `src/App.vue` — main frontend entry, auth, welcome page (~4,300 lines)
 - `src/components/Lists.vue` — deterministic lists, meds verification (~3,400 lines)
-- `server/routes/groups.js` — group registry, membership, relay, outside requests (~4,300 lines)
+- `server/routes/groups.js` — group registry, membership, relay, outside requests (~4,700 lines). Member messages are sealed in the browser (`src/utils/memberMessages.ts`) to the recipient's folder key; hosts store them sealed
 - `server/routes/files.js` — file upload, PDF parsing (~3,100 lines)
 - `server/routes/auth.js` — passkey auth, agent provisioning (~1,700 lines)
 - `server/routes/chat.js` — chat providers, deep link resolution (~1,000 lines)
@@ -37,7 +37,7 @@ Line counts as of v1.6.4 (September 2026); whole repo ≈ 71,000 lines (`src/` 3
 - `server/public-ais.js` — the public AIs in the chat's AI menu (Personal AS): one chat provider per DO catalog model, probed at startup; listed but locked until the patient turns on `public-ai` (the chat route refuses until then). Images attached in chat stay in the browser and go only to models that read images
 - `server/edition.js` — edition switch (`MAIA_EDITION`) and feature registry (~190 lines)
 - `server/edition-routes.js` — every route's feature, and the /api feature gate. **Adding a route? Add it to `ROUTE_FEATURES`**, or `tests/backend/edition-routes.test.js` fails
-- `server/utils/api-guard.js` — /api account-access guard: the session decides the account (~100 lines)
+- `server/utils/api-guard.js` — /api account-access guard: the session decides the account; in the Personal AS edition the admin acts for others only on `/api/admin/` and `/api/billing/` (~140 lines)
 - `server/routes/gnap.js` + `server/gnap/` — GNAP personal AS (direct route): RFC 9421 signatures, grants, RS; reference client `scripts/gnap-client.mjs`
 - `server/advisor-context.js` — what the private AI is told: the full edition's Policy Advisor, and the Personal AS edition's context on every private-AI turn (summary, rules, requests, features to turn on, and help with MAIA itself: their MAIA's state, their recent maia-log, MAIA in brief, and user-facing documentation for a how-to question). Proposals come back as fenced `policy-card` / `maia-feature` blocks (`src/utils/advisorProposals.ts`); only the patient's click saves or turns anything on
 - `server/routes/gnap-out.js` — this MAIA asking another MAIA for its user (P11): pairwise keys, the email hand-off (`/gnap/client/finish/:id`), server-side waiting, answers sealed to the folder key → `Received/`; drafts come from the private AI as fenced `maia-request` blocks, sent only on the user's click

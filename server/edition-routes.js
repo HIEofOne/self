@@ -283,6 +283,8 @@ export const ROUTE_FEATURES = Object.freeze({
 
   // ── peer-messaging, vouch (member side) ───────────────────────────────
   'POST /api/user-groups/send': 'peer-messaging',
+  'POST /api/user-groups/send-sealed': 'peer-messaging',
+  'GET /api/user-groups/recipient-keys': 'peer-messaging',
   'GET /api/user-groups/messages': 'peer-messaging',
   'GET /api/user-groups/directory': 'peer-messaging',
   'POST /api/user-groups/invite': 'peer-messaging',
@@ -337,6 +339,7 @@ export const ROUTE_FEATURES = Object.freeze({
   'GET /api/groups/:groupId/recovery-kit': 'registry',
   'POST /api/groups/:groupId/refresh': 'registry',
   'POST /api/groups/:groupId/relay': 'registry',
+  'POST /api/groups/:groupId/message-key': 'registry',
   'POST /api/groups/:groupId/rotate-join-link': 'registry',
   'GET /api/groups/:groupId/stats': 'registry',
   'POST /api/groups/:groupId/vouch/assert-options': 'registry',

@@ -100,11 +100,18 @@ export const requestedUserId = (req) => {
   return null;
 };
 
+/** Where an admin may name another account when admins are restricted:
+ *  account management only (the admin page's own routes, and billing). */
+export const ADMIN_ACCOUNT_ROUTES = /^\/api\/(admin|billing)\//;
+
 /**
  * @param {object} deps
  * @param {(req) => Promise<string|null>} deps.getDeepLinkOwnerId owner of the guest's shared chat
+ * @param {() => boolean} [deps.restrictAdmin] when true (the Personal AS
+ *        edition), an admin session may act for another account only on
+ *        account-management routes, never on a patient's own data
  */
-export function createApiGuard({ getDeepLinkOwnerId, internalSecret = null } = {}) {
+export function createApiGuard({ getDeepLinkOwnerId, internalSecret = null, restrictAdmin = () => false } = {}) {
   return async function apiAccessGuard(req, res, next) {
     const target = requestedUserId(req);
     if (!target) return next();
@@ -115,7 +122,8 @@ export function createApiGuard({ getDeepLinkOwnerId, internalSecret = null } = {
 
     const sessionUserId = req.session?.userId || null;
     if (sessionUserId) {
-      if (sessionUserId === target || isAdminUserId(sessionUserId)) return next();
+      if (sessionUserId === target) return next();
+      if (isAdminUserId(sessionUserId) && (!restrictAdmin() || ADMIN_ACCOUNT_ROUTES.test(path))) return next();
       return res.status(403).json({ success: false, error: 'FORBIDDEN', message: 'Cannot act for another user' });
     }
 

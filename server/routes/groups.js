@@ -21,7 +21,7 @@ import { recordPatientDecision as recordGnapDecision, stopSharing as stopGnapSha
 import { settleGrantPayment } from '../gnap/payments.js';
 import { forgetRequester } from '../gnap/instances.js';
 import { isVerified as emailTokenVerified } from '../emailVerification.js';
-import { sealTo, openFrom } from '../utils/sealed-box.js';
+import { sealTo, openFrom, isSealedBox, isX25519PublicJwk } from '../utils/sealed-box.js';
 import { GNAP_COPY } from '../gnap/group.js';
 import { CREDIT_PRICES, holdCredits, chargeCredits, resolveHold, getAccount } from '../credits.js';
 import {
@@ -1864,7 +1864,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
         messages = (all || [])
           .filter((m) => m && m.type === 'relay_message' && m.groupId === doc._id && m.toPairwiseId === pairwiseId)
           .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
-          .map((m) => ({ id: m._id, fromPairwiseId: m.fromPairwiseId, box: m.box, createdAt: m.createdAt }));
+          .map((m) => ({ id: m._id, fromPairwiseId: m.fromPairwiseId, box: m.box, createdAt: m.createdAt, ...(m.broadcast ? { broadcast: true } : {}) }));
       } catch { /* empty on error */ }
 
       const credential = signMembershipCredential(doc, member);
@@ -1966,6 +1966,9 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
         fromPairwiseId,
         toPairwiseId,
         box, // opaque sealed box — relay cannot read it
+        // Routing only: sent to everyone in the group (the relay knows that
+        // anyway), so the member's thread list can file it before it's opened.
+        ...(req.body?.broadcast === true ? { broadcast: true } : {}),
         createdAt: new Date(now).toISOString(),
         expiresAt: new Date(now + RELAY_TTL_MS).toISOString()
       };
@@ -1983,6 +1986,35 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
     } catch (error) {
       console.error('[groups] relay failed:', error);
       res.status(500).json({ success: false, error: 'Failed to relay message' });
+    }
+  });
+
+  // POST /api/groups/:groupId/message-key — an active member registers the
+  // key their messages are sealed to: the public half of their MAIA folder
+  // key, whose private half never leaves their browser and folder. Signed
+  // with the member's key, over the key itself.
+  app.post('/api/groups/:groupId/message-key', async (req, res) => {
+    try {
+      const doc = await cloudant.getDocument(GROUPS_DB, req.params.groupId);
+      if (!doc || doc.type !== 'group') return res.status(404).json({ success: false, error: 'Group not found' });
+      const { pairwiseId, messagePublicKeyJwk, payload, signature } = req.body || {};
+      const member = findActiveMember(doc, pairwiseId);
+      if (!member || !member.signingPublicKeyJwk) return res.status(403).json({ success: false, error: 'Not an active member' });
+      if (!isX25519PublicJwk(messagePublicKeyJwk)) return res.status(400).json({ success: false, error: 'An X25519 public key is required' });
+      const claim = verifySignedClaim(payload, signature, member.signingPublicKeyJwk, {
+        action: 'message-key', groupId: doc._id, pairwiseId, x: messagePublicKeyJwk.x
+      });
+      // Fresh, so an old claim can't put back a key the member replaced.
+      if (!claim || !(Math.abs(Date.now() - Date.parse(claim.ts)) < 10 * 60 * 1000)) {
+        return res.status(403).json({ success: false, error: 'Invalid or stale signature' });
+      }
+      member.messagePublicKeyJwk = { kty: 'OKP', crv: 'X25519', x: messagePublicKeyJwk.x };
+      member.messageKeyAt = new Date().toISOString();
+      await cloudant.saveDocument(GROUPS_DB, doc);
+      res.json({ success: true });
+    } catch (error) {
+      console.error('[groups] message-key failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to register the message key' });
     }
   });
 
@@ -2015,7 +2047,10 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
         success: true,
         pairwiseId: target.pairwiseId,
         alias: target.alias || null,
-        encryptionPublicKeyJwk: target.encryptionPublicKeyJwk
+        encryptionPublicKeyJwk: target.encryptionPublicKeyJwk,
+        // The member's message key (their MAIA folder key): messages sealed to
+        // it open only in their browser. Null for a member not yet registered.
+        messagePublicKeyJwk: target.messagePublicKeyJwk || null
       });
     } catch (error) {
       console.error('[groups] member-key lookup failed:', error);
@@ -2220,7 +2255,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
       const active = (doc.members || []).filter((m) => m.status === 'active' && m.encryptionPublicKeyJwk);
       const recipients = active
         .filter((m) => m.pairwiseId !== pairwiseId && m.broadcastMessages !== false)
-        .map((m) => ({ pairwiseId: m.pairwiseId, encryptionPublicKeyJwk: m.encryptionPublicKeyJwk }));
+        .map((m) => ({ pairwiseId: m.pairwiseId, encryptionPublicKeyJwk: m.encryptionPublicKeyJwk, messagePublicKeyJwk: m.messagePublicKeyJwk || null }));
       res.json({
         success: true,
         recipients,
@@ -3282,9 +3317,23 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
       try {
         text = openFrom(membership.encryptionKeyPair.privateKeyJwk, m.box);
       } catch {
-        text = null; // undecryptable — skip rather than store garbage
+        text = null;
       }
-      if (text == null) continue;
+      if (text == null) {
+        // Sealed to the member's message key (their folder key): only their
+        // browser opens it. Kept sealed; who sent it, and when, is routing
+        // this host knows anyway.
+        if (isSealedBox(m.box)) {
+          membership.inbox = membership.inbox || [];
+          membership.inbox.push({
+            id: m.id, fromPairwiseId: m.fromPairwiseId,
+            fromAlias: await lookupMemberAlias(membership, m.fromPairwiseId, aliasCache),
+            sealed: m.box, ...(m.broadcast ? { broadcast: true } : {}), receivedAt: m.createdAt
+          });
+          added++;
+        }
+        continue;
+      }
 
       // AS request envelope? (sealed JSON with maiaType === 'as-request')
       // Broadcast envelope? ('broadcast' — an Everyone message)
@@ -3380,6 +3429,68 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
     }
   });
 
+  /** Relay one already-sealed box to a member (signed as the sender). */
+  const relayBox = async (membership, toPairwiseId, box, { broadcast = false, suppressNotify = false } = {}) => {
+    const base = registryBase(membership);
+    const rq = signWithMembership(membership, {
+      action: 'relay', groupId: membership.groupId, fromPairwiseId: membership.pairwiseId, toPairwiseId, ts: new Date().toISOString()
+    });
+    const r = await fetch(`${base}/api/groups/${encodeURIComponent(membership.groupId)}/relay`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fromPairwiseId: membership.pairwiseId, toPairwiseId, box, payload: rq.payload, signature: rq.signature,
+        ...(broadcast ? { broadcast: true } : {}), ...(suppressNotify ? { suppressNotify: true } : {}) })
+    });
+    const d = await r.json().catch(() => ({}));
+    return r.ok && d.success;
+  };
+
+  /** Register the member's message key (the public half of their folder
+   *  key) with the group, when it's new there. → true when it changed. */
+  const registerMessageKey = async (userDoc, membership) => {
+    const x = userDoc?.folderKeyJwk?.x;
+    if (!x || membership.messageKeyX === x) return false;
+    try {
+      const signed = signWithMembership(membership, {
+        action: 'message-key', groupId: membership.groupId, pairwiseId: membership.pairwiseId, x, ts: new Date().toISOString()
+      });
+      const r = await fetch(`${registryBase(membership)}/api/groups/${encodeURIComponent(membership.groupId)}/message-key`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pairwiseId: membership.pairwiseId, messagePublicKeyJwk: { kty: 'OKP', crv: 'X25519', x }, ...signed })
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.success) return false;
+      membership.messageKeyX = x;
+      return true;
+    } catch { return false; }
+  };
+
+  /** A member's (or everyone's) keys for sealing a message in the browser. */
+  const recipientKeys = async (membership, to) => {
+    const base = registryBase(membership);
+    if (to === '@everyone') {
+      const kq = signWithMembership(membership, {
+        action: 'broadcast-keys', groupId: membership.groupId, pairwiseId: membership.pairwiseId, ts: new Date().toISOString()
+      });
+      const r = await fetch(`${base}/api/groups/${encodeURIComponent(membership.groupId)}/broadcast-keys`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pairwiseId: membership.pairwiseId, payload: kq.payload, signature: kq.signature })
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.success) return null;
+      return (d.recipients || []).map((x) => ({ pairwiseId: x.pairwiseId, alias: null, messagePublicKeyJwk: x.messagePublicKeyJwk || null }));
+    }
+    const kq = signWithMembership(membership, {
+      action: 'member-key', groupId: membership.groupId, caller: membership.pairwiseId, ts: new Date().toISOString()
+    });
+    const r = await fetch(`${base}/api/groups/${encodeURIComponent(membership.groupId)}/member-key/${encodeURIComponent(to)}` +
+      `?caller=${encodeURIComponent(membership.pairwiseId)}&payload=${encodeURIComponent(kq.payload)}&signature=${encodeURIComponent(kq.signature)}`);
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || !d.success) return null;
+    return [{ pairwiseId: d.pairwiseId, alias: d.alias || null, messagePublicKeyJwk: d.messagePublicKeyJwk || null }];
+  };
+
   /** Look up the recipient's encryption key (signed), seal `plaintext` to
    *  it, and relay. Shared by plain messages (/send) and AS requests
    *  (/request). Returns { ok } or { ok:false, status, error }. */
@@ -3448,6 +3559,91 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
     }
     return { ok: true, recipients };
   };
+
+  // GET /api/user-groups/recipient-keys — the keys the browser seals a
+  // message to: one member's, or everyone's (`to=@everyone`), plus the
+  // sender's own message key for their copy of what they sent. A member
+  // without a message key yet gets messages this host seals (legacy).
+  app.get('/api/user-groups/recipient-keys', async (req, res) => {
+    const userId = requireMatchingUser(req, res);
+    if (!userId) return;
+    try {
+      const { groupId, to } = req.query || {};
+      if (!groupId || !to) return res.status(400).json({ success: false, error: 'groupId and to are required' });
+      const userDoc = await cloudant.getDocument(USERS_DB, userId);
+      const membership = (userDoc?.groupMemberships || []).find((m) => m.groupId === groupId);
+      if (!membership) return res.status(404).json({ success: false, error: 'Not a member of this group' });
+      if (await registerMessageKey(userDoc, membership)) await cloudant.saveDocument(USERS_DB, userDoc);
+      const recipients = await recipientKeys(membership, String(to));
+      if (!recipients) return res.status(502).json({ success: false, error: 'Could not reach the group' });
+      res.json({ success: true, recipients, selfKey: isX25519PublicJwk(userDoc.folderKeyJwk) ? userDoc.folderKeyJwk : null });
+    } catch (error) {
+      console.error('[user-groups] recipient-keys failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to look up keys' });
+    }
+  });
+
+  // POST /api/user-groups/send-sealed — relay messages the browser sealed:
+  // { groupId, toPairwiseId (a member or '@everyone'), boxes: [{toPairwiseId, box}],
+  //   selfBox, hostSeal?: { text, for: [pairwiseIds] } }. This host never
+  // sees the text of a sealed message; `hostSeal` is for members who can't
+  // receive one yet, sealed here to their host's key as before.
+  app.post('/api/user-groups/send-sealed', async (req, res) => {
+    const userId = requireMatchingUser(req, res);
+    if (!userId) return;
+    try {
+      const { groupId, toPairwiseId, boxes, selfBox, hostSeal } = req.body || {};
+      if (!groupId || !toPairwiseId || !Array.isArray(boxes)) return res.status(400).json({ success: false, error: 'groupId, toPairwiseId and boxes are required' });
+      if (boxes.length > 500 || boxes.some((b) => !b?.toPairwiseId || !isSealedBox(b.box))) return res.status(400).json({ success: false, error: 'Each box must be a sealed box with its recipient' });
+      if (selfBox != null && !isSealedBox(selfBox)) return res.status(400).json({ success: false, error: 'selfBox must be a sealed box' });
+      const hostText = typeof hostSeal?.text === 'string' ? hostSeal.text : '';
+      const hostFor = Array.isArray(hostSeal?.for) ? hostSeal.for.map(String).slice(0, 500) : [];
+      if (!boxes.length && !(hostText && hostFor.length)) return res.status(400).json({ success: false, error: 'Nothing to send' });
+      const userDoc = await cloudant.getDocument(USERS_DB, userId);
+      const membership = (userDoc?.groupMemberships || []).find((m) => m.groupId === groupId);
+      if (!membership) return res.status(404).json({ success: false, error: 'Not a member of this group' });
+      const broadcast = toPairwiseId === '@everyone';
+      let locked = 0;
+      let hostReadable = 0;
+      for (const b of boxes) if (await relayBox(membership, b.toPairwiseId, b.box, { broadcast })) locked++;
+      if (hostText) {
+        const envelope = broadcast ? JSON.stringify({ maiaType: 'broadcast', text: hostText }) : hostText;
+        for (const to of hostFor) {
+          const r = await deliverSealed(membership, to, envelope);
+          if (r.ok) hostReadable++;
+        }
+      }
+      if (!locked && !hostReadable) return res.status(502).json({ success: false, error: 'The message couldn’t be delivered' });
+      let toAlias = broadcast ? 'Everyone' : null;
+      if (!broadcast) toAlias = await lookupMemberAlias(membership, toPairwiseId, null);
+      const sent = {
+        id: `out_${Date.now()}_${randomBytes(4).toString('hex')}`,
+        toPairwiseId, toAlias,
+        // The sender's copy: sealed to their own message key, or (only for a
+        // message this host sealed) the text.
+        ...(selfBox ? { sealed: selfBox } : { text: hostText || '(Sent sealed. No copy was kept: this MAIA has no folder key yet.)' }),
+        sentAt: new Date().toISOString(),
+        ...(broadcast ? { recipients: locked + hostReadable } : {}),
+        ...(hostReadable ? { hostReadable } : {})
+      };
+      try {
+        membership.outbox = [...(membership.outbox || []), sent].slice(-OUTBOX_MAX);
+        userDoc.updatedAt = new Date().toISOString();
+        await cloudant.saveDocument(USERS_DB, userDoc);
+      } catch {
+        try {
+          const fresh = await cloudant.getDocument(USERS_DB, userId);
+          const fm = (fresh?.groupMemberships || []).find((m) => m.groupId === groupId);
+          if (fm) { fm.outbox = [...(fm.outbox || []), sent].slice(-OUTBOX_MAX); fresh.updatedAt = new Date().toISOString(); await cloudant.saveDocument(USERS_DB, fresh); }
+        } catch (e2) { console.warn('[user-groups] outbox record failed (message WAS delivered):', e2?.message || e2); }
+      }
+      auditLog.logEvent({ type: 'user_group_message_sent', userId, ip: req.ip, details: { groupId, toPairwiseId, locked, hostReadable } });
+      res.json({ success: true, sent, locked, hostReadable });
+    } catch (error) {
+      console.error('[user-groups] send-sealed failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to send message' });
+    }
+  });
 
   // POST /api/user-groups/send — seal a plain message to another member and
   // relay it. Reply-to-sender needs no directory.
@@ -4332,6 +4528,7 @@ export default function setupGroupRoutes(app, cloudant, auditLog, { sendEmail, w
     const kept = [];
     for (const membership of memberships) {
       try {
+        if (await registerMessageKey(userDoc, membership)) changed = true;
         const r = await refreshMembership(membership);
         if (r.revoked) {
           revoked++;
