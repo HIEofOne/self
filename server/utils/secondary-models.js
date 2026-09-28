@@ -35,14 +35,16 @@ const activeParamsB = (description) => {
   return m ? Number(m[1]) : null;
 };
 
-export const isSecondaryCandidate = (m) => !!m
+/** A DO-hosted, active, agent-capable open model that answers in text. */
+export const isHostedAgentModel = (m) => !!m
   && Array.isArray(m.endpoints) && m.endpoints.length > 0
   && m.lifecycle_status === 'active'
   && !/preview/i.test(m.name || '')
   && (m.type === 'chat' || m.type === 'reasoning')
   && Array.isArray(m.modalities?.output) && m.modalities.output.includes('text')
-  && typeof m.uuid === 'string' && !!m.id
-  && m.id !== PRIMARY_MODEL_ID;
+  && typeof m.uuid === 'string' && !!m.id;
+
+export const isSecondaryCandidate = (m) => isHostedAgentModel(m) && m.id !== PRIMARY_MODEL_ID;
 
 export const toSecondaryCandidate = (m) => {
   const maxTokSetting = (m.settings || []).find((s) => s && s.name === 'max_tokens');

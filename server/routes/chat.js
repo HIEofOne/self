@@ -825,7 +825,7 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient, app
     const primaryEndpoint = def.endpoint || doc.agentEndpoint || null;
     if (primaryAgentId && primaryEndpoint && await verifyAgentLive(primaryAgentId)) {
       const model = def.modelName || doc.agentModelName || 'openai-gpt-oss-120b';
-      out.push({ key: 'default', label: labelForModel(model), model });
+      out.push({ key: 'default', label: labelForModel(model, def.modelDisplayName), model });
     }
 
     // 'gpt' slot (historical name — may hold GPT, Deepseek, or other model).

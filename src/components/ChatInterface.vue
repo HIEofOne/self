@@ -1064,7 +1064,7 @@
       @tab-opened="handleMyStuffTabOpened"
       @sign-out-requested="handleSignOut"
       @wizard-requested="handleWizardRequested"
-      @provisioning-event="(data: Record<string, any>) => { logProvisioningEvent(data); if (data?.event === 'secondary-provision-ready') void loadProviders(); }"
+      @provisioning-event="(data: Record<string, any>) => { logProvisioningEvent(data); if (data?.event === 'secondary-provision-ready' || data?.event === 'primary-switch-ready') void loadProviders(); }"
       v-if="canAccessMyStuff"
     />
 

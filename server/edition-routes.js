@@ -168,6 +168,8 @@ export const ROUTE_FEATURES = Object.freeze({
   'PUT /api/agent-instructions': privateAiFeature,
   'POST /api/chat/:provider': (req, params) =>
     (params.provider === 'digitalocean' ? privateAiFeature(req) : 'public-ai'),
+  'GET /api/primary-models': 'advisor',
+  'POST /api/agents/primary-model': 'advisor',
   'GET /api/secondary-models': 'second-ai',
   'POST /api/agents/ensure-secondary': 'second-ai',
   'POST /api/patient-summary/generate-pair': 'second-ai',

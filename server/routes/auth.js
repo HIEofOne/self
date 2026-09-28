@@ -685,6 +685,150 @@ export async function ensureSecondaryAgent(doClient, cloudant, userDoc, { model 
   return userDoc;
 }
 
+/**
+ * Switch the PRIMARY Private AI to another model the user chose
+ * (utils/primary-models.js), the way the secondary switches: a new agent
+ * with the old agent's instructions, the knowledge bases the old agent had
+ * attached attached again (so "Search all my records" stays as it was),
+ * the account repointed (its cached API key dropped: keys belong to one
+ * agent), and only then the old agent deleted. The new agent may still be
+ * deploying on return; `pendingPrimarySwitch` records what to wait for.
+ */
+export async function switchPrimaryAgent(doClient, cloudant, userDoc, model) {
+  const userId = userDoc?.userId;
+  if (!userId || !model?.uuid) throw new SecondaryAgentError('MODEL_REQUIRED', 'Choose a model');
+  const oldId = userDoc.assignedAgentId || userDoc.agentProfiles?.[PROFILE_DEFAULT]?.agentId || null;
+  let old = null;
+  if (oldId) { try { old = await doClient.agent.get(oldId); } catch { old = null; } }
+  if (!old) throw new SecondaryAgentError('NO_PRIMARY_AGENT', 'There is no private AI to switch yet');
+  const currentModel = old.model?.inference_name || userDoc.agentModelName || null;
+  if (currentModel === model.id) return { userDoc, switched: false };
+
+  const lockKey = `${userId}:${PROFILE_DEFAULT}`;
+  if (agentCreationLocks.has(lockKey)) throw new SecondaryAgentError('SWITCH_IN_PROGRESS', 'A switch is already under way');
+  let lockResolve;
+  agentCreationLocks.set(lockKey, new Promise((resolve) => { lockResolve = resolve; }));
+  try {
+    const projectId = await resolveProjectId(doClient);
+    if (!isValidUUID(model.uuid) || !isValidUUID(projectId)) throw new Error('Unable to resolve the model or project for the new agent');
+    const instruction = (typeof old.instruction === 'string' && old.instruction.trim()) ? old.instruction : getMaiaInstructionText();
+    const created = await doClient.agent.create({
+      name: buildAgentName(userId),
+      instruction,
+      modelId: model.uuid,
+      projectId: projectId.trim(),
+      region: getDoRegion(),
+      maxTokens: Math.min(32768, model.maxOutputTokens || 32768),
+      topP: 1,
+      temperature: 0.1,
+      k: 15,
+      retrievalMethod: 'RETRIEVAL_METHOD_REWRITE'
+    });
+    const newId = created.uuid || created.id;
+
+    // The knowledge bases the old agent had, attached to the new one.
+    const kbIds = (Array.isArray(old.knowledge_bases) ? old.knowledge_bases : []).map((kb) => kb?.uuid || kb?.id).filter(Boolean);
+    const attached = [];
+    for (const kbId of kbIds) {
+      try { await doClient.agent.attachKB(newId, kbId); attached.push(kbId); } catch (e) {
+        const msg = String(e?.message || '');
+        if (msg.includes('already') || msg.includes('409')) attached.push(kbId);
+        else console.warn(`[primary-switch] attachKB(${kbId}) to ${newId} failed: ${msg}`);
+      }
+    }
+
+    const resolved = await doClient.agent.get(newId);
+    const endpoint = resolved?.deployment?.url ? `${resolved.deployment.url}/api/v1` : null;
+    const apply = (doc) => {
+      doc.assignedAgentId = newId;
+      doc.assignedAgentName = resolved.name || doc.assignedAgentName;
+      doc.agentEndpoint = endpoint;
+      doc.agentModelName = model.id;
+      delete doc.agentApiKey;
+      const keep = doc.agentProfiles?.[PROFILE_DEFAULT]?.createdAt;
+      doc.agentProfiles = { ...(doc.agentProfiles || {}), [PROFILE_DEFAULT]: keep ? { createdAt: keep } : {} };
+      setAgentProfile(doc, PROFILE_DEFAULT, {
+        agentId: newId, agentName: resolved.name, endpoint, modelName: model.id, modelId: model.id, modelDisplayName: model.name
+      });
+      doc.pendingPrimarySwitch = { from: currentModel, to: model.id, toName: model.name, oldAgentId: oldId, kbIds, startedAt: new Date().toISOString() };
+      doc.updatedAt = new Date().toISOString();
+      return doc;
+    };
+    let doc = apply(userDoc);
+    for (let attempt = 0; ; attempt++) {
+      try { await cloudant.saveDocument('maia_users', doc); break; } catch (e) {
+        if ((e?.statusCode === 409 || e?.error === 'conflict') && attempt < 2) { doc = apply(await cloudant.getDocument('maia_users', userId)); continue; }
+        // The account still points at the old agent: remove the new one.
+        try { await doClient.agent.delete(newId); } catch { /* best effort */ }
+        throw e;
+      }
+    }
+
+    // Only now that the account points at the new agent: remove the old one.
+    try { await doClient.agent.delete(oldId); } catch (e) {
+      console.warn(`[primary-switch] could not delete the replaced agent ${oldId}: ${e?.message || e}`);
+    }
+    return { userDoc: doc, switched: true, from: currentModel, kbIds, attached };
+  } finally {
+    agentCreationLocks.delete(lockKey);
+    lockResolve();
+  }
+}
+
+/**
+ * How a primary switch is going: `ready` once the new agent runs, its
+ * address is known, and every knowledge base the old agent had is attached
+ * (a missing one is attached again here). On ready the account gets the
+ * address, `pendingPrimarySwitch` is cleared, and the switch is logged.
+ */
+export async function checkPrimarySwitch(doClient, cloudant, userDoc, { ensureAgentRetrieval = async () => {}, logEvent = async () => {} } = {}) {
+  const userId = userDoc?.userId;
+  const agentId = userDoc?.assignedAgentId;
+  if (!agentId) return { ready: false, status: 'none' };
+  const pending = userDoc.pendingPrimarySwitch || null;
+  let live = null;
+  try { live = await doClient.agent.get(agentId); } catch { /* still deploying */ }
+  const status = live?.deployment?.status || 'unknown';
+  const endpoint = live?.deployment?.url ? `${live.deployment.url}/api/v1` : null;
+  const attachedIds = new Set((live?.knowledge_bases || []).map((kb) => kb?.uuid || kb?.id).filter(Boolean));
+  const missing = (pending?.kbIds || []).filter((id) => !attachedIds.has(id));
+  for (const kbId of missing) {
+    try { await doClient.agent.attachKB(agentId, kbId); } catch { /* tried again on the next check */ }
+  }
+  const ready = status === 'STATUS_RUNNING' && !!endpoint && missing.length === 0;
+  let doc = userDoc;
+  if (ready && (pending || userDoc.agentEndpoint !== endpoint)) {
+    if (pending?.kbIds?.length) await ensureAgentRetrieval(agentId);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const fresh = await cloudant.getDocument('maia_users', userId);
+        if (!fresh || fresh.assignedAgentId !== agentId) break;
+        fresh.agentEndpoint = endpoint;
+        if (fresh.agentProfiles?.[PROFILE_DEFAULT]) fresh.agentProfiles[PROFILE_DEFAULT].endpoint = endpoint;
+        delete fresh.pendingPrimarySwitch;
+        fresh.updatedAt = new Date().toISOString();
+        await cloudant.saveDocument('maia_users', fresh);
+        doc = fresh;
+        break;
+      } catch (e) { if (e?.statusCode !== 409) break; }
+    }
+    if (pending) {
+      await Promise.resolve(logEvent({
+        event: 'primary-agent-model-switched', from: pending.from, to: pending.to, knowledgeBases: pending.kbIds.length,
+        elapsedSeconds: Math.round((Date.now() - Date.parse(pending.startedAt)) / 1000)
+      })).catch(() => {});
+    }
+  }
+  const def = doc.agentProfiles?.[PROFILE_DEFAULT] || {};
+  return {
+    ready,
+    status: ready ? 'ready' : status,
+    model: { id: def.modelId || doc.agentModelName || null, name: def.modelDisplayName || null },
+    knowledgeBases: pending ? pending.kbIds.length : attachedIds.size,
+    waitingForKnowledgeBase: missing.length > 0
+  };
+}
+
 export default function setupAuthRoutes(app, passkeyService, cloudant, doClient, auditLog, { invalidateResourceCache } = {}) {
   // Check if user exists and has passkey
   app.get('/api/passkey/check-user', async (req, res) => {
