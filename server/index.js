@@ -52,6 +52,7 @@ import setupAskMaiaRoutes, { DEFAULT_ASK_MODEL, FALLBACK_ASK_MODEL } from './rou
 import { enablePublicAis, probePublicAi } from './public-ais.js';
 import { recordFilesForLegend } from './advisor-context.js';
 import { createPrHistory } from './pr-history.js';
+import { migrateAgentInstructions, modernizeInstruction } from './utils/agent-instructions.js';
 import { createSpacesHoldStore, sweepExpiredHolds } from './gnap/documents.js';
 import { sweepExpiredGnapPayments } from './gnap/payments.js';
 import setupPolicyRoutes from './routes/policies.js';
@@ -11269,7 +11270,8 @@ app.post('/api/restore', async (req, res) => {
     if (agentInstructions && results.agent?.agentId) {
       try {
         const agentId = results.agent.agentId;
-        await doClient.agent.update(agentId, { instruction: agentInstructions });
+        // A backup keeps the instructions of its day: bring them up to date.
+        await doClient.agent.update(agentId, { instruction: modernizeInstruction(agentInstructions) });
         results.instructions = true;
       } catch (err) {
         results.errors.push(`Instructions: ${err.message}`);
@@ -15547,6 +15549,10 @@ if (isProduction) {
     console.log(`[ask-maia] model: ${askInference?.model || 'none available'}`);
   }
 }
+
+// Changes to the private AI's standing instructions reach agents that
+// already exist (utils/agent-instructions.js), once per change.
+void migrateAgentInstructions({ cloudant, doClient }).catch((e) => console.warn('[agent-instructions] migration failed:', e?.message || e));
 
 // Startup complete (server already listening for readiness probes)
 console.log(`User app server ready on port ${PORT}`);
