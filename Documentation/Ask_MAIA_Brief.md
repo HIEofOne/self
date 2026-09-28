@@ -17,7 +17,7 @@ You need Chrome on a computer that only you use. On the welcome page you confirm
 
 1. **Verify your email.** MAIA emails you when a request needs your decision or something was shared, plus a weekly summary. It never emails health information.
 2. **Create a passkey**, so only you can sign in.
-3. **Choose your MAIA folder** on your computer. MAIA keeps your own copy of everything there: your Patient Summary as a PDF, your rules, the request log, and documents sent to you.
+3. **Choose your MAIA folder** on your computer. MAIA keeps your own copy of everything there: your Patient Summary as a PDF, your rules, the request log, and documents sent to you. The record PDFs already in the folder are added to MAIA and shown in Workbook → Saved Files, which offers to index them so your private AI can search them: "Index all now" shows an estimate (about a minute per MB, plus one) and the progress, then goes back to setup; "Maybe Later" goes straight back, and indexing stays available in Workbook → More features.
 4. **Join the host's group**, such as Trustee. The group suggests starter rules, for example "a doctor who has confirmed their email may see my current medications".
 5. **Create your Patient Summary**, with your current medications, from an Apple Health export or by answering a few questions. You review and verify it.
 6. **Confirm your rules and turn on sharing.** Read each rule, try it out and change it if you like. Nothing is shared before you turn sharing on.

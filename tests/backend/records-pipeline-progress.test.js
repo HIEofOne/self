@@ -5,7 +5,7 @@
  * records are indexed (adding new ones), unless it went quiet two hours ago.
  */
 import { describe, it, expect } from 'vitest';
-import { computeRecordsPipeline } from '../../server/records-pipeline.js';
+import { computeRecordsPipeline, indexEstimateMinutes } from '../../server/records-pipeline.js';
 
 const NOW = Date.parse('2026-09-27T12:00:00Z');
 const doc = (ks, extra = {}) => ({
@@ -35,5 +35,17 @@ describe('indexing progress in the pipeline', () => {
   it('a finished job is done, with its counts', () => {
     expect(indexed(doc({ phase: 'complete', backendCompleted: true, completedAt: '2026-09-27T11:59:00Z', tokens: 50000, filesIndexed: 2 })))
       .toMatchObject({ status: 'done', tokens: 50000, filesIndexed: 2 });
+  });
+
+  it('reports the files to index and the estimate: about a minute per MB plus one, never under two', () => {
+    const d = doc(null, { files: [
+      { fileName: 'A.pdf', bucketKey: 'ann01/A.pdf', fileSize: 2_400_000 },
+      { fileName: 'B.pdf', bucketKey: 'ann01/B.pdf', fileSize: 1_300_000 },
+      { fileName: 'Guide.pdf', bucketKey: 'ann01/references/Guide.pdf', fileSize: 9_000_000, isReference: true }
+    ] });
+    expect(indexed(d)).toMatchObject({ status: 'pending', filesTotal: 2, estimateMinutes: 5 });
+    expect(indexEstimateMinutes(0)).toBe(2);
+    expect(indexEstimateMinutes(500_000)).toBe(2);
+    expect(indexEstimateMinutes(12_800_000)).toBe(14);
   });
 });

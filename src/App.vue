@@ -537,6 +537,7 @@
             @rehydration-file-removed="handleRehydrationFileRemoved"
             @update:deep-link-info="handleDeepLinkInfoUpdate"
             @local-folder-connected="handleLocalFolderConnected"
+            @return-to-setup="returnToSetup"
             @session-dirty="sessionDirty = true"
             @wizard-complete="handleWizardComplete"
             @test-setup-complete="handleTestSetupComplete"
@@ -802,6 +803,7 @@
       :user-id="user?.userId || ''"
       :group="trusteeGroup ? { groupId: trusteeGroup.groupId, name: trusteeGroup.name, joinLink: trusteeGroup.joinLink } : null"
       :folder-busy="checklistFolderBusy"
+      :folder-progress="checklistFolderProgress"
       :folder-error="checklistFolderError"
       @add-passkey="startPasskeyRegistration"
       @choose-folder="checklistChooseFolder"
@@ -1172,6 +1174,7 @@ import {
   type MaiaState, type DiscoveredUser
 } from './utils/localFolder';
 import { ensureFolderKey, forgetFolderKey, FOLDER_KEY_FILE } from './utils/folderKey';
+import { uploadFolderRecords, recordsIndexProgress } from './utils/recordsSearch';
 import { rememberActivityToken, forgetActivityToken, fetchActivity, activitySummary, readSeenMessages } from './utils/welcomeActivity';
 import { LOG_DIR } from './utils/requestLog';
 import packageJson from '../package.json';
@@ -2972,12 +2975,24 @@ const showSetupChecklist = computed(() =>
   isPersonalAs.value && authenticated.value && !!user.value?.userId
   && !user.value?.isDeepLink && !user.value?.isAdmin && !showAdminPage.value);
 
-// Open the checklist after sign-in while a required step is missing.
-watch([showSetupChecklist, () => user.value?.userId], async ([show]) => {
+// Open the checklist after sign-in while a required step is missing, or
+// while the records are being indexed (it shows the indexing's time).
+watch([showSetupChecklist, () => user.value?.userId], async ([show, uid]) => {
   if (!show) { setupChecklist.reset(); return; }
   const status = await setupChecklist.refresh();
-  if (status && !status.requiredDone) setupChecklist.show();
+  if (status && !status.requiredDone) { setupChecklist.show(); return; }
+  if (uid && (await recordsIndexProgress(uid).catch(() => null))?.state === 'running') setupChecklist.show();
 }, { immediate: true });
+
+// Back from the Workbook's records offer: "Maybe Later", indexing done, or
+// Saved Files left while it runs.
+const returnToSetup = () => {
+  if (!showSetupChecklist.value) return;
+  void setupChecklist.refresh();
+  // After the click that got here (a Workbook tab) has finished, or the
+  // checklist would take it as a click outside and close again.
+  setTimeout(() => setupChecklist.show(), 0);
+};
 
 // A passkey was just added (or the dialog was closed): re-derive.
 watch(showPasskeyDialog, (open) => { if (!open && showSetupChecklist.value) void setupChecklist.refresh(); });
@@ -2988,6 +3003,7 @@ watch(() => setupChecklist.state.status?.agent, (agent, prev) => {
 });
 
 const checklistFolderBusy = ref(false);
+const checklistFolderProgress = ref('');
 const checklistFolderError = ref('');
 /** Row 3: choose the MAIA folder. Done once maia-state.json is written. */
 const checklistChooseFolder = async () => {
@@ -3021,15 +3037,35 @@ const checklistChooseFolder = async () => {
     });
     // The folder key (§7): documents others add are sealed to it.
     await ensureFolderKey(uid).catch(() => null);
-    await setupChecklist.refresh();
+    // The folder's records go to MAIA now (its Apple Health export marked
+    // as such, for the Patient Summary). Saved Files then shows them, and
+    // offers to index them now or later.
+    const records = await uploadFolderRecords(uid, (done, total) => {
+      checklistFolderProgress.value = total && done < total ? `Adding the records in your folder: ${done + 1} of ${total}…` : '';
+    }, { markAppleHealth: true });
+    checklistFolderProgress.value = '';
     if (picked.conflict?.severity === 'warn') {
       $q.notify({ type: 'warning', message: picked.conflict.message, timeout: 8000 });
     }
+    if (typeof records === 'object') {
+      if (records.failed || records.tooLarge) {
+        const parts = [records.failed ? `${records.failed} couldn’t be added` : '', records.tooLarge ? `${records.tooLarge} over 50 MB left out` : ''].filter(Boolean);
+        $q.notify({ type: 'warning', message: `Some records in your folder weren’t added: ${parts.join('; ')}.`, timeout: 8000 });
+      }
+      if (records.uploaded + records.alreadyInMaia > 0) {
+        setupChecklist.hide();
+        void setupChecklist.refresh();
+        await chatInterfaceRef.value?.offerRecordsIndexing?.();
+        return;
+      }
+    }
+    await setupChecklist.refresh();
   } catch (e) {
     console.warn('[setup] folder step failed:', e);
     checklistFolderError.value = 'Could not use that folder. Try again.';
   } finally {
     checklistFolderBusy.value = false;
+    checklistFolderProgress.value = '';
   }
 };
 

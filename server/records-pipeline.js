@@ -48,6 +48,13 @@ const trimmed = (v) => String(v || '').trim();
  *   deterministic lists alone (group_requests.md §5, D11).
  * @param {number} [opts.now] — the time, for tests
  */
+/**
+ * Minutes indexing is expected to take for `bytes` of record PDFs: about a
+ * minute per MB plus a minute of overhead, never under two (calibrated on
+ * test.agropper.xyz for the full edition's welcome page).
+ */
+export const indexEstimateMinutes = (bytes) => Math.max(2, Math.ceil(1 + (Number(bytes) || 0) / 1e6));
+
 export function computeRecordsPipeline(userDoc, opts = {}) {
   const files = Array.isArray(userDoc?.files) ? userDoc.files : [];
   const hasAppleFile = files.some((f) => f && f.isAppleHealth) || userDoc?.hasAppleFile === true;
@@ -102,7 +109,13 @@ export function computeRecordsPipeline(userDoc, opts = {}) {
   const now = opts.now ?? Date.now();
   const jobLive = !!ks?.phase && !['complete', 'error', 'failed'].includes(ks.phase) && ks.backendCompleted !== true
     && (!ks.startedAt || now - Date.parse(ks.startedAt) < 2 * 60 * 60 * 1000);
-  const progress = { tokens: Number(ks?.tokens) || 0, filesIndexed: Number(ks?.filesIndexed) || 0 };
+  const records = files.filter((f) => f && !f.isReference);
+  const progress = {
+    tokens: Number(ks?.tokens) || 0,
+    filesIndexed: Number(ks?.filesIndexed) || 0,
+    filesTotal: records.length,
+    estimateMinutes: indexEstimateMinutes(records.reduce((n, f) => n + (Number(f.fileSize) || 0), 0))
+  };
   if (!indexing) {
     stages.indexed = { status: 'skipped', at: null };
   } else if (jobLive) {
@@ -114,7 +127,7 @@ export function computeRecordsPipeline(userDoc, opts = {}) {
   } else if (ks?.phase === 'error' || ks?.phase === 'failed') {
     stages.indexed = { status: 'error', at: null, error: ks.error || ks.phase };
   } else {
-    stages.indexed = { status: 'pending', at: null };
+    stages.indexed = { status: 'pending', at: null, filesTotal: progress.filesTotal, estimateMinutes: progress.estimateMinutes };
   }
 
   // summaryDrafted — a governed draft exists (userDoc.draftPatientSummary),

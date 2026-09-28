@@ -62,6 +62,7 @@ They leave out secrets and anything that would help an attacker: app and droplet
 
 - Nothing generates or overwrites the Patient Summary without the patient's consent. Verification is a stamp (`patientSummaryVerifiedAt`) that only the patient's own acts set, and any unverified save clears it.
 - In the Personal AS edition, current medications are a section of the summary and are verified with it.
+- In the Personal AS edition, setup's folder step uploads the folder's record PDFs at once (`uploadFolderRecords` with `markAppleHealth`, so the Apple Health route finds its export) and offers indexing in Saved Files. Indexing started there returns to the checklist when it ends or when the patient leaves Saved Files, and a reload during indexing opens the checklist, which shows its time. The estimate is `indexEstimateMinutes` in `server/records-pipeline.js`.
 - The MAIA folder is where records live. Never ask the patient to pick a record that is already there. `isMaiaGeneratedFile()` is the one list of files MAIA writes there.
 - The secondary private AI is chosen by the user and never created automatically. It never falls back to the primary.
 

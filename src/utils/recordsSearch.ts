@@ -13,6 +13,7 @@
  */
 import { fetchPipeline, advancePipeline, type PipelineAdvance } from './pipeline';
 import { reconnectLocalFolder, reconnectLocalFolderWithGesture, getLocalFolderStatus, listFolderFiles, isMaiaGeneratedFile } from './localFolder';
+import { isAppleHealthExportFile } from './appleHealthFolder';
 
 export type IndexState = 'no-records' | 'pending' | 'running' | 'done' | 'error' | 'off' | 'unknown'
   | 'uploading' | 'no-folder' | 'no-permission' | 'upload-failed';
@@ -27,13 +28,23 @@ export const indexStateOf = (p: PipelineAdvance | null): IndexState => {
 
 export const recordsIndexState = async (userId: string): Promise<IndexState> => indexStateOf(await fetchPipeline(userId));
 
-/** The index's state plus the indexing job's progress (start, tokens, files). */
-export interface IndexProgress { state: IndexState; startedAt: string | null; tokens: number; filesIndexed: number }
+/** The index's state plus the indexing job's progress (start, tokens,
+ *  files) and the server's estimate of how long it takes. */
+export interface IndexProgress {
+  state: IndexState; startedAt: string | null; tokens: number; filesIndexed: number;
+  filesTotal: number; estimateMinutes: number | null;
+}
 export async function recordsIndexProgress(userId: string): Promise<IndexProgress> {
   const p = await fetchPipeline(userId);
   const st = p?.pipeline.stages.indexed;
-  return { state: indexStateOf(p), startedAt: st?.status === 'running' ? st.at : null, tokens: st?.tokens || 0, filesIndexed: st?.filesIndexed || 0 };
+  return {
+    state: indexStateOf(p), startedAt: st?.status === 'running' ? st.at : null, tokens: st?.tokens || 0, filesIndexed: st?.filesIndexed || 0,
+    filesTotal: st?.filesTotal || 0, estimateMinutes: st?.estimateMinutes || null
+  };
 }
+
+/** "about 6 minutes", or '' when unknown. */
+export const estimateWords = (minutes: number | null | undefined): string => (minutes ? `about ${minutes} minutes` : '');
 
 /** "3m 07s" since `sinceIso`, or '' when unknown. */
 export const elapsedWords = (sinceIso: string | null, now = Date.now()): string => {
@@ -43,26 +54,36 @@ export const elapsedWords = (sinceIso: string | null, now = Date.now()): string 
   return `${Math.floor(sec / 60)}m ${String(sec % 60).padStart(2, '0')}s`;
 };
 
-/** "Indexing your records: 3m 07s · 41,200 tokens · 1 file indexed so far" */
-export const progressWords = (p: Pick<IndexProgress, 'startedAt' | 'tokens' | 'filesIndexed'>, now = Date.now()): string => {
-  const parts = [elapsedWords(p.startedAt, now)];
+/** "Indexing your records: 3m 07s of about 6 minutes · 41,200 tokens · 1 of 5 files indexed" */
+export const progressWords = (
+  p: Pick<IndexProgress, 'startedAt' | 'tokens' | 'filesIndexed'> & Partial<Pick<IndexProgress, 'filesTotal' | 'estimateMinutes'>>,
+  now = Date.now()
+): string => {
+  const elapsed = elapsedWords(p.startedAt, now);
+  const estimate = estimateWords(p.estimateMinutes);
+  const parts = [elapsed && estimate ? `${elapsed} of ${estimate}` : elapsed];
   if (p.tokens > 0) parts.push(`${p.tokens.toLocaleString()} tokens`);
-  if (p.filesIndexed > 0) parts.push(`${p.filesIndexed} file${p.filesIndexed === 1 ? '' : 's'} indexed so far`);
+  if (p.filesTotal) parts.push(`${p.filesIndexed} of ${p.filesTotal} file${p.filesTotal === 1 ? '' : 's'} indexed`);
+  else if (p.filesIndexed > 0) parts.push(`${p.filesIndexed} file${p.filesIndexed === 1 ? '' : 's'} indexed so far`);
   const detail = parts.filter(Boolean).join(' · ');
-  return `Indexing your records${detail ? `: ${detail}` : '…'}. It usually takes a few minutes; you can keep using MAIA.`;
+  return `Indexing your records${detail ? `: ${detail}` : '…'}. You can keep using MAIA.`;
 };
 
 export const MAX_RECORD_BYTES = 50 * 1024 * 1024; // the upload route's limit
 
-export interface FolderUpload { found: number; uploaded: number; alreadyInMaia: number; failed: number; tooLarge: number }
+export interface FolderUpload { found: number; uploaded: number; alreadyInMaia: number; failed: number; tooLarge: number; appleHealth?: string }
 
 /**
  * Upload the folder's record files that MAIA doesn't have yet (by name).
- * `onProgress` hears each file as it goes. → the counts, or why not.
+ * `onProgress` hears each file as it goes. With `markAppleHealth`, the
+ * first Apple Health export among them is registered as such (when MAIA
+ * has none yet), as the Patient Summary's Apple Health route expects.
+ * → the counts, or why not.
  */
 export async function uploadFolderRecords(
   userId: string,
-  onProgress: (done: number, total: number, name: string) => void = () => {}
+  onProgress: (done: number, total: number, name: string) => void = () => {},
+  opts: { markAppleHealth?: boolean; detect?: (file: Blob) => Promise<boolean> } = {}
 ): Promise<FolderUpload | 'no-folder' | 'no-permission' | 'failed'> {
   const folder = (await reconnectLocalFolder(userId)) || (await reconnectLocalFolderWithGesture(userId));
   if (!folder) return (await getLocalFolderStatus(userId)).configured ? 'no-permission' : 'no-folder';
@@ -70,6 +91,8 @@ export async function uploadFolderRecords(
   const d = await r.json().catch(() => ({}));
   if (!r.ok || !d.success) return 'failed';
   const have = new Set<string>((d.files || []).map((f: { fileName: string }) => f.fileName));
+  let lookForAppleHealth = !!opts.markAppleHealth && !(d.files || []).some((f: { isAppleHealth?: boolean }) => f.isAppleHealth);
+  const detect = opts.detect || isAppleHealthExportFile;
   const records = (await listFolderFiles(folder.handle, { extensions: ['pdf'] })).filter((f) => !isMaiaGeneratedFile(f.name));
   const todo = records.filter((f) => !have.has(f.name));
   const out: FolderUpload = { found: records.length, uploaded: 0, alreadyInMaia: records.length - todo.length, failed: 0, tooLarge: 0 };
@@ -79,6 +102,8 @@ export async function uploadFolderRecords(
     try {
       const file = await entry.fileHandle.getFile();
       if (file.size > MAX_RECORD_BYTES) { out.tooLarge++; continue; }
+      const isAppleHealth = lookForAppleHealth && (await detect(file));
+      if (isAppleHealth) lookForAppleHealth = false;
       const form = new FormData();
       form.append('file', file);
       const up = await fetch('/api/files/upload', { method: 'POST', credentials: 'include', body: form });
@@ -90,12 +115,15 @@ export async function uploadFolderRecords(
           userId,
           fileMetadata: {
             fileName: u.fileInfo.fileName, bucketKey: u.fileInfo.bucketKey, bucketPath: u.fileInfo.userFolder,
-            fileSize: u.fileInfo.size, fileType: 'pdf', uploadedAt: u.fileInfo.uploadedAt, isAppleHealth: false
+            fileSize: u.fileInfo.size, fileType: 'pdf', uploadedAt: u.fileInfo.uploadedAt, isAppleHealth
           },
-          updateInitialFile: false
+          updateInitialFile: isAppleHealth
         })
       });
-      if (meta.ok) out.uploaded++; else out.failed++;
+      if (meta.ok) {
+        out.uploaded++;
+        if (isAppleHealth) out.appleHealth = u.fileInfo.fileName;
+      } else out.failed++;
     } catch {
       out.failed++;
     }

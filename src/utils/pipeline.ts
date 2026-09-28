@@ -13,6 +13,9 @@ export interface PipelineStage {
   /** indexed stage: the indexing job's counts so far */
   tokens?: number;
   filesIndexed?: number;
+  /** indexed: the record files to index, and the estimate in minutes. */
+  filesTotal?: number;
+  estimateMinutes?: number;
 }
 
 export interface RecordsPipeline {
