@@ -9,7 +9,7 @@
       Anyone, anywhere in the world can start a patient group, as defined by its suggested records access policies. The open source MAIA software is free and groups don’t have to host patient records, use AI, or see patient data. Any group can sell Credits to fund records hosting and personal AI. A patient needs one MAIA host but can be a member of many groups.
     </p>
     <p class="gh__intro">
-      MAIA is published in The New England Journal of Medicine AI Journal as <strong>The Medical AI Assistant as Publication, Not Device: Why Peer-Reviewed, Open-Source AI Belongs in the Standard of Care</strong> <a href="https://ai.nejm.org/stoken/default+domain/MJAMGE2HGAZPX58JA8VB/full?redirectUri=doi/full/10.1056/AIp2600289" target="_blank" rel="noopener">Free access link</a>.
+      MAIA is published in The New England Journal of Medicine AI Journal as <strong>The Medical AI Assistant as Publication, Not Device: Why Peer-Reviewed, Open-Source AI Belongs in the Standard of Care</strong>; June 2026 <a href="https://ai.nejm.org/stoken/default+domain/MJAMGE2HGAZPX58JA8VB/full?redirectUri=doi/full/10.1056/AIp2600289" target="_blank" rel="noopener">Free access</a>.
     </p>
     <p class="gh__lead">
       This host runs groups only. It keeps no patients' MAIAs and no health

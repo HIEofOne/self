@@ -316,7 +316,7 @@ Prompt-injection exposure is bounded by construction: advisor outputs are parsed
 | Policy cards | suggested only | ✓ canonical | rendered |
 | Membership (pairwise id, alias, pubkeys) | ✓ | ✓ (own memberships) | — |
 | Member email | **deleted at join** | ✓ | — |
-| Relay messages | ciphertext, ≤30 d | member messages: sealed inbox and sent copy (capped); requests and older host-sealed messages: plaintext | opened with the folder key, rendered |
+| Relay messages | ciphertext, ≤30 d | member messages: sealed inbox and sent copy (capped); requests and host-sealed messages (members with no message key): plaintext | opened with the folder key, rendered |
 | Request outcomes | counts only | full log incl. deciding card | rendered |
 | Vouch credentials | code hash (as id), credential public key, voucher pairwise id | the patient's labelled list (`vouchedParties`) | passkey private key in the requester's authenticator |
 | Credits | ✓ (payer email + ledger) | — | balance display |
