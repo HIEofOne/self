@@ -57,12 +57,17 @@ With the same token, the app uses the same CouchDB droplet as the others; its da
 3. Wait for DigitalOcean to show the domain as active, with its certificate. This takes minutes, sometimes up to an hour.
 4. Send a test email to a trustee.ai address and confirm it still arrives.
 
-**Optional, later: the bare trustee.ai.** Either:
+### The bare trustee.ai
 
-- keep Namecheap's URL redirect on `@` and point it at `https://www.trustee.ai`; or
-- add a Namecheap **ALIAS** record on `@` to the DigitalOcean target, and add `trustee.ai` as a second domain in the app.
+Browsers try `https://trustee.ai` first. A Namecheap URL-redirect record on `@` can't answer that: Namecheap's redirect servers have no certificate for the bare domain, so the visitor gets an error. Instead the bare domain reaches the app, with its own certificate, and the app redirects it to `https://www.trustee.ai`, keeping the path (`server/utils/bare-domain-redirect.js`; it acts whenever `PUBLIC_APP_URL` is a `www.` address).
 
-An ALIAS record doesn't disturb the MX records, but test email again afterwards. `PUBLIC_APP_URL` stays `https://www.trustee.ai`, because join links and the admin's passkey belong to one address.
+1. In the DigitalOcean app: **Settings → Domains → Add Domain** → `trustee.ai`, again **"You manage your domain"**. Leave `www.trustee.ai` as the primary domain.
+2. In Namecheap **Advanced DNS → Host Records**, first take a screenshot. Check that `@` has no A record, CNAME or URL-redirect record. Then **Add New Record → ALIAS Record**: Host `@`, Value the same DigitalOcean target as the `www` CNAME (`‹app›.ondigitalocean.app`), TTL Automatic. Don't touch Mail Settings, the MX records or the SPF TXT record: an ALIAS record sits beside them.
+3. Wait for DigitalOcean to show `trustee.ai` as active, with its certificate.
+4. Check: `curl -I https://trustee.ai/admin` answers `301` with `location: https://www.trustee.ai/admin`.
+5. Send a test email to a trustee.ai address and confirm it still arrives.
+
+`PUBLIC_APP_URL` stays `https://www.trustee.ai`, because join links and the admin's passkey belong to one address.
 
 ## 3. Set up the demonstration groups
 
