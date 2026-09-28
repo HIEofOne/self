@@ -46,6 +46,7 @@
                 <!-- 3. Folder -->
                 <div v-else-if="row.key === 'folder'" class="q-mt-xs">
                   <q-btn outline dense no-caps color="primary" label="Choose folder" :loading="folderBusy" @click="emit('choose-folder')" />
+                  <div v-if="folderProgress" class="text-caption text-grey-8 q-mt-xs">{{ folderProgress }}</div>
                   <div v-if="folderError" class="text-caption text-negative q-mt-xs">{{ folderError }}</div>
                 </div>
                 <!-- 4. Group -->
@@ -101,6 +102,12 @@
           <q-icon v-else :name="status.agent === 'ready' ? 'smart_toy' : 'hourglass_empty'" size="16px" class="q-mr-sm" />
           <span>{{ agentLine }}</span>
         </div>
+        <!-- Indexing the folder's records (setup's "Index all now", or Search all my records) -->
+        <div v-if="indexLine" class="row items-center no-wrap text-caption q-mt-xs" :class="indexing?.state === 'error' ? 'text-negative' : 'text-grey-8'">
+          <q-spinner v-if="indexing?.state === 'running'" size="14px" class="q-mr-sm" />
+          <q-icon v-else :name="indexing?.state === 'error' ? 'error_outline' : 'manage_search'" size="16px" class="q-mr-sm" />
+          <span>{{ indexLine }}</span>
+        </div>
       </q-card-section>
 
       <q-card-actions align="between" class="q-px-md q-pb-md">
@@ -118,10 +125,11 @@ const autoJoinTriedFor = new Set<string>();
 </script>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, ref, watch, onUnmounted } from 'vue';
 import EmailVerifyBox from './EmailVerifyBox.vue';
 import { useSetupChecklist, type SetupStepKey } from '../composables/useSetupChecklist';
 import { useVerifiedEmail } from '../composables/verifiedEmail';
+import { recordsIndexProgress, elapsedWords, estimateWords, INDEX_WORDS, type IndexProgress } from '../utils/recordsSearch';
 
 /**
  * Personal AS setup checklist (Documentation/group_requests.md §5).
@@ -133,6 +141,8 @@ const props = defineProps<{
   userId: string;
   group: { groupId: string; name: string; joinLink: string | null } | null;
   folderBusy?: boolean;
+  /** The folder's records going to MAIA: "Adding the records in your folder: 2 of 5…" */
+  folderProgress?: string;
   folderError?: string;
 }>();
 const emit = defineEmits<{
@@ -170,7 +180,7 @@ const TEXT: Record<SetupStepKey, { title: () => string; info: () => string }> = 
   },
   folder: {
     title: () => 'Choose your MAIA folder',
-    info: () => 'MAIA keeps your own copy of your records here. Choose an empty folder, or one you use only for MAIA.'
+    info: () => 'MAIA keeps your own copy of your records here, so choose a folder you use only for MAIA. The record PDFs at the top of it are added to your MAIA (Workbook → Saved Files).'
   },
   group: {
     title: () => `Join ${groupName.value}`,
@@ -205,6 +215,45 @@ const agentLine = computed(() => {
     case 'none': return 'Starting your private AI…';
     default: return 'Your private AI starts once your email is verified.';
   }
+});
+
+// ── Indexing the folder's records: its time while it runs ───────────────
+// Setup's "Index all now" sends the patient back here when they leave Saved
+// Files, and a reload during indexing opens the checklist (App.vue).
+const indexing = ref<IndexProgress | null>(null);
+const clockNow = ref(Date.now());
+let indexPoll: ReturnType<typeof setInterval> | null = null;
+let indexClock: ReturnType<typeof setInterval> | null = null;
+const stopIndexPoll = () => {
+  if (indexPoll) { clearInterval(indexPoll); indexPoll = null; }
+  if (indexClock) { clearInterval(indexClock); indexClock = null; }
+};
+const pollIndexing = async () => {
+  if (!props.userId || !state.open) { stopIndexPoll(); return; }
+  const p = await recordsIndexProgress(props.userId).catch(() => null);
+  indexing.value = p;
+  if (p?.state === 'running') {
+    if (!indexPoll) indexPoll = setInterval(() => { void pollIndexing(); }, 5000);
+    if (!indexClock) indexClock = setInterval(() => { clockNow.value = Date.now(); }, 1000);
+  } else {
+    stopIndexPoll();
+  }
+};
+watch(() => state.open, (open) => { if (open) void pollIndexing(); else stopIndexPoll(); }, { immediate: true });
+onUnmounted(stopIndexPoll);
+const indexLine = computed(() => {
+  const p = indexing.value;
+  if (!p) return '';
+  if (p.state === 'running') {
+    const elapsed = elapsedWords(p.startedAt, clockNow.value);
+    const estimate = estimateWords(p.estimateMinutes);
+    const time = elapsed ? `${elapsed}${estimate ? ` of ${estimate}` : ''}` : estimate;
+    const files = p.filesTotal ? `${p.filesIndexed} of ${p.filesTotal} files indexed` : '';
+    return `Indexing your records${time || files ? `: ${[time, files].filter(Boolean).join(' · ')}` : '…'}`;
+  }
+  if (p.state === 'done') return 'Your records are indexed: your private AI can search them.';
+  if (p.state === 'error') return INDEX_WORDS.error;
+  return '';
 });
 
 // ── Email: save a newly verified address to the account ─────────────────

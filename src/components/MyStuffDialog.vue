@@ -432,6 +432,16 @@
                       >
                         To be added and indexed
                       </q-chip>
+                      <!-- Personal AS: the server's indexing job takes every record not yet indexed -->
+                      <q-chip
+                        v-else-if="isPersonalAs && serverIndex.running && !isFileIndexed(file.bucketKey)"
+                        color="blue"
+                        text-color="white"
+                        size="sm"
+                      >
+                        <q-spinner size="12px" class="q-mr-xs" />
+                        Indexing in progress
+                      </q-chip>
                       <!-- Not in KB - show amber "Add to Knowledge Base" -->
                       <q-chip
                         v-else-if="!file.inKnowledgeBase"
@@ -510,11 +520,14 @@
                 <q-linear-progress indeterminate color="primary" class="q-mb-sm" />
                 <div class="text-body2">Indexing your records so your private AI can search them…</div>
                 <div class="text-caption text-grey-7 q-mt-xs">
-                  <span v-if="serverIndexElapsed">Time: {{ serverIndexElapsed }} • </span>
-                  Files indexed: {{ serverIndex.filesIndexed }} •
+                  <span v-if="serverIndexElapsed">Time: {{ serverIndexElapsed }}<template v-if="serverIndex.estimateMinutes"> of {{ estimateWords(serverIndex.estimateMinutes) }}</template> • </span>
+                  Files indexed: {{ serverIndex.filesIndexed }}<template v-if="serverIndex.filesTotal"> of {{ serverIndex.filesTotal }}</template> •
                   Tokens: {{ serverIndex.tokens ? serverIndex.tokens.toLocaleString() : 'counting…' }}
                 </div>
-                <div class="text-caption text-grey-6 q-mt-xs">It usually takes a few minutes. You can keep using MAIA.</div>
+                <div class="text-caption text-grey-6 q-mt-xs">
+                  {{ serverIndex.estimateMinutes ? `It usually takes ${estimateWords(serverIndex.estimateMinutes)}.` : 'It usually takes a few minutes.' }}
+                  {{ setupIndexing ? 'When it’s done, MAIA takes you back to setup.' : 'You can keep using MAIA.' }}
+                </div>
               </div>
 
               <div v-if="!serverIndexing && (kbNeedsUpdate || hasCheckboxChanges || kbIndexingOutOfSync || hasPendingKbAdds)" class="q-mt-md q-pt-md" style="border-top: 1px solid #e0e0e0;">
@@ -2170,6 +2183,22 @@
       </q-card>
     </q-dialog>
 
+    <!-- Setup (Personal AS): the folder's records are in Saved Files; index them now or later -->
+    <q-dialog v-model="showIndexOffer" persistent>
+      <q-card style="min-width: 360px; max-width: 480px;">
+        <q-card-section class="text-body1">
+          Indexing of files is now optional because it takes a few more minutes.
+          <div v-if="indexOfferEstimate" class="text-caption text-grey-7 q-mt-sm">
+            Indexing these {{ userFiles.length }} file{{ userFiles.length === 1 ? '' : 's' }} takes {{ indexOfferEstimate }}.
+          </div>
+        </q-card-section>
+        <q-card-actions align="right" class="q-pa-md">
+          <q-btn flat no-caps label="Maybe Later" color="grey-8" :disable="indexOfferBusy" @click="indexLater" />
+          <q-btn unelevated no-caps label="Index all now" color="primary" :loading="indexOfferBusy" @click="indexAllNow" />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
   </Teleport>
 </template>
 
@@ -2184,7 +2213,8 @@ import GroupsPanel from './GroupsPanel.vue';
 import PoliciesPanel from './PoliciesPanel.vue';
 import RequestsPanel from './RequestsPanel.vue';
 import FeaturesPanel from './FeaturesPanel.vue';
-import { recordsIndexProgress, elapsedWords } from '../utils/recordsSearch';
+import { recordsIndexProgress, elapsedWords, estimateWords, startRecordsIndexing, INDEX_WORDS } from '../utils/recordsSearch';
+import { setFeature } from '../utils/advisorProposals';
 import { syncRequestLog } from '../utils/requestLog';
 import { readSeenMessages, writeSeenMessages } from '../utils/welcomeActivity';
 import { ensureFolderKey } from '../utils/folderKey';
@@ -2310,6 +2340,7 @@ const emit = defineEmits<{
   'files-archived': [archivedFiles: string[]]; // Emit bucketKeys of archived files
   'messages-filtered': [messages: Message[], nameMapping?: Array<{ original: string; pseudonym: string }>]; // Emit filtered messages with pseudonyms
   'diary-posted': [content: string]; // Emit diary content to add to chat
+  'return-to-setup': []; // Personal AS: back to the setup checklist
   'reference-file-added': [file: { fileName: string; bucketKey: string; fileSize: number; uploadedAt: string; fileType?: string; fileUrl?: string; isReference: boolean }]; // Emit reference file to add to chat
   'current-medications-saved': [data: { value: string; edited: boolean; source?: string }];
   'medications-offered': [data: {
@@ -2604,7 +2635,7 @@ const TAB_FEATURES: Record<string, string> = {
   diary: 'diary', references: 'references'
   // lists: always shown; without `lists-full` it is Current Medications only
 };
-const { has, isPersonalAs } = useEdition();
+const { has, isPersonalAs, load: reloadEdition } = useEdition();
 // Personal AS: at sign-in (§7, §10.12) — quietly, once per account — make
 // sure the folder key is in place (an account set up before P9 gets one
 // here), save documents accepted since the last visit into Received/, and
@@ -3763,7 +3794,9 @@ const $q = useQuasar();
 // "Search all my records"), not this tab's own Update and Index KB: its
 // clock, tokens and files, polled while it runs; the files reload when it
 // finishes.
-const serverIndex = ref({ running: false, startedAt: null as string | null, tokens: 0, filesIndexed: 0 });
+const serverIndex = ref({ running: false, startedAt: null as string | null, tokens: 0, filesIndexed: 0, filesTotal: 0, estimateMinutes: null as number | null });
+// Indexing that setup's records offer started ("Index all now", below).
+const setupIndexing = ref(false);
 const serverIndexNow = ref(Date.now());
 let serverIndexPoll: ReturnType<typeof setInterval> | null = null;
 let serverIndexClock: ReturnType<typeof setInterval> | null = null;
@@ -3778,15 +3811,79 @@ const pollServerIndex = async () => {
   const p = await recordsIndexProgress(props.userId).catch(() => null);
   if (!p) return;
   const wasRunning = serverIndex.value.running;
-  serverIndex.value = { running: p.state === 'running', startedAt: p.startedAt, tokens: p.tokens, filesIndexed: p.filesIndexed };
+  serverIndex.value = {
+    running: p.state === 'running', startedAt: p.startedAt, tokens: p.tokens, filesIndexed: p.filesIndexed,
+    filesTotal: p.filesTotal, estimateMinutes: p.estimateMinutes
+  };
   if (serverIndex.value.running) {
     if (!serverIndexPoll) serverIndexPoll = setInterval(() => { void pollServerIndex(); }, 5000);
     if (!serverIndexClock) serverIndexClock = setInterval(() => { serverIndexNow.value = Date.now(); }, 1000);
   } else {
     stopServerIndexPoll();
     if (wasRunning) void loadFiles();
+    // Indexing that setup started is done: back to the setup checklist.
+    if (setupIndexing.value) {
+      setupIndexing.value = false;
+      if (p.state === 'error') $q.notify({ type: 'warning', message: INDEX_WORDS.error });
+      emit('return-to-setup');
+    }
   }
 };
+
+// ── Setup (Personal AS): the folder's records, indexed now or later ──
+// Setup's folder step uploads the folder's records and opens Saved Files
+// with this offer. "Maybe Later" goes back to the setup checklist. "Index
+// all now" stays here, with the estimate and the progress, and goes back to
+// the checklist when indexing ends — or as soon as the patient leaves Saved
+// Files, where the checklist shows the indexing's time from then on.
+const showIndexOffer = ref(false);
+const indexOfferBusy = ref(false);
+const indexOfferEstimate = ref('');
+const offerRecordsIndexing = async () => {
+  if (!props.userId) return;
+  currentTab.value = 'files';
+  void loadFiles();
+  const p = await recordsIndexProgress(props.userId).catch(() => null);
+  indexOfferEstimate.value = estimateWords(p?.estimateMinutes);
+  // Already chose to search all records: index the new files, no question.
+  if (has('records-index')) { await indexAllNow(); return; }
+  showIndexOffer.value = true;
+};
+const indexLater = () => {
+  showIndexOffer.value = false;
+  emit('return-to-setup');
+};
+const indexAllNow = async () => {
+  if (!props.userId || indexOfferBusy.value) return;
+  indexOfferBusy.value = true;
+  try {
+    if (!has('records-index')) {
+      if (!(await setFeature(props.userId, 'records-index', true, 'settings'))) throw new Error('feature');
+      await reloadEdition(true);
+    }
+    const r = await startRecordsIndexing(props.userId);
+    showIndexOffer.value = false;
+    if (r.state !== 'running') {
+      $q.notify({ type: r.state === 'done' ? 'positive' : 'warning', message: INDEX_WORDS[r.state] });
+      emit('return-to-setup');
+      return;
+    }
+    setupIndexing.value = true;
+    await pollServerIndex();
+  } catch {
+    $q.notify({ type: 'negative', message: 'Indexing couldn’t be started. Try again, or later in Workbook → More features.' });
+  } finally {
+    indexOfferBusy.value = false;
+  }
+};
+// Leaving Saved Files (another tab, or closing the Workbook) while setup's
+// indexing runs: back to the checklist, which shows its progress.
+const leaveSetupIndexing = () => {
+  if (!setupIndexing.value) return;
+  setupIndexing.value = false;
+  emit('return-to-setup');
+};
+watch(currentTab, (t, prev) => { if (prev === 'files' && t !== 'files') leaveSetupIndexing(); });
 watch(currentTab, (t) => { if (t === 'files') void pollServerIndex(); else stopServerIndexPoll(); }, { immediate: true });
 watch(kbIndexingActiveOnServer, (v) => { if (v && currentTab.value === 'files' && !serverIndexPoll) void pollServerIndex(); });
 onUnmounted(stopServerIndexPoll);
@@ -8629,11 +8726,12 @@ const wizardGenerateSummary = (action: 'generate-summary' | 'update-summary-meds
   }
 };
 
-defineExpose({ wizardGenerateSummary, collapseRail });
+defineExpose({ wizardGenerateSummary, collapseRail, offerRecordsIndexing });
 
 watch(isOpen, (newValue) => {
   emit('update:modelValue', newValue);
   if (!newValue) {
+    leaveSetupIndexing();
     if (pollingInterval.value) {
       clearInterval(pollingInterval.value);
       pollingInterval.value = null;

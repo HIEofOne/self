@@ -59,7 +59,7 @@ const error = ref('');
 const indexState = ref<IndexState>('unknown');
 // While indexing runs: the job's start, tokens and files (polled), and a
 // clock that ticks every second.
-const progress = ref({ startedAt: null as string | null, tokens: 0, filesIndexed: 0 });
+const progress = ref({ startedAt: null as string | null, tokens: 0, filesIndexed: 0, filesTotal: 0, estimateMinutes: null as number | null });
 const now = ref(Date.now());
 let timer: ReturnType<typeof setInterval> | null = null;
 let clock: ReturnType<typeof setInterval> | null = null;
@@ -71,7 +71,7 @@ const refreshIndex = async () => {
   if (!props.userId || !state.features['records-index']?.enabled) return;
   const p = await recordsIndexProgress(props.userId);
   indexState.value = p.state;
-  progress.value = { startedAt: p.startedAt, tokens: p.tokens, filesIndexed: p.filesIndexed };
+  progress.value = { startedAt: p.startedAt, tokens: p.tokens, filesIndexed: p.filesIndexed, filesTotal: p.filesTotal, estimateMinutes: p.estimateMinutes };
   if (indexState.value === 'running') {
     if (!timer) timer = setInterval(refreshIndex, 5000);
     if (!clock) clock = setInterval(() => { now.value = Date.now(); }, 1000);

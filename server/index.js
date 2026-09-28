@@ -5331,7 +5331,7 @@ app.get('/api/records/files', async (req, res) => {
     const userDoc = await cloudant.getDocument('maia_users', userId);
     const files = (Array.isArray(userDoc?.files) ? userDoc.files : [])
       .filter((f) => f?.fileName && !f.isReference)
-      .map((f) => ({ fileName: f.fileName, fileSize: f.fileSize || null, inKnowledgeBase: !!f.inKnowledgeBase }));
+      .map((f) => ({ fileName: f.fileName, fileSize: f.fileSize || null, inKnowledgeBase: !!f.inKnowledgeBase, isAppleHealth: !!f.isAppleHealth }));
     res.set('Cache-Control', 'no-store');
     res.json({ success: true, files });
   } catch {

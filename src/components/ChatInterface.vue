@@ -1025,6 +1025,7 @@
     <!-- My Stuff Dialog -->
     <MyStuffDialog
       @open-peer-thread="handleOpenPeerThread"
+      @return-to-setup="emit('return-to-setup')"
       ref="myStuffDialogRef"
       v-model="showMyStuffDialog"
       :userId="props.user?.userId || ''"
@@ -1377,6 +1378,9 @@ const emit = defineEmits<{
   // Passkey nudge (quick-start tier): opens App.vue's existing
   // add-a-passkey dialog for the signed-in temporary user.
   'add-passkey': [];
+  // Personal AS setup: back to the setup checklist (after the records
+  // indexing offer, or when indexing started from it ends or is left).
+  'return-to-setup': [];
 }>();
 
 const $q = useQuasar();
@@ -1748,6 +1752,15 @@ const stage3Checked = computed(() =>
   !wizardRestoreActive.value && (wizardStage2Complete.value || wizardCurrentMedications.value || wizardStage2NoDevice.value)
 );
 const showPrivateUnavailableDialog = ref(false);
+// Personal AS: the setup checklist shows the private AI starting, failing
+// or ready, and public AIs stay locked until the patient turns them on, so
+// this full-edition dialog would only mislead (it opened while a new
+// account's private AI was still starting).
+const notePrivateUnavailable = () => {
+  if (isPersonalAs.value) return;
+  showPrivateUnavailableDialog.value = true;
+};
+watch(isPersonalAs, (on) => { if (on) showPrivateUnavailableDialog.value = false; });
 /** Becomes true after first refreshWizardState (or immediately for deep-link). Gates spinner and "Private AI unavailable" modal. */
 const initialLoadComplete = ref(false);
 const wizardStage2Complete = ref(false);
@@ -3502,7 +3515,7 @@ const loadProviders = async () => {
             && !welcomeSetupActive.value && !agentSetupPollingActive.value) {
           // Not shown while the agent is actively DEPLOYING (welcome-form
           // setup keeps the wizard closed; "unavailable" would be a lie).
-          showPrivateUnavailableDialog.value = true;
+          notePrivateUnavailable();
         }
         if (!pickStillOffered) selectFirstNonPrivateProvider();
       }
@@ -3520,7 +3533,7 @@ const loadProviders = async () => {
       showPrivateUnavailableDialog.value = false;
     } else {
       if (initialLoadComplete.value && !showAgentSetupDialog.value && !props.restoreActive) {
-        showPrivateUnavailableDialog.value = true;
+        notePrivateUnavailable();
       }
       selectFirstNonPrivateProvider();
     }
@@ -3563,7 +3576,7 @@ watch(
     if (getProviderKey(selectedProvider.value) === 'digitalocean') {
       if (initialLoadComplete.value && !showAgentSetupDialog.value && !props.restoreActive
           && !welcomeSetupActive.value && !agentSetupPollingActive.value) {
-        showPrivateUnavailableDialog.value = true;
+        notePrivateUnavailable();
       }
       selectFirstNonPrivateProvider();
     }
@@ -4931,7 +4944,7 @@ const dismissWizard = () => {
   showMyStuffDialog.value = false;
   stopAgentSetupTimer();
   if (initialLoadComplete.value && providers.value.length > 0 && !providers.value.includes('digitalocean')) {
-    showPrivateUnavailableDialog.value = true;
+    notePrivateUnavailable();
     selectFirstNonPrivateProvider();
   }
 };
@@ -10527,6 +10540,14 @@ const openMyStuffTab = (tab: string) => {
   showMyStuffDialog.value = true;
 };
 
+/** Setup's folder step uploaded the folder's records: show them in Saved
+ *  Files and offer to index them now or later. */
+const offerRecordsIndexing = async () => {
+  openMyStuffTab('files');
+  await nextTick();
+  myStuffDialogRef.value?.offerRecordsIndexing();
+};
+
 defineExpose({
   generateSetupLogPdf,
   markIndexingAlreadyCompleted,
@@ -10537,6 +10558,7 @@ defineExpose({
   setTestFinalOutput,
   closeMyStuff,
   openMyStuffTab,
+  offerRecordsIndexing,
   loadProviders
 });
 </script>
