@@ -100,9 +100,6 @@
                   <p class="welcome-lede">
                     MAIA serves <strong>patient communities</strong> creating private peer support networks powered by personalized, confidential AI; <strong>specialty clinics</strong> offering trusted support circles alongside clinician-recommended AI tools; and <strong>primary care practices</strong> that collaborate with patients who manage their most sensitive records with a personal AI assistant.
                   </p>
-                  <div v-if="hostGroup?.description" class="text-body2 text-grey-8 text-center q-mb-md" style="max-width: 560px; margin-left: auto; margin-right: auto;">
-                    {{ hostGroup.description }}
-                  </div>
                 </template>
                 <div v-else-if="editionReady" class="text-h6 text-center q-mb-sm">
                   Welcome to MAIA
@@ -4689,7 +4686,7 @@ onMounted(async () => {
 .welcome-lede {
   max-width: 640px;
   margin: 4px auto 12px;
-  text-align: center;
+  text-align: left;
   line-height: 1.55;
   color: #37424d;
   font-size: 0.95rem;

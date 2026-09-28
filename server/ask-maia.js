@@ -30,6 +30,13 @@ const TEXT_EXT = /\.(md|js|mjs|cjs|ts|vue|json|html|txt|css|scss|yml|yaml|sh)$/i
 const SKIP = /(^|\/)(node_modules|dist|\.git|\.claude|coverage)(\/|$)|\.min\.js$|(^|\/)\.env/;
 const MAX_FILE_BYTES = 1_000_000;
 
+// The files don't change while the server runs: read them once per root.
+const filesCache = new Map();
+const cachedFiles = (rootDir) => {
+  if (!filesCache.has(rootDir)) filesCache.set(rootDir, loadRepoFiles(rootDir));
+  return filesCache.get(rootDir);
+};
+
 /** Every allowed text file under `rootDir`: { path, text, lines }. */
 export function loadRepoFiles(rootDir) {
   const out = [];
@@ -320,7 +327,7 @@ export function buildPrList(prs, summarize) {
  * search index that also covers `prs` ({ number, mergedAt, title, body }).
  */
 export function buildKnowledge(rootDir, prs = [], summarize = () => '') {
-  const files = loadRepoFiles(rootDir);
+  const files = cachedFiles(rootDir);
   const byPath = new Map(files.map((f) => [f.path, f]));
   return {
     files,
@@ -332,6 +339,25 @@ export function buildKnowledge(rootDir, prs = [], summarize = () => '') {
     docMap: buildDocMap(files),
     prList: buildPrList(prs, summarize)
   };
+}
+
+/**
+ * For the patient's own private AI (server/advisor-context.js): the brief
+ * and the documentation, searchable, so a question about using MAIA gets
+ * the sections that answer it. Built once per root.
+ */
+const helpCache = new Map();
+// The documents written for people using MAIA, not the developers' notes.
+const HELP_DOCS = /^(README\.md|public\/[^/]+\.md|public\/MAIA_[^/]+\.html|Documentation\/(group_requests|MAIA_Request_Security_Privacy_Design|Trustee_Host)\.md)$/;
+export function helpKnowledge(rootDir) {
+  if (!helpCache.has(rootDir)) {
+    const files = cachedFiles(rootDir);
+    helpCache.set(rootDir, {
+      brief: files.find((f) => f.path === BRIEF_PATH)?.text || '',
+      index: buildSearchIndex(files.filter((f) => HELP_DOCS.test(f.path)), [])
+    });
+  }
+  return helpCache.get(rootDir);
 }
 
 // ── The research tools ──────────────────────────────────────────────────

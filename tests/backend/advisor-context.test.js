@@ -13,7 +13,8 @@ import express from 'express';
 import request from 'supertest';
 import { serve } from '../helpers/serve.js';
 import {
-  advisorContextKind, buildEditionAdvisorContext, buildPolicyAdvisorContext, advisorRequestLine, recordFilesForLegend
+  advisorContextKind, buildEditionAdvisorContext, buildPolicyAdvisorContext, advisorRequestLine, recordFilesForLegend,
+  maiaStateLines, recentActivityLines, isHelpQuestion, helpSectionLines, latestQuestion
 } from '../../server/advisor-context.js';
 import setupEditionRoutes from '../../server/routes/edition.js';
 import { FEATURES, getEdition, setEditionForTests } from '../../server/edition.js';
@@ -144,6 +145,87 @@ describe('citations the chat can link', () => {
 
   it('says nothing about citing when there are no record files', async () => {
     expect(await buildEditionAdvisorContext(cloudant, PATIENT)).not.toContain('CITING RECORDS');
+  });
+});
+
+describe('help with MAIA itself', () => {
+  const doc = {
+    ...PATIENT, emailVerified: true, credentialID: 'c', folderConnectedAt: '2026-09-20T10:00:00Z',
+    agentEndpoint: 'https://agent.example', agentModelName: 'openai-gpt-oss-120b',
+    privacyFilteredSummary: { text: 'x' },
+    features: { 'records-index': { enabledAt: '2026-09-26T00:00:00Z' } },
+    files: [
+      { fileName: 'Health Records - Rowan.pdf', bucketKey: 'pat01/kb/Health Records - Rowan.pdf', fileSize: 526000, uploadedAt: '2026-09-25T17:31:00Z', isAppleHealth: true },
+      { fileName: 'MRI.pdf', bucketKey: 'pat01/MRI.pdf', fileSize: 90000, uploadedAt: '2026-09-26T09:00:00Z' }
+    ],
+    kbIndexedBucketKeys: ['pat01/kb/Health Records - Rowan.pdf'],
+    kbIndexingStatus: { phase: 'error', startedAt: '2026-09-27T01:45:00Z', updatedAt: '2026-09-27T01:46:00Z', error: 'Knowledge base creation requires at least one file.' },
+    provisioningLog: [
+      { id: 1, time: '2026-09-25T10:00:00Z', event: 'email-verified', email: 'r@x.example' },
+      { id: 2, time: '2026-09-25T10:01:00Z', event: 'workbook-opened' },
+      { id: 3, time: '2026-09-25T10:02:00Z', event: 'email-verified', email: 'r@x.example' },
+      { id: 4, time: '2026-09-25T11:00:00Z', event: 'chat-question', question: 'private words' },
+      { id: 5, time: '2026-09-27T01:46:00Z', event: 'kb-index-failed', error: 'no files' }
+    ]
+  };
+
+  it('describes their MAIA: setup, private AI, summary, saved files and the search index', () => {
+    const lines = maiaStateLines(doc);
+    expect(lines[0]).toBe('Setup: email verified; passkey created; MAIA folder connected (2026-09-20); groups: Trustee.');
+    expect(lines[1]).toBe('Private AI: ready (openai-gpt-oss-120b).');
+    expect(lines[2]).toBe('Patient Summary: saved, verified 2026-09-20; privacy-filtered copy made.');
+    setEditionForTests('full');
+    expect(maiaStateLines(doc)[2]).toBe('Patient Summary: saved, verified 2026-09-20; privacy-filtered copy made; medications not verified.');
+    setEditionForTests('personal-as');
+    expect(lines).toContain('  - Health Records - Rowan.pdf (514 KB, uploaded 2026-09-25, Apple Health export, in the search index)');
+    expect(lines).toContain('  - MRI.pdf (88 KB, uploaded 2026-09-26, not in the search index)');
+    expect(lines[lines.length - 1]).toBe('"Search all my records" is on; the last indexing failed on 2026-09-27: Knowledge base creation requires at least one file.');
+    const fresh = maiaStateLines({ userId: 'new01', draftPatientSummary: { text: 'draft' }, draftJob: { status: 'failed', error: 'AGENT_NOT_READY' } });
+    expect(fresh[0]).toMatch(/^Setup: email NOT verified; passkey not created yet; MAIA folder not connected yet; groups: none\./);
+    expect(fresh[2]).toBe('Patient Summary: none yet; the last draft failed (AGENT_NOT_READY); a draft is waiting for their review in Workbook → Patient Summary.');
+    expect(maiaStateLines({ ...doc, kbIndexingStatus: { phase: 'indexing', startedAt: '2026-09-27T12:00:00Z', tokens: '41200' } }).pop())
+      .toBe('"Search all my records" is on; indexing is under way (indexing, started 2026-09-27, 41,200 tokens so far).');
+  });
+
+  it('their recent activity: the maia-log without routine UI events or chat text, repeats folded', () => {
+    expect(recentActivityLines(doc)).toEqual([
+      '2026-09-25 10:02 email-verified ×2 (the latest shown) (email=r@x.example)',
+      '2026-09-27 01:46 kb-index-failed (error=no files)'
+    ]);
+    expect(recentActivityLines(doc).join('\n')).not.toContain('private words');
+    expect(recentActivityLines({})).toEqual([]);
+  });
+
+  it('a how-to question gets the documentation written for users; a health question doesn\'t', () => {
+    expect(isHelpQuestion('How do I share my summary with my doctor?')).toBe(true);
+    expect(isHelpQuestion('Why did indexing fail?')).toBe(true);
+    expect(isHelpQuestion('What was my last A1c?')).toBe(false);
+    const sections = helpSectionLines('How do I share my summary with my doctor?');
+    expect(sections.length).toBeGreaterThan(0);
+    for (const s of sections) expect(s).toMatch(/^--- (README\.md|public\/|Documentation\/(group_requests|MAIA_Request_Security_Privacy_Design|Trustee_Host)\.md)/);
+    expect(helpSectionLines('What was my last A1c?')).toEqual([]);
+  });
+
+  it('the edition context carries the help block: their state, their activity, the brief, and documentation when asked how', async () => {
+    const how = await buildEditionAdvisorContext(cloudant, doc, { question: 'Why did indexing my records fail?' });
+    expect(how).toContain('=== HELP WITH MAIA ITSELF ===');
+    expect(how).toContain('THEIR MAIA\'S STATE:');
+    expect(how).toContain('2026-09-27 01:46 kb-index-failed (error=no files)');
+    expect(how).toContain('MAIA IN BRIEF:\n# MAIA in brief');
+    expect(how).toContain('DOCUMENTATION THAT MAY ANSWER THIS QUESTION:');
+    expect(how.indexOf('=== HELP WITH MAIA ITSELF ===')).toBeLessThan(how.indexOf('=== END MAIA CONTEXT ==='));
+    const health = await buildEditionAdvisorContext(cloudant, doc, { question: 'What was my last A1c?' });
+    expect(health).toContain('THEIR MAIA\'S STATE:');
+    expect(health).not.toContain('DOCUMENTATION THAT MAY ANSWER THIS QUESTION:');
+  });
+
+  it('the question is the patient\'s last message, after any attached file\'s text', () => {
+    expect(latestQuestion([
+      { role: 'system', content: 'ctx' }, { role: 'user', content: 'first' }, { role: 'assistant', content: 'a' },
+      { role: 'user', content: 'File: lab.pdf (pdf)\nContent:\nHbA1c 7.1\n\nUser query: How do I add this to my records?' }
+    ])).toBe('How do I add this to my records?');
+    expect(latestQuestion([{ role: 'user', content: 'Plain question' }])).toBe('Plain question');
+    expect(latestQuestion(null)).toBe('');
   });
 });
 

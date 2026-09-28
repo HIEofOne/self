@@ -7,7 +7,7 @@ import { DigitalOceanProvider } from '../../lib/chat-client/providers/digitaloce
 import { getOrCreateAgentApiKey, recreateAgentApiKey } from '../utils/agent-helper.js';
 import { ensureUserAgent, ensureSecondaryAgent } from './auth.js';
 import { policySentence, READ_SCOPES, POLICY_PURPOSES } from './policies.js';
-import { buildPolicyAdvisorContext, buildEditionAdvisorContext, advisorContextKind } from '../advisor-context.js';
+import { buildPolicyAdvisorContext, buildEditionAdvisorContext, advisorContextKind, latestQuestion } from '../advisor-context.js';
 import { isVerified as emailTokenVerified } from '../emailVerification.js';
 import { chargeCredits, ADVISOR_QUESTION_CREDITS } from '../credits.js';
 import { isFeatureEnabled, getEdition } from '../edition.js';
@@ -315,8 +315,10 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient, app
         try {
           const advisorDoc = userDoc || await cloudant?.getDocument('maia_users', userId);
           if (advisorDoc) {
+            // The patient's latest question, so a question about MAIA itself
+            // gets the documentation for it.
             const content = advisorKind === 'edition'
-              ? await buildEditionAdvisorContext(cloudant, advisorDoc)
+              ? await buildEditionAdvisorContext(cloudant, advisorDoc, { question: latestQuestion(messages) })
               : await buildPolicyAdvisorContext(cloudant, advisorDoc);
             messages.unshift({ role: 'system', content });
           }
