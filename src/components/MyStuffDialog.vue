@@ -640,6 +640,63 @@
 
             <!-- Primary agent tab -->
             <template v-if="activeAgentProfile === 'default'">
+              <!-- Which model the primary private AI runs on -->
+              <div v-if="primaryModels.length" class="primary-model q-mb-lg">
+                <div class="row items-center q-gutter-sm">
+                  <div class="text-subtitle2">Model</div>
+                  <q-select
+                    v-model="primaryChoice" :options="primaryOptions" emit-value map-options dense outlined options-dense
+                    style="min-width: 300px" :disable="primarySwitch.status === 'switching'" aria-label="Model for your private AI"
+                  >
+                    <template #option="scope">
+                      <q-item v-bind="scope.itemProps">
+                        <q-item-section>
+                          <q-item-label>{{ scope.opt.label }}</q-item-label>
+                          <q-item-label caption>{{ scope.opt.caption }}</q-item-label>
+                        </q-item-section>
+                      </q-item>
+                    </template>
+                  </q-select>
+                  <q-btn unelevated no-caps color="primary" label="Switch"
+                         :disable="!primaryChoice || primaryChoice === primaryCurrent?.id || primarySwitch.status === 'switching'"
+                         @click="confirmPrimarySwitch = true" />
+                </div>
+                <div class="text-caption text-grey-7 q-mt-xs">
+                  Every model here runs on DigitalOcean's own servers; none sends your records to a public AI
+                  company. Prices are DigitalOcean's, per million tokens (input / output).
+                </div>
+                <div v-if="primarySwitch.status === 'switching'" class="primary-model__progress q-mt-sm">
+                  <q-spinner size="16px" color="primary" />
+                  Switching your private AI to {{ primarySwitch.toName }}: {{ primarySwitch.elapsed }}s.
+                  {{ primarySwitch.kbNote }} It can't answer until this is done, usually a few minutes.
+                </div>
+                <div v-else-if="primarySwitch.status === 'ready'" class="primary-model__done q-mt-sm">
+                  <div>{{ primarySwitch.readyNote }}</div>
+                  <div class="q-mt-xs">Update your Patient Summary with {{ primarySwitch.toName }}? You review the new draft before anything changes.</div>
+                  <div class="q-mt-sm">
+                    <q-btn unelevated no-caps color="primary" icon="refresh" label="Write a new draft" @click="primarySwitch.status = 'idle'; handleRequestNewSummary()" />
+                    <q-btn flat no-caps label="Not now" class="q-ml-sm" @click="primarySwitch.status = 'idle'" />
+                  </div>
+                </div>
+                <div v-else-if="primarySwitch.status === 'failed'" class="text-negative text-caption q-mt-sm">{{ primarySwitch.error }}</div>
+              </div>
+              <q-dialog v-model="confirmPrimarySwitch">
+                <q-card style="max-width: 480px">
+                  <q-card-section>
+                    <div class="text-h6">Switch your private AI to {{ primaryChoiceName }}?</div>
+                    <div class="text-body2 q-mt-sm">
+                      MAIA sets up a new private AI on {{ primaryChoiceName }} with the same instructions,
+                      connects it to the knowledge base your current one uses (if any), then removes the
+                      current one. It takes a few minutes, and your private AI can't answer until it's done.
+                      Your chats, your Patient Summary and your records don't change.
+                    </div>
+                  </q-card-section>
+                  <q-card-actions align="right">
+                    <q-btn flat no-caps label="Cancel" v-close-popup />
+                    <q-btn unelevated no-caps color="primary" :label="`Switch to ${primaryChoiceName}`" v-close-popup @click="startPrimarySwitch" />
+                  </q-card-actions>
+                </q-card>
+              </q-dialog>
               <div class="row items-center justify-between q-mb-md">
                 <div class="text-h6">Agent Instructions</div>
                 <q-btn
@@ -2798,6 +2855,97 @@ const instrTabLabel = (profileKey: string): string => {
   const short = label.replace(/^Private AI\s*/, '');
   return `Instructions for ${short}`;
 };
+
+// ── Primary agent: the model it runs on ───────────────────────────
+// The user may move their primary private AI to one of the most expensive
+// DO-hosted open models (/api/primary-models). The server sets up a new
+// agent with the same instructions and knowledge bases, and we poll until
+// it runs and is connected; then we offer a new Patient Summary draft.
+interface PrimaryModel { id: string; name: string; priceInPerM: number | null; priceOutPerM: number | null; contextWindow: number | null; imageInput: boolean; isDefault: boolean }
+const primaryModels = ref<PrimaryModel[]>([]);
+const primaryCurrent = ref<{ id: string | null; name: string | null } | null>(null);
+const primaryChoice = ref<string | null>(null);
+const confirmPrimarySwitch = ref(false);
+const primarySwitch = ref<{ status: 'idle' | 'switching' | 'ready' | 'failed'; toName: string; elapsed: number; kbNote: string; readyNote: string; error: string }>(
+  { status: 'idle', toName: '', elapsed: 0, kbNote: '', readyNote: '', error: '' });
+let primaryPoll: ReturnType<typeof setTimeout> | null = null;
+let primaryClock: ReturnType<typeof setInterval> | null = null;
+const PRIMARY_SWITCH_TIMEOUT_MS = 8 * 60 * 1000;
+const fmtPricePerM = (v: number | null) => (v == null ? '?' : `$${v < 1 ? v.toFixed(2) : v.toFixed(v % 1 ? 2 : 0)}`);
+const fmtContextShort = (n: number | null) => (!n ? '' : n >= 1_000_000 ? `${Math.round(n / 1_000_000)}M` : `${Math.round(n / 1000)}K`);
+const primaryOptions = computed(() => primaryModels.value.map((m) => ({
+  value: m.id,
+  label: `${m.name}${m.isDefault ? ' (default)' : ''}${m.id === primaryCurrent.value?.id ? ' · current' : ''}`,
+  caption: [`${fmtPricePerM(m.priceInPerM)} / ${fmtPricePerM(m.priceOutPerM)} per 1M tokens`, m.contextWindow ? `${fmtContextShort(m.contextWindow)} context` : '', m.imageInput ? 'reads images' : ''].filter(Boolean).join(' · ')
+})));
+const primaryChoiceName = computed(() => primaryModels.value.find((m) => m.id === primaryChoice.value)?.name || primaryChoice.value || '');
+const stopPrimaryTimers = () => {
+  if (primaryPoll) { clearTimeout(primaryPoll); primaryPoll = null; }
+  if (primaryClock) { clearInterval(primaryClock); primaryClock = null; }
+};
+const primaryCall = async (body: Record<string, unknown>) => {
+  const r = await fetch('/api/agents/primary-model', {
+    method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userId: props.userId, ...body })
+  });
+  const d = await r.json().catch(() => ({}));
+  return { ok: r.ok && d.success !== false, data: d as Record<string, any> };
+};
+const loadPrimaryModels = async () => {
+  if (!props.userId) return;
+  try {
+    const r = await fetch(`/api/primary-models?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
+    const d = await r.json();
+    if (!r.ok || !d.success) return;
+    primaryModels.value = d.models || [];
+    primaryCurrent.value = d.current || null;
+    if (!primaryChoice.value || primarySwitch.value.status !== 'switching') primaryChoice.value = d.current?.id || null;
+    if (d.switching && primarySwitch.value.status !== 'switching') followPrimarySwitch(d.switching.toName || d.switching.to, Date.now());
+  } catch { /* the chooser stays hidden */ }
+};
+const followPrimarySwitch = (toName: string, startedAt: number) => {
+  stopPrimaryTimers();
+  primarySwitch.value = { status: 'switching', toName, elapsed: 0, kbNote: '', readyNote: '', error: '' };
+  primaryClock = setInterval(() => { primarySwitch.value.elapsed = Math.round((Date.now() - startedAt) / 1000); }, 1000);
+  const poll = async () => {
+    const { ok, data } = await primaryCall({ checkOnly: true });
+    if (ok && data.ready) {
+      stopPrimaryTimers();
+      primarySwitch.value = {
+        ...primarySwitch.value, status: 'ready',
+        readyNote: `Your private AI now runs on ${toName}${data.knowledgeBases ? ', connected to your knowledge base as before' : ''}.`
+      };
+      emit('provisioning-event', { event: 'primary-switch-ready', model: data.model?.id || null, elapsedSeconds: primarySwitch.value.elapsed });
+      await loadPrimaryModels();
+      await loadAgent();
+      return;
+    }
+    if (ok && data.knowledgeBases) primarySwitch.value.kbNote = data.waitingForKnowledgeBase ? 'Connecting your knowledge base.' : 'Your knowledge base is connected.';
+    if (Date.now() - startedAt > PRIMARY_SWITCH_TIMEOUT_MS) {
+      stopPrimaryTimers();
+      primarySwitch.value = { ...primarySwitch.value, status: 'failed', error: 'This is taking longer than usual. The new private AI keeps starting in the background; check back here in a few minutes.' };
+      return;
+    }
+    primaryPoll = setTimeout(poll, 5000);
+  };
+  primaryPoll = setTimeout(poll, 3000);
+};
+const startPrimarySwitch = async () => {
+  const modelId = primaryChoice.value;
+  if (!modelId) return;
+  const toName = primaryChoiceName.value;
+  primarySwitch.value = { status: 'switching', toName, elapsed: 0, kbNote: '', readyNote: '', error: '' };
+  const { ok, data } = await primaryCall({ modelId });
+  if (!ok) {
+    primarySwitch.value = { ...primarySwitch.value, status: 'failed', error: data.message || 'The switch couldn’t start. Try again.' };
+    return;
+  }
+  emit('provisioning-event', { event: 'primary-switch-requested', model: modelId });
+  if (data.status === 'unchanged') { primarySwitch.value.status = 'idle'; return; }
+  followPrimarySwitch(toName, Date.now());
+};
+watch([currentTab, isOpen], ([t, open]) => { if (open && t === 'agent') void loadPrimaryModels(); }, { immediate: true });
+onUnmounted(stopPrimaryTimers);
 
 // ── Secondary agent: user-chosen model ────────────────────────────
 // The secondary Private AI is never created automatically. The user picks
@@ -8610,6 +8758,8 @@ onUnmounted(() => {
 </script>
 
 <style scoped lang="scss">
+.primary-model__progress { display: flex; align-items: center; gap: 6px; font-size: 0.85rem; color: #455a64; }
+.primary-model__done { background: #e8f5e9; border: 1px solid #a5d6a7; border-radius: 6px; padding: 10px 12px; font-size: 0.9rem; }
 .q-item {
   cursor: default;
 }

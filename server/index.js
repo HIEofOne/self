@@ -14227,8 +14227,10 @@ app.get('/api/secondary-models', async (req, res) => {
     const userId = resolveUserId(req, res);
     if (!userId) return;
     const { listSecondaryModels, DEFAULT_SECONDARY_MODEL_ID } = await import('./utils/secondary-models.js');
-    const models = await listSecondaryModels(doClient);
     const doc = await cloudant.getDocument('maia_users', userId);
+    // Not the model behind their primary private AI.
+    const primaryModel = doc?.agentProfiles?.default?.modelId || doc?.agentModelName || null;
+    const models = (await listSecondaryModels(doClient)).filter((m) => m.id !== primaryModel);
     const prof = doc?.agentProfiles?.gpt || null;
     res.json({
       success: true,
@@ -14241,6 +14243,79 @@ app.get('/api/secondary-models', async (req, res) => {
   } catch (error) {
     console.error('[secondary-models] catalog lookup failed:', error?.message || error);
     res.status(502).json({ success: false, error: 'CATALOG_UNAVAILABLE', message: 'Could not load the model list from DigitalOcean.' });
+  }
+});
+
+// Models the user may choose for the PRIMARY Private AI (utils/primary-models.js):
+// the four most expensive DO-hosted open models and the default. The model
+// behind their second private AI isn't offered.
+app.get('/api/primary-models', async (req, res) => {
+  try {
+    const userId = resolveUserId(req, res);
+    if (!userId) return;
+    const { listPrimaryModels, DEFAULT_PRIMARY_MODEL_ID } = await import('./utils/primary-models.js');
+    const doc = await cloudant.getDocument('maia_users', userId);
+    const secondaryModel = doc?.agentProfiles?.gpt?.agentId ? (doc.agentProfiles.gpt.modelId || doc.agentProfiles.gpt.modelName) : null;
+    const models = (await listPrimaryModels(doClient)).filter((m) => m.id !== secondaryModel);
+    const def = doc?.agentProfiles?.default || {};
+    res.json({
+      success: true,
+      models,
+      defaultId: DEFAULT_PRIMARY_MODEL_ID,
+      current: doc?.assignedAgentId ? { id: def.modelId || doc.agentModelName || null, name: def.modelDisplayName || null } : null,
+      switching: doc?.pendingPrimarySwitch ? { to: doc.pendingPrimarySwitch.to, toName: doc.pendingPrimarySwitch.toName } : null
+    });
+  } catch (error) {
+    console.error('[primary-models] catalog lookup failed:', error?.message || error);
+    res.status(502).json({ success: false, error: 'CATALOG_UNAVAILABLE', message: 'Could not load the model list from DigitalOcean.' });
+  }
+});
+
+// Switch the PRIMARY Private AI to a chosen model (auth.js switchPrimaryAgent),
+// or, with `checkOnly`, report on the switch: `ready` once the new agent runs,
+// its address is saved, and the knowledge bases the old agent had are
+// attached again. Only a signed-in session may switch.
+app.post('/api/agents/primary-model', async (req, res) => {
+  try {
+    const userId = resolveUserId(req, res);
+    if (!userId) return;
+    let userDoc = await cloudant.getDocument('maia_users', userId);
+    if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+    const requested = typeof req.body?.modelId === 'string' ? req.body.modelId.trim() : '';
+
+    if (!req.body?.checkOnly && requested) {
+      if (!req.session?.userId) return res.status(401).json({ success: false, error: 'NOT_AUTHENTICATED' });
+      const { resolvePrimaryModel } = await import('./utils/primary-models.js');
+      const model = await resolvePrimaryModel(doClient, requested);
+      if (!model) return res.status(400).json({ success: false, error: 'MODEL_NOT_ALLOWED', message: 'That model is not available as your private AI.' });
+      const { switchPrimaryAgent } = await import('./routes/auth.js');
+      try {
+        const r = await switchPrimaryAgent(doClient, cloudant, userDoc, model);
+        if (!r.switched) return res.json({ success: true, ready: true, status: 'unchanged', model: { id: model.id, name: model.name } });
+        invalidateResourceCache(userId);
+        await appendUserProvisioningEvent(userId, {
+          event: 'primary-agent-switch-started', from: r.from, to: model.id, knowledgeBases: r.kbIds.length, reattached: r.attached.length
+        }).catch(() => {});
+        console.log(`[primary-switch] ${userId}: ${r.from} → ${model.id}, ${r.attached.length}/${r.kbIds.length} knowledge base(s) attached`);
+        return res.json({ success: true, ready: false, status: 'switching', model: { id: model.id, name: model.name } });
+      } catch (e) {
+        console.error(`[primary-switch] failed for ${userId}:`, e?.message || e);
+        const code = e?.code || 'SWITCH_FAILED';
+        return res.status(code === 'SWITCH_IN_PROGRESS' ? 409 : 502).json({ success: false, error: code, message: e?.message || 'Could not switch the private AI' });
+      }
+    }
+
+    // Poll: is the new agent running, with its address and its knowledge bases?
+    const { checkPrimarySwitch } = await import('./routes/auth.js');
+    const st = await checkPrimarySwitch(doClient, cloudant, userDoc, {
+      ensureAgentRetrieval,
+      logEvent: (evt) => appendUserProvisioningEvent(userId, evt)
+    });
+    if (st.ready) invalidateResourceCache(userId);
+    res.json({ success: true, ...st });
+  } catch (error) {
+    console.error('[primary-model] failed:', error?.message || error);
+    res.status(500).json({ success: false, error: 'PRIMARY_MODEL_FAILED', message: error?.message || 'failed' });
   }
 });
 

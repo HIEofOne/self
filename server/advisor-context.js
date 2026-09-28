@@ -322,7 +322,7 @@ export function helpSectionLines(question, { rootDir = REPO_ROOT, max = 3, chars
 export const MAIA_SCREENS = [
   'Workbook (the left sidebar; Sign out is at its bottom). Its tabs:',
   '  - Saved Files: the record files in MAIA, and whether each is in the search index; shows indexing progress.',
-  '  - AI Agents: their private AI and its instructions; a second private AI (a More features option).',
+  '  - AI Agents: their private AI: the Model dropdown (switch it to another DigitalOcean-hosted model; the knowledge base stays connected, then MAIA offers a new Patient Summary draft) and its instructions; a second private AI (a More features option).',
   '  - Saved Chats: appears once they save a chat.',
   '  - Patient Summary: write it ("Use my Apple Health export", or "Answer a few questions instead" → "Write my summary"), review and Verify it with its medications; "Request New Summary"; the privacy-filtered copy.',
   '  - Groups: their groups, invitations and join links.',
