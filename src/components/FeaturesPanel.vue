@@ -6,6 +6,15 @@
       turning one off hides it again without deleting anything. Your private
       AI may suggest one when it would help with what you're doing.
     </div>
+    <!-- Member messages on a phone or in Safari (the folder key travels with the passkey) -->
+    <div class="fp__item">
+      <div class="text-body2 text-weight-medium">Your MAIA on your phone and in Safari</div>
+      <div class="text-caption text-grey-8 q-mb-xs">
+        Sign in there with your passkey to read messages, answer requests and chat with your private AI.
+        Your MAIA folder stays on your computer, and catches up there.
+      </div>
+      <PhoneAccess :user-id="userId" />
+    </div>
     <div v-if="!features.length" class="text-caption text-grey-7">Nothing more to turn on here.</div>
     <div v-for="f in features" :key="f.key" class="fp__item" :class="{ 'fp__item--on': f.enabled }">
       <div class="row items-start no-wrap">
@@ -43,6 +52,7 @@
  */
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { useEdition } from '../composables/useEdition';
+import PhoneAccess from './PhoneAccess.vue';
 import { setFeature } from '../utils/advisorProposals';
 import { recordsIndexProgress, startRecordsIndexing, uploadWords, progressWords, INDEX_WORDS, type IndexState } from '../utils/recordsSearch';
 

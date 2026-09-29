@@ -24,26 +24,8 @@
              A patient's MAIA keeps their records in a folder, which needs
              Chrome (or another Chromium browser) on a computer. Checked by
              capability, not user agent. No "continue anyway". -->
-        <div v-if="editionChromeGate" class="flex flex-center" style="height: 100vh">
-          <q-card style="max-width: 520px" class="q-pa-md">
-            <q-card-section>
-              <div class="text-h6 q-mb-sm">Open this page in Chrome on a computer</div>
-              <div class="text-body2 q-mb-md">
-                MAIA keeps your own copy of your health records in a folder on
-                your computer. Only Chrome (or Microsoft Edge) on a computer can
-                do that, so MAIA can't start in this browser.
-              </div>
-              <div class="text-caption text-grey-8 q-mb-xs">Copy this link and open it in Chrome:</div>
-              <div class="row items-center q-gutter-sm">
-                <div class="text-caption" style="flex: 1 1 auto; min-width: 0; word-break: break-all;">{{ pageLink }}</div>
-                <q-btn flat dense size="sm" icon="content_copy" label="Copy" style="flex: 0 0 auto;" @click="copyPageLink" />
-              </div>
-            </q-card-section>
-          </q-card>
-        </div>
-
         <!-- Not authenticated - show auth dialog -->
-        <div v-else-if="!authenticated" class="flex flex-center" style="height: 100vh">
+        <div v-if="!authenticated" class="flex flex-center" style="height: 100vh">
           <template v-if="deepLinkShareId">
             <q-card style="min-width: 420px; max-width: 520px">
               <q-card-section>
@@ -165,7 +147,8 @@
                 </div>
 
                 <!-- Account status cards derived from IndexedDB + .webloc -->
-                <div v-if="discoveredUsers.length > 0" class="q-mb-md">
+                <!-- MAIAs found in this browser's folders (not on a phone or in Safari: no folder) -->
+                <div v-if="discoveredUsers.length > 0 && !companionWelcome" class="q-mb-md">
                   <div
                     v-for="du in discoveredUsers"
                     :key="du.userId"
@@ -241,8 +224,8 @@
                     <q-btn flat dense size="sm" color="grey-6" icon="person_add" :label="isPersonalAs ? 'Start another MAIA on this computer' : 'Add family member'" @click="handleAddFamilyMember" />
                   </div>
                 </div>
-                <!-- No discovered users: passkey link -->
-                <div v-else class="text-center q-mb-md">
+                <!-- No discovered users: passkey link (a phone or Safari has its own card below) -->
+                <div v-else-if="!companionWelcome" class="text-center q-mb-md">
                   <p class="q-ma-none text-body2" style="color: #1a1a1a">
                     Start a new account or
                     <a
@@ -310,7 +293,23 @@
                   <!-- Personal AS edition: only what this configuration needs,
                        each with an (i) explanation. The setup checklist (P2)
                        adds the passkey and the folder after GET STARTED. -->
-                  <div v-if="isPersonalAs" class="edition-start">
+                  <!-- A phone, or Safari: no MAIA folder here, so no new MAIA; an
+                       existing one opens with its passkey (companion mode). -->
+                  <div v-if="companionWelcome" class="edition-start">
+                    <div class="text-subtitle1 text-weight-medium q-mb-xs">Open your MAIA</div>
+                    <div class="text-body2 q-mb-md">
+                      On a phone or in Safari you can read your messages, answer requests, chat with
+                      your private AI and review your Patient Summary. Your MAIA folder stays on your
+                      computer, and catches up there.
+                    </div>
+                    <PasskeyAuth sign-in-only @authenticated="handleAuthenticated" />
+                    <div class="text-caption text-grey-7 q-mt-md">
+                      To start a new MAIA, open this page in Chrome on a computer:
+                      <span style="word-break: break-all;">{{ pageLink }}</span>
+                      <q-btn flat dense size="sm" icon="content_copy" label="Copy" @click="copyPageLink" />
+                    </div>
+                  </div>
+                  <div v-else-if="isPersonalAs" class="edition-start">
                     <template v-if="!discoveredUsers.length || addingFamilyMember">
                     <div v-if="addingFamilyMember" class="text-body2 text-weight-medium q-mb-sm">A new MAIA</div>
                     <div class="edition-start__row">
@@ -1175,6 +1174,7 @@ import {
 } from './utils/localFolder';
 import { ensureFolderKey, forgetFolderKey, FOLDER_KEY_FILE } from './utils/folderKey';
 import { uploadFolderRecords, recordsIndexProgress } from './utils/recordsSearch';
+import { syncFolderKeyWithPasskey } from './utils/passkeyFolderKey';
 import { rememberActivityToken, forgetActivityToken, fetchActivity, activitySummary, readSeenMessages } from './utils/welcomeActivity';
 import { LOG_DIR } from './utils/requestLog';
 import packageJson from '../package.json';
@@ -1491,9 +1491,11 @@ void loadEdition();
 // flashes the other's page. If the request fails, the full welcome shows.
 const editionReady = computed(() => editionState.loaded || !!editionState.error);
 watch(() => user.value?.userId, () => { void loadEdition(true); });
-// Shared-chat guests (clinicians) and admin pages don't need a folder.
-// A group-only host keeps no records, so its visitors need no folder: no gate.
-const editionChromeGate = computed(() =>
+// A browser without folder access (a phone, or Safari) opens an existing
+// MAIA with its passkey, in companion mode: everything the server keeps
+// works; what lives in the folder waits for the computer. A new MAIA still
+// starts in Chrome on a computer, where its records folder is.
+const companionWelcome = computed(() =>
   isPersonalAs.value && !isGroupOnlyHost.value && !isChromeCapable && !deepLinkShareId.value && !isDeepLinkUser.value
   && !showAdminPage.value && window.location.pathname !== '/admin');
 const pageLink = window.location.href;
@@ -3037,6 +3039,7 @@ const checklistChooseFolder = async () => {
     });
     // The folder key (§7): documents others add are sealed to it.
     await ensureFolderKey(uid).catch(() => null);
+    void syncFolderKeyWithPasskey(uid);
     // The folder's records go to MAIA now (its Apple Health export marked
     // as such, for the Patient Summary). Saved Files then shows them, and
     // offers to index them now or later.

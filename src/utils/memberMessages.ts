@@ -23,7 +23,7 @@ export interface MemberMessage {
   [k: string]: unknown;
 }
 
-export const LOCKED_TEXT = '🔒 Locked message. It opens only in MAIA on a computer with your MAIA folder.';
+export const LOCKED_TEXT = '🔒 Locked message. It opens in MAIA on your computer, or here once you unlock it with your passkey.';
 
 const opened = new Map<string, { text: string; broadcast: boolean }>();
 

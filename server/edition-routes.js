@@ -72,6 +72,8 @@ export const ROUTE_FEATURES = Object.freeze({
   'POST /api/passkey/registration-complete': 'account',
   'POST /api/passkey/authenticate': 'account',
   'POST /api/passkey/authenticate-verify': 'account',
+  'POST /api/passkey/discover': 'account',
+  'POST /api/passkey/discover-verify': 'account',
   'GET /api/temporary/suggested-id': 'account',
   'POST /api/temporary/start': 'account',
   'POST /api/temporary/restore': 'account',
@@ -100,6 +102,7 @@ export const ROUTE_FEATURES = Object.freeze({
   'GET /api/welcome-activity': 'account',
   'GET /api/setup-status': 'account',
   'POST /api/setup/folder-connected': 'account',
+  'POST /api/setup/folder-catch-up': 'account',
 
   // ── notifications ─────────────────────────────────────────────────────
   'GET /api/user/notification-email': 'notifications',
@@ -232,6 +235,8 @@ export const ROUTE_FEATURES = Object.freeze({
   // P9: documents others add — the folder key and the sealed holds (routes/received.js)
   'GET /api/folder-key': 'documents-in',
   'POST /api/folder-key': 'documents-in',
+  'GET /api/folder-key/wrapped': 'documents-in',
+  'PUT /api/folder-key/wrapped': 'documents-in',
   'GET /api/received': 'documents-in',
   'GET /api/received/:id/box': 'documents-in',
   'POST /api/received/:id/delivered': 'documents-in',

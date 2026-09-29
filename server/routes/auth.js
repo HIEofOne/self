@@ -31,6 +31,22 @@ function buildAgentName(userId, suffix = '') {
   return `${userId}-agent-${suffix ? suffix + '-' : ''}${timestamp}`;
 }
 
+/**
+ * The account a discoverable passkey names. Its user handle is
+ * `<userId>@<host>` (host-qualified since #302); an older bare handle names
+ * the account itself. A handle for another host is not this host's.
+ * → the userId, or null.
+ */
+export function accountFromUserHandle(userHandleB64u, host) {
+  if (typeof userHandleB64u !== 'string' || !userHandleB64u) return null;
+  let handle;
+  try { handle = Buffer.from(userHandleB64u, 'base64url').toString('utf8'); } catch { return null; }
+  const at = handle.lastIndexOf('@');
+  const id = at === -1 ? handle : handle.slice(0, at);
+  if (at !== -1 && handle.slice(at + 1) !== host) return null;
+  return /^[a-z0-9-]{3,20}$/.test(id) ? id : null;
+}
+
 export const PROFILE_DEFAULT = 'default';
 export const PROFILE_GPT = 'gpt';
 
@@ -1090,6 +1106,46 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
     }
   });
 
+  /** A verified passkey assertion: save the counter, start the session. */
+  const finishPasskeySignIn = async (req, res, userId, result, clientInfo) => {
+    // Save the new counter on a fresh copy (see register-verify).
+    const newCounter = result.userDoc?.counter;
+    const updatedUser = await saveUserDocWithRetry(cloudant, userId, (doc) => {
+      if (newCounter !== undefined) doc.counter = newCounter;
+      delete doc.challenge;
+      doc.updatedAt = new Date().toISOString();
+    });
+    const agentReadyUser = await ensureUserAgent(doClient, cloudant, updatedUser);
+
+    req.session.userId = agentReadyUser.userId;
+    req.session.username = agentReadyUser.userId;
+    req.session.displayName = agentReadyUser.displayName;
+    req.session.isTemporary = !!agentReadyUser.temporaryAccount;
+    req.session.authenticatedAt = new Date().toISOString();
+    req.session.expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
+    await auditLog.logEvent({
+      type: 'login_success',
+      userId: agentReadyUser.userId,
+      ip: clientInfo.ip,
+      userAgent: clientInfo.userAgent
+    });
+
+    // Clear temp cookie — passkey users no longer need it
+    res.clearCookie(TEMP_USER_COOKIE);
+
+    const isAdminUser = agentReadyUser.userId?.toLowerCase() === (process.env.ADMIN_USERNAME || 'admin').trim()?.toLowerCase();
+    res.json({
+      success: true,
+      user: {
+        userId: agentReadyUser.userId,
+        displayName: agentReadyUser.displayName,
+        isTemporary: !!agentReadyUser.temporaryAccount,
+        isAdmin: isAdminUser
+      }
+    });
+  };
+
   // Passkey authentication - generate options
   app.post('/api/passkey/authenticate', async (req, res) => {
     try {
@@ -1166,48 +1222,68 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
         return res.status(400).json({ error: 'Authentication verification failed' });
       }
 
-      // Update counter
-      // Save the new counter on a fresh copy (see register-verify).
-      const newCounter = result.userDoc?.counter;
-      const updatedUser = await saveUserDocWithRetry(cloudant, userId, (doc) => {
-        if (newCounter !== undefined) doc.counter = newCounter;
-        delete doc.challenge;
-        doc.updatedAt = new Date().toISOString();
-      });
-      const agentReadyUser = await ensureUserAgent(doClient, cloudant, updatedUser);
-
-      // Set session
-      req.session.userId = agentReadyUser.userId;
-      req.session.username = agentReadyUser.userId;
-      req.session.displayName = agentReadyUser.displayName;
-      req.session.isTemporary = !!agentReadyUser.temporaryAccount;
-      req.session.authenticatedAt = new Date().toISOString();
-      req.session.expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-
-      // Log successful login
-      await auditLog.logEvent({
-        type: 'login_success',
-        userId: agentReadyUser.userId,
-        ip: clientInfo.ip,
-        userAgent: clientInfo.userAgent
-      });
-
-      // Clear temp cookie — passkey users no longer need it
-      res.clearCookie(TEMP_USER_COOKIE);
-
-      const isAdminUser = agentReadyUser.userId?.toLowerCase() === (process.env.ADMIN_USERNAME || 'admin').trim()?.toLowerCase();
-      res.json({
-        success: true,
-        user: {
-          userId: agentReadyUser.userId,
-          displayName: agentReadyUser.displayName,
-          isTemporary: !!agentReadyUser.temporaryAccount,
-          isAdmin: isAdminUser
-        }
-      });
+      await finishPasskeySignIn(req, res, userId, result, clientInfo);
     } catch (error) {
       console.error('Authentication verify error:', error);
       res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Passkey sign-in without the MAIA ID (a phone, or Safari, that has never
+  // seen this MAIA): the browser offers the passkeys it has for this site,
+  // and the chosen passkey's user handle, `<userId>@<host>`, names the
+  // account. The challenge waits in the session, used once.
+  app.post('/api/passkey/discover', async (req, res) => {
+    try {
+      const options = await passkeyService.generateDiscoverableOptions();
+      req.session.passkeyDiscover = { challenge: options.challenge, at: Date.now() };
+      res.json(options);
+    } catch (error) {
+      console.error('Discoverable options error:', error);
+      res.status(500).json({ error: 'Could not start passkey sign-in' });
+    }
+  });
+
+  app.post('/api/passkey/discover-verify', async (req, res) => {
+    try {
+      const { response } = req.body || {};
+      const pending = req.session?.passkeyDiscover;
+      if (req.session) delete req.session.passkeyDiscover;
+      if (!response?.id || !pending?.challenge || Date.now() - pending.at > 5 * 60 * 1000) {
+        return res.status(400).json({ error: 'Start the passkey sign-in again' });
+      }
+      let expectedOrigin = null;
+      try {
+        expectedOrigin = passkeyService.resolveExpectedOrigin(req.get('origin'));
+      } catch {
+        return res.status(403).json({ error: 'Origin not allowed' });
+      }
+      // The account: from the user handle, or (an older passkey) by its id.
+      // A handle for another host is that host's passkey.
+      const host = passkeyService.hostname();
+      const handle = (() => { try { return Buffer.from(String(response.response?.userHandle || ''), 'base64url').toString('utf8'); } catch { return ''; } })();
+      if (handle.includes('@') && !handle.endsWith(`@${host}`)) {
+        return res.status(404).json({ error: `This passkey is for ${handle.slice(handle.lastIndexOf('@') + 1)}, not ${host}` });
+      }
+      let userId = accountFromUserHandle(response.response?.userHandle, host);
+      if (!userId && cloudant.findDocuments) {
+        const found = await cloudant.findDocuments('maia_users', { selector: { credentialID: { $eq: response.id } }, limit: 1 }).catch(() => null);
+        userId = found?.docs?.[0]?.userId || null;
+      }
+      const userDoc = userId ? await cloudant.getDocument('maia_users', userId) : null;
+      if (!userDoc || !userDoc.credentialID || userDoc.credentialID !== response.id) {
+        return res.status(404).json({ error: 'This passkey doesn’t open a MAIA on this site' });
+      }
+      const clientInfo = getClientInfo(req);
+      const result = await passkeyService.verifyAuthentication({ response, expectedChallenge: pending.challenge, userDoc, expectedOrigin });
+      if (!result.verified) {
+        await auditLog.logEvent({ type: 'login_failure', userId, ip: clientInfo.ip, userAgent: clientInfo.userAgent, details: 'Passkey verification failed (discoverable)' });
+        return res.status(400).json({ error: 'Authentication verification failed' });
+      }
+      await finishPasskeySignIn(req, res, userId, result, clientInfo);
+    } catch (error) {
+      console.error('Discoverable sign-in error:', error);
+      res.status(500).json({ error: 'Passkey sign-in failed' });
     }
   });
 

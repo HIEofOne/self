@@ -2223,6 +2223,8 @@ import SecondaryModelChooser from './SecondaryModelChooser.vue';
 import PatientInterview from './PatientInterview.vue';
 import { useQuasar } from 'quasar';
 import { useFolderPdfs } from '../composables/useFolderPdfs';
+import { syncFolderKeyWithPasskey } from '../utils/passkeyFolderKey';
+import { catchUpFolder } from '../utils/folderCatchUp';
 import { deleteChatById } from '../utils/chatApi';
 import { processFileNCitations } from '../utils/fileNCitations';
 import { applyPseudonymsClient } from '../utils/pseudonyms';
@@ -2647,8 +2649,12 @@ watch([isPersonalAs, () => props.userId], ([pas, uid]) => {
   logSyncedFor.add(uid);
   void (async () => {
     await ensureFolderKey(uid).catch(() => null);
+    // The folder key goes with the passkey too, when this page's sign-in gave its secret.
+    await syncFolderKeyWithPasskey(uid).catch(() => null);
     await deliverReceived(uid).catch(() => null);
     await syncRequestLog(uid);
+    // What was changed on a phone or in Safari reaches the folder's PDFs.
+    await catchUpFolder(uid);
   })().catch(() => { /* next time */ });
 }, { immediate: true });
 // P7d: in Personal AS the medicines are reviewed inside the Patient Summary,

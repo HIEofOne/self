@@ -1,12 +1,19 @@
 /**
  * The patient's side of documents others add (group_requests.md §7, §10.12):
  * the folder key, and the sealed holds the browser opens and writes to the
- * folder. The server holds only the public half of the folder key; the
- * private half lives in the folder (maia-folder-key.json) and the browser.
+ * folder. The server holds the public half of the folder key; the private
+ * half lives in the folder (maia-folder-key.json) and the browser. The
+ * server may also keep a copy of the private half encrypted with a secret
+ * only the patient's passkey produces (WebAuthn PRF), so a phone or Safari,
+ * where there is no folder, can open member messages: the server can't
+ * decrypt that copy.
  *
  *   GET  /api/folder-key                the public half the server seals to
  *   POST /api/folder-key                { publicJwk } — set it (setup step 3,
  *                                       or a folder connected in a new browser)
+ *   GET  /api/folder-key/wrapped        the passkey-encrypted copy, if any
+ *   PUT  /api/folder-key/wrapped        { credentialId, x, iv, ct } — keep one,
+ *                                       for this account's passkey and folder key
  *   GET  /api/received                  accepted documents not yet in the folder
  *   GET  /api/received/:id/box          one sealed box (a held one, for a preview)
  *   POST /api/received/:id/delivered    { fileName } — it is in Received/; delete the hold
@@ -26,6 +33,14 @@ const ANSWER_LABELS = {
 };
 
 const USERS_DB = 'maia_users';
+
+/** The passkey copy of the folder key, when it is for the account's current
+ *  passkey and current folder key (else it's stale, and null). */
+export const wrappedFor = (u) => {
+  const w = u?.folderKeyWrapped;
+  if (!w || w.v !== 1 || !u.credentialID || w.credentialId !== u.credentialID || w.x !== u.folderKeyJwk?.x) return null;
+  return { v: 1, credentialId: w.credentialId, x: w.x, iv: w.iv, ct: w.ct, at: w.at || null };
+};
 const AS_REQUESTS_DB = 'maia_as_requests';
 const MAX_FILE_NAME = 160;
 
@@ -84,6 +99,8 @@ export default function setupReceivedRoutes(app, { cloudant, holds, auditLog = {
         const at = new Date(now()).toISOString();
         u.folderKeyJwk = { kty: 'OKP', crv: 'X25519', x: jwk.x };
         u.folderKeyCreatedAt = at;
+        // The passkey copy was of the old key.
+        delete u.folderKeyWrapped;
         u.updatedAt = at;
         try {
           await cloudant.saveDocument(USERS_DB, u);
@@ -93,6 +110,55 @@ export default function setupReceivedRoutes(app, { cloudant, holds, auditLog = {
         }
         log('folder_key_set', userId, { replaced });
         return res.json({ success: true, replaced });
+      }
+      return res.status(409).json({ success: false, error: 'CONFLICT' });
+    } catch {
+      res.status(500).json({ success: false, error: 'FOLDER_KEY_FAILED' });
+    }
+  });
+
+  // The folder key's private half, encrypted in the browser with a key
+  // derived from the passkey's PRF secret. Opaque here: only the passkey
+  // (on any device it syncs to) can open it.
+  app.get('/api/folder-key/wrapped', async (req, res) => {
+    const userId = sessionUser(req, res);
+    if (!userId) return;
+    try {
+      const u = await cloudant.getDocument(USERS_DB, userId);
+      if (!u) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+      res.set('Cache-Control', 'no-store');
+      res.json({ success: true, wrapped: wrappedFor(u), credentialId: u.credentialID || null });
+    } catch {
+      res.status(500).json({ success: false, error: 'FOLDER_KEY_FAILED' });
+    }
+  });
+
+  app.put('/api/folder-key/wrapped', async (req, res) => {
+    const userId = sessionUser(req, res);
+    if (!userId) return;
+    const { credentialId, x, iv, ct } = req.body || {};
+    const b64u = (v, max) => typeof v === 'string' && v.length > 0 && v.length <= max && /^[A-Za-z0-9_-]+$/.test(v);
+    if (!b64u(credentialId, 1400) || !b64u(x, 64) || !b64u(iv, 32) || !b64u(ct, 600)) {
+      return res.status(400).json({ success: false, error: 'INVALID_WRAPPED_KEY' });
+    }
+    try {
+      for (let attempt = 0; attempt < 4; attempt++) {
+        const u = await cloudant.getDocument(USERS_DB, userId);
+        if (!u) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+        // Only for this account's own passkey and its current folder key.
+        if (credentialId !== u.credentialID) return res.status(409).json({ success: false, error: 'NOT_THIS_PASSKEY' });
+        if (x !== u.folderKeyJwk?.x) return res.status(409).json({ success: false, error: 'NOT_THIS_FOLDER_KEY' });
+        const at = new Date(now()).toISOString();
+        u.folderKeyWrapped = { v: 1, credentialId, x, iv, ct, at };
+        u.updatedAt = at;
+        try {
+          await cloudant.saveDocument(USERS_DB, u);
+        } catch (e) {
+          if (e?.statusCode === 409 && attempt < 3) continue;
+          throw e;
+        }
+        log('folder_key_wrapped', userId, {});
+        return res.json({ success: true });
       }
       return res.status(409).json({ success: false, error: 'CONFLICT' });
     } catch {

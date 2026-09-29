@@ -13,6 +13,7 @@
 import { combinedSummaryReview, getEdition } from '../edition.js';
 import { asStateOf } from './policies.js';
 import { joinLinkFor } from './groups.js';
+import { wrappedFor } from './received.js';
 import { requestedUserId } from '../utils/api-guard.js';
 
 const USERS_DB = 'maia_users';
@@ -77,7 +78,14 @@ export const deriveSetupStatus = (doc, { joinableGroup = null, inviteOnlyGroup =
     edition: getEdition(),
     steps,
     requiredDone: steps.every((s) => !s.required || s.done),
-    agent: agentState(doc)
+    agent: agentState(doc),
+    // The folder key travels with the passkey (routes/received.js), so a
+    // phone or Safari can open member messages.
+    folderKeyOnPasskey: !!wrappedFor(doc),
+    hasFolderKey: !!doc?.folderKeyJwk?.x,
+    // Changed on a phone or in Safari (no folder): the folder's PDFs to
+    // rewrite on the computer, { summary?: iso, rules?: iso }.
+    folderCatchUp: doc?.folderCatchUp && typeof doc.folderCatchUp === 'object' ? { ...doc.folderCatchUp } : {}
   };
 };
 
@@ -143,6 +151,35 @@ export default function setupSetupRoutes(app, cloudant) {
       return res.status(409).json({ success: false, error: 'CONFLICT' });
     } catch (e) {
       console.error('[setup] folder-connected failed:', e?.message || e);
+      res.status(500).json({ success: false, error: 'SAVE_FAILED' });
+    }
+  });
+
+  // POST /api/setup/folder-catch-up { what: 'summary'|'rules', done? } — a
+  // browser without the folder changed what the folder's PDFs show; the
+  // computer rewrites them and clears the note.
+  app.post('/api/setup/folder-catch-up', async (req, res) => {
+    const what = req.body?.what;
+    if (what !== 'summary' && what !== 'rules') return res.status(400).json({ success: false, error: 'WHAT_REQUIRED' });
+    try {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const doc = await loadUser(req, res);
+        if (!doc) return;
+        const notes = doc.folderCatchUp && typeof doc.folderCatchUp === 'object' ? { ...doc.folderCatchUp } : {};
+        if (req.body?.done === true) delete notes[what];
+        else notes[what] = new Date().toISOString();
+        if (Object.keys(notes).length) doc.folderCatchUp = notes; else delete doc.folderCatchUp;
+        try {
+          await cloudant.saveDocument(USERS_DB, doc);
+        } catch (e) {
+          if (e?.statusCode === 409 && attempt < 2) continue;
+          throw e;
+        }
+        return res.json({ success: true, folderCatchUp: notes });
+      }
+      return res.status(409).json({ success: false, error: 'CONFLICT' });
+    } catch (e) {
+      console.error('[setup] folder-catch-up failed:', e?.message || e);
       res.status(500).json({ success: false, error: 'SAVE_FAILED' });
     }
   });

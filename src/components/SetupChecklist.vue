@@ -44,6 +44,9 @@
                   @click="emit('add-passkey')"
                 />
                 <!-- 3. Folder -->
+                <div v-else-if="row.key === 'folder' && !folderCapable" class="q-mt-xs text-caption text-grey-8">
+                  Choose it in Chrome on your computer: that's where MAIA keeps your records.
+                </div>
                 <div v-else-if="row.key === 'folder'" class="q-mt-xs">
                   <q-btn outline dense no-caps color="primary" label="Choose folder" :loading="folderBusy" @click="emit('choose-folder')" />
                   <div v-if="folderProgress" class="text-caption text-grey-8 q-mt-xs">{{ folderProgress }}</div>
@@ -108,6 +111,12 @@
           <q-icon v-else :name="indexing?.state === 'error' ? 'error_outline' : 'manage_search'" size="16px" class="q-mr-sm" />
           <span>{{ indexLine }}</span>
         </div>
+        <!-- Messages on a phone or in Safari: the folder key travels with the passkey -->
+        <PhoneAccess :user-id="userId" :status="keyStatus" class="q-mt-xs" @changed="refresh" />
+        <div v-if="!folderCapable" class="row items-center no-wrap text-caption text-grey-7 q-mt-xs">
+          <q-icon name="phone_iphone" size="16px" class="q-mr-sm" />
+          <span>This device works without your MAIA folder. The files MAIA keeps there are updated on your computer.</span>
+        </div>
       </q-card-section>
 
       <q-card-actions align="between" class="q-px-md q-pb-md">
@@ -130,6 +139,8 @@ import EmailVerifyBox from './EmailVerifyBox.vue';
 import { useSetupChecklist, type SetupStepKey } from '../composables/useSetupChecklist';
 import { useVerifiedEmail } from '../composables/verifiedEmail';
 import { recordsIndexProgress, elapsedWords, estimateWords, INDEX_WORDS, type IndexProgress } from '../utils/recordsSearch';
+import { isFileSystemAccessSupported } from '../utils/localFolder';
+import PhoneAccess from './PhoneAccess.vue';
 
 /**
  * Personal AS setup checklist (Documentation/group_requests.md §5).
@@ -255,6 +266,12 @@ const indexLine = computed(() => {
   if (p.state === 'error') return INDEX_WORDS.error;
   return '';
 });
+
+// A phone or Safari: no folder here (the folder row says where to choose it).
+const folderCapable = isFileSystemAccessSupported();
+const keyStatus = computed(() => (status.value ? {
+  passkey: !!step('passkey')?.done, hasFolderKey: !!status.value.hasFolderKey, folderKeyOnPasskey: !!status.value.folderKeyOnPasskey
+} : null));
 
 // ── Email: save a newly verified address to the account ─────────────────
 const { state: verifiedEmail } = useVerifiedEmail();

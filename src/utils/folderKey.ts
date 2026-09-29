@@ -11,7 +11,7 @@ import { reconnectLocalFolder, getLocalFolderStatus, readFileFromFolder, writeFi
 
 export const FOLDER_KEY_FILE = 'maia-folder-key.json';
 
-interface PrivateJwk { kty: 'OKP'; crv: 'X25519'; x: string; d: string }
+export interface PrivateJwk { kty: 'OKP'; crv: 'X25519'; x: string; d: string }
 export type FolderKeyResult = 'ok' | 'created' | 'restored' | 'no-folder' | 'no-permission' | 'unsupported' | 'failed';
 
 // ── This browser's copy (IndexedDB) ─────────────────────────────────────
@@ -138,6 +138,22 @@ export async function forgetFolderKey(userId: string): Promise<void> {
       tx.onerror = () => { db.close(); reject(tx.error); };
     });
   } catch { /* nothing to forget */ }
+}
+
+/** The private folder key as a JWK: this browser's copy, else the
+ *  folder's (null if neither has it). For carrying it with the passkey. */
+export async function getFolderPrivateJwk(userId: string): Promise<PrivateJwk | null> {
+  const local = await idbGet(userId).catch(() => null);
+  if (local) return local;
+  const folder = await reconnectLocalFolder(userId);
+  return folder ? readKeyFile(folder.handle) : null;
+}
+
+/** Keep a folder key opened from its passkey copy in this browser (a phone
+ *  or Safari: no folder), so member messages open here. */
+export async function keepFolderKeyInBrowser(userId: string, jwk: PrivateJwk): Promise<void> {
+  if (!isPrivateJwk(jwk)) throw new Error('not a folder key');
+  await idbSet(userId, { kty: 'OKP', crv: 'X25519', x: jwk.x, d: jwk.d });
 }
 
 /** The private folder key, for opening a sealed document (null if this
