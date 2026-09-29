@@ -12,7 +12,7 @@
  * (I-32), never as search results.
  */
 import { fetchPipeline, advancePipeline, type PipelineAdvance } from './pipeline';
-import { reconnectLocalFolder, reconnectLocalFolderWithGesture, getLocalFolderStatus, listFolderFiles, isMaiaGeneratedFile } from './localFolder';
+import { reconnectLocalFolder, reconnectLocalFolderWithGesture, getLocalFolderStatus, listFolderFiles, isMaiaGeneratedFile, isFileSystemAccessSupported } from './localFolder';
 import { isAppleHealthExportFile } from './appleHealthFolder';
 
 export type IndexState = 'no-records' | 'pending' | 'running' | 'done' | 'error' | 'off' | 'unknown'
@@ -138,6 +138,11 @@ export async function startRecordsIndexing(
   userId: string,
   onProgress?: (done: number, total: number, name: string) => void
 ): Promise<{ state: IndexState; upload?: FolderUpload }> {
+  // A phone or Safari has no folder to upload from: index what MAIA has.
+  if (!isFileSystemAccessSupported()) {
+    const r = await advancePipeline(userId, 'index-records');
+    return { state: r?.next.action === 'indexing-running' ? 'running' : indexStateOf(r) };
+  }
   const upload = await uploadFolderRecords(userId, onProgress);
   if (upload === 'no-folder' || upload === 'no-permission') return { state: upload };
   if (upload === 'failed') return { state: 'upload-failed' };

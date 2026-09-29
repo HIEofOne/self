@@ -24,9 +24,11 @@ A group run on a host that also holds patients' MAIAs is run by that host's admi
 
 **MAIA's admin account** manages accounts and Credits. It can't open a patient's records, summary, chats, requests or messages through the app. The operator can still read the host's database directly, as above.
 
-**Messages between group members** are sealed in the sender's browser to each recipient's MAIA folder key, with a copy sealed to the sender's own. Hosts and the group relay carry and store them sealed. A message opens only in MAIA on a computer that has the member's MAIA folder, so if the folder is lost, its sealed messages can't be opened. The one exception: a member whose MAIA hasn't registered a folder key yet gets messages sealed by the sender's host to theirs, which both hosts can read. MAIA says so when you send one.
+**Messages between group members** are sealed in the sender's browser to each recipient's MAIA folder key, with a copy sealed to the sender's own. Hosts and the group relay carry and store them sealed. A message opens in MAIA on a computer that has the member's MAIA folder, or on their phone or in Safari once unlocked with their passkey. If the folder is lost and the passkey never carried the key, its sealed messages can't be opened. The one exception: a member whose MAIA hasn't registered a folder key yet gets messages sealed by the sender's host to theirs, which both hosts can read. MAIA says so when you send one.
 
 Requests to a patient and the answers their sharing rules give are handled by the patient's host, so the rules can answer while the patient is offline.
+
+**On your phone or in Safari**, you sign in with your passkey. To open your messages there, your host keeps a copy of your folder key locked with a key only your passkey can produce, so the host itself can't open it.
 
 **What no host can see:**
 - the patient's MAIA folder on their own computer;

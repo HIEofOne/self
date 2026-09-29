@@ -6,10 +6,15 @@
         label="Sign in with Passkey"
         color="primary"
         icon="login"
-        class="full-width q-mb-md"
-        @click="startSignInFlow"
+        class="full-width q-mb-xs"
+        :loading="loading"
+        @click="discoverSignIn"
       />
+      <div class="text-center q-mb-md">
+        <q-btn flat dense no-caps size="sm" color="primary" label="Use my MAIA ID instead" @click="startSignInFlow" />
+      </div>
       <q-btn
+        v-if="!props.signInOnly"
         label="Create New Passkey"
         color="secondary"
         icon="person_add"
@@ -17,10 +22,10 @@
         @click="startRegistrationFlow"
       />
       <p class="text-caption text-grey-7 q-mt-sm q-mb-none">
-        No Touch ID? You can create or sign in with a passkey on your smartphone when prompted.
+        {{ props.signInOnly ? 'Your passkey is on the devices it syncs to (iCloud Keychain, Google Password Manager). On another phone or computer, choose “use a passkey from another device” when prompted.' : 'No Touch ID? You can create or sign in with a passkey on your smartphone when prompted.' }}
       </p>
       <!-- A way out of the (persistent) "Add a Passkey" dialog from here too -->
-      <q-btn flat dense no-caps color="grey-8" label="Cancel" class="q-mt-sm" @click="cancelFlow" />
+      <q-btn v-if="!props.signInOnly" flat dense no-caps color="grey-8" label="Cancel" class="q-mt-sm" @click="cancelFlow" />
     </div>
 
     <!-- Step 2: User ID Input -->
@@ -73,7 +78,7 @@
            admin user this reveals the Admin Secret prompt, which is the
            designed recovery path. -->
       <q-btn
-        v-if="action === 'signin' && !loading"
+        v-if="action === 'signin' && !loading && !props.signInOnly"
         flat
         dense
         color="primary"
@@ -164,13 +169,16 @@
 </template>
 
 <script setup lang="ts">
-import { ref, nextTick, watch } from 'vue';
+import { ref, nextTick, watch, onMounted } from 'vue';
 import { startRegistration } from '@simplewebauthn/browser';
-import { startAuthentication } from '@simplewebauthn/browser';
+import { startAuthentication, type PublicKeyCredentialRequestOptionsJSON } from '@simplewebauthn/browser';
+import { withPrf, takePrfSecret, rememberPrfSecret } from '../utils/passkeyFolderKey';
 
 const props = defineProps<{
   prefillUserId?: string | null;
   prefillAction?: 'signin' | 'register' | null;
+  /** Only signing in to an existing MAIA (a phone, or Safari: no new MAIA there). */
+  signInOnly?: boolean;
 }>();
 
 const emit = defineEmits(['authenticated', 'cancelled']);
@@ -188,6 +196,53 @@ const showConfirmWithoutFileDialog = ref(false);
 const fileInputRef = ref<HTMLInputElement | null>(null);
 const uploadingFile = ref(false);
 const kbName = ref<string | null>(null);
+
+// ── Sign in with a passkey, no MAIA ID: the browser offers the passkeys
+// it has for this site, and the chosen one names the account. Its options
+// are fetched before the click: Safari opens a passkey prompt only straight
+// from a click. Every sign-in also asks the passkey for its PRF secret, which
+// carries the folder key to a phone (utils/passkeyFolderKey.ts); it stays in
+// this page and is never sent.
+let discoverOptions: { options: PublicKeyCredentialRequestOptionsJSON; at: number } | null = null;
+const prefetchDiscover = async () => {
+  try {
+    const r = await fetch('/api/passkey/discover', { method: 'POST', credentials: 'include' });
+    if (r.ok) discoverOptions = { options: await r.json(), at: Date.now() };
+  } catch { /* fetched again on click */ }
+};
+onMounted(() => { if (!props.prefillUserId) void prefetchDiscover(); });
+
+const discoverSignIn = async () => {
+  error.value = '';
+  loading.value = true;
+  try {
+    if (!discoverOptions || Date.now() - discoverOptions.at > 4 * 60 * 1000) await prefetchDiscover();
+    if (!discoverOptions) throw new Error('Could not start passkey sign-in. Check your connection and try again.');
+    const { options } = discoverOptions;
+    discoverOptions = null;
+    let assertion;
+    try {
+      assertion = await startAuthentication({ optionsJSON: withPrf(options) });
+    } catch (waErr: any) {
+      if (waErr?.name === 'NotAllowedError') throw new Error('The passkey prompt was closed, or this device has no passkey for MAIA. Try again, or use your MAIA ID.');
+      throw waErr;
+    }
+    const secret = takePrfSecret(assertion as unknown as { clientExtensionResults?: Record<string, unknown> });
+    const r = await fetch('/api/passkey/discover-verify', {
+      method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ response: assertion })
+    });
+    const result = await r.json().catch(() => ({}));
+    if (!r.ok || !result.success) throw new Error(result.error || 'Sign-in failed');
+    rememberPrfSecret(result.user.userId, assertion.id, secret);
+    emit('authenticated', result.user);
+  } catch (err: any) {
+    error.value = err?.message || 'Sign-in failed';
+    void prefetchDiscover();
+  } finally {
+    loading.value = false;
+  }
+};
 
 const startSignInFlow = async () => {
   action.value = 'signin';
@@ -525,7 +580,7 @@ const handleSignIn = async () => {
     // Step 2: Authenticate with passkey
     let assertion;
     try {
-      assertion = await startAuthentication({ optionsJSON: options });
+      assertion = await startAuthentication({ optionsJSON: withPrf(options) });
     } catch (waErr: any) {
       // NotAllowedError = the browser found no credential matching the
       // server's allowCredentials (or the prompt was dismissed). The most
@@ -549,6 +604,9 @@ const handleSignIn = async () => {
       throw waErr;
     }
 
+    // The passkey's PRF secret stays in this page (folder key on a phone).
+    const prfSecret = takePrfSecret(assertion as unknown as { clientExtensionResults?: Record<string, unknown> });
+
     // Step 3: Verify authentication
     const verifyResponse = await fetch('/api/passkey/authenticate-verify', {
       method: 'POST',
@@ -568,6 +626,7 @@ const handleSignIn = async () => {
     const result = await verifyResponse.json();
 
     if (result.success) {
+      rememberPrfSecret(result.user.userId, assertion.id, prfSecret);
       emit('authenticated', result.user);
     } else {
       throw new Error(result.error || 'Authentication verification failed');

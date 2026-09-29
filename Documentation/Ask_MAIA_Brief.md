@@ -22,6 +22,8 @@ You need Chrome on a computer that only you use. On the welcome page you confirm
 5. **Create your Patient Summary**, with your current medications, from an Apple Health export or by answering a few questions. You review and verify it.
 6. **Confirm your rules and turn on sharing.** Read each rule, try it out and change it if you like. Nothing is shared before you turn sharing on.
 
+**On your phone or in Safari.** Once your MAIA exists, open the same address on a phone or in Safari and tap "Sign in with Passkey": no MAIA ID needed, just the passkey (synced by iCloud Keychain or Google Password Manager). There you can read your messages, answer requests, chat with your private AI and review your Patient Summary. Your MAIA folder stays on your computer and catches up there. To open your messages on the phone, your passkey carries your folder key: sign in once on your computer with your passkey (or use Workbook → More features → "Set up with your passkey"), then tap "Unlock with your passkey" on the phone. A new MAIA still starts in Chrome on a computer.
+
 ## How requests work
 
 Every request comes in through the same door, a public internet standard called GNAP (RFC 9635), and MAIA handles it the same way every time. It checks who is asking and what they can prove, such as a confirmed email or group membership, and what they want and why. Then your rules decide:

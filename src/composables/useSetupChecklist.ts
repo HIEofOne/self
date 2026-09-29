@@ -33,6 +33,11 @@ export interface SetupStatus {
   steps: SetupStep[];
   requiredDone: boolean;
   agent: AgentState;
+  /** The folder key travels with the passkey (a phone or Safari can open messages). */
+  folderKeyOnPasskey?: boolean;
+  hasFolderKey?: boolean;
+  /** Changed where there's no folder: the folder's PDFs to rewrite on the computer. */
+  folderCatchUp?: { summary?: string; rules?: string };
 }
 
 interface ChecklistState {

@@ -14,6 +14,14 @@
       </q-btn>
     </div>
 
+    <!-- Locked here (a phone, Safari, or a browser without the folder): the
+         folder key travels with the passkey (utils/passkeyFolderKey.ts) -->
+    <div v-if="lockedCount" class="peer-thread__locked">
+      <q-icon name="lock" size="16px" />
+      <span>{{ unlockNote || `${lockedCount} message${lockedCount === 1 ? ' is' : 's are'} locked on this device.` }}</span>
+      <q-btn flat dense no-caps size="sm" color="primary" label="Unlock with your passkey" :loading="unlocking" @click="unlockHere" />
+    </div>
+
     <!-- Thread -->
     <div ref="scrollEl" class="peer-thread__scroll" :style="{ background: threadTint }">
       <div v-if="!threadItems.length && !pendingRequest" class="text-caption text-grey-6 text-center q-mt-lg">
@@ -147,6 +155,7 @@ import { useQuasar } from 'quasar';
 import { SCOPE_OPTIONS, PURPOSE_OPTIONS, type Scope, type Purpose } from '../utils/policyCards';
 import { useEdition } from '../composables/useEdition';
 import { openMessages, sendMemberMessage } from '../utils/memberMessages';
+import { preparePasskeyUnlock, passkeyUnlock } from '../utils/passkeyFolderKey';
 
 const $q = useQuasar();
 const { isPersonalAs } = useEdition();
@@ -183,8 +192,8 @@ const deciding = ref(false);
 const scrollEl = ref<HTMLElement | null>(null);
 
 const threadItems = computed(() => {
-  const items: Array<{ id: string; direction: 'in' | 'out'; text: string; at: string; who?: string; fromId?: string; sealed?: boolean; hostReadable?: boolean }> = [];
-  const extra = (m: any) => ({ sealed: !!m.sealed, hostReadable: !!m.hostReadable });
+  const items: Array<{ id: string; direction: 'in' | 'out'; text: string; at: string; who?: string; fromId?: string; sealed?: boolean; hostReadable?: boolean; locked?: boolean }> = [];
+  const extra = (m: any) => ({ sealed: !!m.sealed, hostReadable: !!m.hostReadable, locked: !!m.locked });
   if (props.peerId === '@everyone') {
     // The Everyone thread: all broadcasts in, all your broadcasts out.
     for (const m of inbox.value) if (m.broadcast) items.push({ id: m.id, direction: 'in', text: m.text, at: m.receivedAt, who: m.fromAlias || 'Member', fromId: m.fromPairwiseId, ...extra(m) });
@@ -239,6 +248,28 @@ const scrollToBottom = async () => {
 };
 
 // ── Data: load + silent 5s pull (testing cadence, matches GroupsPanel) ──
+const lockedCount = computed(() => threadItems.value.filter((i) => i.locked).length);
+const unlocking = ref(false);
+const unlockNote = ref('');
+// Safari opens a passkey prompt only straight from a click: fetch its options first.
+watch(lockedCount, (n, prev) => { if (n && !prev) void preparePasskeyUnlock(props.userId); });
+const unlockHere = async () => {
+  if (unlocking.value) return;
+  unlocking.value = true;
+  unlockNote.value = '';
+  try {
+    const r = await passkeyUnlock(props.userId);
+    if (r === 'unlocked' || r === 'already' || r === 'stored') await loadThread();
+    else if (r === 'no-copy') unlockNote.value = 'Sign in once on your computer with your passkey, then unlock here.';
+    else if (r === 'no-secret') unlockNote.value = 'This passkey can’t carry your folder key. These messages open on your computer.';
+    else unlockNote.value = 'That didn’t work. Try again.';
+  } catch {
+    unlockNote.value = 'The passkey prompt was closed. Try again.';
+  } finally {
+    unlocking.value = false;
+  }
+};
+
 const loadThread = async () => {
   try {
     const [mRes, rRes] = await Promise.all([
@@ -443,6 +474,10 @@ onUnmounted(() => { if (pullTimer) clearInterval(pullTimer); });
   display: flex;
   &.is-in { justify-content: flex-start; }
   &.is-out { justify-content: flex-end; }
+}
+.peer-thread__locked {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 6px 12px; background: #fff8e1; border-bottom: 1px solid #ffe0a3; font-size: 0.82rem; color: #6d4c00;
 }
 .peer-thread__note {
   font-size: 11px;

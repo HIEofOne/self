@@ -2,6 +2,7 @@ import { useQuasar } from 'quasar';
 import { reconnectLocalFolderWithGesture, MAIA_FOLDER_PDFS } from '../utils/localFolder';
 import { writeSharingPoliciesPdf, writeSummaryPdfs, type FolderPdfResult } from '../utils/folderPdfs';
 import type { AsState, PolicyCard } from '../utils/policyCards';
+import { noteFolderCatchUp } from '../utils/folderCatchUp';
 
 /**
  * Personal AS edition (group_requests.md §7): keep the folder's PDFs in step
@@ -40,6 +41,7 @@ export function useFolderPdfs() {
   const saveSummaryPdfs = async (userId: string): Promise<FolderPdfResult> => {
     const what = 'your Patient Summary';
     const result = await writeSummaryPdfs(userId);
+    void noteFolderCatchUp(userId, 'summary', result); // a phone or Safari: the computer catches up
     if (result === 'written') {
       $q.notify({ type: 'positive', message: `Saved in your MAIA folder: "${MAIA_FOLDER_PDFS.summary}" and its privacy-filtered copy.` });
     }
@@ -55,6 +57,7 @@ export function useFolderPdfs() {
   const saveSharingPoliciesPdf = async (userId: string, data: { cards: PolicyCard[]; asState: AsState }): Promise<FolderPdfResult> => {
     const what = 'your sharing rules';
     const result = await writeSharingPoliciesPdf(userId, data);
+    void noteFolderCatchUp(userId, 'rules', result); // a phone or Safari: the computer catches up
     report(result, what, () => askPermission(userId, () => writeSharingPoliciesPdf(userId, data), what));
     return result;
   };
