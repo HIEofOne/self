@@ -219,11 +219,21 @@ const rows = computed(() => (status.value?.steps || [])
     return { ...s, title: TEXT[s.key].title(), info: TEXT[s.key].info(), detail };
   }));
 
+// While the private AI gets ready: how long so far, ticking.
+const agentClock = ref(Date.now());
+let agentTimer: ReturnType<typeof setInterval> | null = null;
+watch(() => [state.open, status.value?.agent], ([open, agent]) => {
+  const waiting = open && (agent === 'creating' || agent === 'none');
+  if (waiting && !agentTimer) agentTimer = setInterval(() => { agentClock.value = Date.now(); }, 1000);
+  if (!waiting && agentTimer) { clearInterval(agentTimer); agentTimer = null; }
+}, { immediate: true });
+onUnmounted(() => { if (agentTimer) clearInterval(agentTimer); });
 const agentLine = computed(() => {
+  const so = elapsedWords(status.value?.agentSince || null, agentClock.value);
   switch (status.value?.agent) {
     case 'ready': return 'Your private AI is ready.';
-    case 'creating': return 'Your private AI is getting ready. This takes about a minute.';
-    case 'none': return 'Starting your private AI…';
+    case 'creating':
+    case 'none': return `Your private AI is getting ready${so ? `: ${so} so far` : ''}. It usually takes 2 to 3 minutes, and setup goes on meanwhile.`;
     default: return 'Your private AI starts once your email is verified.';
   }
 });

@@ -284,11 +284,19 @@ const applyPrefill = async (prefill: string | null | undefined) => {
   if (!prefill) return;
   userId.value = prefill;
   action.value = props.prefillAction === 'register' ? 'register' : 'signin';
+  if (props.prefillAction === 'register') {
+    // Adding a passkey to the signed-in account: straight to the passkey
+    // prompt (its id isn't editable, so a screen showing it only confused).
+    // The ID screen appears only when something needs it: the admin secret,
+    // or an error to show.
+    currentStep.value = 'registering';
+    await continueAction();
+    if (adminSecretRequired.value || error.value) currentStep.value = 'userId';
+    return;
+  }
   currentStep.value = 'userId';
   await nextTick();
   userIdInputRef.value?.focus();
-  // Do not auto-call continueAction for register: user must click Continue so we can run
-  // check-user and show the admin secret field first if needed.
   if (props.prefillAction === 'signin') {
     continueAction();
   }

@@ -43,6 +43,36 @@ export async function recordsIndexProgress(userId: string): Promise<IndexProgres
   };
 }
 
+/**
+ * Wait while the records are being indexed (setup's "Index all now"), so the
+ * Patient Summary can use the index; `shouldStop` lets the patient write it
+ * now instead. → why it stopped waiting.
+ */
+export async function waitForIndexing(userId: string, opts: {
+  onProgress?: (p: IndexProgress) => void;
+  shouldStop?: () => boolean;
+  intervalMs?: number;
+  timeoutMs?: number;
+} = {}): Promise<'done' | 'skipped' | 'error' | 'timeout'> {
+  const t0 = Date.now();
+  const intervalMs = opts.intervalMs ?? 5000;
+  const timeoutMs = opts.timeoutMs ?? 60 * 60 * 1000;
+  while (Date.now() - t0 < timeoutMs) {
+    if (opts.shouldStop?.()) return 'skipped';
+    const p = await recordsIndexProgress(userId).catch(() => null);
+    if (p) {
+      if (p.state !== 'running') return p.state === 'error' ? 'error' : 'done';
+      opts.onProgress?.(p);
+    }
+    // Wake each second so "write it now" takes effect at once.
+    for (let waited = 0; waited < intervalMs; waited += 1000) {
+      if (opts.shouldStop?.()) return 'skipped';
+      await new Promise((res) => setTimeout(res, Math.min(1000, intervalMs)));
+    }
+  }
+  return 'timeout';
+}
+
 /** "about 6 minutes", or '' when unknown. */
 export const estimateWords = (minutes: number | null | undefined): string => (minutes ? `about ${minutes} minutes` : '');
 

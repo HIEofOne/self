@@ -105,6 +105,13 @@ describe('deriveSetupStatus', () => {
     setEditionForTests('full');
     expect(deriveSetupStatus({}).agent).toBe('none');
   });
+
+  it('agentSince: when the private AI started, for the checklist to count up from', () => {
+    expect(deriveSetupStatus({}).agentSince).toBeNull();
+    expect(deriveSetupStatus({ createdAt: 'T0' }).agentSince).toBe('T0');
+    expect(deriveSetupStatus({ createdAt: 'T0', emailVerifiedAt: 'T1' }).agentSince).toBe('T1');
+    expect(deriveSetupStatus({ createdAt: 'T0', emailVerifiedAt: 'T1', agentProfiles: { default: { createdAt: 'T2' } } }).agentSince).toBe('T2');
+  });
 });
 
 describe.each(EDITIONS)('setup routes, edition "%s"', (edition) => {

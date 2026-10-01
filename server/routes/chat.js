@@ -11,6 +11,7 @@ import { buildPolicyAdvisorContext, buildEditionAdvisorContext, advisorContextKi
 import { isVerified as emailTokenVerified } from '../emailVerification.js';
 import { chargeCredits, ADVISOR_QUESTION_CREDITS } from '../credits.js';
 import { isFeatureEnabled, getEdition } from '../edition.js';
+import { DEFAULT_PRIMARY_MODEL_ID } from '../utils/primary-models.js';
 
 // One SSE event per streaming update. Intermediate updates carry only the
 // new delta: the provider's running totals (content / reasoningContent)
@@ -805,6 +806,7 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient, app
     if (m.includes('kimi')) return 'Private AI (Kimi)';
     if (m.includes('gpt')) return 'Private AI (GPT)';
     if (m.includes('deepseek')) return 'Private AI (Deepseek)';
+    if (m === 'qwen3.8-max') return 'Private AI (Qwen3.8-Max)';
     if (m.includes('qwen')) return 'Private AI (Qwen)';
     return 'Private AI';
   };
@@ -867,6 +869,8 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient, app
     let providers = chatClient.getAvailableProviders();
     let featureDoc = null;
     let privateAiProfiles = [];
+    // The primary's model, even before it is live (labels like "Private AI Primary (…)").
+    let primaryLabel = labelForModel(DEFAULT_PRIMARY_MODEL_ID);
     const userId = req.session?.userId;
     const isDeepLink = !!req.session?.isDeepLink;
 
@@ -974,6 +978,8 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient, app
             }
           }
           privateAiProfiles = await buildPrivateAiProfiles(userDoc);
+          const defProf = userDoc?.agentProfiles?.default || {};
+          primaryLabel = labelForModel(defProf.modelName || userDoc?.agentModelName || DEFAULT_PRIMARY_MODEL_ID, defProf.modelDisplayName);
         }
       } catch (err) {
         console.warn('[chat/providers] Could not load user doc, excluding Private AI:', err?.message);
@@ -982,6 +988,6 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient, app
     } else {
       providers = providers.filter((p) => p !== 'digitalocean');
     }
-    res.json({ ...editionFiltered(providers, privateAiProfiles, featureDoc, { guest: isDeepLink }), providerModels: chatClient.getProviderModels() });
+    res.json({ ...editionFiltered(providers, privateAiProfiles, featureDoc, { guest: isDeepLink }), providerModels: chatClient.getProviderModels(), primaryLabel });
   });
 }

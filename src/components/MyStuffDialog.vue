@@ -638,7 +638,7 @@
 
           <!-- My AI Agent Tab -->
           <q-tab-panel name="agent">
-            <!-- Sub-tabs: Primary (GPT) and Secondary (Kimi) -->
+            <!-- Sub-tabs: Primary and Secondary, labeled by model -->
             <q-tabs
               v-model="activeAgentProfile"
               dense
@@ -1710,7 +1710,16 @@
               </div>
               <div v-else-if="aiWaiting" class="text-center">
                 <q-spinner size="2em" color="primary" />
-                <div class="q-mt-sm">{{ PRIVATE_AI_WAIT_TEXT }}</div>
+                <div class="q-mt-sm">{{ privateAiWaitText(aiWaitSince, waitClock) }}</div>
+              </div>
+              <!-- "Index all now" was chosen: the summary waits so it can use the index -->
+              <div v-else-if="indexWait" class="text-center">
+                <q-spinner size="2em" color="primary" />
+                <div class="q-mt-sm">
+                  Your records are being indexed: {{ elapsedWords(indexWait.startedAt, waitClock) || 'starting' }}<template v-if="indexWait.estimateMinutes"> of {{ estimateWords(indexWait.estimateMinutes) }}</template><template v-if="indexWait.filesTotal">, {{ indexWait.filesIndexed }} of {{ indexWait.filesTotal }} files</template>.
+                </div>
+                <div class="text-caption text-grey-7 q-mt-xs">Your Patient Summary will be written as soon as indexing finishes, so it can use the index.</div>
+                <q-btn flat dense no-caps color="primary" class="q-mt-sm" label="Write it now instead" @click="skipIndexWait = true" />
               </div>
               <div v-else class="text-center">
                 <q-spinner size="2em" />
@@ -1905,6 +1914,22 @@
                     label="Let MAIA look in your folder for your Apple Health export"
                     @click="allowFolderAndLook"
                   />
+                  <!-- Records other than an Apple Health export (Epic, clinic PDFs): the
+                       private AI reads their full text (server/utils/records-text.js). -->
+                  <div v-else-if="hasRecords" class="row items-center no-wrap">
+                    <q-btn
+                      unelevated no-caps color="primary" icon="description"
+                      label="Write my summary from my records"
+                      :loading="loadingSummary"
+                      @click="currentTab = 'summary'; requestNewSummary({ skipCmGate: true })"
+                    />
+                    <q-icon name="info_outline" size="18px" color="grey-6" class="q-ml-sm cursor-pointer">
+                      <q-tooltip max-width="320px">
+                        Your private AI reads the full text of the record files in MAIA and writes the summary,
+                        with each fact linked to its page. You review it before anything is saved.
+                      </q-tooltip>
+                    </q-icon>
+                  </div>
                   <template v-else>
                     <div class="row items-center no-wrap text-body2 text-grey-8">
                       No Apple Health export in your MAIA folder yet.
@@ -2191,12 +2216,31 @@
 
     <!-- Setup (Personal AS): the folder's records are in Saved Files; index them now or later -->
     <q-dialog v-model="showIndexOffer" persistent>
-      <q-card style="min-width: 360px; max-width: 480px;">
-        <q-card-section class="text-body1">
-          Indexing of files is now optional because it takes a few more minutes.
-          <div v-if="indexOfferEstimate" class="text-caption text-grey-7 q-mt-sm">
-            Indexing these {{ userFiles.length }} file{{ userFiles.length === 1 ? '' : 's' }} takes {{ indexOfferEstimate }}.
+      <q-card style="min-width: 360px; max-width: 520px;">
+        <q-card-section class="q-pb-sm">
+          <div class="text-h6">Your records are in MAIA</div>
+        </q-card-section>
+        <q-card-section class="q-pt-none text-body2">
+          <div v-if="!indexOffer" class="row items-center no-wrap q-gutter-sm text-grey-8">
+            <q-spinner size="1.2em" color="primary" /><span>Looking through your records…</span>
           </div>
+          <template v-else>
+            <p class="q-mb-sm">
+              {{ indexOffer.files }} record file{{ indexOffer.files === 1 ? '' : 's' }} from your folder
+              ({{ formatFileSize(indexOffer.bytes) }}{{ indexOffer.pages ? `, ${indexOffer.fitsSummary ? '' : 'over '}${indexOffer.pages} pages` : '' }}){{ indexOffer.appleHealth ? ', including your Apple Health export' : '' }}.
+            </p>
+            <p v-if="indexOffer.fitsSummary" class="q-mb-sm">
+              Your private AI writes your <strong>Patient Summary</strong> from the full text of every page, with or without indexing.
+            </p>
+            <p v-else class="q-mb-sm">
+              That's more than your private AI can read at once, so <strong>indexing lets your Patient Summary draw on all of it</strong>.
+            </p>
+            <p class="q-mb-none">
+              <strong>Indexing is optional.</strong> It also lets your private AI search every page when you ask it questions later.
+              For these files it takes {{ estimateWords(indexOffer.estimateMinutes) || 'a few minutes' }}. You can keep setting up meanwhile;
+              if you write your summary before it finishes, MAIA waits so the summary can use it.
+            </p>
+          </template>
         </q-card-section>
         <q-card-actions align="right" class="q-pa-md">
           <q-btn flat no-caps label="Maybe Later" color="grey-8" :disable="indexOfferBusy" @click="indexLater" />
@@ -2219,7 +2263,7 @@ import GroupsPanel from './GroupsPanel.vue';
 import PoliciesPanel from './PoliciesPanel.vue';
 import RequestsPanel from './RequestsPanel.vue';
 import FeaturesPanel from './FeaturesPanel.vue';
-import { recordsIndexProgress, elapsedWords, estimateWords, startRecordsIndexing, INDEX_WORDS } from '../utils/recordsSearch';
+import { recordsIndexProgress, elapsedWords, estimateWords, startRecordsIndexing, INDEX_WORDS, waitForIndexing, type IndexProgress } from '../utils/recordsSearch';
 import { setFeature } from '../utils/advisorProposals';
 import { syncRequestLog } from '../utils/requestLog';
 import { readSeenMessages, writeSeenMessages } from '../utils/welcomeActivity';
@@ -2239,7 +2283,7 @@ import {
   getLocalFolderStatus, readFileFromFolder, reconnectLocalFolder, reconnectLocalFolderWithGesture, writeFileToFolder
 } from '../utils/localFolder';
 import { findAppleHealthExportInFolder } from '../utils/appleHealthFolder';
-import { PRIVATE_AI_WAIT_TEXT, privateAiNotReadyText, waitForPrivateAi } from '../utils/privateAi';
+import { privateAiWaitText, privateAiNotReadyText, waitForPrivateAi } from '../utils/privateAi';
 import { drugKey, joinMedsSection, sameMedList, splitMedsSection, type MedsSection } from '../utils/summaryMeds';
 import SummaryMedsRows from './SummaryMedsRows.vue';
 import { logModalEvent } from '../utils/modalLog';
@@ -2887,10 +2931,15 @@ const agentProfileLabelsMap = computed(() => {
   return map;
 });
 
+// The server's label ("Private AI (Qwen3.8-Max)") with the role added; before
+// the primary is live, the model it runs on (primaryLabel from /api/chat/providers).
+const primaryFallbackLabel = ref('Private AI Primary');
+const withRole = (label: string, profileKey: string) =>
+  label.replace(/^Private AI\s*(?=\()/, `Private AI ${profileKey === 'default' ? 'Primary' : 'Secondary'} `);
 const profileLabel = (profileKey: string): string => {
   const prof = agentProfilesList.value.find(p => p.key === profileKey);
-  if (prof) return prof.label;
-  if (profileKey === 'default') return 'Private AI Primary (GPT)';
+  if (prof) return withRole(prof.label, profileKey);
+  if (profileKey === 'default') return primaryFallbackLabel.value;
   return 'Secondary Private AI (choose a model)';
 };
 const instrTabLabel = (profileKey: string): string => {
@@ -3533,6 +3582,16 @@ const kbSummaryFiles = ref<number | null>(null);
 const summaryNeedsVerify = ref(false);
 // Waiting for a new account's private AI before drafting (Personal AS).
 const aiWaiting = ref(false);
+// When the private AI started, and the indexing being waited for; a clock
+// ticks while either wait shows.
+const aiWaitSince = ref<string | null>(null);
+const indexWait = ref<IndexProgress | null>(null);
+const skipIndexWait = ref(false);
+const waitClock = ref(Date.now());
+let waitClockTimer: ReturnType<typeof setInterval> | null = null;
+const startWaitClock = () => { if (!waitClockTimer) waitClockTimer = setInterval(() => { waitClock.value = Date.now(); }, 1000); };
+const stopWaitClock = () => { if (waitClockTimer) { clearInterval(waitClockTimer); waitClockTimer = null; } };
+onUnmounted(stopWaitClock);
 // The last error came from a draft, so RETRY runs the draft again (it used
 // to only reload the tab, although the message promised a new run).
 const summaryDraftFailed = ref(false);
@@ -3850,16 +3909,24 @@ const pollServerIndex = async () => {
 // Files, where the checklist shows the indexing's time from then on.
 const showIndexOffer = ref(false);
 const indexOfferBusy = ref(false);
-const indexOfferEstimate = ref('');
+// What the offer tells the patient (/api/records/overview): the files, their
+// size and pages, the Apple Health export, the estimate, and whether the
+// summary reads every page at once or needs the index for the rest.
+const indexOffer = ref<{ files: number; bytes: number; appleHealth: string | null; pages: number; fitsSummary: boolean; estimateMinutes: number | null } | null>(null);
 const offerRecordsIndexing = async () => {
   if (!props.userId) return;
   currentTab.value = 'files';
   void loadFiles();
-  const p = await recordsIndexProgress(props.userId).catch(() => null);
-  indexOfferEstimate.value = estimateWords(p?.estimateMinutes);
   // Already chose to search all records: index the new files, no question.
   if (has('records-index')) { await indexAllNow(); return; }
+  indexOffer.value = null;
   showIndexOffer.value = true;
+  try {
+    const r = await fetch(`/api/records/overview?userId=${encodeURIComponent(props.userId)}`, { credentials: 'include' });
+    const d = await r.json();
+    if (r.ok && d.success) indexOffer.value = d;
+  } catch { /* the offer still works without the details */ }
+  if (!indexOffer.value) indexOffer.value = { files: userFiles.value.length, bytes: userFiles.value.reduce((n, f) => n + (f.fileSize || 0), 0), appleHealth: null, pages: 0, fitsSummary: true, estimateMinutes: null };
 };
 const indexLater = () => {
   showIndexOffer.value = false;
@@ -4051,6 +4118,7 @@ const loadAgent = async () => {
         const pd = await provResp.json();
         const list = Array.isArray(pd.privateAiProfiles) ? pd.privateAiProfiles : [];
         agentProfilesList.value = list.map((p: { key: string; label: string }) => ({ key: p.key, label: p.label }));
+        if (typeof pd.primaryLabel === 'string' && pd.primaryLabel) primaryFallbackLabel.value = withRole(pd.primaryLabel, 'default');
         // Don't reset activeAgentProfile when the current tab isn't in
         // the deployed-profiles list — the 'gpt' tab is always rendered
         // and handles the undeployed state with a Deploy button.
@@ -7374,6 +7442,7 @@ const loadPatientSummary = async () => {
         if (list.length > 0) {
           agentProfilesList.value = list.map((p: { key: string; label: string }) => ({ key: p.key, label: p.label }));
         }
+        if (typeof pd.primaryLabel === 'string' && pd.primaryLabel) primaryFallbackLabel.value = withRole(pd.primaryLabel, 'default');
       }
     } catch { /* non-fatal */ }
   }
@@ -7603,11 +7672,14 @@ const folderExport = reactive<{
   registered: boolean;
 }>({ state: 'idle', label: '', file: null, registered: false });
 
+// Record files in MAIA (from the folder, say) without an Apple Health export.
+const hasRecords = ref(false);
 const lookForFolderExport = async () => {
   if (!props.userId || folderExport.state === 'scanning') return;
   folderExport.state = 'scanning';
   try {
     const p = await fetchPipeline(props.userId);
+    hasRecords.value = p?.pipeline.stages?.imported?.status === 'done';
     if (p?.pipeline.hasAppleFile) {
       Object.assign(folderExport, { state: 'found', registered: true, file: null, label: `Your Apple Health export: ${p.pipeline.appleFileName || 'already added'}` });
       return;
@@ -7749,7 +7821,8 @@ const handleRequestNewSummary = () => {
     // A new draft from the Apple Health export when there is one;
     // otherwise the interview.
     void fetchPipeline(props.userId).then((p) => {
-      if (p?.pipeline.hasAppleFile) {
+      // An Apple Health export, or any records: the private AI reads them.
+      if (p?.pipeline.hasAppleFile || p?.pipeline.stages?.imported?.status === 'done') {
         summaryPair.value = null;
         pendingSummaryRegeneration.value = true;
         void requestNewSummary();
@@ -7834,16 +7907,28 @@ const requestNewSummary = async (opts?: { skipCmGate?: boolean }) => {
     // Personal AS: a new account's private AI may still be deploying —
     // wait for it here rather than start a draft that fails.
     if (isPersonalAs.value) {
+      startWaitClock();
       const ready = await waitForPrivateAi({
-        onWaiting: () => { loadingSummary.value = true; aiWaiting.value = true; }
+        onWaiting: ({ startedAt }) => { loadingSummary.value = true; aiWaitSince.value = startedAt; aiWaiting.value = true; }
       });
       aiWaiting.value = false;
       if (ready !== 'ready') {
+        stopWaitClock();
         loadingSummary.value = false;
         summaryError.value = privateAiNotReadyText(ready);
         summaryDraftFailed.value = true;
         return;
       }
+      // The patient chose to index: wait for it (or "Write it now instead").
+      const ip = await recordsIndexProgress(props.userId).catch(() => null);
+      if (ip?.state === 'running') {
+        loadingSummary.value = true;
+        skipIndexWait.value = false;
+        indexWait.value = ip;
+        await waitForIndexing(props.userId, { onProgress: (p) => { indexWait.value = p; }, shouldStop: () => skipIndexWait.value });
+        indexWait.value = null;
+      }
+      stopWaitClock();
     }
     const adv = await advancePipeline(props.userId, 'draft-summary');
     if (!adv) {
