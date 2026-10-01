@@ -3,6 +3,8 @@
 Mapped 2026-07-19 by reading server/index.js end to end. No code changed.
 This is the substrate under every recent "instability" report.
 
+> **Since v2.0.6 (October 2026): the draft reads the records themselves.** When the patient's record PDFs fit the budget (`server/utils/records-text.js`: about 100,000 tokens, 75,000 for GPT-oss), `buildPatientSummaryPromptForUser` sends their full text, page by page as `=== File N, page P ===` in the citation links' File N order, with the prompt `patient-summary.records-in-context`. The deterministic blocks stay only as anchors where they are facts: the identity, verified or Apple Health medications, Apple Health allergies and flagged labs. The prompt adds a **Notable Lab Trends** section. Over the budget, the builder falls back to the extracts and knowledge base described below. Why: a Quest-only Apple Health export (Edith Pargh, 19 pages of labs) gave the extracts nothing but two flagged labs, and knowledge-base retrieval missed every LDL row; with the records in context, Qwen3.8-Max, GLM-5.3 and DeepSeek V4 Pro all produced accurate, fully cited summaries. Qwen3.8-Max is the default private AI for new accounts (`MAIA_PRIMARY_MODEL` overrides).
+
 ## 1. Generators (who writes summary text)
 
 | Path | Endpoint | Prompt | Notes |

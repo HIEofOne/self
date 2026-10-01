@@ -3,6 +3,7 @@
  */
 
 import { readFileSync } from 'fs';
+import { DEFAULT_PRIMARY_MODEL_ID } from '../utils/primary-models.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { findUserAgent } from '../utils/agent-helper.js';
@@ -112,7 +113,9 @@ function isValidUUID(value) {
 // NOTE: profile keys 'default' and 'gpt' stay as historical identifiers
 // (kept to avoid migrating every existing userDoc.agentProfiles[*].agentId).
 export const MODEL_GPT = { inference_name: 'openai-gpt-oss-120b', name: 'OpenAI GPT-oss-120b', id: 'openai-gpt-oss-120b' };
-export const MODEL_PRIMARY = MODEL_GPT;
+// A new account's primary model (utils/primary-models.js: Qwen3.8-Max, or
+// MAIA_PRIMARY_MODEL); GPT-oss-120b if the catalog lacks it.
+export const MODEL_PRIMARY = { inference_name: DEFAULT_PRIMARY_MODEL_ID, name: DEFAULT_PRIMARY_MODEL_ID, id: DEFAULT_PRIMARY_MODEL_ID };
 
 const matchesModel = (m, spec) =>
   m.inference_name === spec.inference_name ||
@@ -154,14 +157,19 @@ async function resolveModelAndProject(doClient, modelSpec = MODEL_PRIMARY) {
   // PREFERRED PATH: look up the requested model in the DO catalog FIRST.
   // Only fall back to an existing agent's model if the catalog lookup
   // fails (fallback is primary-only — the GPT agent must use GPT).
+  let maxOutputTokens = null;
   if (!isValidUUID(modelId)) {
     try {
-      const modelsResponse = await doClient.request('/v2/gen-ai/models');
+      const modelsResponse = await doClient.request('/v2/gen-ai/models?per_page=200');
       const models = modelsResponse.models || modelsResponse.data?.models || [];
       if (models.length > 0) {
-        const preferredModel = models.find(m => matchesModel(m, modelSpec));
+        // The primary's default, else (if the catalog lacks it) GPT-oss-120b.
+        const preferredModel = models.find(m => matchesModel(m, modelSpec))
+          || (isPrimary ? models.find(m => matchesModel(m, MODEL_GPT)) : null);
         if (preferredModel && preferredModel.uuid && isValidUUID(preferredModel.uuid)) {
           modelId = preferredModel.uuid;
+          const maxSetting = (preferredModel.settings || []).find((x) => x?.name === 'max_tokens');
+          maxOutputTokens = Number(maxSetting?.max) || null;
         }
       }
     } catch (error) {
@@ -198,7 +206,7 @@ async function resolveModelAndProject(doClient, modelSpec = MODEL_PRIMARY) {
     }
   }
 
-  return { modelId, projectId };
+  return { modelId, projectId, maxOutputTokens };
 }
 
 function getMaiaInstructionText() {
@@ -441,7 +449,7 @@ export async function ensureUserAgent(doClient, cloudant, userDoc) {
     agentCreationLocks.set(userId, lockPromise);
 
     try {
-      const { modelId, projectId } = await resolveModelAndProject(doClient);
+      const { modelId, projectId, maxOutputTokens } = await resolveModelAndProject(doClient);
       if (!isValidUUID(modelId) || !isValidUUID(projectId)) {
         throw new Error('Unable to resolve model or project ID for agent creation');
       }
@@ -454,7 +462,7 @@ export async function ensureUserAgent(doClient, cloudant, userDoc) {
         modelId: modelId.trim(),
         projectId: projectId.trim(),
         region: getDoRegion(),
-        maxTokens: 32768,
+        maxTokens: Math.min(32768, maxOutputTokens || 32768),
         topP: 1,
         temperature: 0.1,
         k: 15,

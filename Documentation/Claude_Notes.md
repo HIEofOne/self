@@ -60,6 +60,7 @@ They leave out secrets and anything that would help an attacker: app and droplet
 
 **Records and the Patient Summary**
 
+- The Patient Summary draft reads the records' full text when it fits (`server/utils/records-text.js`, prompt `patient-summary.records-in-context`); the deterministic blocks are anchors only where they are facts. Over the budget it falls back to the extracts and the knowledge base. Keep File N numbering on `recordFilesForLegend` so citations link.
 - Nothing generates or overwrites the Patient Summary without the patient's consent. Verification is a stamp (`patientSummaryVerifiedAt`) that only the patient's own acts set, and any unverified save clears it.
 - In the Personal AS edition, current medications are a section of the summary and are verified with it.
 - Companion mode (a phone, or Safari: no File System Access API): an existing MAIA opens with its passkey, including passkey-only sign-in (`/api/passkey/discover`, the account named by the `<userId>@<host>` user handle; another host's passkey is refused). A new MAIA still starts in Chrome on a computer. Folder writes there return no-folder quietly; the summary and rules PDFs are noted (`/api/setup/folder-catch-up`) and rewritten at the computer's next sign-in (`src/utils/folderCatchUp.ts`); `Received/` and the request log already catch up. Messages open once the folder key is unlocked with the passkey (`PhoneAccess.vue`, the thread's Unlock).

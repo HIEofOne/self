@@ -3080,6 +3080,10 @@ const modelDisplayNames: Record<string, string> = {
   'deepseek-r1-distill-llama-70b': 'DeepSeek R1 70B',
   'nvidia-nemotron-3-super-120b': 'Nemotron 120B',
   'kimi-k2.5': 'Kimi K2.5',
+  'kimi-k3': 'Kimi K3',
+  'qwen3.8-max': 'Qwen3.8-Max',
+  'glm-5.3': 'GLM-5.3',
+  'deepseek-v4-pro-0813': 'DeepSeek V4 Pro',
   'gemini-3.5-flash': 'Gemini 3.5 Flash',
 };
 
