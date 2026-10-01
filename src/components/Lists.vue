@@ -642,6 +642,7 @@
 </template>
 
 <script setup lang="ts">
+import { outOfRangeLines as outOfRangeLinesWithNames } from '../utils/oorLines';
 import PdfViewerModal from './PdfViewerModal.vue';
 import { ref, computed, onMounted, watch, onActivated, onDeactivated, nextTick } from 'vue';
 import { useQuasar } from 'quasar';
@@ -2237,7 +2238,7 @@ const extractObservationsForCategory = (
         // For Lab Results, track lines with "OUT   OF   RANG*"
         let outOfRangeLines: string[] = [];
         if (categoryLower.includes('lab result')) {
-          outOfRangeLines = obsLines.filter(l => l.includes('OUT') && l.includes('OF') && l.includes('RANG'));
+          outOfRangeLines = outOfRangeLinesWithNames(obsLines);
         }
         
         if (shouldMergeByDate) {
@@ -2320,7 +2321,7 @@ const extractObservationsForCategory = (
       // For Lab Results, track lines with "OUT   OF   RANG*"
       let outOfRangeLines: string[] = [];
       if (categoryLower.includes('lab result')) {
-        outOfRangeLines = obsLines.filter(l => l.includes('OUT') && l.includes('OF') && l.includes('RANG'));
+        outOfRangeLines = outOfRangeLinesWithNames(obsLines);
       }
       
       if (shouldMergeByDate) {

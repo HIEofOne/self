@@ -293,6 +293,41 @@ Discharge Reports from 1/1/1993 through 5/29/2015 (cont)`;
   });
 });
 
+describe('parsePatientIdentityFromText — a lab row is not a name (the "TOTAL BILIRUBIN" bug)', () => {
+  // The shape pdf-parse gives a Quest-only Apple Health export: the name
+  // above the date of birth, then lab rows, some written "TEST, QUALIFIER".
+  const questExport = `
+
+EDITH PARGH
+Date of Birth: Nov 29, 1953 (Age 72)Quest Diagnostics
+Lab Results
+Aug 4, 2026TSTCURRNTRFRNC
+ALBUMIN
+4.8 g/dL
+ALKALINE PHOSPHATASE
+87.0 U/L
+BILIRUBIN, TOTAL
+0.7 mg/dL
+PROTEIN, TOTAL
+7.1 g/dL`;
+
+  it('takes the line above the date of birth, not "BILIRUBIN, TOTAL"', () => {
+    const id = parsePatientIdentityFromText(questExport);
+    expect(id.name).toBe('EDITH PARGH');
+    expect(id.dobIso).toBe('1953-11-29');
+  });
+
+  it('without a date of birth, a "Last, First" line deep in the document or naming a lab qualifier is not taken', () => {
+    const noDob = questExport.replace(/Date of Birth:[^\n]*\n/, '').replace('EDITH PARGH\n', '');
+    expect(parsePatientIdentityFromText(noDob).name).toBe(null);
+    expect(parsePatientIdentityFromText('IRON, SERUM\n62 ug/dL').name).toBe(null);
+  });
+
+  it('a real "Last, First" header line still works without a date of birth', () => {
+    expect(parsePatientIdentityFromText('MASSACHUSETTS GENERAL HOSPITAL\nVOLYA,MARGARET\nMRN: 4786557').name).toBe('MARGARET VOLYA');
+  });
+});
+
 describe('parsePatientIdentityFromText — guards against picking the SPOUSE name', () => {
   it('does not pull "Arnold Glicksman" from a spouse / emergency-contact line', () => {
     // The line above "Spouse:" is the spouse — NOT the patient.

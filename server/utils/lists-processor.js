@@ -14,6 +14,7 @@
  * @returns {Promise<Array<{category: string, bucketKey: string, observationCount: number}>>} Array of saved category files
  */
 import { putObjectWithLog, deleteObjectWithLog } from './spaces-ops.js';
+import { outOfRangeLines as outOfRangeLinesWithNames } from './oor-lines.js';
 
 export async function extractAndSaveCategoryFiles(fullMarkdown, userId, listsFolder, s3Client, bucketName) {
   const categoryFiles = [];
@@ -156,7 +157,7 @@ export async function extractAndSaveCategoryFiles(fullMarkdown, userId, listsFol
           // For Lab Results, track lines with "OUT   OF   RANG*"
           let outOfRangeLines = [];
           if (categoryLower.includes('lab result')) {
-            outOfRangeLines = obsLines.filter(l => l.includes('OUT') && l.includes('OF') && l.includes('RANG'));
+            outOfRangeLines = outOfRangeLinesWithNames(obsLines);
           }
           
           if (shouldMergeByDate) {
@@ -207,7 +208,7 @@ export async function extractAndSaveCategoryFiles(fullMarkdown, userId, listsFol
       
       let outOfRangeLines = [];
       if (categoryLower.includes('lab result')) {
-        outOfRangeLines = obsLines.filter(l => l.includes('OUT') && l.includes('OF') && l.includes('RANG'));
+        outOfRangeLines = outOfRangeLinesWithNames(obsLines);
       }
       
       if (shouldMergeByDate) {

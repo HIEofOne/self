@@ -4,6 +4,7 @@
  */
 
 import multer from 'multer';
+import { healInitialFile } from '../utils/initial-file.js';
 import pdf from 'pdf-parse';
 import { S3Client, GetObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
@@ -1948,6 +1949,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
           return { httpStatus: 404, body: { error: 'User not found' } };
         }
 
+        healInitialFile(userDoc); // a key left behind by a move
         if (userDoc.initialFile?.bucketKey) {
           initialFileBucketKey = userDoc.initialFile.bucketKey;
           initialFileName = userDoc.initialFile.fileName;
