@@ -98,6 +98,9 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import { VuePDF } from '@tato30/vue-pdf';
+// pdf.js's text-layer rules: without them the invisible text doesn't line up
+// with the page, and text can't be selected or copied.
+import '@tato30/vue-pdf/style.css';
 import * as pdfjsLib from 'pdfjs-dist';
 
 // Configure PDF.js worker
@@ -317,23 +320,7 @@ watch(() => [props.modelValue, props.initialPage], ([isOpen, initialPage]) => {
 }
 
 .pdf-viewer :deep(.textLayer) {
-  position: absolute;
-  left: 0;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  overflow: hidden;
-  opacity: 0.2;
-  line-height: 1.0;
   pointer-events: auto;
-}
-
-.pdf-viewer :deep(.textLayer > span) {
-  color: transparent;
-  position: absolute;
-  white-space: pre;
-  cursor: text;
-  transform-origin: 0% 0%;
 }
 
 .pdf-controls {

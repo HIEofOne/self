@@ -37,6 +37,8 @@ import { getProjectIdForGenAI } from './utils/project-config.js';
 import setupAuthRoutes from './routes/auth.js';
 import setupChatRoutes, { getOwnerIdForDeepLinkSession, getShareOwnerId } from './routes/chat.js';
 import { bareDomainRedirect } from './utils/bare-domain-redirect.js';
+import { oorLineWithName } from './utils/oor-lines.js';
+import { healInitialFile } from './utils/initial-file.js';
 import { createApiGuard, isLocalDevRequest, isAdminUserId, INTERNAL_CALL_HEADER } from './utils/api-guard.js';
 import { deletionProof } from './utils/delete-proof.js';
 import setupFileRoutes from './routes/files.js';
@@ -6411,6 +6413,7 @@ app.post('/api/toggle-file-knowledge-base', async (req, res) => {
           destKey
         });
         userDoc.files[fileIndex].bucketKey = destKey;
+        healInitialFile(userDoc); // the initial file (Apple Health) follows its move
         console.log(`[KB Update] Moved file ${fileName} into KB folder: ${destKey}`);
       }
     } catch (moveError) {
@@ -10200,6 +10203,10 @@ app.get('/api/user-status', async (req, res) => {
     // If initialFile exists but bucketKey is missing, try to reconstruct it from KB name
     let initialFile = null;
     const kbInfo = await resolveKbForUserFromDo(userId);
+    // A key left behind when indexing or archiving moved the file.
+    if (healInitialFile(userDoc)) {
+      try { await cloudant.saveDocument('maia_users', userDoc); } catch { /* healed again next read */ }
+    }
     if (userDoc.initialFile) {
       let bucketKey = userDoc.initialFile.bucketKey;
       
@@ -12169,10 +12176,10 @@ function extractAppleHealthOorLabs(fullMarkdown) {
       continue;
     }
     if (/OUT\s+OF\s+RANG/i.test(t)) {
-      // Strip the trailing "OUT OF RANG[E]?" marker (the final E is often
-      // dropped in the pdfjs text extraction) so the cleaned line shows just
-      // the observation.
-      const clean = t.replace(/\s+/g, ' ').replace(/\s*OUT\s+OF\s+RANG[A-Z]*\s*$/i, '').trim();
+      // The row with its test name (restored when a long name wrapped
+      // around the values), without the trailing "OUT OF RANG[E]?" marker
+      // (the final E is often dropped in the pdfjs text extraction).
+      const clean = oorLineWithName(lines, i).replace(/\s+/g, ' ').replace(/\s*OUT\s+OF\s+RANG[A-Z]*\s*$/i, '').trim();
       out.push({ isoDate: currentIso, page: currentPage, line: clean });
     }
   }
