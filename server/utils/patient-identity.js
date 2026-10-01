@@ -297,55 +297,10 @@ export function parsePatientIdentityFromText(text, maxScanChars = 8000) {
   // Provider / Spouse / Referred / etc. The very first occurrence in
   // the head is almost always the patient's emergency contact, NOT
   // the patient (the patient block doesn't use a "Name:" label).
-  const nameMatches = [
-    // "LastName, FirstName" — allow optional whitespace after comma.
-    // The MGB Patient Extract header renders as "VOLYA,MARGARET" with
-    // no space after the comma; requiring `,\s+` (as we did) missed it.
-    /^\s*([A-Z][A-Za-z\-'’]+,\s*[A-Z][A-Za-z\-'’]+(?:\s+[A-Z][A-Za-z\-'’]+)?)\s*$/m,
-    /^\s*Name[:\s]+([A-Z][A-Za-z\-'’\.]+(?:\s+[A-Z][A-Za-z\-'’\.]+)*)\s*$/m,
-    // Concatenated AH fallback ("Name: ArnoldGlicksman") — accept a
-    // single CamelCase token that has at least one internal lowercase→
-    // uppercase boundary. The split function inserts a space there.
-    /^\s*Name[:\s]+([A-Z][a-z]+[A-Z][A-Za-z\-'’\.]+)\s*$/m
-  ];
-  // Labels in the ~200 chars BEFORE a "Name:" match that indicate the
-  // match is some OTHER person (not the patient). When any of these
-  // appear in the preceding context, the "Name:" capture is rejected.
-  const NON_PATIENT_LABELS = /\b(ContactPerson|Contact Person|Spouse|Emergency|HealthCareProxy|Health Care Proxy|Next of Kin|Provider|Physician|Author|Signed|Signature|Referred|Friend|Relationship|Witness|Surrogate|Guarantor)\b/i;
-  for (const re of nameMatches) {
-    const m = head.match(re);
-    if (!m) continue;
-    // Context guard: only applied to the two "Name:" patterns
-    // (re === nameMatches[1] || nameMatches[2]). The Last,First
-    // pattern doesn't need it — it's already specific.
-    if (re !== nameMatches[0]) {
-      const ctxStart = Math.max(0, m.index - 200);
-      const ctx = head.slice(ctxStart, m.index);
-      if (NON_PATIENT_LABELS.test(ctx)) continue;
-    }
-    let n = m[1].trim();
-    // Convert "Last, First" or "Last,First" → "First Last". The
-    // `\s*` lets us catch the MGB no-space variant.
-    if (/^[A-Za-z\-'’]+,\s*[A-Za-z\-'’]+/.test(n)) {
-      const [last, rest] = n.split(/,\s*/);
-      n = `${rest} ${last}`.trim();
-    }
-    // Repair PDF-extraction concatenation: "ArnoldGlicksman" →
-    // "Arnold Glicksman". Only inserts a space at lowercase→uppercase
-    // boundaries; idempotent on names that already have correct
-    // spacing. Skips apostrophes and hyphens which are valid mid-name
-    // characters that don't indicate a word boundary.
-    n = splitCamelCase(n);
-    // Skip "Page N", "Address ..." false positives.
-    if (!/\b(page|address|mrn|generated)\b/i.test(n)) {
-      name = n;
-      break;
-    }
-  }
-
-  // Anchor-line fallback: when no labeled "Name:" or "Last, First"
-  // pattern matched, look at the non-empty line IMMEDIATELY ABOVE
-  // the DOB match. The current AH export format places the patient's
+  // Anchor line FIRST: the non-empty line IMMEDIATELY ABOVE the DOB
+  // match. (It used to be a fallback after a document-wide "Last, First"
+  // search, which took Quest's "BILIRUBIN, TOTAL" lab row for the patient
+  // "TOTAL BILIRUBIN".) The current AH export format places the patient's
   // first-name (or full name) alone on the line above the DOB:
   //
   //     Margarita
@@ -387,6 +342,58 @@ export function parsePatientIdentityFromText(text, maxScanChars = 8000) {
         break;
       }
       // First non-noise non-name line breaks the search.
+      break;
+    }
+  }
+
+  const nameMatches = [
+    // "LastName, FirstName" — allow optional whitespace after comma.
+    // The MGB Patient Extract header renders as "VOLYA,MARGARET" with
+    // no space after the comma; requiring `,\s+` (as we did) missed it.
+    /^\s*([A-Z][A-Za-z\-'’]+,\s*[A-Z][A-Za-z\-'’]+(?:\s+[A-Z][A-Za-z\-'’]+)?)\s*$/m,
+    /^\s*Name[:\s]+([A-Z][A-Za-z\-'’\.]+(?:\s+[A-Z][A-Za-z\-'’\.]+)*)\s*$/m,
+    // Concatenated AH fallback ("Name: ArnoldGlicksman") — accept a
+    // single CamelCase token that has at least one internal lowercase→
+    // uppercase boundary. The split function inserts a space there.
+    /^\s*Name[:\s]+([A-Z][a-z]+[A-Z][A-Za-z\-'’\.]+)\s*$/m
+  ];
+  // Labels in the ~200 chars BEFORE a "Name:" match that indicate the
+  // match is some OTHER person (not the patient). When any of these
+  // appear in the preceding context, the "Name:" capture is rejected.
+  const NON_PATIENT_LABELS = /\b(ContactPerson|Contact Person|Spouse|Emergency|HealthCareProxy|Health Care Proxy|Next of Kin|Provider|Physician|Author|Signed|Signature|Referred|Friend|Relationship|Witness|Surrogate|Guarantor)\b/i;
+  // A "Last, First" line is trusted only among the document's opening
+  // lines (the patient header), and never when a part reads like a lab
+  // test or qualifier ("BILIRUBIN, TOTAL", "IRON, SERUM").
+  const opening = head.split('\n').filter((l) => l.trim()).slice(0, 25).join('\n');
+  const LAB_WORD = /^(total|free|direct|indirect|serum|plasma|urine|blood|whole|ratio|calc|fasting|random|ionized|corrected|absolute|automated|quant|qual|panel|level)$/i;
+  for (const re of (name ? [] : nameMatches)) {
+    const m = (re === nameMatches[0] ? opening : head).match(re);
+    if (!m) continue;
+    if (re === nameMatches[0] && m[1].split(/,\s*|\s+/).some((w) => LAB_WORD.test(w))) continue;
+    // Context guard: only applied to the two "Name:" patterns
+    // (re === nameMatches[1] || nameMatches[2]). The Last,First
+    // pattern doesn't need it — it's already specific.
+    if (re !== nameMatches[0]) {
+      const ctxStart = Math.max(0, m.index - 200);
+      const ctx = head.slice(ctxStart, m.index);
+      if (NON_PATIENT_LABELS.test(ctx)) continue;
+    }
+    let n = m[1].trim();
+    // Convert "Last, First" or "Last,First" → "First Last". The
+    // `\s*` lets us catch the MGB no-space variant.
+    if (/^[A-Za-z\-'’]+,\s*[A-Za-z\-'’]+/.test(n)) {
+      const [last, rest] = n.split(/,\s*/);
+      n = `${rest} ${last}`.trim();
+    }
+    // Repair PDF-extraction concatenation: "ArnoldGlicksman" →
+    // "Arnold Glicksman". Only inserts a space at lowercase→uppercase
+    // boundaries; idempotent on names that already have correct
+    // spacing. Skips apostrophes and hyphens which are valid mid-name
+    // characters that don't indicate a word boundary.
+    n = splitCamelCase(n);
+    // Skip "Page N", "Address ..." false positives.
+    if (!/\b(page|address|mrn|generated)\b/i.test(n)) {
+      name = n;
       break;
     }
   }

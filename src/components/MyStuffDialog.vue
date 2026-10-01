@@ -2111,6 +2111,12 @@
             Check your Current Medications in the list below: edit, remove or add medicines right there.
             They are verified with the rest of your summary.
           </div>
+          <!-- The records list no medications (an export of lab results only, say): ask, don't say "None". -->
+          <div v-if="isPersonalAs && reviewMedsView && !reviewMedRows.length" class="review-no-meds q-mb-sm">
+            <q-icon name="medication" size="18px" class="q-mr-xs" />
+            Your records don't list any medications. Add each medicine you take below (name, dose, how often),
+            so your summary is complete.
+          </div>
           <!-- P7d: the Current Medications section as rows, in place -->
           <div v-if="isPersonalAs && reviewMedsView" class="text-body2 q-pa-md bg-grey-1 rounded-borders" @click="handlePsCitationClick">
             <div v-html="reviewMedsView.before"></div>
@@ -9186,5 +9192,9 @@ $my-stuff-z: 6000; // above q-dialog default; sub-dialogs from within
   display: flex;
   flex-direction: column;
   background: #fff;
+}
+.review-no-meds {
+  display: flex; align-items: center; padding: 8px 12px; border-radius: 6px;
+  background: #fff4d6; border-left: 4px solid #e59a00; color: #4a3500; font-size: 0.9rem;
 }
 </style>
