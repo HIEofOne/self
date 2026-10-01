@@ -35,11 +35,17 @@ const CATALOG = [
 ];
 
 describe('the models to choose from', () => {
-  it('the four most expensive hosted models, newest per family, then the default', () => {
+  it('the four most expensive hosted models, newest per family, then the low-cost one; Qwen3.8-Max is the default', () => {
     const picked = pickPrimaryModels(CATALOG);
     expect(picked.map((m) => m.id)).toEqual(['kimi-k3', 'qwen3.8-max', 'glm-5.3', 'deepseek-v4-pro-0813', 'openai-gpt-oss-120b']);
-    expect(picked.map((m) => m.isDefault)).toEqual([false, false, false, false, true]);
+    expect(picked.map((m) => m.isDefault)).toEqual([false, true, false, false, false]);
     expect(picked[0]).toMatchObject({ name: 'Kimi K3', priceInPerM: 3, priceOutPerM: 15 });
+  });
+
+  it('a default outside the top four is still offered, marked default', () => {
+    const picked = pickPrimaryModels(CATALOG, { defaultId: 'kimi-k2.6' });
+    expect(picked.map((m) => m.id)).toEqual(['kimi-k3', 'qwen3.8-max', 'glm-5.3', 'deepseek-v4-pro-0813', 'kimi-k2.6', 'openai-gpt-oss-120b']);
+    expect(picked.find((m) => m.isDefault)?.id).toBe('kimi-k2.6');
   });
 
   it('a model family is its id without version numbers', () => {

@@ -12623,6 +12623,32 @@ async function buildPatientSummaryPromptForUser(userId, userDoc, profileKey = 'd
     radiology,
     fileTags
   };
+  // Draft from the records themselves when they fit (utils/records-text.js):
+  // the model reads every page, as it reads a file attached in chat, and
+  // the checked blocks (identity, medications, Apple Health's allergies and
+  // flagged labs) stay as anchors. Records over the budget: the extracts
+  // (or the knowledge base) as before. Edith Pargh's Quest-only export gave
+  // the extracts nothing but two flagged labs.
+  let records = '';
+  try {
+    const { buildRecordsText, recordsBudgetChars } = await import('./utils/records-text.js');
+    const { extractPdfWithPages } = await import('./utils/pdf-parser.js');
+    const modelName = profileKey === 'default' ? userDoc?.agentModelName : userDoc?.agentProfiles?.[profileKey]?.modelName;
+    const r = await buildRecordsText(pdfFilesForLegend, {
+      readBuffer: (key) => readSpacesObjectBuffer(key),
+      extractPages: async (buf) => (await extractPdfWithPages(buf))?.pages || [],
+      maxChars: recordsBudgetChars(modelName)
+    });
+    console.log(`[patient-summary] records for ${userId}: ${r.complete
+      ? `${r.pages} page(s) from ${r.files} file(s), ${r.chars} chars`
+      : `over the budget (${r.chars}+ chars), drafting from the extracts`}${r.unreadable.length ? `; no text in ${r.unreadable.length} file(s)` : ''}`);
+    if (r.complete && r.pages > 0) records = r.text;
+  } catch (e) {
+    console.warn(`[patient-summary] records text failed: ${e?.message || e}`);
+  }
+  vars.records = records;
+  vars.today = new Date().toISOString().slice(0, 10);
+
   // Per-agent override (My Stuff → Patient Summary → "Instructions for
   // <Agent>"). When set, takes precedence over the Layer-2 default; the
   // same `{placeholders}` are substituted so the user can rearrange the
@@ -12630,6 +12656,20 @@ async function buildPatientSummaryPromptForUser(userId, userDoc, profileKey = 'd
   const override = userDoc?.agentProfiles?.[profileKey]?.patientSummaryPrompt;
   if (override && override.trim()) {
     return substitutePromptPlaceholders(override, vars) + globalCitationContract;
+  }
+  if (records) {
+    // Only blocks that are facts, not fallbacks ("write exactly …"): with the
+    // records in front of it, the model fills the rest from them.
+    const anchor = (block) => (/^\*\*Authoritative/.test(String(block || '').trim()) ? block : '');
+    const inContext = getClinicalPrompt('patient-summary.records-in-context', {
+      ...vars,
+      currentMedications: anchor(currentMedications),
+      stoppedMedications: anchor(stoppedMedications),
+      allergies: anchor(allergies),
+      // Apple Health's own flags (a list, or "none flagged") are exact.
+      outOfRangeLabs: hasAppleHealth && ahBuf ? outOfRangeLabs : ''
+    });
+    if (inContext) return inContext + globalCitationContract;
   }
   return (getClinicalPrompt(recordsOnly ? 'patient-summary.records-only' : 'patient-summary.draft', vars)
     || getClinicalPrompt('patient-summary.draft', vars)

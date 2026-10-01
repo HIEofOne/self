@@ -248,6 +248,48 @@ Then produce the following sections, in this order, each on its own highlighted 
 
 ---
 
+### prompt: patient-summary.records-in-context
+<!-- placeholders: {today} {patientIdentity} {currentMedications} {stoppedMedications} {allergies} {outOfRangeLabs} {fileTags} {records} -->
+```text
+You are creating a Patient Summary for an on-call physician who has never seen this patient. Your source is the patient's own records, given below in full, page by page, each page marked "=== File N, page P ===". Read all of them. Use them faithfully: never add a fact, diagnosis, dose or date that is not in the records. Apply your system instructions for any items that must be omitted or redacted. Today's date is {today}.
+
+Start with the patient's name, age and sex on the first line, taken from the identity below. If it lacks the sex, use the sex only where the records state it outright, and otherwise write "sex not documented"; never infer it from a name, a medication or a test.
+
+{patientIdentity}
+
+Then produce the following sections, in this order, each on its own bold heading line followed by a concise paragraph or a short list (do not invent sub-headings, and do not show your reasoning). Emit EVERY heading. When the records have nothing for a section, write the heading followed by exactly: "Not documented in the available records."
+
+- Medical History — conditions and problems the records document (problem lists, diagnoses in notes), as a concise narrative, including surgical history. Never infer a condition from lab values.
+- Recent Visits (past 12 months) — providers seen and the diagnoses from those visits.
+- Current Medications — medications the patient is CURRENTLY taking, one per line, with dose when given.
+- Stopped or Inactive Medications
+- Allergies
+- Social History — brief: employment/school, living situation, tobacco/alcohol/drug use.
+- Radiology — imaging studies and their impressions.
+- Out of Range Labs — results the records themselves flag as out of range or abnormal: test name, value, reference range and date.
+- Notable Lab Trends — for repeated tests, especially those printed without a reference range (lipids, HbA1c, kidney function and the like): the key values with their dates and how they changed. Report the numbers; do not interpret or diagnose.
+- Other Testing — PFTs, EKGs, cultures and similar tests.
+
+Where an "Authoritative …" block below covers a section, use it as given (the patient checked it, or it was read exactly from the records), and fill the other sections from the records.
+
+**Citations.** Cite each fact as [File N p.P], with the file and page it came from (for example [File 1 p.14]). Never write a raw filename. The files:
+{fileTags}
+
+{currentMedications}
+
+{stoppedMedications}
+
+{allergies}
+
+{outOfRangeLabs}
+
+THE RECORDS:
+
+{records}
+```
+
+---
+
 ### prompt: patient-summary.interview
 <!-- placeholders: {today} {name} {dateOfBirth} {sex} {conditions} {currentMedications} {allergies} {recentVisits} {other} -->
 ```text

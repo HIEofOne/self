@@ -15,6 +15,7 @@ export const SUMMARY_SECTIONS = [
   'social history',
   'radiology',
   'out of range labs',
+  'notable lab trends',
   'other testing'
 ];
 
