@@ -492,7 +492,9 @@ export async function ensureUserAgent(doClient, cloudant, userDoc) {
     agentId: userDoc.assignedAgentId,
     agentName: userDoc.assignedAgentName,
     endpoint: userDoc.agentEndpoint,
-    modelName: userDoc.agentModelName
+    modelName: userDoc.agentModelName,
+    // The catalog's name ("Qwen3.8-Max"), for labels like "Private AI Primary (…)".
+    modelDisplayName: resolvedAgent.model?.name && resolvedAgent.model.name !== userDoc.agentModelName ? resolvedAgent.model.name : null
   });
 
   // Save with conflict retry
@@ -519,7 +521,8 @@ export async function ensureUserAgent(doClient, cloudant, userDoc) {
           agentId: userDoc.assignedAgentId,
           agentName: userDoc.assignedAgentName,
           endpoint: userDoc.agentEndpoint,
-          modelName: userDoc.agentModelName
+          modelName: userDoc.agentModelName,
+          modelDisplayName: resolvedAgent.model?.name && resolvedAgent.model.name !== userDoc.agentModelName ? resolvedAgent.model.name : null
         });
       } else {
         throw error;
@@ -1980,11 +1983,15 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
         }
       }
 
+      // When the private AI started (or, before its record exists, when the
+      // account did): the waiting messages count up from it.
+      const startedAt = userDoc.agentProfiles?.default?.createdAt || userDoc.emailVerifiedAt || userDoc.createdAt || null;
       if (!agent) {
         return res.json({
           success: true,
           status: 'not_started',
           endpointReady: false,
+          startedAt,
           provisionAttempted,
           ...(mayCreatePrimaryAgent(userDoc) ? {} : { waitingFor: 'email-verification' })
         });
@@ -2041,6 +2048,7 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
         status: deploymentStatus,
         endpointReady,
         endpoint,
+        startedAt,
         provisionAttempted
       });
     } catch (error) {

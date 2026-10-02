@@ -3150,6 +3150,7 @@ const normalizePrivateAiProfiles = (
     if (s.includes('kimi')) return 'Kimi';
     if (s.includes('gpt')) return 'GPT';
     if (s.includes('deepseek')) return 'Deepseek';
+    if (s.includes('qwen')) return 'Qwen';
     return '';
   };
   return [...raw]
@@ -3172,10 +3173,12 @@ const isPrivateAiLabel = (label: string) =>
 
 // Dynamic label for a profile key ('default' = primary, 'gpt' = secondary).
 // normalizePrivateAiProfiles already formats as "Private AI Primary (GPT)" etc.
+// Before the primary is live: the model it runs on (/api/chat/providers primaryLabel).
+const primaryFallbackLabel = ref('Private AI Primary');
 const labelForProfileKey = (key: string): string => {
   const prof = privateAiProfiles.value.find(p => p.key === key);
   if (prof) return prof.label;
-  if (key === 'default') return 'Private AI Primary (GPT)';
+  if (key === 'default') return primaryFallbackLabel.value;
   return 'Private AI Secondary';
 };
 
@@ -3486,6 +3489,9 @@ const loadProviders = async () => {
     );
     publicAis.value = Array.isArray(data.publicAis) ? data.publicAis : [];
     publicAiOn.value = data.publicAiOn !== false;
+    if (typeof data.primaryLabel === 'string' && data.primaryLabel) {
+      primaryFallbackLabel.value = data.primaryLabel.replace(/^Private AI\s*(?=\()/, 'Private AI Primary ');
+    }
     for (const m of publicAis.value) providerLabels[m.id] = m.label;
 
     // Keep wizard model name refs in sync whenever profiles are loaded

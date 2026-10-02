@@ -79,6 +79,9 @@ export const deriveSetupStatus = (doc, { joinableGroup = null, inviteOnlyGroup =
     steps,
     requiredDone: steps.every((s) => !s.required || s.done),
     agent: agentState(doc),
+    // When the private AI started (its record, else the verified email that
+    // starts it, else the account): the checklist counts up from it.
+    agentSince: doc?.agentProfiles?.default?.createdAt || doc?.emailVerifiedAt || doc?.createdAt || null,
     // The folder key travels with the passkey (routes/received.js), so a
     // phone or Safari can open member messages.
     folderKeyOnPasskey: !!wrappedFor(doc),

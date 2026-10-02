@@ -138,6 +138,7 @@ export const ROUTE_FEATURES = Object.freeze({
   'GET /api/user-files': 'summary',
   'POST /api/user-file-metadata': 'summary',
   'GET /api/records/files': 'summary',
+  'GET /api/records/overview': 'summary',
   'DELETE /api/delete-file': 'summary',
   'POST /api/archive-user-files': 'summary',
   'POST /api/cleanup-imported-files': 'summary',

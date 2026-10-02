@@ -33,6 +33,8 @@ export interface SetupStatus {
   steps: SetupStep[];
   requiredDone: boolean;
   agent: AgentState;
+  /** When the private AI started (the checklist counts up from it). */
+  agentSince?: string | null;
   /** The folder key travels with the passkey (a phone or Safari can open messages). */
   folderKeyOnPasskey?: boolean;
   hasFolderKey?: boolean;

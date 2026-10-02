@@ -772,6 +772,7 @@ let worksheetTimer: ReturnType<typeof setInterval> | null = null;
 let worksheetAbort: AbortController | null = null;
 
 const modelShortNames: Record<string, string> = {
+  'qwen3.8-max': 'Qwen3.8-Max',
   'openai-gpt-oss-120b': 'GPT 120B',
   'kimi-k2.5': 'Kimi K2.5',
   'deepseek-v4-pro': 'DeepSeek V4 Pro',
@@ -789,7 +790,7 @@ const worksheetCardTitle = (profileKey: string): string => {
     const short = profileStr.replace(/^Private AI\s*/, '').replace(/^\(/, '').replace(/\)$/, '');
     return `Current Medications Worksheet (${short})`;
   }
-  return `Current Medications Worksheet (${profileKey === 'default' ? 'GPT' : 'Kimi'})`;
+  return `Current Medications Worksheet (${profileKey === 'default' ? 'Primary' : 'Secondary'})`;
 };
 
 const worksheetSpecsOrdered = computed(() => {

@@ -5362,6 +5362,46 @@ app.get('/api/records/files', async (req, res) => {
   }
 });
 
+// What setup tells the patient before they choose to index (Saved Files'
+// offer): how many record files and how big, whether one is the Apple
+// Health export, how long indexing would take, and whether the Patient
+// Summary can read every page at once (utils/records-text.js) or needs the
+// index for the rest.
+app.get('/api/records/overview', async (req, res) => {
+  try {
+    const userId = req.query.userId || req.session?.userId;
+    if (!userId || req.session?.userId !== userId) return res.status(401).json({ success: false, error: 'NOT_AUTHENTICATED' });
+    const userDoc = await cloudant.getDocument('maia_users', userId);
+    if (!userDoc) return res.status(404).json({ success: false, error: 'USER_NOT_FOUND' });
+    const files = recordFilesForLegend(userDoc);
+    const bytes = files.reduce((n, f) => n + (Number(f.fileSize) || 0), 0);
+    const { buildRecordsText, recordsBudgetChars } = await import('./utils/records-text.js');
+    const { extractPdfWithPages } = await import('./utils/pdf-parser.js');
+    const { indexEstimateMinutes } = await import('./records-pipeline.js');
+    const { DEFAULT_PRIMARY_MODEL_ID } = await import('./utils/primary-models.js');
+    const r = await buildRecordsText(files, {
+      readBuffer: (key) => readSpacesObjectBuffer(key),
+      extractPages: async (buf) => (await extractPdfWithPages(buf))?.pages || [],
+      maxChars: recordsBudgetChars(userDoc.agentModelName || DEFAULT_PRIMARY_MODEL_ID)
+    });
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      success: true,
+      files: files.length,
+      bytes,
+      appleHealth: files.find((f) => f.isAppleHealth)?.fileName || null,
+      pages: r.pages,
+      unreadable: r.unreadable.length,
+      // The summary reads them all (else: as many as fit; the rest needs the index).
+      fitsSummary: r.complete,
+      estimateMinutes: files.length ? indexEstimateMinutes(bytes) : null
+    });
+  } catch (e) {
+    console.warn('[records/overview] failed:', e?.message || e);
+    res.status(500).json({ success: false, error: 'OVERVIEW_FAILED' });
+  }
+});
+
 app.post('/api/user-file-metadata', async (req, res) => {
   try {
     const userId = resolveUserId(req, res);
