@@ -29,6 +29,13 @@ describe('useSetupChecklist', () => {
     expect(state.status?.agent).toBe('ready');
   });
 
+  it('keeps when the private AI started, for the checklist to count up from', async () => {
+    stubFetch({ setup: [{ ...status('creating'), agentSince: '2026-10-03T12:00:00Z' }], agent: [{ endpointReady: false }] });
+    const { refresh, state } = useSetupChecklist();
+    await refresh();
+    expect(state.status?.agentSince).toBe('2026-10-03T12:00:00Z');
+  });
+
   it('while the private AI is being created, polls until it is ready, then re-derives', async () => {
     const calls = stubFetch({
       setup: [status('creating'), status('ready')],
