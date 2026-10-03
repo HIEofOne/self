@@ -9,6 +9,8 @@
         <div class="text-h6">Set up your MAIA</div>
       </q-card-section>
 
+      <!-- Only the rows scroll: Sign out and Done stay in view on a short window -->
+      <div class="setup-checklist__body">
       <q-card-section class="q-pt-none">
         <div v-if="!status && state.error" class="text-negative">Couldn't load your setup: {{ state.error }}</div>
         <div v-else-if="!status" class="row justify-center q-pa-md"><q-spinner size="2em" /></div>
@@ -110,6 +112,8 @@
           <q-spinner v-if="indexing?.state === 'running'" size="14px" class="q-mr-sm" />
           <q-icon v-else :name="indexing?.state === 'error' ? 'error_outline' : 'manage_search'" size="16px" class="q-mr-sm" />
           <span>{{ indexLine }}</span>
+          <q-btn v-if="indexing?.state === 'error'" flat dense no-caps size="sm" color="primary" label="Try again"
+                 class="q-ml-sm" :loading="indexRetrying" @click="retryIndexing" />
         </div>
         <!-- Messages on a phone or in Safari: the folder key travels with the passkey -->
         <PhoneAccess :user-id="userId" :status="keyStatus" class="q-mt-xs" @changed="refresh" />
@@ -118,8 +122,9 @@
           <span>This device works without your MAIA folder. The files MAIA keeps there are updated on your computer.</span>
         </div>
       </q-card-section>
+      </div>
 
-      <q-card-actions align="between" class="q-px-md q-pb-md">
+      <q-card-actions align="between" class="setup-checklist__actions q-px-md q-pb-md">
         <q-btn flat dense no-caps color="grey-8" label="Sign out" @click="emit('sign-out')" />
         <q-btn unelevated color="primary" label="Done" :disable="!requiredDone" @click="hide" />
       </q-card-actions>
@@ -138,7 +143,7 @@ import { computed, ref, watch, onUnmounted } from 'vue';
 import EmailVerifyBox from './EmailVerifyBox.vue';
 import { useSetupChecklist, type SetupStepKey } from '../composables/useSetupChecklist';
 import { useVerifiedEmail } from '../composables/verifiedEmail';
-import { recordsIndexProgress, elapsedWords, estimateWords, INDEX_WORDS, type IndexProgress } from '../utils/recordsSearch';
+import { recordsIndexProgress, startRecordsIndexing, elapsedWords, estimateWords, indexErrorWords, type IndexProgress } from '../utils/recordsSearch';
 import { isFileSystemAccessSupported } from '../utils/localFolder';
 import PhoneAccess from './PhoneAccess.vue';
 
@@ -273,9 +278,18 @@ const indexLine = computed(() => {
     return `Indexing your records${time || files ? `: ${[time, files].filter(Boolean).join(' · ')}` : '…'}`;
   }
   if (p.state === 'done') return 'Your records are indexed: your private AI can search them.';
-  if (p.state === 'error') return INDEX_WORDS.error;
+  if (p.state === 'error') return indexErrorWords(p.error);
   return '';
 });
+// "Try again" after indexing stopped: upload what the folder has, start again.
+const indexRetrying = ref(false);
+const retryIndexing = async () => {
+  if (!props.userId || indexRetrying.value) return;
+  indexRetrying.value = true;
+  try { await startRecordsIndexing(props.userId); } catch { /* the line shows the state */ }
+  indexRetrying.value = false;
+  await pollIndexing();
+};
 
 // A phone or Safari: no folder here (the folder row says where to choose it).
 const folderCapable = isFileSystemAccessSupported();
@@ -376,6 +390,18 @@ watch(status, async (s) => {
 .setup-checklist {
   width: 520px;
   max-width: 95vw;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 48px);
+}
+.setup-checklist__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+.setup-checklist__actions {
+  flex: none;
+  border-top: 1px solid #f0f0f0;
 }
 .setup-row {
   display: flex;

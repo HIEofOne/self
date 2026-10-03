@@ -8434,6 +8434,8 @@ const runPoll = async () => {
             const failReason = failedJob.error || failedJob.message || 'Unknown error';
             console.error(`[KB AUTO] ❌ Indexing job ${failedJobId} failed:`, failReason);
             console.log(`[KB AUTO] ❌ Polling stopped for job ${activeJobId} (reason=job_failed)`);
+            // Record it: without this the stage read "running" until it went stale.
+            try { await persistKbIndexingStatus(userId, { phase: 'error', error: `DigitalOcean's indexing job failed: ${failReason}` }); } catch { /* bookkeeping */ }
             await logFinalIndexingStatus('job_failed');
             await cleanupEphemeralIndexing('failed');
              return;
@@ -8459,6 +8461,7 @@ const runPoll = async () => {
            clearPollTimer();
           console.error(`[KB AUTO] ⚠️ Polling timeout: No indexing job found after ${maxPolls} polls (${Math.round((maxPolls * pollDelayMs) / 60000)} minutes)`);
           console.log(`[KB AUTO] ⚠️ Polling stopped for job ${activeJobId} (reason=timeout)`);
+          try { await persistKbIndexingStatus(userId, { phase: 'error', error: 'Indexing was still unfinished after an hour.' }); } catch { /* bookkeeping */ }
           await logFinalIndexingStatus('timeout');
           await cleanupEphemeralIndexing('timeout');
          } else {
