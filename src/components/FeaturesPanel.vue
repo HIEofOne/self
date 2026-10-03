@@ -54,7 +54,7 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { useEdition } from '../composables/useEdition';
 import PhoneAccess from './PhoneAccess.vue';
 import { setFeature } from '../utils/advisorProposals';
-import { recordsIndexProgress, startRecordsIndexing, uploadWords, progressWords, INDEX_WORDS, type IndexState } from '../utils/recordsSearch';
+import { recordsIndexProgress, startRecordsIndexing, uploadWords, progressWords, indexErrorWords, INDEX_WORDS, type IndexState } from '../utils/recordsSearch';
 
 const props = defineProps<{ userId: string }>();
 const emit = defineEmits<{ 'open-files': [] }>();
@@ -69,7 +69,7 @@ const error = ref('');
 const indexState = ref<IndexState>('unknown');
 // While indexing runs: the job's start, tokens and files (polled), and a
 // clock that ticks every second.
-const progress = ref({ startedAt: null as string | null, tokens: 0, filesIndexed: 0, filesTotal: 0, estimateMinutes: null as number | null });
+const progress = ref({ startedAt: null as string | null, tokens: 0, filesIndexed: 0, filesTotal: 0, estimateMinutes: null as number | null, error: null as string | null });
 const now = ref(Date.now());
 let timer: ReturnType<typeof setInterval> | null = null;
 let clock: ReturnType<typeof setInterval> | null = null;
@@ -81,7 +81,7 @@ const refreshIndex = async () => {
   if (!props.userId || !state.features['records-index']?.enabled) return;
   const p = await recordsIndexProgress(props.userId);
   indexState.value = p.state;
-  progress.value = { startedAt: p.startedAt, tokens: p.tokens, filesIndexed: p.filesIndexed, filesTotal: p.filesTotal, estimateMinutes: p.estimateMinutes };
+  progress.value = { startedAt: p.startedAt, tokens: p.tokens, filesIndexed: p.filesIndexed, filesTotal: p.filesTotal, estimateMinutes: p.estimateMinutes, error: p.error || null };
   if (indexState.value === 'running') {
     if (!timer) timer = setInterval(refreshIndex, 5000);
     if (!clock) clock = setInterval(() => { now.value = Date.now(); }, 1000);
@@ -95,7 +95,8 @@ const uploadNote = ref('');
 const lastUpload = ref('');
 const indexLine = computed(() => (indexState.value === 'uploading' && uploadNote.value
   ? uploadNote.value
-  : [lastUpload.value, indexState.value === 'running' ? progressWords(progress.value, now.value) : INDEX_WORDS[indexState.value]].filter(Boolean).join(' ')));
+  : [lastUpload.value, indexState.value === 'running' ? progressWords(progress.value, now.value)
+    : indexState.value === 'error' ? indexErrorWords(progress.value.error) : INDEX_WORDS[indexState.value]].filter(Boolean).join(' ')));
 const index = async () => {
   busy.value = 'index';
   indexState.value = 'uploading';

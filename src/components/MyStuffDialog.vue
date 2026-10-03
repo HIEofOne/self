@@ -2263,7 +2263,7 @@ import GroupsPanel from './GroupsPanel.vue';
 import PoliciesPanel from './PoliciesPanel.vue';
 import RequestsPanel from './RequestsPanel.vue';
 import FeaturesPanel from './FeaturesPanel.vue';
-import { recordsIndexProgress, elapsedWords, estimateWords, startRecordsIndexing, INDEX_WORDS, waitForIndexing, type IndexProgress } from '../utils/recordsSearch';
+import { recordsIndexProgress, elapsedWords, estimateWords, startRecordsIndexing, INDEX_WORDS, indexErrorWords, waitForIndexing, type IndexProgress } from '../utils/recordsSearch';
 import { setFeature } from '../utils/advisorProposals';
 import { syncRequestLog } from '../utils/requestLog';
 import { readSeenMessages, writeSeenMessages } from '../utils/welcomeActivity';
@@ -3895,7 +3895,7 @@ const pollServerIndex = async () => {
     // Indexing that setup started is done: back to the setup checklist.
     if (setupIndexing.value) {
       setupIndexing.value = false;
-      if (p.state === 'error') $q.notify({ type: 'warning', message: INDEX_WORDS.error });
+      if (p.state === 'error') $q.notify({ type: 'warning', message: indexErrorWords(p.error) });
       emit('return-to-setup');
     }
   }

@@ -33,13 +33,16 @@ export const recordsIndexState = async (userId: string): Promise<IndexState> => 
 export interface IndexProgress {
   state: IndexState; startedAt: string | null; tokens: number; filesIndexed: number;
   filesTotal: number; estimateMinutes: number | null;
+  /** Why indexing stopped, as the server recorded it. */
+  error?: string | null;
 }
 export async function recordsIndexProgress(userId: string): Promise<IndexProgress> {
   const p = await fetchPipeline(userId);
   const st = p?.pipeline.stages.indexed;
   return {
     state: indexStateOf(p), startedAt: st?.status === 'running' ? st.at : null, tokens: st?.tokens || 0, filesIndexed: st?.filesIndexed || 0,
-    filesTotal: st?.filesTotal || 0, estimateMinutes: st?.estimateMinutes || null
+    filesTotal: st?.filesTotal || 0, estimateMinutes: st?.estimateMinutes || null,
+    error: st?.status === 'error' ? st.error || null : null
   };
 }
 
@@ -189,6 +192,13 @@ export const uploadWords = (u?: FolderUpload) => {
   if (u.tooLarge) parts.push(`${u.tooLarge} over 50 MB left out`);
   if (u.failed) parts.push(`${u.failed} couldn’t be uploaded`);
   return `${parts[0]}${parts.length > 1 ? ` (${parts.slice(1).join('; ')})` : ''}.`;
+};
+
+/** "Indexing stopped: <the reason the server recorded>." */
+export const indexErrorWords = (reason?: string | null): string => {
+  const r = String(reason || '').replace(/^(Error:\s*)+/i, '').replace(/\s+/g, ' ').trim().replace(/[.\s]+$/, '');
+  if (!r || r === 'error' || r === 'failed') return 'Indexing stopped with an error.';
+  return `Indexing stopped: ${r.length > 180 ? `${r.slice(0, 177)}…` : r}.`;
 };
 
 export const INDEX_WORDS: Record<IndexState, string> = {
