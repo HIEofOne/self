@@ -95,7 +95,7 @@ const refresh = async (): Promise<SetupStatus | null> => {
     const r = await fetch('/api/setup-status', { credentials: 'include' });
     const d = await r.json().catch(() => null);
     if (!r.ok || !d?.success) throw new Error(d?.error || `HTTP ${r.status}`);
-    state.status = { edition: d.edition, steps: d.steps, requiredDone: d.requiredDone, agent: d.agent };
+    state.status = { edition: d.edition, steps: d.steps, requiredDone: d.requiredDone, agent: d.agent, agentSince: d.agentSince ?? null };
     state.error = '';
     if ((d.agent === 'creating' || d.agent === 'none') && !state.agentFailed) watchAgent();
     else if (d.agent === 'ready') stopAgentWatch();

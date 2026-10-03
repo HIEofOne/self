@@ -5,7 +5,7 @@ through. Captured 2026-07-26 (v1.5.110). Check items off and link the PR as
 they land. Pointers are starting points, not final scope.
 
 **Status: items 1–8 shipped as of v1.5.124.** Open: a live delete→restore
-verification for #8 (see that item), and #9 (added 2026-09-28).
+verification for #8 (see that item); #9 (added 2026-09-28) was fixed in v2.0.8.
 
 ## Email & notifications
 
@@ -61,7 +61,16 @@ verification for #8 (see that item), and #9 (added 2026-09-28).
   re-disable the two controls. See `Setup_Sequence.md` →
   "Restore-after-deletion".
 
-- [ ] **9. Adding a passkey later fails in the Personal AS edition.** An account
+- [x] **9. Adding a passkey later fails in the Personal AS edition.** **Fixed
+  in v2.0.8** (reproduced locally with a virtual authenticator). Adding a
+  passkey saved it, then waited for the private AI: a failed start returned an
+  error though the passkey was saved, and a start that failed after the agent
+  was created never released its lock, so the wait never ended. Now the passkey
+  doesn't wait for the private AI in the Personal AS edition (setup shows and
+  retries it), a failed start no longer fails the passkey, and the lock is
+  always released (`tests/backend/passkey-after-start.test.js`). v2.0.7 had
+  also made the dialog spin before asking for a passkey at all (it called
+  `continueAction` during setup). Original report: an account
   started without a passkey ("This is my own computer") couldn't add one
   afterwards on test.agropper.xyz (seen 2026-09-28, v1.6.52). The test and
   production hosts were cleared to their admin accounts rather than fix it then.

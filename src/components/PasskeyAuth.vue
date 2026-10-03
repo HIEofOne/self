@@ -290,7 +290,14 @@ const applyPrefill = async (prefill: string | null | undefined) => {
     // The ID screen appears only when something needs it: the admin secret,
     // or an error to show.
     currentStep.value = 'registering';
-    await continueAction();
+    // The immediate watch below runs during setup, before continueAction is
+    // defined: wait a tick (calling it at once threw and left the spinner up).
+    await nextTick();
+    try {
+      await continueAction();
+    } catch (err: any) {
+      error.value = err?.message || 'Could not add a passkey';
+    }
     if (adminSecretRequired.value || error.value) currentStep.value = 'userId';
     return;
   }

@@ -267,8 +267,19 @@ Then produce the following sections, in this order, each on its own bold heading
 - Social History — brief: employment/school, living situation, tobacco/alcohol/drug use.
 - Radiology — imaging studies and their impressions.
 - Out of Range Labs — results the records themselves flag as out of range or abnormal: test name, value, reference range and date.
-- Notable Lab Trends — for repeated tests, especially those printed without a reference range (lipids, HbA1c, kidney function and the like): the key values with their dates and how they changed. Report the numbers; do not interpret or diagnose.
+- Notable Lab Trends — for repeated tests, especially those printed without a reference range (lipids, HbA1c, kidney function and the like): how the values changed over time. Report the numbers; do not interpret or diagnose.
 - Other Testing — PFTs, EKGs, cultures and similar tests.
+
+**Notable Lab Trends is a list, never a paragraph.** One top-level line per test, with its unit, then one indented line per result, newest first, at most 8 (the 8 most recent; look through all the records for them). Each indented line is the date, the value and its citation, and nothing else. Only dates on which that test has a result: never a line for a date when only other tests were done. One test per line: never several tests in one line or sentence. A panel whose results were all within range (a CBC, for example) is one line saying so, with its dates. For example:
+
+- Total cholesterol (mg/dL)
+  - Feb 9, 2022: 195 [File 2 p.2]
+  - Jan 5, 2021: 210 [File 2 p.4]
+- HbA1c (%)
+  - Feb 9, 2022: 5.9 [File 2 p.3]
+  - Jan 5, 2021: 5.6 [File 2 p.4]
+
+(The values above only show the layout; take every value from the records.)
 
 Where an "Authoritative …" block below covers a section, use it as given (the patient checked it, or it was read exactly from the records), and fill the other sections from the records.
 

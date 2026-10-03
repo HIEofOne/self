@@ -475,65 +475,70 @@ export async function ensureUserAgent(doClient, cloudant, userDoc) {
     }
   }
 
-  const resolvedAgent = await doClient.agent.get(agent.uuid || agent.id);
-  const endpoint = resolvedAgent?.deployment?.url ? `${resolvedAgent.deployment.url}/api/v1` : null;
-  userDoc.assignedAgentId = resolvedAgent.uuid || resolvedAgent.id;
-  userDoc.assignedAgentName = resolvedAgent.name || userDoc.assignedAgentName;
-  userDoc.agentEndpoint = endpoint || userDoc.agentEndpoint || null;
-  userDoc.agentModelName = resolvedAgent.model?.inference_name || resolvedAgent.model?.name || userDoc.agentModelName || null;
-  if (!WIZARD_DONE_STAGES_AUTH.has(userDoc.workflowStage)) {
-    userDoc.workflowStage = endpoint ? 'agent_deployed' : 'agent_named';
-  }
-  userDoc.agentSetupInProgress = !endpoint;
-  userDoc.updatedAt = new Date().toISOString();
-  // Mirror the primary agent into the 'default' profile so the chat
-  // router / My Agent UI can address it by profile key uniformly.
-  setAgentProfile(userDoc, PROFILE_DEFAULT, {
-    agentId: userDoc.assignedAgentId,
-    agentName: userDoc.assignedAgentName,
-    endpoint: userDoc.agentEndpoint,
-    modelName: userDoc.agentModelName,
-    // The catalog's name ("Qwen3.8-Max"), for labels like "Private AI Primary (…)".
-    modelDisplayName: resolvedAgent.model?.name && resolvedAgent.model.name !== userDoc.agentModelName ? resolvedAgent.model.name : null
-  });
+  try {
+    const resolvedAgent = await doClient.agent.get(agent.uuid || agent.id);
+    const endpoint = resolvedAgent?.deployment?.url ? `${resolvedAgent.deployment.url}/api/v1` : null;
+    userDoc.assignedAgentId = resolvedAgent.uuid || resolvedAgent.id;
+    userDoc.assignedAgentName = resolvedAgent.name || userDoc.assignedAgentName;
+    userDoc.agentEndpoint = endpoint || userDoc.agentEndpoint || null;
+    userDoc.agentModelName = resolvedAgent.model?.inference_name || resolvedAgent.model?.name || userDoc.agentModelName || null;
+    if (!WIZARD_DONE_STAGES_AUTH.has(userDoc.workflowStage)) {
+      userDoc.workflowStage = endpoint ? 'agent_deployed' : 'agent_named';
+    }
+    userDoc.agentSetupInProgress = !endpoint;
+    userDoc.updatedAt = new Date().toISOString();
+    // Mirror the primary agent into the 'default' profile so the chat
+    // router / My Agent UI can address it by profile key uniformly.
+    setAgentProfile(userDoc, PROFILE_DEFAULT, {
+      agentId: userDoc.assignedAgentId,
+      agentName: userDoc.assignedAgentName,
+      endpoint: userDoc.agentEndpoint,
+      modelName: userDoc.agentModelName,
+      // The catalog's name ("Qwen3.8-Max"), for labels like "Private AI Primary (…)".
+      modelDisplayName: resolvedAgent.model?.name && resolvedAgent.model.name !== userDoc.agentModelName ? resolvedAgent.model.name : null
+    });
 
-  // Save with conflict retry
-  let saved = false;
-  let retries = 3;
-  while (!saved && retries > 0) {
-    try {
-      await cloudant.saveDocument('maia_users', userDoc);
-      saved = true;
-    } catch (error) {
-      if ((error.statusCode === 409 || error.error === 'conflict') && retries > 1) {
-        retries -= 1;
-        userDoc = await cloudant.getDocument('maia_users', userId);
-        userDoc.assignedAgentId = resolvedAgent.uuid || resolvedAgent.id;
-        userDoc.assignedAgentName = resolvedAgent.name || userDoc.assignedAgentName;
-        userDoc.agentEndpoint = endpoint || userDoc.agentEndpoint || null;
-        userDoc.agentModelName = resolvedAgent.model?.inference_name || resolvedAgent.model?.name || userDoc.agentModelName || null;
-        if (!WIZARD_DONE_STAGES_AUTH.has(userDoc.workflowStage)) {
-          userDoc.workflowStage = endpoint ? 'agent_deployed' : 'agent_named';
+    // Save with conflict retry
+    let saved = false;
+    let retries = 3;
+    while (!saved && retries > 0) {
+      try {
+        await cloudant.saveDocument('maia_users', userDoc);
+        saved = true;
+      } catch (error) {
+        if ((error.statusCode === 409 || error.error === 'conflict') && retries > 1) {
+          retries -= 1;
+          userDoc = await cloudant.getDocument('maia_users', userId);
+          userDoc.assignedAgentId = resolvedAgent.uuid || resolvedAgent.id;
+          userDoc.assignedAgentName = resolvedAgent.name || userDoc.assignedAgentName;
+          userDoc.agentEndpoint = endpoint || userDoc.agentEndpoint || null;
+          userDoc.agentModelName = resolvedAgent.model?.inference_name || resolvedAgent.model?.name || userDoc.agentModelName || null;
+          if (!WIZARD_DONE_STAGES_AUTH.has(userDoc.workflowStage)) {
+            userDoc.workflowStage = endpoint ? 'agent_deployed' : 'agent_named';
+          }
+          userDoc.agentSetupInProgress = !endpoint;
+          userDoc.updatedAt = new Date().toISOString();
+          setAgentProfile(userDoc, PROFILE_DEFAULT, {
+            agentId: userDoc.assignedAgentId,
+            agentName: userDoc.assignedAgentName,
+            endpoint: userDoc.agentEndpoint,
+            modelName: userDoc.agentModelName,
+            modelDisplayName: resolvedAgent.model?.name && resolvedAgent.model.name !== userDoc.agentModelName ? resolvedAgent.model.name : null
+          });
+        } else {
+          throw error;
         }
-        userDoc.agentSetupInProgress = !endpoint;
-        userDoc.updatedAt = new Date().toISOString();
-        setAgentProfile(userDoc, PROFILE_DEFAULT, {
-          agentId: userDoc.assignedAgentId,
-          agentName: userDoc.assignedAgentName,
-          endpoint: userDoc.agentEndpoint,
-          modelName: userDoc.agentModelName,
-          modelDisplayName: resolvedAgent.model?.name && resolvedAgent.model.name !== userDoc.agentModelName ? resolvedAgent.model.name : null
-        });
-      } else {
-        throw error;
       }
     }
-  }
 
-  // Release lock so waiting callers pick up the saved agent
-  if (needsCreation && lockResolve) {
-    agentCreationLocks.delete(userId);
-    lockResolve();
+  } finally {
+    // Release the lock even when reading or saving the new agent failed:
+    // a lock left behind made every later call for this user (adding a
+    // passkey among them) wait forever. Waiters re-read the account.
+    if (needsCreation && lockResolve) {
+      agentCreationLocks.delete(userId);
+      lockResolve();
+    }
   }
   return userDoc;
 }
@@ -1034,8 +1039,23 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
         doc.updatedAt = new Date().toISOString();
       });
 
-      const agentReadyUser = await ensureUserAgent(doClient, cloudant, updatedUser);
-      console.log(`[NEW FLOW 2] ✅ User document saved (agent ready)`);
+      // The passkey is saved; the private AI is a step of its own. A failed
+      // or slow start must not fail or hold up the passkey (the page showed
+      // an error, or spun until the start finished, though the passkey was
+      // saved). In the Personal AS edition it started at GET STARTED and
+      // setup shows and retries it, so don't wait; elsewhere wait as before.
+      let agentReadyUser = updatedUser;
+      if (getEdition() === 'personal-as') {
+        ensureUserAgent(doClient, cloudant, updatedUser).catch((e) =>
+          console.warn(`[AGENT] Start after passkey for ${userId} failed: ${e?.message || e}`));
+      } else {
+        try {
+          agentReadyUser = await ensureUserAgent(doClient, cloudant, updatedUser);
+        } catch (e) {
+          console.warn(`[AGENT] Start after passkey for ${userId} failed: ${e?.message || e}`);
+        }
+      }
+      console.log(`[NEW FLOW 2] ✅ User document saved`);
 
       // Set session
       req.session.userId = agentReadyUser.userId;
