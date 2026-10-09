@@ -13,6 +13,8 @@ MAIA (Medical AI Assistant) is free, open-source software for patients. Each pat
 
 ## Getting started (Personal AS edition)
 
+The welcome page has a 6½-minute video (no sound), MAIA Quick Start: how to get your health records and then set up MAIA, with a brief tour of key features. It stays on the welcome page after you have a MAIA.
+
 You need Chrome on a computer that only you use. On the welcome page you confirm your email address, then GET STARTED creates your MAIA and starts your private AI at once (it takes 2 to 3 minutes; the checklist shows the time so far while you go on with setup), and opens a short setup checklist:
 
 1. **Verify your email.** MAIA emails you when a request needs your decision or something was shared, plus a weekly summary. It never emails health information.

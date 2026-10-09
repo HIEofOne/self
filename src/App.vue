@@ -146,6 +146,22 @@
                   <q-btn flat dense color="negative" label="Dismiss" style="flex: 0 0 auto;" @click="invalidInviteMessage = ''" />
                 </div>
 
+                <!-- The tour video, for a new patient and for one who already has a MAIA -->
+                <div class="welcome-tour q-mb-md">
+                  <p class="q-ma-none q-mb-sm text-body2" style="color: #1a1a1a">
+                    How to get your health records and then set up MAIA, with a brief tour of key features.
+                  </p>
+                  <button
+                    type="button" class="welcome-tour__thumb"
+                    aria-label="Play the MAIA Quick Start video (6½ minutes, no sound)"
+                    @click="showTourVideo = true"
+                  >
+                    <span class="welcome-tour__play"><q-icon name="play_arrow" size="20px" /></span>
+                    <img src="/welcome-video-poster.jpg" alt="MAIA Quick Start" width="240" height="52" />
+                  </button>
+                  <div class="text-caption text-grey-7">6½ minutes, no sound</div>
+                </div>
+
                 <!-- Account status cards derived from IndexedDB + .webloc -->
                 <!-- MAIAs found in this browser's folders (not on a phone or in Safari: no folder) -->
                 <div v-if="discoveredUsers.length > 0 && !companionWelcome" class="q-mb-md">
@@ -826,6 +842,22 @@
             @cancelled="showPasskeyDialog = false"
           />
         </q-card-section>
+      </q-card>
+    </q-dialog>
+
+    <!-- The welcome page's tour video: loaded only when played -->
+    <q-dialog v-model="showTourVideo">
+      <!-- Inline width: a dialog's card is otherwise capped at 560px -->
+      <q-card class="welcome-tour__player" style="width: 960px; max-width: 95vw;">
+        <q-bar class="bg-black text-white">
+          <div class="text-caption">MAIA Quick Start</div>
+          <q-space />
+          <q-btn v-close-popup dense flat round icon="close" aria-label="Close" />
+        </q-bar>
+        <video
+          class="welcome-tour__video" src="/welcome-video.mp4" poster="/welcome-video-poster.jpg"
+          controls autoplay muted playsinline preload="metadata"
+        />
       </q-card>
     </q-dialog>
 
@@ -1753,6 +1785,7 @@ const applyWelcomePastedLink = async () => {
 const tempStartLoading = ref(false);
 const tempStartError = ref('');
 const showTempSignOutDialog = ref(false);
+const showTourVideo = ref(false);
 const showDestroyDialog = ref(false);
 const destroyLoading = ref(false);
 // Async delete: clicking DELETE kicks off the (multi-minute) server delete, then
@@ -4685,13 +4718,52 @@ onMounted(async () => {
   align-items: stretch;
 }
 
-.welcome-video {
-  width: 100%;
-  height: auto;
-  max-height: 500px;
-  border-radius: 4px;
-  background-color: #000;
+/* The welcome page's tour video: a thumbnail with a play arrow, played in a dialog */
+.welcome-tour {
+  text-align: center;
+}
+.welcome-tour__thumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px 4px 4px;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  background: #000;
+  cursor: pointer;
+}
+.welcome-tour__thumb:hover {
+  border-color: #1976d2;
+}
+.welcome-tour__thumb:focus-visible {
+  outline: 2px solid #1976d2;
+  outline-offset: 2px;
+}
+.welcome-tour__thumb img {
   display: block;
+  width: 200px;
+  max-width: 60vw;
+  height: auto;
+}
+.welcome-tour__play {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: #1976d2;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.welcome-tour__player {
+  background: #000;
+}
+.welcome-tour__video {
+  display: block;
+  width: 100%;
+  max-height: 80vh;
+  background: #000;
 }
 
 .welcome-door {
