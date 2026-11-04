@@ -309,18 +309,20 @@
                   <!-- Personal AS edition: only what this configuration needs,
                        each with an (i) explanation. The setup checklist (P2)
                        adds the passkey and the folder after GET STARTED. -->
-                  <!-- A phone, or Safari: no MAIA folder here, so no new MAIA; an
-                       existing one opens with its passkey (companion mode). -->
+                  <!-- A phone, an iPad, or Safari: no MAIA folder here, so no new MAIA;
+                       an existing one opens with its passkey (companion mode). Every
+                       browser on an iPhone or iPad, Chrome included, is WebKit. -->
                   <div v-if="companionWelcome" class="edition-start">
                     <div class="text-subtitle1 text-weight-medium q-mb-xs">Open your MAIA</div>
                     <div class="text-body2 q-mb-md">
-                      On a phone or in Safari you can read your messages, answer requests, chat with
-                      your private AI and review your Patient Summary. Your MAIA folder stays on your
-                      computer, and catches up there.
+                      On a phone, an iPad or in Safari you can read your messages, answer requests,
+                      chat with your private AI and review your Patient Summary. Your MAIA folder stays
+                      on your computer, and catches up there.
                     </div>
                     <PasskeyAuth sign-in-only @authenticated="handleAuthenticated" />
                     <div class="text-caption text-grey-7 q-mt-md">
-                      To start a new MAIA, open this page in Chrome on a computer:
+                      To start a new MAIA, open this page in Chrome on a computer (browsers on an
+                      iPhone or iPad, Chrome included, can't keep a MAIA folder):
                       <span style="word-break: break-all;">{{ pageLink }}</span>
                       <q-btn flat dense size="sm" icon="content_copy" label="Copy" @click="copyPageLink" />
                     </div>
@@ -356,14 +358,6 @@
                       <a href="#" class="welcome-footer-link text-caption" @click.prevent="addingFamilyMember = false">Back to my MAIA</a>
                     </div>
                     </template>
-                    <!-- The MAIA Request Map, the Group Network (public/*.html) and Ask
-                         Claude about MAIA (/ask): open to anyone, before any account exists. -->
-                    <WelcomeMaps class="q-mt-lg" />
-                    <div class="text-center text-caption text-grey-6 q-mt-lg">
-                      <a href="/page.html?doc=Privacy" target="_blank" class="welcome-footer-link">Privacy</a>
-                      · <a href="https://forum.agropper.xyz" target="_blank" rel="noopener" class="welcome-footer-link">Community forum</a>
-                      · MAIA v{{ appVersion }}
-                    </div>
                   </div>
                   <WelcomeContent v-else @sign-in="handlePasskeySignInLink">
                     <!-- Get Started setup form (New_User_Flows.md §5 step 4):
@@ -470,6 +464,17 @@
                       </div>
                     </template>
                   </WelcomeContent>
+                  <!-- The MAIA Request Map, the Group Network (public/*.html) and Ask
+                       Claude about MAIA (/ask): open to anyone, before any account
+                       exists, on a computer and on a phone or iPad alike. -->
+                  <template v-if="isPersonalAs">
+                    <WelcomeMaps class="q-mt-lg" />
+                    <div class="text-center text-caption text-grey-6 q-mt-lg">
+                      <a href="/page.html?doc=Privacy" target="_blank" class="welcome-footer-link">Privacy</a>
+                      · <a href="https://forum.agropper.xyz" target="_blank" rel="noopener" class="welcome-footer-link">Community forum</a>
+                      · MAIA v{{ appVersion }}
+                    </div>
+                  </template>
 
                   <!-- Paste an invite / join link (pre-auth capture) -->
                   <q-dialog v-model="showWelcomePasteDialog">
